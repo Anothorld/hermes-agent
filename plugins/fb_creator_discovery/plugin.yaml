@@ -1,0 +1,9 @@
+name: fb_creator_discovery
+version: 0.1.0
+description: "Meta Facebook Creator Discovery API — 3 tools (creator search, creator profile/insights, content search) for matching creators to brand interests. Page Access Token resolved from FB_CREATOR_PAGE_TOKEN env var or ~/.hermes/fb_creator.json."
+author: Hermes Agent
+kind: backend
+provides_tools:
+  - fb_creator_search
+  - fb_creator_profile
+  - fb_content_search
