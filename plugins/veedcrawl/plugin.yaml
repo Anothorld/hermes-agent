@@ -1,0 +1,11 @@
+name: veedcrawl
+version: 0.1.0
+description: "Veedcrawl video intelligence — 5 tools (account, metadata, transcript, extract, profile) over the Veedcrawl REST API. Wraps async transcript/extract jobs with built-in polling, response caching, rate-limit recovery, and credit guardrails. Auth via the VEEDCRAWL_API_KEY env var (X_API_KEY also accepted)."
+author: agent_prj
+kind: backend
+provides_tools:
+  - veedcrawl_account
+  - veedcrawl_metadata
+  - veedcrawl_transcript
+  - veedcrawl_extract
+  - veedcrawl_profile
