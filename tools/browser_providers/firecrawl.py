@@ -3,7 +3,7 @@
 import logging
 import os
 import uuid
-from typing import Dict
+from typing import Any, Dict, Mapping, Optional
 
 import requests
 
@@ -42,7 +42,13 @@ class FirecrawlProvider(CloudBrowserProvider):
             "Authorization": f"Bearer {api_key}",
         }
 
-    def create_session(self, task_id: str) -> Dict[str, object]:
+    def create_session(
+        self,
+        task_id: str,
+        *,
+        session_options: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, object]:
+        del session_options  # Firecrawl has no profile concept today.
         ttl = int(os.environ.get("FIRECRAWL_BROWSER_TTL", "300"))
 
         body: Dict[str, object] = {"ttl": ttl}
