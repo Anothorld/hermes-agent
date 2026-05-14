@@ -3,7 +3,7 @@
 import logging
 import os
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import requests
 
@@ -50,7 +50,17 @@ class BrowserbaseProvider(CloudBrowserProvider):
             )
         return config
 
-    def create_session(self, task_id: str) -> Dict[str, object]:
+    def create_session(
+        self,
+        task_id: str,
+        *,
+        session_options: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, object]:
+        # ``session_options`` is reserved for cross-provider extensions
+        # (e.g. Browser Use ``profile_id``) and is intentionally ignored
+        # here — Browserbase exposes its own env-var knobs.
+        del session_options
+
         config = self._get_config()
 
         # Optional env-var knobs

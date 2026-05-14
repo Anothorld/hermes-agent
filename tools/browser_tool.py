@@ -63,7 +63,7 @@ import tempfile
 import threading
 import time
 import requests
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from pathlib import Path
 from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
@@ -1531,7 +1531,11 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     }
 
 
-def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
+def _get_session_info(
+    task_id: Optional[str] = None,
+    *,
+    session_options: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, str]:
     """
     Get or create session info for the given session key.
 
@@ -1581,7 +1585,9 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
             session_info = _create_local_session(task_id)
         else:
             try:
-                session_info = provider.create_session(task_id)
+                session_info = provider.create_session(
+                    task_id, session_options=session_options
+                )
                 # Validate cloud provider returned a usable session
                 if not session_info or not isinstance(session_info, dict):
                     raise ValueError(f"Cloud provider returned invalid session: {session_info!r}")

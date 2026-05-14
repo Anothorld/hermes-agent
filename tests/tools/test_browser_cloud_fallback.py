@@ -125,7 +125,7 @@ class TestCloudProviderRuntimeFallback:
 
         call_count = 0
 
-        def create_session_flaky(task_id):
+        def create_session_flaky(task_id, *, session_options=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

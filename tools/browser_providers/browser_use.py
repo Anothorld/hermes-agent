@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import requests
 
@@ -117,7 +117,38 @@ class BrowserUseProvider(CloudBrowserProvider):
         }
         return headers
 
-    def create_session(self, task_id: str) -> Dict[str, object]:
+    @staticmethod
+    def _resolve_profile_id(
+        session_options: Optional[Mapping[str, Any]],
+    ) -> Optional[str]:
+        """Resolve the Browser Use profile id to attach to a new session.
+
+        Resolution order:
+          1. Explicit ``session_options["profile_id"]`` (caller override).
+          2. ``BROWSER_USE_PROFILE_ID`` environment variable.
+
+        Returns ``None`` when neither is set, in which case Browser Use will
+        create an ephemeral profile for the session.
+        """
+
+        if session_options:
+            candidate = session_options.get("profile_id")
+            if candidate:
+                return str(candidate).strip() or None
+
+        env_value = os.environ.get("BROWSER_USE_PROFILE_ID")
+        if env_value:
+            stripped = env_value.strip()
+            if stripped:
+                return stripped
+        return None
+
+    def create_session(
+        self,
+        task_id: str,
+        *,
+        session_options: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, object]:
         config = self._get_config()
         managed_mode = bool(config.get("managed_mode"))
 
@@ -128,7 +159,7 @@ class BrowserUseProvider(CloudBrowserProvider):
         # Keep gateway-backed sessions short so billing authorization does not
         # default to a long Browser-Use timeout when Hermes only needs a task-
         # scoped ephemeral browser.
-        payload = (
+        payload: Dict[str, Any] = (
             {
                 "timeout": _DEFAULT_MANAGED_TIMEOUT_MINUTES,
                 "proxyCountryCode": _DEFAULT_MANAGED_PROXY_COUNTRY_CODE,
@@ -136,6 +167,14 @@ class BrowserUseProvider(CloudBrowserProvider):
             if managed_mode
             else {}
         )
+
+        # Attach a persistent Browser Use profile when the caller (or the
+        # operator via env var) requests one.  The v3 API accepts a
+        # ``profileId`` (string<uuid>) on POST /browsers — see
+        # https://docs.browser-use.com/cloud/openapi/v3.json.
+        profile_id = self._resolve_profile_id(session_options)
+        if profile_id:
+            payload["profileId"] = profile_id
 
         response = requests.post(
             f"{config['base_url']}/browsers",

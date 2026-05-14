@@ -352,6 +352,159 @@ def test_browser_use_managed_gateway_uses_new_idempotency_key_for_a_new_session_
     assert first_headers["X-Idempotency-Key"] != second_headers["X-Idempotency-Key"]
 
 
+def _make_browser_use_response():
+    class _Response:
+        status_code = 200
+        ok = True
+        text = ""
+        headers: dict = {}
+
+        def json(self):
+            return {
+                "id": "bu_session_profile",
+                "connectUrl": "wss://connect.browser-use.example/session-profile",
+            }
+
+    return _Response()
+
+
+def test_browser_use_direct_attaches_profile_id_from_session_options():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.pop("BROWSER_USE_PROFILE_ID", None)
+    env.update({"BROWSER_USE_API_KEY": "direct-key"})
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            provider.create_session(
+                "task-profile-explicit",
+                session_options={"profile_id": "11111111-2222-3333-4444-555555555555"},
+            )
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["profileId"] == "11111111-2222-3333-4444-555555555555"
+
+
+def test_browser_use_direct_attaches_profile_id_from_env_var():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.update({
+        "BROWSER_USE_API_KEY": "direct-key",
+        "BROWSER_USE_PROFILE_ID": "  env-profile-uuid  ",
+    })
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            provider.create_session("task-profile-env")
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["profileId"] == "env-profile-uuid"
+
+
+def test_browser_use_direct_omits_profile_id_when_unset():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.pop("BROWSER_USE_PROFILE_ID", None)
+    env.update({"BROWSER_USE_API_KEY": "direct-key"})
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            provider.create_session("task-profile-none")
+
+    payload = post.call_args.kwargs["json"]
+    assert "profileId" not in payload
+
+
+def test_browser_use_session_options_overrides_env_var():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.update({
+        "BROWSER_USE_API_KEY": "direct-key",
+        "BROWSER_USE_PROFILE_ID": "env-profile",
+    })
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            provider.create_session(
+                "task-profile-override",
+                session_options={"profile_id": "explicit-profile"},
+            )
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["profileId"] == "explicit-profile"
+
+
+def test_browser_use_managed_gateway_attaches_profile_id():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.pop("BROWSER_USE_API_KEY", None)
+    env.update({
+        "TOOL_GATEWAY_USER_TOKEN": "nous-token",
+        "BROWSER_USE_GATEWAY_URL": "http://127.0.0.1:3009",
+        "BROWSER_USE_PROFILE_ID": "managed-profile-uuid",
+    })
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            provider.create_session("task-profile-managed")
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["profileId"] == "managed-profile-uuid"
+    # Managed defaults must still be present.
+    assert payload["timeout"] == 5
+    assert payload["proxyCountryCode"] == "us"
+
+
 def test_terminal_tool_prefers_managed_modal_when_gateway_ready_and_no_direct_creds():
     _install_fake_tools_package()
     env = os.environ.copy()

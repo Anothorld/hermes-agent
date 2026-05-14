@@ -1,7 +1,7 @@
 """Abstract base class for cloud browser providers."""
 
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Any, Dict, Mapping, Optional
 
 
 class CloudBrowserProvider(ABC):
@@ -26,8 +26,19 @@ class CloudBrowserProvider(ABC):
         """
 
     @abstractmethod
-    def create_session(self, task_id: str) -> Dict[str, object]:
+    def create_session(
+        self,
+        task_id: str,
+        *,
+        session_options: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, object]:
         """Create a cloud browser session and return session metadata.
+
+        ``session_options`` is an optional, provider-specific bag of overrides
+        passed by the caller (e.g. ``{"profile_id": "<uuid>"}`` for Browser
+        Use to attach a persistent profile).  Implementations MUST tolerate
+        unknown keys and a missing/None value, falling back to environment
+        variables and provider defaults.
 
         Must return a dict with at least::
 
