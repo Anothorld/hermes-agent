@@ -1,7 +1,7 @@
 """Veedcrawl integration plugin — bundled, auto-loaded.
 
-Registers 5 tools (``account``, ``metadata``, ``transcript``, ``extract``,
-``profile``) into the ``veedcrawl`` toolset. Each tool is gated by
+Registers 6 tools (``account``, ``metadata``, ``transcript``, ``extract``,
+``profile``, ``job``) into the ``veedcrawl`` toolset. Each tool is gated by
 ``_check_veedcrawl_available()`` — when ``VEEDCRAWL_API_KEY`` (or
 ``X_API_KEY``) is unset, the tools remain registered but the runtime check
 prevents dispatch.
@@ -15,12 +15,14 @@ from __future__ import annotations
 from plugins.veedcrawl.tools import (
     VEEDCRAWL_ACCOUNT_SCHEMA,
     VEEDCRAWL_EXTRACT_SCHEMA,
+    VEEDCRAWL_JOB_SCHEMA,
     VEEDCRAWL_METADATA_SCHEMA,
     VEEDCRAWL_PROFILE_SCHEMA,
     VEEDCRAWL_TRANSCRIPT_SCHEMA,
     _check_veedcrawl_available,
     _handle_account,
     _handle_extract,
+    _handle_job,
     _handle_metadata,
     _handle_profile,
     _handle_transcript,
@@ -32,6 +34,7 @@ _TOOLS = (
     ("veedcrawl_transcript", VEEDCRAWL_TRANSCRIPT_SCHEMA, _handle_transcript, "🎙️"),
     ("veedcrawl_extract",    VEEDCRAWL_EXTRACT_SCHEMA,    _handle_extract,    "🧪"),
     ("veedcrawl_profile",    VEEDCRAWL_PROFILE_SCHEMA,    _handle_profile,    "👤"),
+    ("veedcrawl_job",        VEEDCRAWL_JOB_SCHEMA,        _handle_job,        "🔁"),
 )
 
 

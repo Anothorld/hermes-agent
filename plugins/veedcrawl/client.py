@@ -43,6 +43,12 @@ _COST_EXTRACT = 10
 _CACHE_TTL_METADATA = 24 * 3600
 _CACHE_TTL_PROFILE = 6 * 3600
 
+# (poll_path_prefix, cost) for each async endpoint that supports lookup-by-id.
+_JOB_LOOKUP_SPECS: dict[str, tuple[str, int]] = {
+    "transcript": ("/v1/transcript/", _COST_TRANSCRIPT_GENERATE),
+    "extract": ("/v1/extract/", _COST_EXTRACT),
+}
+
 
 def resolve_api_key() -> Optional[str]:
     """Return the configured API key from env, or ``None`` if unset."""
@@ -259,6 +265,35 @@ class VeedcrawlClient:
             request=self._request,
             ensure_credits=self._ensure_credits,
             sleep=self._sleep,
+        )
+
+    # ---- async-job recovery -------------------------------------------------
+
+    def lookup_job(self, *, endpoint: str, job_id: str) -> dict[str, Any]:
+        """Fetch the result of an existing async job by id.
+
+        Use this when an earlier ``transcript`` / ``extract`` call returned a
+        ``job_id`` (e.g. with ``wait=False`` or because the agent dropped the
+        original payload).  Does not spend credits — it is a plain ``GET``.
+        """
+        endpoint_lc = (endpoint or "").lower()
+        spec = _JOB_LOOKUP_SPECS.get(endpoint_lc)
+        if spec is None:
+            raise VeedcrawlAPIError(
+                f"unsupported endpoint {endpoint!r}; expected one of "
+                f"{sorted(_JOB_LOOKUP_SPECS)}",
+                status_code=400,
+            )
+        if not job_id:
+            raise VeedcrawlAPIError("job_id is required", status_code=400)
+        poll_prefix, cost = spec
+        payload, headers = self._request("GET", f"{poll_prefix}{job_id}")
+        return jobs.finalise_job(
+            endpoint=endpoint_lc,
+            cache_params={"job_id": job_id},
+            payload=payload,
+            headers=headers,
+            cost=cost,
         )
 
 

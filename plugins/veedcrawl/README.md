@@ -4,7 +4,7 @@ Native [Veedcrawl](https://veedcrawl.com) integration for Hermes. Veedcrawl is a
 video-intelligence REST API that turns public YouTube / TikTok / Instagram /
 X / Facebook URLs into metadata, transcripts, and structured AI extractions.
 
-This plugin exposes **5 agent tools** that mirror Veedcrawl's official MCP
+This plugin exposes **6 agent tools** that mirror Veedcrawl's official MCP
 surface. Async jobs (`/v1/transcript`, `/v1/extract`) are polled inside the
 client so agents see synchronous semantics.
 
@@ -13,10 +13,11 @@ client so agents see synchronous semantics.
 | Tool | Endpoint(s) | Cost | Notes |
 | --- | --- | --- | --- |
 | `veedcrawl_account` | `/v1/me`, `/health` | 0 | Probe + remaining credits |
-| `veedcrawl_metadata` | `GET /v1/metadata` | 0 | Free first-pass video facts |
-| `veedcrawl_transcript` | `POST /v1/transcript` (+ poll) | 1 native / 5 whisper | `mode`: `native` \| `generate` \| `auto` |
-| `veedcrawl_extract` | `POST /v1/extract` (+ poll) | 10 | Custom prompt, optional JSON Schema |
+| `veedcrawl_metadata` | `GET /v1/metadata` | 0 | Free first-pass video facts (URL only) |
+| `veedcrawl_transcript` | `POST /v1/transcript` (+ poll) | 1 native / 5 whisper | `mode`: `native` \| `generate` \| `auto` — also accepts `job_id` alone to fetch an existing result |
+| `veedcrawl_extract` | `POST /v1/extract` (+ poll) | 10 | Custom prompt, optional JSON Schema — also accepts `job_id` alone to fetch an existing result |
 | `veedcrawl_profile` | `/v1/{instagram,tiktok}/profile` | 0 | `platform`: `instagram` \| `tiktok` |
+| `veedcrawl_job` | `GET /v1/{transcript,extract}/{job_id}` | 0 | Look up the result of an earlier async job by id |
 
 Key management (`/v1/keys`) is intentionally **not exposed** — keys are an
 operator concern, not an agent concern.
@@ -82,6 +83,23 @@ Pass `wait: false` to receive `{"job_id": ..., "status": "queued"}` immediately
 and re-call the same tool with `job_id` (and identical other args) to poll once.
 Useful when fanning out many extractions in parallel without holding many
 synchronous workers.
+
+## Resuming a job by id
+
+If a previous `veedcrawl_extract` / `veedcrawl_transcript` call already
+produced a `job_id`, you can fetch the result later **without spending new
+credits** (it is a plain `GET`). Three equivalent ways:
+
+```jsonc
+// dedicated lookup tool (recommended for clarity)
+{"tool": "veedcrawl_job", "args": {"endpoint": "extract", "job_id": "abc123"}}
+
+// or pass job_id alone to the original tool
+{"tool": "veedcrawl_extract",    "args": {"job_id": "abc123"}}
+{"tool": "veedcrawl_transcript", "args": {"job_id": "abc123"}}
+```
+
+`veedcrawl_metadata` is a sync `GET` and does **not** accept `job_id`.
 
 ## Limits & error codes
 
