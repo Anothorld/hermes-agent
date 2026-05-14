@@ -59,7 +59,7 @@ class TestManifest:
         assert (PLUGIN_DIR / "tools.py").is_file()
         assert (PLUGIN_DIR / "_internal").is_dir()
 
-    def test_manifest_advertises_five_tools(self):
+    def test_manifest_advertises_six_tools(self):
         data = yaml.safe_load((PLUGIN_DIR / "plugin.yaml").read_text())
         assert data["name"] == "veedcrawl"
         assert data["kind"] == "backend"
@@ -69,6 +69,7 @@ class TestManifest:
             "veedcrawl_transcript",
             "veedcrawl_extract",
             "veedcrawl_profile",
+            "veedcrawl_job",
         }
 
 
@@ -325,6 +326,131 @@ class TestToolHandlers:
         raw = tools_mod._handle_metadata({"url": "https://youtu.be/xyz"})
         payload = json.loads(raw)
         assert payload["title"] == "demo"
+
+
+# ---------------------------------------------------------------------------
+# job_id-only resume / lookup paths
+# ---------------------------------------------------------------------------
+
+class TestJobLookup:
+    """Veedcrawl async jobs must be retrievable by ``job_id`` alone.
+
+    Without this, an agent that loses the result payload of a successful
+    extract/transcript call would have to re-spend credits to re-fetch it.
+    """
+
+    def _patch_factory(self, monkeypatch, handler):
+        import plugins.veedcrawl.tools as tools_mod
+        from plugins.veedcrawl.client import VeedcrawlClient
+
+        def factory():
+            return VeedcrawlClient(
+                api_key="vc_test_key",
+                transport=httpx.MockTransport(handler),
+                sleep=lambda _: None,
+            )
+
+        monkeypatch.setattr(tools_mod, "VeedcrawlClient", lambda: factory())
+        return tools_mod
+
+    def test_client_lookup_job_returns_completed_payload(self):
+        routes = {
+            "GET /v1/extract/job-x": [
+                httpx.Response(200, json={
+                    "jobId": "job-x",
+                    "status": "completed",
+                    "resultJson": {"score": 9},
+                }),
+            ],
+        }
+        with _client(_credits_then(routes)) as c:
+            result = c.lookup_job(endpoint="extract", job_id="job-x")
+        assert result["status"] == "completed"
+        assert result["result_json"] == {"score": 9}
+        # cost is recorded for accounting parity with a fresh extract.
+        assert result["credits_used"] == 10
+
+    def test_client_lookup_job_unknown_endpoint_raises(self):
+        from plugins.veedcrawl._internal.errors import VeedcrawlAPIError
+
+        with _client(lambda _: httpx.Response(500)) as c, pytest.raises(VeedcrawlAPIError):
+            c.lookup_job(endpoint="bogus", job_id="abc")
+
+    def test_extract_handler_resume_by_job_id_only(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert request.url.path == "/v1/extract/job-y"
+            return httpx.Response(200, json={
+                "jobId": "job-y",
+                "status": "completed",
+                "resultJson": {"k": "v"},
+            })
+
+        tools_mod = self._patch_factory(monkeypatch, handler)
+        raw = tools_mod._handle_extract({"job_id": "job-y"})
+        payload = json.loads(raw)
+        assert payload["status"] == "completed"
+        assert payload["result_json"] == {"k": "v"}
+
+    def test_transcript_handler_resume_by_job_id_only(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert request.url.path == "/v1/transcript/job-z"
+            return httpx.Response(200, json={
+                "jobId": "job-z",
+                "status": "completed",
+                "resultJson": {"text": "hello"},
+            })
+
+        tools_mod = self._patch_factory(monkeypatch, handler)
+        raw = tools_mod._handle_transcript({"job_id": "job-z"})
+        payload = json.loads(raw)
+        assert payload["status"] == "completed"
+
+    def test_veedcrawl_job_tool_dispatches_by_endpoint(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/extract/job-q"
+            return httpx.Response(200, json={
+                "jobId": "job-q",
+                "status": "completed",
+                "resultJson": {"ok": True},
+            })
+
+        tools_mod = self._patch_factory(monkeypatch, handler)
+        raw = tools_mod._handle_job({"endpoint": "extract", "job_id": "job-q"})
+        payload = json.loads(raw)
+        assert payload["result_json"] == {"ok": True}
+
+    def test_extract_missing_url_and_job_id_returns_bad_request(self, monkeypatch):
+        from plugins.veedcrawl import tools as tools_mod
+
+        # no transport call should ever happen — fail loud if it does.
+        def handler(_: httpx.Request) -> httpx.Response:  # pragma: no cover
+            raise AssertionError("HTTP must not be invoked when args are invalid")
+
+        self._patch_factory(monkeypatch, handler)
+        raw = tools_mod._handle_extract({})
+        payload = json.loads(raw)
+        assert payload["error"]
+        assert payload["code"] == "bad_request"
+        assert "url" in payload["error"] or "job_id" in payload["error"]
+
+    def test_extract_missing_prompt_returns_bad_request(self, monkeypatch):
+        from plugins.veedcrawl import tools as tools_mod
+
+        self._patch_factory(monkeypatch, lambda _: httpx.Response(500))
+        raw = tools_mod._handle_extract({"url": "https://x.com/y"})
+        payload = json.loads(raw)
+        assert payload["code"] == "bad_request"
+        assert "prompt" in payload["error"]
+
+    def test_metadata_missing_url_returns_bad_request(self, monkeypatch):
+        from plugins.veedcrawl import tools as tools_mod
+
+        self._patch_factory(monkeypatch, lambda _: httpx.Response(500))
+        raw = tools_mod._handle_metadata({"job_id": "wont-help"})
+        payload = json.loads(raw)
+        assert payload["code"] == "bad_request"
 
 
 # ---------------------------------------------------------------------------

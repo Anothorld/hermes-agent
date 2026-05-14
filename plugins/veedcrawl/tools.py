@@ -61,8 +61,15 @@ VEEDCRAWL_METADATA_SCHEMA: dict[str, Any] = {
 
 VEEDCRAWL_TRANSCRIPT_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": (
+        "Transcribe a public video. Provide ``url`` to start a new job, "
+        "OR provide ``job_id`` alone to fetch the result of an existing job."
+    ),
     "properties": {
-        "url": {"type": "string", "description": "Public video URL."},
+        "url": {
+            "type": "string",
+            "description": "Public video URL. Required unless ``job_id`` is provided.",
+        },
         "mode": {
             "type": "string",
             "enum": ["native", "generate", "auto"],
@@ -90,20 +97,37 @@ VEEDCRAWL_TRANSCRIPT_SCHEMA: dict[str, Any] = {
         "force_refresh": {"type": "boolean", "default": False},
         "job_id": {
             "type": "string",
-            "description": "Resume polling for an existing job.",
+            "description": (
+                "Existing job id. Pass alone to fetch a previously submitted "
+                "transcript result without spending new credits."
+            ),
         },
     },
-    "required": ["url"],
+    "oneOf": [
+        {"required": ["url"]},
+        {"required": ["job_id"]},
+    ],
     "additionalProperties": False,
 }
 
 VEEDCRAWL_EXTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": (
+        "Run a structured extraction over a public video. Provide ``url`` and "
+        "``prompt`` to start a new job, OR provide ``job_id`` alone to fetch "
+        "the result of an existing job."
+    ),
     "properties": {
-        "url": {"type": "string", "description": "Public video URL."},
+        "url": {
+            "type": "string",
+            "description": "Public video URL. Required unless ``job_id`` is provided.",
+        },
         "prompt": {
             "type": "string",
-            "description": "Natural-language extraction instructions.",
+            "description": (
+                "Natural-language extraction instructions. Required unless "
+                "``job_id`` is provided."
+            ),
         },
         "schema": {
             "type": "object",
@@ -113,9 +137,40 @@ VEEDCRAWL_EXTRACT_SCHEMA: dict[str, Any] = {
         "wait": {"type": "boolean", "default": True},
         "timeout_s": {"type": "number", "default": 180},
         "force_refresh": {"type": "boolean", "default": False},
-        "job_id": {"type": "string"},
+        "job_id": {
+            "type": "string",
+            "description": (
+                "Existing job id. Pass alone to fetch a previously submitted "
+                "extraction result without spending new credits."
+            ),
+        },
     },
-    "required": ["url", "prompt"],
+    "oneOf": [
+        {"required": ["url", "prompt"]},
+        {"required": ["job_id"]},
+    ],
+    "additionalProperties": False,
+}
+
+VEEDCRAWL_JOB_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Look up the result of a previously submitted Veedcrawl async job. "
+        "Use this when an earlier ``veedcrawl_transcript`` or "
+        "``veedcrawl_extract`` call returned a ``job_id``."
+    ),
+    "properties": {
+        "endpoint": {
+            "type": "string",
+            "enum": ["transcript", "extract"],
+            "description": "Which async endpoint produced the job.",
+        },
+        "job_id": {
+            "type": "string",
+            "description": "The ``job_id`` returned by the original tool call.",
+        },
+    },
+    "required": ["endpoint", "job_id"],
     "additionalProperties": False,
 }
 
@@ -181,29 +236,53 @@ def _handle_account(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, 
     return out
 
 
+def _require(args: dict[str, Any], key: str, *, hint: str = "") -> str:
+    """Return ``args[key]`` as ``str`` or raise ``ValueError`` (-> bad_request)."""
+    value = args.get(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        suffix = f" {hint}" if hint else ""
+        raise ValueError(f"missing required argument {key!r}.{suffix}")
+    return str(value)
+
+
 @_wrap_errors
 def _handle_metadata(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
+    url = _require(
+        args,
+        "url",
+        hint="veedcrawl_metadata fetches video facts by URL only; it does not accept job_id.",
+    )
     return client.metadata(
-        url=str(args["url"]),
+        url=url,
         force_refresh=bool(args.get("force_refresh")),
     )
 
 
 @_wrap_errors
 def _handle_transcript(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
+    job_id = args.get("job_id")
+    if job_id:
+        return client.lookup_job(endpoint="transcript", job_id=str(job_id))
+    url = _require(
+        args,
+        "url",
+        hint="Provide either url=<video URL> to start a new job or job_id=<id> to fetch an existing one.",
+    )
     return client.transcript(
-        url=str(args["url"]),
+        url=url,
         mode=str(args.get("mode") or "auto"),
         lang=args.get("lang"),
         wait=bool(args.get("wait", True)),
         timeout_s=float(args.get("timeout_s") or 180.0),
         force_refresh=bool(args.get("force_refresh")),
-        job_id=args.get("job_id"),
     )
 
 
 @_wrap_errors
 def _handle_extract(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
+    job_id = args.get("job_id")
+    if job_id:
+        return client.lookup_job(endpoint="extract", job_id=str(job_id))
     schema = args.get("schema")
     if isinstance(schema, str):
         # Tolerate stringified JSON Schemas from less-strict callers.
@@ -211,16 +290,32 @@ def _handle_extract(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, 
             schema = json.loads(schema)
         except json.JSONDecodeError as exc:
             raise ValueError(f"schema must be JSON Schema object, not string: {exc}") from exc
+    url = _require(
+        args,
+        "url",
+        hint="Provide either url+prompt to start a new job or job_id=<id> to fetch an existing one.",
+    )
+    prompt = _require(
+        args,
+        "prompt",
+        hint="Provide either url+prompt to start a new job or job_id=<id> to fetch an existing one.",
+    )
     return client.extract(
-        url=str(args["url"]),
-        prompt=str(args["prompt"]),
+        url=url,
+        prompt=prompt,
         schema=schema,
         lang=args.get("lang"),
         wait=bool(args.get("wait", True)),
         timeout_s=float(args.get("timeout_s") or 180.0),
         force_refresh=bool(args.get("force_refresh")),
-        job_id=args.get("job_id"),
     )
+
+
+@_wrap_errors
+def _handle_job(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
+    endpoint = _require(args, "endpoint")
+    job_id = _require(args, "job_id")
+    return client.lookup_job(endpoint=endpoint, job_id=job_id)
 
 
 @_wrap_errors
@@ -241,10 +336,12 @@ __all__ = (
     "VEEDCRAWL_TRANSCRIPT_SCHEMA",
     "VEEDCRAWL_EXTRACT_SCHEMA",
     "VEEDCRAWL_PROFILE_SCHEMA",
+    "VEEDCRAWL_JOB_SCHEMA",
     "_handle_account",
     "_handle_metadata",
     "_handle_transcript",
     "_handle_extract",
     "_handle_profile",
+    "_handle_job",
     "_check_veedcrawl_available",
 )
