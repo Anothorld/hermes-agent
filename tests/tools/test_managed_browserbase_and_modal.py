@@ -505,6 +505,151 @@ def test_browser_use_managed_gateway_attaches_profile_id():
     assert payload["proxyCountryCode"] == "us"
 
 
+def test_browser_use_direct_mode_defaults_proxy_country_code_to_us():
+    """Direct API key sessions must also send proxyCountryCode so Browser Use
+    routes through residential proxies (the field selects egress region, the
+    proxy itself is always on for Cloud sessions)."""
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.pop("BROWSER_USE_PROFILE_ID", None)
+    env.pop("BROWSER_USE_PROXY_COUNTRY_CODE", None)
+    env.update({"BROWSER_USE_API_KEY": "direct-key"})
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            session = provider.create_session("task-proxy-default")
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["proxyCountryCode"] == "us"
+    # Direct mode must NOT carry the managed-only 5-minute timeout.
+    assert "timeout" not in payload
+    # Hermes must now honestly advertise that residential proxies are on.
+    assert session["features"]["proxies"] is True
+    assert session["features"]["proxy_country_code"] == "us"
+
+
+def test_browser_use_direct_mode_honours_proxy_country_code_env_var():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.pop("BROWSER_USE_PROFILE_ID", None)
+    env.update({
+        "BROWSER_USE_API_KEY": "direct-key",
+        "BROWSER_USE_PROXY_COUNTRY_CODE": "  JP  ",
+    })
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            session = provider.create_session("task-proxy-env")
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["proxyCountryCode"] == "jp"
+    assert session["features"]["proxy_country_code"] == "jp"
+
+
+def test_browser_use_session_options_override_proxy_country_code():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.pop("BROWSER_USE_PROFILE_ID", None)
+    env.update({
+        "BROWSER_USE_API_KEY": "direct-key",
+        "BROWSER_USE_PROXY_COUNTRY_CODE": "us",
+    })
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            provider.create_session(
+                "task-proxy-override",
+                session_options={"proxy_country_code": "DE"},
+            )
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["proxyCountryCode"] == "de"
+
+
+def test_browser_use_session_options_can_suppress_proxy_country_code():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.pop("BROWSER_USE_PROFILE_ID", None)
+    env.update({"BROWSER_USE_API_KEY": "direct-key"})
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ) as post:
+            session = provider.create_session(
+                "task-proxy-suppress",
+                session_options={"proxy_country_code": ""},
+            )
+
+    payload = post.call_args.kwargs["json"]
+    assert "proxyCountryCode" not in payload
+    # When no proxy is advertised, features must NOT claim residential proxies.
+    assert "proxies" not in session["features"]
+
+
+def test_browser_use_features_flag_persistent_profile_when_profile_id_set():
+    _install_fake_tools_package()
+    env = os.environ.copy()
+    env.update({
+        "BROWSER_USE_API_KEY": "direct-key",
+        "BROWSER_USE_PROFILE_ID": "abc-profile",
+    })
+
+    with patch.dict(os.environ, env, clear=True):
+        browser_use_module = _load_tool_module(
+            "tools.browser_providers.browser_use",
+            "browser_providers/browser_use.py",
+        )
+        provider = browser_use_module.BrowserUseProvider()
+
+        with patch.object(
+            browser_use_module.requests,
+            "post",
+            return_value=_make_browser_use_response(),
+        ):
+            session = provider.create_session("task-profile-features")
+
+    assert session["features"]["persistent_profile"] is True
+
+
 def test_terminal_tool_prefers_managed_modal_when_gateway_ready_and_no_direct_creds():
     _install_fake_tools_package()
     env = os.environ.copy()
