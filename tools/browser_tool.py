@@ -2316,9 +2316,12 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             features = session_info["features"]
             active_features = [k for k, v in features.items() if v]
             if not features.get("proxies"):
+                provider = _get_cloud_provider()
+                provider_label = provider.provider_name() if provider else "local browser"
                 response["stealth_warning"] = (
-                    "Running WITHOUT residential proxies. Bot detection may be more aggressive. "
-                    "Consider upgrading Browserbase plan for proxy support."
+                    f"Running WITHOUT residential proxies on {provider_label}. "
+                    "Bot detection may be more aggressive on sensitive sites. "
+                    "Check the provider's proxy/region settings to enable them."
                 )
             response["stealth_features"] = active_features
 

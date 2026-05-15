@@ -143,6 +143,36 @@ class BrowserUseProvider(CloudBrowserProvider):
                 return stripped
         return None
 
+    @staticmethod
+    def _resolve_proxy_country_code(
+        session_options: Optional[Mapping[str, Any]],
+        *,
+        managed_mode: bool,
+    ) -> Optional[str]:
+        """Resolve the Browser Use ``proxyCountryCode`` for a new session.
+
+        Resolution order:
+          1. Explicit ``session_options["proxy_country_code"]``.
+          2. ``BROWSER_USE_PROXY_COUNTRY_CODE`` env var.
+          3. Default ``"us"`` (Browser Use Cloud always routes through
+             residential proxies; the code only selects the egress region).
+
+        Pass an explicit empty string via ``session_options`` to suppress.
+        """
+        if session_options is not None and "proxy_country_code" in session_options:
+            raw = session_options.get("proxy_country_code")
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                return None
+            return str(raw).strip().lower()
+
+        env_value = (os.environ.get("BROWSER_USE_PROXY_COUNTRY_CODE") or "").strip()
+        if env_value:
+            return env_value.lower()
+
+        # Preserve historical default for both managed and direct sessions.
+        del managed_mode  # currently identical for both modes
+        return _DEFAULT_MANAGED_PROXY_COUNTRY_CODE
+
     def create_session(
         self,
         task_id: str,
@@ -160,13 +190,21 @@ class BrowserUseProvider(CloudBrowserProvider):
         # default to a long Browser-Use timeout when Hermes only needs a task-
         # scoped ephemeral browser.
         payload: Dict[str, Any] = (
-            {
-                "timeout": _DEFAULT_MANAGED_TIMEOUT_MINUTES,
-                "proxyCountryCode": _DEFAULT_MANAGED_PROXY_COUNTRY_CODE,
-            }
+            {"timeout": _DEFAULT_MANAGED_TIMEOUT_MINUTES}
             if managed_mode
             else {}
         )
+
+        # Browser Use Cloud sessions route through residential proxies; the
+        # ``proxyCountryCode`` field only chooses the egress region. We send
+        # it in both managed and direct modes so bot-detection behaviour is
+        # consistent and Hermes can honestly advertise ``proxies=True`` in
+        # features below.
+        proxy_country_code = self._resolve_proxy_country_code(
+            session_options, managed_mode=managed_mode
+        )
+        if proxy_country_code:
+            payload["proxyCountryCode"] = proxy_country_code
 
         # Attach a persistent Browser Use profile when the caller (or the
         # operator via env var) requests one.  The v3 API accepts a
@@ -201,11 +239,18 @@ class BrowserUseProvider(CloudBrowserProvider):
 
         cdp_url = session_data.get("cdpUrl") or session_data.get("connectUrl") or ""
 
+        features: Dict[str, Any] = {"browser_use": True}
+        if proxy_country_code:
+            features["proxies"] = True
+            features["proxy_country_code"] = proxy_country_code
+        if profile_id:
+            features["persistent_profile"] = True
+
         return {
             "session_name": session_name,
             "bb_session_id": session_data["id"],
             "cdp_url": cdp_url,
-            "features": {"browser_use": True},
+            "features": features,
             "external_call_id": external_call_id,
         }
 
