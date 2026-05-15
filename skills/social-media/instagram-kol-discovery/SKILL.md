@@ -15,11 +15,11 @@ Find Instagram **individual creators** who fit the brand's KOL profile (mid-to-h
 |---|-----------|-----------|---------------|
 | 1 | Region | North America (US / CA) | Bio contains a US/CA city, state, country name, or 🇺🇸/🇨🇦 flag emoji. Bio signal alone is sufficient. |
 | 2 | Followers | ≥ 100,000 | Read from profile header. |
-| 3 | Niche | Home, interior, furniture, lifestyle, decor | Bio keywords + last 10–15 posts visually about home/interior/furniture/lifestyle. Reject pure fashion/food/travel/tech. |
+| 3 | Niche | Home, interior, furniture, lifestyle, decor, or any niche with visible indoor/home scenes | Bio keywords + visual scan of last 10–15 posts. **Accept** if the creator's videos regularly feature indoor living spaces (living room, bedroom, kitchen, dining area) even if their primary niche is fashion, food, travel, or lifestyle. Only reject if there is zero home/interior content across all recent posts. |
 | 4 | Avg. views (recent) | ≥ 30,000 | Average the view counts of the **most recent 10–15 reels/videos**, **excluding any posted within the last 72 hours** (data not yet stabilized). |
 | 5 | Engagement rate | ≥ 3% | Formula: `(likes + comments) / views`, computed per video then averaged across the same 10–15 sample. |
 | 6 | Account type | Individual personal blogger | Bio/about section shows a real person's name; no agency/studio/media/brand language. Profile picture shows a person (not a logo). Account is not verified as a business entity. Discard if the account clearly represents a company, media outlet, or talent agency. |
-| 7 | No competitor conflict | Account must not sell, manufacture, or primarily promote competing home furniture/decor products | Check bio for shop links, brand handles, or "founder of" language pointing to a competing furniture/home goods brand. Check recent posts for recurring product promotion of a competing brand. Discard if a clear commercial conflict exists. |
+| 7 | No competitor conflict | Account must not sell, manufacture, or primarily promote competing home furniture/decor products | Check bio for shop links, brand handles, or "founder of" language pointing to a competing furniture/home goods brand. Discard if a clear commercial conflict exists. |
 
 When mining commenters as candidates, only enqueue accounts already showing **≥ 100k followers** on the hover/profile preview. Do NOT keep nano/micro candidates.
 
@@ -86,7 +86,7 @@ If hashtag search pages (Channel A) fail to load or time out repeatedly:
    b. Drop any posted within the last 72 hours.
    c. For each remaining reel, call `veedcrawl_metadata(url=<reel_url>)` to retrieve structured metrics (views, likes, comments, publish time) at zero cost. Fall back to reading metrics from a page screenshot only if `veedcrawl_metadata` returns no data for that URL.
    d. Compute `avg_views = mean(views)` and `avg_engagement = mean((likes+comments)/views)`.
-   e. Keep only if `avg_views ≥ 30,000` AND `avg_engagement ≥ 3%`.
+   e. Prefer candidates with `avg_views ≥ 30,000` AND `avg_engagement ≥ 3%`, but do not hard-discard those who fall slightly short. Record actual values and flag them — the user will make the final call on borderline cases.
 
 5. **Lateral expansion** — For each KOL that passes step 4, run Channel B and Channel C to enqueue new candidates (respect the 3-hop cap and the ≥ 100k comment-mining filter). Loop back to step 3 for new candidates.
 
@@ -116,6 +116,31 @@ If hashtag search pages (Channel A) fail to load or time out repeatedly:
 - **Minimal delays**: Add a wait only when strictly needed (e.g., waiting for a reel list to load after scrolling, or for a modal to open). Keep waits short — 1–2 seconds is usually enough; never idle for more than 3–5 seconds without a concrete reason.
 - **No redundant checks**: Do not re-screenshot or re-snapshot the same state you just confirmed. Move to the next step immediately.
 - **Fail fast**: If an element is not found within one retry, skip that item and continue with the queue rather than stalling the session.
+
+## Anti-Bot Detection Guidelines
+Instagram actively detects and blocks automated access. Follow these rules throughout every session:
+
+### Request pacing
+- **Between profile visits**: wait 3–6 seconds before navigating to the next profile. Do not visit more than ~10 profiles per minute.
+- **Between reel inspections within a profile**: wait 1–2 seconds between opening individual reels.
+- **After scrolling a feed/grid**: pause 1–2 seconds before the next scroll to simulate natural reading behaviour.
+- **After a login or cold session start**: wait 5–8 seconds before the first navigation to let the page fully initialize.
+
+### Session hygiene
+- **Reuse a logged-in profile**: always attach `BROWSER_USE_PROFILE_ID` to carry session cookies across runs. A fresh unauthenticated session is far more likely to hit a login wall or CAPTCHA on Instagram.
+- **Do not open multiple Instagram tabs simultaneously** in the same session — stick to one active tab.
+- **Do not clear cookies mid-session** or reload the browser; this resets trust signals.
+- **Limit total profiles per session**: process at most 30–40 profiles per Browser Use session. Create a new session for the next batch to avoid accumulating suspicious activity signals on a single session fingerprint.
+
+### Navigation patterns
+- **Always navigate via direct URL** (e.g. `https://www.instagram.com/<username>/`) rather than using the search bar, which triggers additional tracking endpoints.
+- **Avoid navigating directly from hashtag page to profile and back repeatedly in rapid succession** — this pattern is a strong bot signal. Collect all profile URLs from a hashtag page first, then visit profiles in a separate pass.
+- **Do not use `browser_back` repeatedly** in a short window — each `browser_back` call is logged as a navigation event; accumulating many quickly looks automated.
+
+### CAPTCHA / challenge handling
+- If Instagram shows a CAPTCHA, "Verify it's you", or "Suspicious login" challenge: **stop the current action immediately**, take a screenshot, and surface the challenge to the user. Do not attempt to solve CAPTCHAs programmatically.
+- If a login wall appears mid-session: the profile cookie may have expired. Stop, report to the user, and request a fresh authenticated profile ID.
+- If a rate-limit page ("Try again later") appears: pause the entire crawl for at least 10 minutes before resuming, or switch to Channel D (public web search fallback) for the remainder of the session.
 
 ## Pitfalls
 - ❌ Do NOT use `browser_back` as the primary way to leave a post — prefer the in-modal × close button. `browser_back` often lands on `about:blank` or the IG home feed, forcing a full re-navigation to the hashtag URL.
