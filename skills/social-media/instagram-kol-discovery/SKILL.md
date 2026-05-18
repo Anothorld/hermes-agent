@@ -40,17 +40,9 @@ Extract these fields. If a field is missing, mark it `inferred` and write a shor
 
 Then derive the single **Primary Purchase Driver** (see next section) and 1-2 **Secondary Drivers**.
 
-If no brief is provided, run **Brief Fallback**:
-1. Infer a provisional persona from product category + visible product claims.
-2. Mark every inferred field as `assumption`.
-3. Disclose all assumptions in the final output under "Assumptions made due to missing brief".
+If no brief is provided, run **Brief Fallback**: infer a provisional persona from product category + visible claims, mark all inferred fields as `assumption`, and disclose them in the final output.
 
-If the user provides past high-conversion creators, run **Reference Calibration** before browsing:
-1. Review what actually made those creators work: audience cues, tone, scene type, product-integration pattern, showcase quality, CTA style.
-2. Separate causal signals from accidental ones. Do **not** copy superficial traits if the real conversion driver was humor, authority, demo clarity, or relatability.
-3. Convert those signals into adjacent creator archetypes, search seeds, and role choices.
-4. Record the **conversion mechanism** behind each winner. Typical mechanisms include: new-apartment / first-home milestone, newlywed / couple nest-building, hosting/movie-night upgrade, practical comfort demo, setup/gaming/home-theater authority, setup-completion / room-upgrade framing, and personality-led relatable storytelling.
-5. Treat high-signal comments as evidence of conversion quality. Questions about dimensions, apartment suitability, assembly, device compatibility, hosting, comfort, or durability are stronger than generic compliments.
+**Default historical rule**: Use **Embedded Historical Search Experience** below by default. User-supplied newer winners only override it when they are clearly closer to the current product family and show repeat commercial strength, not just aesthetic similarity.
 
 ## Product-Driver Routing
 Classify the product into ONE primary driver below. The driver — not the product name — determines KOL strategy. Same product (e.g. a sofa) can route differently depending on the brief.
@@ -68,30 +60,40 @@ Always record the chosen driver and a 1-line justification. Do not pick more tha
 Important: the **same product can route to different drivers based on the story being sold**. A sofa can route to Driver A when sold as cozy aesthetics, to Driver B when sold as family hosting, or to Driver D when sold as a home-theater / gaming / room-setup upgrade.
 
 ## Creator-Type Scope
-There is **no built-in restriction to home/decor creators**. Creator vertical is a clue, not a gate. Eligible creators may come from home, family, tech/setup, gaming, DIY/maker, productivity, lifestyle, fashion/luxury, comedy/entertainment, or mixed-format creator worlds if they satisfy all three of these conditions:
+There is **no built-in restriction to home/decor creators**. Creator vertical is a clue, not a gate. Eligible creators may come from home/family, tech/setup, gaming, DIY/maker, productivity, lifestyle, fashion/luxury, comedy/entertainment, or mixed creator worlds if they meet all three tests:
 
-1. Their audience matches the buyer's purchase intent.
-2. Their content world gives the product a believable reason to appear.
+1. Audience purchase intent matches.
+2. The product has a believable place in their content world.
 3. They can showcase the product credibly on camera.
 
-Examples:
-- A media console may fit a tech/setup or gaming creator better than a home-decor creator.
-- A dining table or sectional may fit a family-humor or couple-lifestyle creator better than a pure interior-styling account.
-- A statement piece may fit a fashion/luxury lifestyle creator better than an interior-only creator if that creator's audience buys for taste/status.
-
-Do not reject a creator merely because their top-line niche is not "home". Reject them only if buyer-intent match, product-context fit, or Showcase Capability fails.
+Typical cross-vertical cases: media console -> tech/setup/gaming; dining table or sectional -> family or couple-lifestyle; statement piece -> fashion/luxury taste-maker. Reject only if buyer-intent fit, product-context fit, or Showcase Capability fails.
 
 ## Conversion-Mechanism Patterns
-When user-supplied winners are available, classify them by **how they convert**, not by niche label. Common high-value patterns:
+Use these proven mechanisms as default heuristics:
 
-- **Milestone lifestyle pattern** — the furniture marks a life upgrade: first apartment, new home, moving in together, newlywed setup, "finally feels like home".
-- **Daily-use comfort pattern** — the creator sells lived experience: movie nights, lounging, hosting friends, falling asleep on the couch, everyday convenience.
-- **Feature-demo pattern** — the creator explains why the product is better: modular layout, remote control, sofa-bed transformation, built-in lights, storage, cable flow, solid wood, etc.
-- **Specialized setup pattern** — the product belongs inside an existing hobby or tech world: gaming, home theater, media wall, vinyl, creator desk, AV setup.
-- **Setup-completion / room-upgrade pattern** — the product is framed as the final piece that completes a space: "my room was almost done until this arrived", "this turned my living room into a real home theater", "this completed the setup". Strong for male-skewed setup, gaming, minimalist-tech, and room-upgrade audiences.
-- **Relatable personality pattern** — the product is carried by story, humor, or couple/family dynamics rather than design expertise alone.
+- **Milestone lifestyle** — first apartment, new home, moving in together, newlywed, "finally feels like home"
+- **Daily-use comfort** — movie nights, lounging, hosting, everyday convenience
+- **Feature demo** — modularity, remote, sofa-bed, built-in lights, storage, cable flow, assembly/material proof
+- **Specialized setup** — gaming, home theater, media wall, vinyl, creator desk, AV setup
+- **Setup completion** — the final piece that completes a room or system; strong for setup/gaming/minimalist-tech
+- **Relatable personality** — humor, couple/family dynamics, creator POV
 
-Search for adjacent creators who share one or more of these mechanisms, even if their niche label is lifestyle, tech, entertainment, or gaming rather than home.
+Search adjacent creators by mechanism, not niche label.
+
+## Embedded Historical Search Experience
+These priors are distilled from roughly **66 deduped campaigns / 205 raw rows** and should be treated as built-in search experience.
+
+| Product family | Proven creator types / benchmarks | What repeatedly won | Default search priority |
+|---|---|---|---|
+| **SEB8008** sofa / sofa bed / electric sofa | `kathypicos`, `kennellymichelle`, `sofyaplotnikova`, `bebekolog_`, `haikettua_atl`, `deanwethers`, `starabelar` | comfort + movie-night, moving/newlywed, lifestyle-upgrade demo, honest reassurance, home-theater/setup, culture hook | milestone lifestyle -> comfort/family -> honest-review home -> setup/home-theater -> entertainment/culture |
+| **TS8279** media console / TV console | `make.one.studio` | setup/home-theater authority, device compatibility, room-upgrade logic | setup, gaming, home theater, desk/setup, maker before decor |
+| **DT8168** dining table | `kubrayasun` | dining-space completion, hosting/family meals, statement-piece + fully assembled convenience | dining setup, hosting, family meals, polished everyday home-life |
+| **SF8220** family-friendly sofa / practical seating | `evalunalife` | mom-approved comfort, kid/pet practicality, movies/reading, real-use proof | moms, family-home, kid/pet practical, real-use comfort before pure design |
+| **SSF8030** recliner / accent chair | `lifelybyrosa` | comfort-first, modern look, value reassurance, material/price questions | comfort-first, modern-look, material/color reassurance, realistic value |
+| **SSF0005** electric chair / recliner | `ugc.aylinkenan` | ergonomic comfort, leather quality, one-touch recline, purchase reassurance | close-up material detail, ergonomic demo, reassurance-led creators |
+| **TS8136** room-upgrade / detail-led living-room furniture | `amerikada_hayattt`, `sydneywinbush` | home details, walnut/minimalist styling, fully assembled ease, moving-in series | room-upgrade diaries, moving-in creators, home-details lifestyle |
+
+**Hook priors vs commerce priors**: creators such as `dilamiraco`, `theozspace`, `daisy.diarys`, and `miausalife` are useful top-of-funnel or expansion anchors, but repeated commerce winners outrank one-week hook spikes for default benchmarking.
 
 ## Persona Inference Framework
 Build the buyer persona from the extracted Campaign Context — never from a built-in default. The persona has 5 dimensions; each is used later as a scoring axis.
@@ -107,12 +109,12 @@ Persona is a *target* used to evaluate creators; it is never used to pre-filter 
 ## Showcase Capability Framework
 Independent of audience match, evaluate whether the creator can actually present *this product* well on camera. Score each dimension 0–10 based on the most recent 10–15 Reels.
 
-1. **Visual production quality** — lighting, framing, stabilization, color, resolution. Does the product look premium, or muddy/low-light?
-2. **On-camera presence / narration** — face-to-camera comfort, voiceover clarity, ability to demo features (if the product has mechanisms, modularity, AV slots, storage, recline, etc.).
-3. **Scene fit for the product** — do their existing shooting locations actually contain (or could believably contain) the room/scene this furniture lives in? A creator who only films kitchen counters cannot showcase a sofa.
-4. **Furniture/large-object placement track record** — has the creator filmed similar-scale objects (furniture, large appliances, room makeovers, AV setups, organization installs)? Past furniture/large-object placements are the single strongest evidence.
-5. **Format fit** — does their typical Reel format (room tour, before/after, day-in-the-life, demo, styling, unboxing) support a 30–60s product placement for *this* product driver?
-6. **Branded-content execution** — if past sponsored Reels exist, did the brand integration look natural, did the product remain the focus, was there a clear CTA?
+1. **Visual production quality** — lighting, framing, stability, color, resolution.
+2. **On-camera demo skill** — voiceover, explanation, ability to show mechanisms or use cases.
+3. **Scene fit** — does the creator actually film in the kind of room where this product belongs?
+4. **Large-object track record** — prior furniture / room-makeover / AV / organization placements.
+5. **Format fit** — room tour, before/after, day-in-the-life, demo, styling, unboxing, etc.
+6. **Branded-content execution** — natural integration, product focus, clear CTA.
 
 Derive a **Showcase Score** (0–100) = weighted average × 10. Tiers:
 - **Strong showcase**: ≥ 70
@@ -199,14 +201,9 @@ When mining commenters as candidates, only enqueue accounts already showing **�
 ## Discovery Channels
 
 ### Channel A — Hashtag search (seed discovery)
-Generate **8–12 seed hashtags dynamically** from: product category, room/use context, buyer persona, the Primary Purchase Driver, and any user-supplied winning reference creators. Mix product terms, room/scene terms, persona terms, audience-intent terms, and creator-format / subculture terms. Avoid popular-but-irrelevant tags. Where helpful, include NA-locality cues (e.g. `#usinteriors`, `#canadianhome`). Do **not** limit seeds to home hashtags when the likely converter lives in another creator world such as tech/setup, gaming, family humor, or personality-led lifestyle.
+Generate **8–12 seed hashtags dynamically** from: product category, room/use context, buyer persona, the Primary Purchase Driver, and the nearest matching product family in **Embedded Historical Search Experience**. Mix product terms, room/scene terms, persona terms, audience-intent terms, and creator-format / subculture terms. Avoid popular-but-irrelevant tags. Where helpful, include NA-locality cues (e.g. `#usinteriors`, `#canadianhome`). Do **not** limit seeds to home hashtags when the historical commerce winner for that family lives in another creator world such as tech/setup, gaming, family humor, or personality-led lifestyle.
 
-Illustrative seed mappings (examples only, regenerate per brief):
-- Driver A — sofa: `#cozyhome` `#livingroomdecor` `#familyroom` `#homeliving` `#sofainspo`
-- Driver B — dining table: `#diningroomdecor` `#hostingathome` `#familydinner` `#kitchenanddining`
-- Driver C — storage cabinet: `#homeorganization` `#entrywayideas` `#storagehacks` `#smallspacehome`
-- Driver D — TV stand / media console: `#mediaconsole` `#tvstand` `#mediaroom` `#hometheater` `#livingroomsetup` `#cablemanagement` `#gameroom` `#vinylsetup`
-- Driver E — designer cabinet: `#interiordesigner` `#designforward` `#highdesignhome` `#statementfurniture`
+Illustrative mapping only: sofa -> `#cozyhome` `#livingroomdecor` `#familyroom`; dining -> `#diningroomdecor` `#hostingathome` `#familydinner`; storage -> `#homeorganization` `#entrywayideas` `#storagehacks`; media console -> `#mediaconsole` `#tvstand` `#hometheater` `#livingroomsetup`; designer -> `#interiordesigner` `#designforward` `#statementfurniture`.
 
 Navigate directly to the hashtag results page (avoids the search-box redirect bug):
 ```
@@ -262,48 +259,27 @@ Lateral expansion (B + C) is allowed up to **3 hops** from any seed hashtag resu
 
 Track three counters across the run: total reviewed candidates, reviewed High-match candidates, distinct discovery surfaces sampled. Maintain a prioritized queue from Channels A–F.
 
-1. **Interpret the brief (Step 0)** — Extract Campaign Context, choose Primary Purchase Driver and Secondary Drivers, set scoring weights, choose Creator Roles. If no brief, run Brief Fallback and disclose assumptions. If the user provided past winning creators, run Reference Calibration here and widen creator types accordingly.
-2. **Seed phase** — Generate 8–12 dynamic seed hashtags + public-search queries + reference-adjacent creator patterns from the Campaign Context. Run Channel A, Channel D, and Channel F when available. Collect post/reel URLs of high-performing content.
-3. **Extract direct URLs** — For each target post/reel:
-   a. Click the post/reel to open the modal.
-   b. Run `browser_console(expression="window.location.href")` to capture the canonical URL.
-   c. Close the modal using the in-page × button. Use `browser_back` only if no × is present — it often lands on `about:blank` or the IG home feed.
-4. **Profile qualification** — For each unique creator:
-   a. Open their profile.
-   b. Read followers and bio.
-   c. **Region gate**: discard immediately if no US/CA signal in bio.
-   d. **Reels activity gate**: discard if < 5 Reels in last 3 months.
-   e. Take a screenshot of the Reels tab to assess content style and product-context relevance against the Primary Purchase Driver.
-   f. Score on the 5 persona dimensions + performance + authority using the dynamic weights → Match Score.
-   g. Score on the 6 Showcase Capability dimensions from the same Reels sample → Showcase Score. Pay specific attention to: prior furniture/large-object placements, demo capability for any product mechanisms (recline, modularity, storage, AV slots), and whether their typical scenes physically contain the room this product lives in.
-   h. If followers ≥ 100k AND region = NA AND product-context relevance fits AND Match Score ≥ 50 AND Showcase Score ≥ 50 → proceed to step 5. Discard otherwise.
-5. **Performance qualification** — On the qualified profile's Reels tab:
-   a. List the 10–15 most recent Reels.
-   b. Drop any posted within the last 72 hours.
-   c. Call `veedcrawl_metadata(url=<reel_url>)` for each remaining Reel (zero cost). Fall back to page screenshot only when metadata is empty.
-   d. Compute `avg_views` and `avg_engagement = mean((likes+comments)/views)`.
-   e. Prefer `avg_views ≥ 30,000` AND `avg_engagement ≥ 3%`. Borderline cases are flagged, not discarded.
-6. **Lateral expansion** — For each KOL passing step 5, run Channels B and C (3-hop cap, ≥ 100k filter, NA gate). Loop back to step 4 for new candidates. Do not end the run while high-priority queued candidates remain unreviewed.
-7. **Content extraction** — Three tiers:
-   - **Tier 1 — Screenshot (always, zero cost)**: profile grid + sample Reel pages.
-   - **Tier 2 — Metadata (always for qualified KOLs, zero cost)**: `veedcrawl_metadata` for recent Reels.
-   - **Tier 3 — Full extraction (only on explicit user request, has cost)**: `veedcrawl_extract(url=..., prompt=...)` — both args required. Only when the user asks for spoken/visual scene mining or product-placement analysis. Never speculative.
+1. **Interpret** — Extract Campaign Context, choose Drivers, weights, Roles, and the closest family in **Embedded Historical Search Experience**. If no brief, run Brief Fallback.
+2. **Seed** — Start from the proven creator worlds and mechanisms in the matched family, then generate dynamic hashtags/public-search queries. Run Channels A, D, and F when useful.
+3. **Capture and qualify** — Open target posts, capture canonical URLs with `browser_console(expression="window.location.href")`, close via the in-page × button, then qualify each creator: region -> Reels activity -> product-context relevance -> Match Score -> Showcase Score.
+4. **Measure performance** — On qualified profiles, sample 10–15 recent Reels, exclude the last 72 hours, run `veedcrawl_metadata`, and compute average views plus engagement rate. Prefer `avg_views ≥ 30,000` and `avg_engagement ≥ 3%`; borderline cases are flagged, not auto-rejected.
+5. **Expand and finalize** — Use Channels B, C, and E for lateral expansion until stop conditions are met. Use screenshots always, `veedcrawl_metadata` for qualified KOLs, and `veedcrawl_extract` only on explicit request.
 
 ## Deliver Results
 Return results only after the persistence criteria are satisfied. Start with a one-line verdict naming the **Best Overall KOL** (or an explicit blocker statement). Then return:
 
 | Username | Profile URL | Followers | Avg Views | Engagement Rate | Region | Match Score | Showcase Score | Final Fit | Best Role | Buyer-Intent Fit | Showcase Evidence | Prior Competitor Collab | Why this creator fits this product |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| @example | https://instagram.com/example | 245k | 58,400 | 4.2% | Brooklyn, NY 🇺🇸 | 82 | 74 | 78.8 | Conversion + Showcase | High — comments repeatedly ask about TV-mounting, cable management, room setup | 3 prior media-console / TV-stand placements; clean wide shots of full media wall; on-camera AV setup demo | ⭐ Yes (@CompetitorBrand, ~6 mo ago) | Real media-room rebuilds with AV gear; audience already shopping AV-friendly furniture; proven ability to demo AV-furniture on camera |
 
 **Sort priority**: 1) Final Fit (combined) descending 2) Role coverage (ensure each chosen Creator Role — including Showcase role — is represented near the top) 3) Prior competitor collab promoted within same tier 4) Showcase Score descending as final tiebreaker. Include a separate short list of "discarded" candidates with the failing criterion (note whether failure was on Match, Showcase, or both).
 
 Also include:
 - **Campaign Context summary**: extracted product category, core claims, persona, Primary + Secondary Purchase Drivers, chosen Creator Roles, applied Audience-Match weights, applied Match/Showcase combination weighting.
-- **Reference calibration used** (only if user supplied past winning creators): summarize what those creators had in common and how they widened the eligible creator pool beyond home verticals.
+- **Historical prior used**: state which product-family prior from **Embedded Historical Search Experience** was used as the main benchmark, and whether the shortlisted creator resembles a historical commerce winner or only a historical hook winner.
+- **Optional reference override used** (only if the user supplied newer winners): explain what changed versus the built-in historical priors.
 - **Conversion mechanism matched**: for each top creator, state which proven mechanism they match best (e.g. milestone lifestyle, daily-use comfort, feature-demo, specialized setup, relatable narrative) and why that mechanism is likely to convert this product.
-- **Why each creator fits this product (not just looks like a home account)**: 1–2 sentences per top creator linking their content/audience to the actual purchase trigger — not generic aesthetic remarks.
-- **Showcase evidence per top creator**: cite 2–3 concrete past Reels (URLs) demonstrating their ability to film this category — furniture/large-object placements, room scenes, demo-style content. If no direct furniture precedent exists, state the closest analog and the residual risk.
+- **Why each creator fits this product**: 1–2 sentences tying content + audience to the purchase trigger, not generic aesthetic similarity.
+- **Showcase evidence per top creator**: 2–3 concrete Reels/URLs or the closest analog plus residual risk if no direct precedent exists.
 - **Assumptions made due to missing brief** (only if Brief Fallback was used): list every `inferred`/`assumption` field.
 - **Search coverage summary**: reviewed candidates, reviewed High-match candidates, surfaces actually used, surfaces blocked or exhausted.
 
