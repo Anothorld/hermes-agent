@@ -69,13 +69,36 @@ Hard content rules:
 draft_ids:
   product_pitch: <draft_id>
 status: drafted_product_pitch
+stage: product_pick
+sub_status: pitch_drafted
 last_pitched_skus:
   - <sku_id_1>
   - <sku_id_2>
 last_action_at: <iso8601>
 ```
 
-### Step 6 — Return
+### Step 6 — CAL audit (mandatory, fire-and-forget)
+Write the draft + rationale snapshot to CAL (`hermes-agent/plugins/kol-ops-bridge/cal.py`).
+
+1. `cal.record_draft(stage='product_pitch', sub_status='pitch_drafted', ...)` with full subject/body and a `context_snapshot` containing:
+   ```json
+   {
+     "selling_point_group": "<from card>",
+     "creator_type": "<from card>",
+     "hit_skus": ["<sku_id_1>", "<sku_id_2>", ...],
+     "whitelist_hits": ["<url_1>", "<url_2>", ...],
+     "prior_reply_quote": "<≤200-char excerpt from the KOL reply that triggered this pitch>",
+     "prior_pitched_skus": ["<from previous pitches on this thread>"],
+     "current_stage": "product_pick",
+     "sub_status_at_time": "pitch_drafted",
+     "budget_per_kol": <number>,
+     "absolute_floor": <number>,
+     "triggered_by": "<chat|web|cron>"
+   }
+   ```
+2. `cal.record_event(event_type='emailed_product_pitch', stage='product_pick', sub_status='pitch_drafted', actor=<from caller>, payload={draft_id, skus_pitched})`.
+
+### Step 7 — Return
 Return `{draft_id, kol_handle, skus_pitched}` to caller. Do not notify; the orchestrator / dispatcher batches notifications.
 
 ## Hard Rules

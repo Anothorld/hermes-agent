@@ -50,12 +50,39 @@ Every downstream skill (initial-email, product-pitch-email, negotiation-email, r
 > Operational setup (Gmail labels, cron registration, TEST MODE dry-run, rollback)
 > lives in `SETUP.md` next to this SKILL.md. Read it before the first campaign.
 
+## Trigger Mode (chat | web | cron)
+This skill accepts a `triggered_by` parameter at invocation. It defaults to `chat` for free-form chat invocations. The external KOL Ops Console invokes via Gateway `POST /v1/runs` with `triggered_by=web` baked into the instructions.
+
+Mode branch (single point of divergence — keep it small):
+- `chat` — Step 3 posts the shortlist approval prompt and **waits** for the user's chat reply with one of the four allowed verbs.
+- `web`  — Step 3 writes the shortlist to disk, writes a `shortlist_ready` event to CAL, then **exits**. The operator approves through `POST /api/plugins/kol-ops-bridge/campaigns/{id}/approve-shortlist`; a fresh agent session resumes from Step 4 when the approval lands.
+- `cron` — same as `chat` but treats absence of a chat user as a hard error (cron should not block on chat approval).
+
+The `triggered_by` value flows into every CAL write as `actor=<chat|web|cron>` (or a more specific value like `web:operator`).
+
+## 8-Stage State Machine
+KOL cards live in exactly one of these 8 stages, with sub-status detail. The Kanban card's `stage` + `sub_status` MUST stay in sync with the latest `kol_conversation_events` row.
+
+| # | stage | typical sub_status values |
+|---|---|---|
+| 1 | `discovered`        | `pool_pending_approval` → `approved` / `rejected` |
+| 2 | `outreach`          | `email_missing` / `initial_drafted` / `initial_sent` / `reply_received` |
+| 3 | `product_pick`      | `pitch_drafted` / `pitch_sent` / `sku_selected` |
+| 4 | `negotiation`       | `accept_drafted` / `counter_drafted` / `refuse_escalated` / `accepted` |
+| 5 | `contract`          | `pending` / `sent_for_signature` / `signed` / `declined` |
+| 6 | `logistics`         | `pending` / `address_collected` / `tracking_filled` / `in_transit` / `delivered` |
+| 7 | `content_delivery`  | `submitted_v<n>` / `revision_requested_v<n>` / `approved_v<n>` |
+| 8 | `closed`            | `closed_success` / `closed_declined` / `closed_abandoned` |
+
+The legacy `status` field is retained as a free-form pointer for backwards compatibility, but the canonical truth is `(stage, sub_status)`.
+
 ## Procedure
 
 ### Step 1 — Resolve campaign config
 1. Read or create `~/.hermes/kol-outreach/<campaign_id>/config.yaml`.
 2. Validate: SKU whitelist non-empty, `budget_per_kol > 0`, `budget_per_kol < absolute_floor <= budget_total`, `test_mode_to` is a valid email.
 3. Fail fast in chat if validation fails. Do not proceed.
+4. **CAL**: `cal.record_event(event_type='campaign_started', stage='discovered', sub_status=null, actor=<triggered_by>, product_sku=<from config>, campaign_id=<id>, kol_identity_id=null, payload={mode, budget_total, budget_per_kol, absolute_floor, headcount_target})` — use the special identity id `0` (system event) by recording on a campaign-scoped event without an identity. If CAL requires an identity, skip this write; the bridge backend infers campaign start from the first per-KOL event.
 
 ### Step 2 — Run discovery
 1. Invoke the `instagram-kol-discovery` skill with the product brief and budget context.
@@ -63,7 +90,11 @@ Every downstream skill (initial-email, product-pitch-email, negotiation-email, r
 3. Persist the raw discovery output to `~/.hermes/kol-outreach/<campaign_id>/shortlist.md`.
 
 ### Step 3 — Notify user for shortlist approval (mandatory)
-Post **one** chat message using this fixed template, then **stop and wait** for the user's reply. Do not move on without explicit approval.
+In `triggered_by=web` mode, do NOT post the chat prompt. Instead:
+1. `cal.record_event(event_type='shortlist_ready', ...)` for the campaign.
+2. Exit the agent run cleanly. The Web operator approves via `POST /api/plugins/kol-ops-bridge/campaigns/{id}/approve-shortlist`; a fresh agent session resumes at Step 4 when the approval webhook arrives.
+
+In `triggered_by=chat` mode (default), post **one** chat message using this fixed template, then **stop and wait** for the user's reply. Do not move on without explicit approval.
 
 ```
 ✅ KOL shortlist ready — <N> candidates across <M> selling-point groups.
@@ -80,14 +111,17 @@ Full list ↓
 If a `notifier` channel is configured (Telegram / Discord / Slack via Hermes gateway), also send the first 3 lines to that channel. Never duplicate the full shortlist into external channels (privacy).
 
 ### Step 4 — Parse approval and build per-KOL index cards
-1. Parse the user's reply against the four allowed verbs. If the reply is ambiguous, ask once more with the same template; never guess.
+1. In `web` mode, the approval set arrives via the bridge endpoint's `selected_handles`. In `chat`/`cron` mode, parse the user's reply against the four allowed verbs. If the reply is ambiguous, ask once more with the same template; never guess.
 2. For each approved handle:
+   - **Upsert KOL identity in CAL** first: `kol_identity_id = cal.upsert_identity(handle=<handle>, primary_email=<email or null>, region=<from discovery>, creator_type=<from discovery>, env=<TEST|LIVE>)`. The same identity id MUST be reused for all later events on this handle (one identity, many cards across products).
    - Create one Kanban index card on board `kol-outreach`, title `kol:<handle>`.
    - Card body YAML:
 
      ```yaml
      campaign_id: <campaign_id>
+     product_sku: <from config>
      kol_handle: <handle>
+     kol_identity_id: <from cal.upsert_identity>
      email: null
      selling_point_group: <group letter or label>
      creator_type: <from discovery row>
@@ -100,10 +134,13 @@ If a `notifier` channel is configured (Telegram / Discord / Slack via Hermes gat
        negotiation: null
      gmail_thread_id: null
      status: shortlisted
+     stage: outreach
+     sub_status: email_pending
+     env: <TEST|LIVE>
      notified_drafts: []
      ```
 
-   - Status transitions: `shortlisted` → `drafted_initial` → `sent_initial` → `replied` → `drafted_<intent>` → `sent_<intent>` → `negotiating` / `closed` / `rejected`. The card is an index, not a gate; nothing blocks on it.
+   - **CAL**: `cal.record_event(event_type='approved', stage='discovered', sub_status='approved', actor=<triggered_by>, kol_identity_id=<id>, card_id=<id>, product_sku=<...>, campaign_id=<...>, payload={selling_point_group, creator_type, final_fit})`. Old `status` enum is retained for back-compat; canonical truth is `(stage, sub_status)` from the 8-stage table above.
 
 ### Step 5 — Email discovery (lightweight)
 For each approved KOL with `email: null`:

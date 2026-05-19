@@ -61,10 +61,36 @@ Update the card body, merging (never replacing) these fields:
 draft_ids:
   initial: <draft_id>
 status: drafted_initial
+stage: outreach
+sub_status: initial_drafted
 last_action_at: <iso8601>
 ```
 
-### Step 6 — Return
+### Step 6 — CAL audit (mandatory, fire-and-forget)
+Write the draft + a generation-rationale snapshot to the Conversation Audit Layer (`hermes-agent/plugins/kol-ops-bridge/cal.py`). These calls MUST run after Step 5; failure is logged but does not abort the skill (per CAL failure policy).
+
+1. Resolve `kol_identity_id`: `cal.upsert_identity(handle=<handle>, primary_email=<email>, ...)` (if the orchestrator already produced one, use that id directly).
+2. Register aliases: `cal.add_alias(kol_identity_id, kind='email', value=<email>)` and (after draft creation) `cal.add_alias(kol_identity_id, kind='gmail_thread_id', value=<thread_id>)`.
+3. `cal.record_draft(...)` with `stage='initial'`, `sub_status='initial_drafted'`, full `subject` + `body`, and `context_snapshot` including at minimum:
+   ```json
+   {
+     "selling_point_group": "<from card>",
+     "creator_type": "<from card>",
+     "recommendation_reason": "<from discovery row>",
+     "brand_voice": "<from config>",
+     "mode": "<TEST|LIVE>",
+     "intended_recipient": "<real email>",
+     "current_stage": "outreach",
+     "sub_status_at_time": "initial_drafted",
+     "hit_skus": [],
+     "budget_per_kol": <number>,
+     "absolute_floor": <number>,
+     "triggered_by": "<chat|web|cron>"
+   }
+   ```
+4. `cal.record_event(event_type='emailed_initial', stage='outreach', sub_status='initial_drafted', actor=<from caller>, payload={draft_id, message_id})`.
+
+### Step 7 — Return
 Return `{draft_id, message_id, kol_handle}` to the caller. Do not post a chat notification from this skill — the orchestrator batches notifications.
 
 ## Hard Rules
