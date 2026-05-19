@@ -10,6 +10,7 @@ export type WsEvent = {
     stage: string | null;
     sub_status: string | null;
     ts: string;
+    actor: string;
     payload_json: string;
   }>;
 };

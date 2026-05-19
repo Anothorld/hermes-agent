@@ -41,14 +41,14 @@ def _ensure_owner() -> None:
         conn.execute(
             "INSERT INTO users (email, password_hash, role, is_active, created_at) VALUES (?,?,?,1,?)",
             (
-                "owner@local",
+                "owner@console.app",
                 hash_password(pwd),
                 "owner",
                 _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
             ),
         )
         log.warning("=" * 60)
-        log.warning("[FIRST BOOT] created user owner@local")
+        log.warning("[FIRST BOOT] created user owner@console.app")
         log.warning("[FIRST BOOT] one-time password: %s", pwd)
         log.warning("[FIRST BOOT] rotate via POST /auth/users immediately.")
         log.warning("=" * 60)

@@ -35,7 +35,12 @@ class BridgeClient:
         json: Optional[dict[str, Any]] = None,
     ) -> Any:
         url = f"{self._base}{path}"
-        r = await self._client.request(method, url, params=params, json=json, headers=self._headers)
+        try:
+            r = await self._client.request(
+                method, url, params=params, json=json, headers=self._headers
+            )
+        except httpx.HTTPError as exc:
+            raise BridgeError(502, f"bridge unreachable: {exc}") from exc
         if r.status_code >= 400:
             raise BridgeError(r.status_code, r.text)
         if r.headers.get("content-type", "").startswith("application/json"):

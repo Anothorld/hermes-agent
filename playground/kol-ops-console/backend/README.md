@@ -21,7 +21,7 @@ export KOC_DB_PATH=$HOME/.hermes/kol-ops-console/app.db
 uvicorn app.main:app --reload --port 8765
 ```
 
-First boot auto-creates an `owner@local` user with a random password printed
+First boot auto-creates an `owner@console.app` user with a random password printed
 to stdout. Rotate immediately.
 
 ## Layout
