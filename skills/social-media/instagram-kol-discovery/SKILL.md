@@ -103,7 +103,7 @@ Maintain a prioritized queue and cover at least **2 discovery surfaces** unless 
 Lateral expansion from seed results is capped at **3 hops**. One failed hashtag, browser session, selector, or extraction call never ends the run; switch surface or seed.
 
 ## Persistence And Run
-Do not stop at the first acceptable candidate. Continue until a defensible **Best Overall KOL** exists or all relevant surfaces are exhausted.
+Do not stop at the first acceptable candidate. Continue until each priority product feature / selling-point group has a defensible creator set, or all relevant surfaces are exhausted.
 
 Minimum evidence when reachable:
 - review at least **3 High-Match candidates**;
@@ -112,19 +112,41 @@ Minimum evidence when reachable:
 - use screenshots and run **`veedcrawl_metadata(url=...)` for every qualified KOL's recent Reels** because it is mandatory/free for qualification;
 - use `veedcrawl_extract(url=..., prompt=...)` only when the user explicitly requests paid/deep extraction.
 
-Workflow: interpret context -> choose driver/roles/history prior -> seed and enqueue -> capture canonical URLs with `browser_console(expression="window.location.href")` -> qualify region/Reels/context/scores -> measure views + ER -> expand laterally -> rank by Final Fit and role coverage. Close posts via the in-page × button, not `browser_back`.
+Workflow: interpret context -> split product into 2-4 feature/selling-point groups -> choose driver/roles/history prior per group -> seed and enqueue -> capture canonical URLs with `browser_console(expression="window.location.href")` -> qualify region/Reels/context/scores -> measure views + ER -> expand laterally -> rank by Final Fit and role coverage within each group. Close posts via the in-page × button, not `browser_back`.
 
-If no clear winner exists, return **"No best-fit KOL identified yet"** with the blocker.
+If no group has clear recommendations, return **"No best-fit KOL identified yet"** with the blocker. If only some groups are weak, keep the group and mark the evidence gap.
 
 ## Deliver Results
-Start with one verdict naming **Best Overall KOL** or the blocker. Then provide:
+Final output must be a **Markdown document** organized by product features / selling points, not only one global leaderboard. Start with a short verdict naming the strongest group and strongest overall creator if clear, then provide 2-4 groups. Each group represents a distinct product value angle such as comfort, family use, storage/function, setup/AV fit, design statement, material reassurance, or moving/new-home lifestyle.
 
-| Username | Profile URL | Followers | Avg Views | ER | Region | Match | Showcase | Final Fit | Role | Mechanism | Showcase Evidence | Competitor Collab | Why Fit |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+Required structure:
 
-Sort by: Final Fit desc -> role coverage -> prior competitor collab within tier -> Showcase Score. Also include discarded candidates with failing criterion.
+```md
+# Instagram KOL Recommendations For [Product]
 
-Required summary: Campaign Context, chosen driver/roles/weights, historical prior used, reference override if any, conversion mechanism per top creator, 2-3 Reel/URL showcase evidence points per top creator, assumptions from Brief Fallback, and search coverage (reviewed total, High-match total, surfaces used/blocked).
+## Campaign Context
+- Product / key selling points:
+- Primary + secondary drivers:
+- Historical prior used:
+- Search coverage:
+
+## Group 1: [Feature / Selling Point]
+Why this group matters: [buyer motive + content angle]
+
+| Username | Profile URL | Followers | Avg Views | ER | Region | Creator Type | Match | Showcase | Final Fit | Recommendation Reason |
+|---|---|---|---|---|---|---|---|---|---|---|
+
+Recommended creators: 3-5 per group when available. If fewer than 3 pass, explain the blocker.
+
+### Evidence Notes
+- Showcase evidence: 2-3 Reel/URL examples or closest analogs for top creators.
+- Conversion mechanism: milestone, comfort, feature demo, setup completion, relatable personality, etc.
+- Risks / assumptions:
+```
+
+For every group, show **3-5 recommended bloggers** where the search surface allows. Include creator data, creator type, and the product-specific recommendation reason. Sort within each group by: Final Fit desc -> role coverage -> prior competitor collab within tier -> Showcase Score. Avoid repeating the same creator across groups unless they clearly serve different selling points.
+
+Also include: discarded candidates with failing criterion, optional reference override if any, assumptions from Brief Fallback, and search coverage (reviewed total, High-match total, surfaces used/blocked).
 
 ## Cloud Browser Notes
 - Set `BROWSER_USE_API_KEY`; optional `BROWSER_USE_PROFILE_ID` preserves Instagram login state. Browser Use `/browsers` has no `keepAlive`; reuse by not stopping the session.
