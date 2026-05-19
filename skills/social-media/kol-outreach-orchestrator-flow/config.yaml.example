@@ -1,0 +1,37 @@
+# Campaign config example — copy to ~/.hermes/kol-outreach/<campaign_id>/config.yaml
+# All paths are absolute. All currencies must match (default USD).
+
+campaign_id: seb8008-spring          # short slug, must match the directory name
+product_brief_path: /abs/path/to/brief.md
+sku_whitelist:
+  - https://example.com/products/seb8008
+  - https://example.com/products/ts8279
+  - https://example.com/products/sf8220
+allowed_hosts:                       # used by product-pitch to reject off-brand URLs
+  - example.com
+
+# Budget rules (read by negotiation skill — never edit from a skill at runtime).
+# Required relationship:  budget_per_kol < absolute_floor <= budget_total
+currency: USD
+budget_total: 12000
+budget_per_kol: 1500
+absolute_floor: 2200                 # refusal-zone ceiling; agent must escalate at/above this
+headcount_target: 8
+
+# Test inbox: in TEST MODE every draft.to is rewritten to this address.
+mode: TEST                           # TEST | LIVE — flip to LIVE only after explicit user say-so
+test_mode_to: tester@example.com
+
+# Brand voice (used by initial-email skill).
+brand_name: Example Living
+brand_sender_name: Alex
+brand_signature: |
+  Alex · Example Living
+  https://example.com
+
+# Optional second-channel notifier; if absent, chat-only.
+notifier:
+  channel: telegram                  # telegram | discord | slack
+  chat_id: "-1001234567890"
+
+created_at: 2026-05-19T10:00:00Z
