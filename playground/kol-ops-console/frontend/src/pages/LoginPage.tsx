@@ -5,7 +5,7 @@ import { api, setToken } from '../api';
 export function LoginPage() {
   const nav = useNavigate();
   const loc = useLocation() as { state?: { from?: { pathname?: string } } };
-  const [email, setEmail] = useState('owner@local');
+  const [email, setEmail] = useState('owner@console.app');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

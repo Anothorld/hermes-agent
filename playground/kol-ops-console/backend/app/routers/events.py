@@ -13,9 +13,9 @@ import logging
 from contextlib import suppress
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 
-from ..bridge_client import BridgeClient
+from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
 from ..deps import current_user, get_bridge
 from ..security import decode_token
@@ -37,7 +37,10 @@ async def recent_events(
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict]:
     e = (env or get_settings().env).upper()
-    return await bridge.recent_events(e, limit=limit)
+    try:
+        return await bridge.recent_events(e, limit=limit)
+    except BridgeError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
 
 @router.get("/escalations/open")
@@ -47,7 +50,10 @@ async def open_escalations(
     env: str | None = Query(None),
 ) -> list[dict]:
     e = (env or get_settings().env).upper()
-    return await bridge.list_open_escalations(e)
+    try:
+        return await bridge.list_open_escalations(e)
+    except BridgeError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
 
 class _Hub:
