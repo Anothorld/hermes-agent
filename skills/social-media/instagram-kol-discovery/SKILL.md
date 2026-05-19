@@ -154,6 +154,14 @@ Also include: discarded candidates with failing criterion, optional reference ov
 - Act when visible, avoid redundant screenshots/snapshots, wait only 1-2 seconds unless needed.
 - If hashtag pages time out, switch to public-web seed creators + Similar accounts. If Instagram fails 3 consecutive times, document the blocker and fall back.
 
+### Browser Reliability Rules (learned from agent.log failures)
+- **Navigation timeout**: the default 60s is too short for Browser Use free tier on IG / heavy SPA pages. Pass `timeout=150` (or higher) on `browser_navigate` for first-load of `instagram.com/*`, `xiaohongshu.com/*`, or any infinite-scroll feed. Subsequent in-SPA navigation can use the default.
+- **Always re-snapshot after navigation**: any `browser_navigate`, `browser_click` that triggers a route change, or page reload **invalidates all `@eXX` refs**. Before the next `browser_click` / `browser_type`, you MUST call `browser_snapshot` and use refs from the new snapshot. Reusing a ref across pages will surface as `Unknown ref: eXX` and waste a tool turn.
+- **Stop retrying the same call**: if `browser_navigate` to the same URL fails twice, do NOT issue a third identical call. Switch tactic in this order: (a) change `wait_until` (`domcontentloaded` instead of `load`), (b) try the public/non-login URL variant, (c) `cleanup_browser(task_id)` then retry once to force a fresh cloud session, (d) fall back to `veedcrawl_extract` or public-web search. The runtime emits `same_tool_failure_warning` at count=3 — treat that as a hard stop signal.
+- **CDP closed / channel errors**: when you see `CDP response channel closed`, `Could not compute box model`, or `Failed to take screenshot ... CDP response channel closed`, the cloud session is dead. Call `cleanup_browser(task_id)` once, then re-issue the navigate; the next tool call will auto-create a new Browser Use session. Do not keep clicking on the dead session.
+- **Element-not-found loops**: `Could not locate element with role=...` usually means the page hasn't finished rendering or the element is inside a virtualized list. Resolve by: snapshot → scroll once → snapshot again, instead of retrying the same click.
+- **Cloud 400 / provider failure**: `BrowserUseProvider failed (... 400 Invalid HTTP request ...)` is a transient upstream issue; the runtime auto-falls-back to local Chromium. Don't change strategy — continue with the same plan; just note `fallback_from_cloud=true` in the run report.
+
 ## Pitfalls
 - Do not default to home/decor creators just because the product is furniture.
 - Do not let visual similarity outrank buyer intent for functional, technical, family-practical, or use-case products.
