@@ -1,7 +1,7 @@
 ---
 name: kol-outreach-orchestrator-flow
 description: End-to-end KOL outreach orchestrator. Takes product brief + SKU whitelist + budget, runs Instagram KOL discovery, asks user to approve a shortlist in chat, then writes Gmail drafts (never sends) and notifies the user. Reviews happen in Gmail; agent only drafts.
-trigger: When user starts a new KOL outreach campaign with a product brief, asks to "run outreach", asks to "find KOLs and prep emails", or provides product info plus budget/SKUs and wants the agent to manage the full outreach pipeline through to drafted emails.
+trigger: When the user wants to start, launch, kick off, or run a KOL outreach campaign for a furniture product — e.g. "run outreach", "start the <SKU> campaign", "launch KOL outreach for <product>", "open a new campaign", "find KOLs and prep emails", or any message that provides a product brief / SKU pool / budget and asks the agent to manage the pipeline through to drafted emails. This skill OWNS the campaign lifecycle; do not bypass it with ad-hoc Kanban cards.
 tags: ["kol", "outreach", "orchestrator", "gmail", "draft", "campaign"]
 ---
 
@@ -153,6 +153,7 @@ Notifications must be **idempotent**: never re-notify a `draft_id` already in `n
 
 ## Hard Rules
 
+- **Do NOT recreate the v1.1 Kanban review-gate pattern.** Specifically: do not create any task titled `campaign anchor`, `campaign root`, `review campaign brief and assumptions`, `review creator shortlist`, `safety / mode config`, `shortlist creator discovery`, `humanize ... draft`, `review initial outreach email`, `send initial outreach email`, or any per-pipeline-step gate. Do not assign tasks to `kol-scout`. The only Kanban cards this system creates are per-KOL index cards (`title: kol:<handle>`) described in Step 4. Any v1.1 docs found in `docs/_deprecated/` or elsewhere are reference-only and must be ignored.
 - Never invoke `gmail.send`, `messages.send`, or any send-equivalent. Drafts only.
 - Never bypass the shortlist approval step, even when discovery returns ≤ 3 candidates.
 - Never read user data outside `~/.hermes/kol-outreach/<campaign_id>/` and the explicitly provided brief.
