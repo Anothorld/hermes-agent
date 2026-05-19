@@ -79,12 +79,37 @@ Hard content rules:
 draft_ids:
   negotiation: <draft_id>
 status: drafted_negotiation
+stage: negotiation
+sub_status: <accept_drafted | counter_drafted | refuse_escalated>
 negotiation:
   last_request: <R currency>
   last_counter: <counter or null>
   decision: accept | counter | refuse_escalate
 last_action_at: <iso8601>
 ```
+
+### Step 5b — CAL audit (mandatory, fire-and-forget)
+Write negotiation history, draft, and event to CAL.
+
+1. `cal.record_negotiation(kol_identity_id, decision=<accept|counter|refuse_escalate>, kol_request_amount=R, currency=<...>, agent_counter_amount=<counter or null>, decision_reason='<one-line reason>', budget_per_kol_at_time=B, absolute_floor_at_time=F, card_id=<id>, campaign_id=<id>, product_sku=<from card>)`.
+2. `cal.record_draft(stage='negotiation', sub_status='<accept_drafted|counter_drafted|refuse_escalated>', ...)` with full subject/body and `context_snapshot`:
+   ```json
+   {
+     "kol_request_amount": R,
+     "currency": "<...>",
+     "agent_counter_amount": <number or null>,
+     "decision": "<accept|counter|refuse_escalate>",
+     "budget_per_kol": B,
+     "absolute_floor": F,
+     "floor_buffer": 0.95,
+     "prior_reply_quote": "<≤200-char excerpt from KOL's price message>",
+     "current_stage": "negotiation",
+     "sub_status_at_time": "<accept_drafted|counter_drafted|refuse_escalated>",
+     "triggered_by": "<chat|web|cron>"
+   }
+   ```
+3. `cal.record_event(event_type='emailed_negotiation', stage='negotiation', sub_status=<sub_status>, actor=<from caller>, payload={draft_id, decision})`.
+4. If `decision == 'refuse_escalate'`: also `cal.record_escalation(reason='floor_violation', kol_identity_id=<id>, card_id=<id>, campaign_id=<id>, ai_recommendation='hold and ask human; do not auto-counter')`.
 
 ### Step 6 — Escalate when required
 If `decision == refuse_escalate`, post **one** chat message:

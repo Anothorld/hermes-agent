@@ -18,7 +18,17 @@ Keep KOL outreach moving without human polling: detect new replies in Gmail, cla
 
 ### Step 1 — Pull unread inbound replies
 1. Query Gmail for messages with label `kol-outreach/pending-reply` and `is:unread`.
-2. For each message, resolve its thread, then look up the Kanban card whose `gmail_thread_id` matches. If no card matches, escalate (`unknown thread: <thread_id>`) and move on.
+2. For each message, **resolve KOL identity using a multi-strategy match** (record both the chosen strategy and a confidence in [0, 1]):
+
+   | Order | Strategy | Confidence on match |
+   |---|---|---|
+   | 1 | `gmail_thread_id` → Kanban card `gmail_thread_id` field AND `cal.resolve_identity(aliases=[('gmail_thread_id', tid)])` agree | 1.00 |
+   | 2 | Follow `In-Reply-To` / `References` headers; if any referenced message id is in `cal.kol_identity_alias` (kind=`gmail_message_id`) | 0.90 |
+   | 3 | `cal.resolve_identity(aliases=[('email', from_addr)])` matches a known identity (KOL replied from a known address but in a new thread) | 0.80 |
+   | 4 | Body mentions exactly one `@handle` that resolves via `cal.resolve_identity(aliases=[('handle', h)])` | 0.60 |
+   | — | None of the above | 0.00 → escalate as `unknown_sender` and move on |
+
+3. If `match_confidence < 0.7`, do NOT draft for this message; record a `kol_reply_history` row with `match_strategy='unmatched'` (or the partial match) and add to the escalate batch with reason `low_confidence_match`.
 
 ### Step 2 — Load campaign context
 1. Read `campaign_id` from the card; load `~/.hermes/kol-outreach/<campaign_id>/config.yaml`.
@@ -33,6 +43,7 @@ Use the LLM to assign exactly one intent + a confidence score in [0, 1]. Allowed
 | `asks_materials`    | Asks for product info / catalog / samples. |
 | `proposes_rate`     | Provides a specific number as a fee ask. |
 | `counter_offers`    | Responds to a prior number with a different number. |
+| `content_submission`| KOL submitted a draft video; body contains a URL on the platform whitelist (youtube/youtu.be/tiktok/instagram/bilibili/vimeo). ONLY valid when the KOL's current stage is `logistics.delivered` or later. |
 | `declines`          | Says no, not a fit, not available. |
 | `out_of_office`     | Auto-reply / away message. |
 | `other`             | Anything else (questions, scheduling, off-topic). |
@@ -57,11 +68,19 @@ last_reply:
 |---|---|
 | `interested` / `asks_materials` | Invoke `kol-outreach-product-pitch-email` skill with this card. |
 | `proposes_rate` / `counter_offers` | Parse number + currency. If parse succeeds, invoke `kol-outreach-negotiation-email`. If parse fails, escalate. |
+| `content_submission` | Invoke `kol-outreach-content-review` skill (extracts video URL + notifies operator; does NOT draft). |
 | `declines` | Set `status: closed_declined`. Draft no reply. Add to next escalate digest (info only). |
 | `out_of_office` | Re-label message back to `kol-outreach/replied/ooo`. Do not draft. No escalate. |
 | `other` | Escalate. |
 
-After a successful draft, move the inbound message's label from `kol-outreach/pending-reply` to `kol-outreach/replied/<intent>` and mark read. This is the idempotency anchor: never process a message that is not under `pending-reply`.
+After a successful draft (or `content_submission` routing), move the inbound message's label from `kol-outreach/pending-reply` to `kol-outreach/replied/<intent>` and mark read. This is the idempotency anchor: never process a message that is not under `pending-reply`.
+
+### Step 4b — CAL audit (mandatory, fire-and-forget)
+For every processed inbound message, write CAL **before** the label move (so a crash mid-step doesn't lose the reply):
+
+1. `cal.record_reply(kol_identity_id=<resolved id or NULL>, gmail_message_id=<id>, gmail_thread_id=<tid>, from_addr=<addr>, received_at=<iso8601>, snippet=<≤200 chars>, body=<full body>, intent=<intent>, confidence=<intent confidence>, match_strategy=<chosen strategy from Step 1>, match_confidence=<from Step 1>, handled_action=<routed_skill|escalated|ignored>, card_id=<id>, campaign_id=<id>)`.
+2. `cal.record_event(event_type='reply_received', stage=<KOL's current stage>, sub_status='reply_classified', actor='cron:dispatcher', payload={intent, intent_confidence, match_strategy, match_confidence, gmail_message_id})`.
+3. On escalation: `cal.record_escalation(reason=<low_confidence_reply|low_confidence_match|unknown_sender|parse_failed|other>, kol_identity_id=<or null>, card_id=<or null>, campaign_id=<or null>, classifier_confidence=<x>, ai_recommendation=<one-line>)`.
 
 ### Step 5 — Escalate low-confidence / policy cases
 Accumulate an escalate list across this run. At end of run, post **one** chat message:
