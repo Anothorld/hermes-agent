@@ -46,6 +46,10 @@ created_at: 2026-05-19T10:00:00Z
 
 Every downstream skill (initial-email, product-pitch-email, negotiation-email, reply-dispatcher) reads this file. Never duplicate budget or whitelist values inside SKILL prompts.
 
+> Use `config.yaml.example` (next to this SKILL.md) as the starting template.
+> Operational setup (Gmail labels, cron registration, TEST MODE dry-run, rollback)
+> lives in `SETUP.md` next to this SKILL.md. Read it before the first campaign.
+
 ## Procedure
 
 ### Step 1 — Resolve campaign config
