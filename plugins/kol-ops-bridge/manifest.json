@@ -1,0 +1,8 @@
+{
+  "name": "kol-ops-bridge",
+  "label": "KOL Ops Bridge",
+  "description": "Headless plugin: persists per-KOL conversation audit (events/drafts/replies/negotiations/identity/escalations) and exposes read/write API + start endpoint for the external KOL Ops Console. No UI tab — this plugin is API-only.",
+  "icon": "Radio",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}
