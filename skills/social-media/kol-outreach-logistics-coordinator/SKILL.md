@@ -12,7 +12,7 @@ Move one KOL forward from `contract.signed` into `logistics.pending` and let the
 **STUB IMPLEMENTATION.** The first release does not integrate any carrier (UPS / FedEx / 顺丰 etc.). The Web console exposes form fields for `address`, `carrier`, `tracking_no`, `shipped_at`, `delivered_at`; these are pushed via the bridge `POST /api/plugins/kol-ops-bridge/logistics/update` endpoint. When the project later integrates a carrier API, only this skill's Procedure changes — the CAL schema (`address`, `carrier`, `tracking_no`, `shipped_at`, `delivered_at` payload fields) is already in place.
 
 ## Inputs (from caller)
-- `campaign_id`, `kol_handle`, `card_id`, `kol_identity_id`
+- `campaign_id`, `kol_handle`, `kol_identity_id` (CAL's `card_id` column is legacy — pass NULL)
 - `triggered_by` (`chat` | `web` | `cron`)
 - `env` (`TEST` | `LIVE`)
 
@@ -24,14 +24,8 @@ Fail loudly if any required input is missing.
 1. Confirm CAL has a `contract_signed` event for this KOL.
 2. Confirm no existing `logistics.delivered` event (avoid double-advance).
 
-### Step 2 — Advance the card
-Update the Kanban card body:
-```yaml
-status: logistics_pending
-stage: logistics
-sub_status: pending
-last_action_at: <iso8601>
-```
+### Step 2 — Advance state via CAL
+There is no Kanban card. Step 3's `cal.record_event(event_type='logistics_pending', stage='logistics', sub_status='pending', ...)` is the single state transition. The KOL Ops Console reads this event and exposes the address / carrier / tracking form.
 
 ### Step 3 — Write CAL audit
 Call `cal.record_event` with:

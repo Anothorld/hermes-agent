@@ -1,7 +1,7 @@
 ---
 name: kol-outreach-product-pitch-email
 description: Draft (never send) the second-touch English email that introduces 2-4 SKUs from the campaign whitelist to a KOL who replied positively or asked for materials. Validates every URL/SKU id against the whitelist and escalates instead of inventing products.
-trigger: When the reply dispatcher classifies a KOL reply as intent `interested` or `asks_materials` with confidence >= 0.7, and the KOL has no existing `draft_ids.product_pitch` on their Kanban card.
+trigger: When the reply dispatcher classifies a KOL reply as intent `interested` or `asks_materials` with confidence >= 0.7, and CAL has no existing `kol_draft_history` row with `stage='product_pitch'` for this `(kol_identity_id, campaign_id, env)`.
 tags: ["kol", "outreach", "email", "product-pitch", "gmail", "draft"]
 ---
 
@@ -10,7 +10,7 @@ Draft one Gmail reply on the KOL's existing thread that proposes **2 to 4** conc
 
 ## Inputs (from caller)
 - `campaign_id` and config path.
-- Kanban card id (must contain `gmail_thread_id`, `selling_point_group`, `creator_type`, `kol_handle`).
+- `kol_identity_id` (from CAL). The caller must also pass the live working context derived from CAL: `gmail_thread_id` (from `kol_identity_alias` where `kind='gmail_thread_id'`), `selling_point_group`, `creator_type`, `kol_handle` (all from the latest `approved` event payload).
 - The KOL's reply text (for context, not for parsing rules).
 
 If `gmail_thread_id` is missing or empty, abort and escalate — never start a new thread for a product pitch.
@@ -63,19 +63,8 @@ Hard content rules:
 2. In TEST MODE, rewrite `to` to `test_mode_to` and prepend `Intended recipient: <real_email>` on the first body line.
 3. Apply label `kol-outreach/pending/product_pitch` to the draft message.
 
-### Step 5 — Write back to card
-
-```yaml
-draft_ids:
-  product_pitch: <draft_id>
-status: drafted_product_pitch
-stage: product_pick
-sub_status: pitch_drafted
-last_pitched_skus:
-  - <sku_id_1>
-  - <sku_id_2>
-last_action_at: <iso8601>
-```
+### Step 5 — (removed in v2) Persist state via CAL only
+There is no Kanban card to update. The draft id, `last_pitched_skus`, `stage='product_pick'`, and `sub_status='pitch_drafted'` are all captured by the CAL writes in Step 6 and rendered for the operator through the KOL Ops Console.
 
 ### Step 6 — CAL audit (mandatory, fire-and-forget)
 Write the draft + rationale snapshot to CAL (`hermes-agent/plugins/kol-ops-bridge/cal.py`).

@@ -9,7 +9,7 @@ tags: ["kol", "outreach", "content", "revision", "email", "draft"]
 Create exactly one Gmail draft on the existing KOL thread, asking the KOL to revise their submitted video according to the operator's notes. The email must be respectful, concrete, and reference the specific submission version. No price changes, no contract changes, no new SKU proposals.
 
 ## Inputs (from caller)
-- `campaign_id`, `kol_handle`, `card_id`, `kol_identity_id`, `gmail_thread_id`
+- `campaign_id`, `kol_handle`, `kol_identity_id`, `gmail_thread_id` (CAL's `card_id` column is legacy — pass NULL)
 - `submission_version` (e.g. `2` for v2 → request v3)
 - `revision_notes` (free-text, operator-written, MUST be quoted verbatim somewhere in the body)
 - Path to `~/.hermes/kol-outreach/<campaign_id>/config.yaml` for brand voice / sender / signature / test inbox / mode
@@ -77,14 +77,8 @@ Hard content rules:
    - `stage: content_delivery`, `sub_status: revision_drafted_v<submission_version+1>`
    - `payload: {draft_id, target_version: submission_version + 1}`
 
-### Step 6 — Update Kanban card and return
-Update card body:
-```yaml
-draft_ids:
-  content_revision_v<submission_version+1>: <draft_id>
-status: content_revision_drafted
-last_action_at: <iso8601>
-```
+### Step 6 — Return
+No Kanban card update. The Step 5 CAL writes (`cal.record_draft` with `stage='content_revision'` + `cal.record_event` with `event_type='emailed_content_revision'`) are the single source of truth; the KOL Ops Console renders the new draft from CAL.
 
 Return `{draft_id, message_id, target_version}`. The orchestrator/notifier batches the human notification.
 

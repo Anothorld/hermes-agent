@@ -1,7 +1,7 @@
 ---
 name: kol-outreach-negotiation-email
 description: Draft (never send) a negotiation reply to a KOL who has named a rate. Reads the campaign budget floor and refuses + escalates when the ask is too close to the absolute floor. Never commits to a price without explicit human approval in the Gmail draft.
-trigger: When the reply dispatcher classifies a KOL reply as intent `proposes_rate` or `counter_offers` with confidence >= 0.7, and the KOL's Kanban card has `status` in {sent_product_pitch, negotiating}.
+trigger: When the reply dispatcher classifies a KOL reply as intent `proposes_rate` or `counter_offers` with confidence >= 0.7, and the KOL's latest CAL `kol_conversation_events.stage` is in {`product_pick`, `negotiation`}.
 tags: ["kol", "outreach", "email", "negotiation", "gmail", "draft", "budget"]
 ---
 
@@ -10,7 +10,7 @@ Draft one reply-on-thread Gmail draft that moves a price negotiation one step fo
 
 ## Inputs
 - `campaign_id` + config path.
-- Kanban card id (must contain `gmail_thread_id`).
+- `kol_identity_id` (from CAL). The caller must also pass `gmail_thread_id` (from `kol_identity_alias` where `kind='gmail_thread_id'`).
 - KOL's reply text containing a price ask.
 - Parsed `requested_amount` and `requested_currency` (caller is responsible for extracting these — if it cannot, escalate).
 
@@ -73,25 +73,13 @@ Hard content rules:
 2. TEST MODE rewrite same as other skills (`to = test_mode_to`, prepend `Intended recipient:`).
 3. Label: `kol-outreach/pending/negotiation`.
 
-### Step 5 — Write back to card
-
-```yaml
-draft_ids:
-  negotiation: <draft_id>
-status: drafted_negotiation
-stage: negotiation
-sub_status: <accept_drafted | counter_drafted | refuse_escalated>
-negotiation:
-  last_request: <R currency>
-  last_counter: <counter or null>
-  decision: accept | counter | refuse_escalate
-last_action_at: <iso8601>
-```
+### Step 5 — (removed in v2) Persist state via CAL only
+No Kanban card update. The draft id, negotiation decision, last request/counter amount, `stage='negotiation'`, and the appropriate `sub_status` are all written by Step 5b's CAL calls (`cal.record_negotiation` + `cal.record_draft` + `cal.record_event`). The KOL Ops Console derives the working state from these rows.
 
 ### Step 5b — CAL audit (mandatory, fire-and-forget)
 Write negotiation history, draft, and event to CAL.
 
-1. `cal.record_negotiation(kol_identity_id, decision=<accept|counter|refuse_escalate>, kol_request_amount=R, currency=<...>, agent_counter_amount=<counter or null>, decision_reason='<one-line reason>', budget_per_kol_at_time=B, absolute_floor_at_time=F, card_id=<id>, campaign_id=<id>, product_sku=<from card>)`.
+1. `cal.record_negotiation(kol_identity_id, decision=<accept|counter|refuse_escalate>, kol_request_amount=R, currency=<...>, agent_counter_amount=<counter or null>, decision_reason='<one-line reason>', budget_per_kol_at_time=B, absolute_floor_at_time=F, card_id=NULL, campaign_id=<id>, product_sku=<from caller>)`. (`card_id` is a legacy column; always NULL in v2.)
 2. `cal.record_draft(stage='negotiation', sub_status='<accept_drafted|counter_drafted|refuse_escalated>', ...)` with full subject/body and `context_snapshot`:
    ```json
    {
@@ -109,7 +97,7 @@ Write negotiation history, draft, and event to CAL.
    }
    ```
 3. `cal.record_event(event_type='emailed_negotiation', stage='negotiation', sub_status=<sub_status>, actor=<from caller>, payload={draft_id, decision})`.
-4. If `decision == 'refuse_escalate'`: also `cal.record_escalation(reason='floor_violation', kol_identity_id=<id>, card_id=<id>, campaign_id=<id>, ai_recommendation='hold and ask human; do not auto-counter')`.
+4. If `decision == 'refuse_escalate'`: also `cal.record_escalation(reason='floor_violation', kol_identity_id=<id>, card_id=NULL, campaign_id=<id>, ai_recommendation='hold and ask human; do not auto-counter')`.
 
 ### Step 6 — Escalate when required
 If `decision == refuse_escalate`, post **one** chat message:
