@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { useLiveEvents } from '../useLiveEvents';
 
@@ -14,18 +14,34 @@ type EventRow = {
 
 type Escalation = { id: number; reason: string; ts: string };
 
+const POLL_MS = 10_000;
+
 export function ReplyMonitorPage() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [escs, setEscs] = useState<Escalation[]>([]);
 
-  useEffect(() => {
-    api.get<EventRow[]>('/events/recent?limit=100').catch(() => []).then((rows) => setEvents(rows ?? []));
-    api.get<Escalation[]>('/escalations/open').catch(() => []).then((rows) => setEscs(rows ?? []));
+  const refresh = useCallback(() => {
+    api
+      .get<EventRow[]>('/events/recent?limit=100')
+      .catch(() => [])
+      .then((rows) => setEvents(rows ?? []));
+    api
+      .get<Escalation[]>('/escalations/open')
+      .catch(() => [])
+      .then((rows) => setEscs(rows ?? []));
   }, []);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, POLL_MS);
+    return () => clearInterval(id);
+  }, [refresh]);
 
   useLiveEvents((evt) => {
     if (evt.type !== 'events') return;
-    setEvents((prev) => [...evt.items.map((e) => e as EventRow), ...prev].slice(0, 200));
+    setEvents((prev) =>
+      [...evt.items.map((e) => e as EventRow), ...prev].slice(0, 200),
+    );
   });
 
   return (

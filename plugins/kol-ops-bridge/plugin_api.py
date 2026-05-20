@@ -47,10 +47,26 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import cal
+from . import gmail_client as _gmail
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _resolve_recipient(identity: dict[str, Any], env: str) -> Optional[str]:
+    """Pick which email address a draft should be sent to.
+
+    TEST mode honours ``KOL_OPS_BRIDGE_TEST_INBOX`` so operators can
+    safely flush all drafts to their own inbox without ever risking a
+    real outbound email. LIVE mode requires a real ``primary_email``
+    on the identity row.
+    """
+    if env == "TEST":
+        override = os.environ.get("KOL_OPS_BRIDGE_TEST_INBOX")
+        if override:
+            return override
+    return identity.get("primary_email") or None
 
 
 # ---------------------------------------------------------------------------
@@ -990,7 +1006,8 @@ def agent_record_draft(
 ):
     """Stub Gmail-draft creation -> record in CAL + emit ``*_drafted`` event."""
     _require_bridge_key(x_bridge_key)
-    if not cal.get_identity(body.kol_identity_id):
+    identity = cal.get_identity(body.kol_identity_id)
+    if not identity:
         raise HTTPException(
             status_code=404,
             detail=f"identity {body.kol_identity_id} not found",
@@ -998,12 +1015,75 @@ def agent_record_draft(
     import secrets as _secrets
 
     draft_id = body.draft_id or f"d-{_secrets.token_hex(8)}"
+    product_sku = body.product_sku or _lookup_campaign_sku(campaign_id, body.env)
+
+    # ------------------------------------------------------------------
+    # Attempt Gmail draft push. Best-effort: failures fall back to the
+    # legacy "stub" behaviour so the console still gets a CAL row.
+    # ------------------------------------------------------------------
+    gmail_message_id = body.gmail_message_id
+    gmail_thread_id = body.gmail_thread_id
+    gmail_push_status: dict[str, Any] = {"attempted": False}
+    if not gmail_message_id:
+        recipient = _resolve_recipient(identity, body.env)
+        client = _gmail.default_client()
+        if recipient and client.is_available():
+            gmail_push_status = {"attempted": True, "recipient": recipient}
+            try:
+                result = client.create_draft(
+                    to=recipient,
+                    subject=body.subject,
+                    body=body.body,
+                )
+                gmail_message_id = result.message_id or None
+                gmail_thread_id = result.thread_id or None
+                gmail_push_status.update(
+                    ok=True,
+                    draft_id=result.draft_id,
+                    message_id=result.message_id,
+                    thread_id=result.thread_id,
+                )
+                # Index the thread so inbound replies can be linked back.
+                if gmail_thread_id:
+                    cal.add_alias(
+                        kol_identity_id=body.kol_identity_id,
+                        kind="gmail_thread_id",
+                        value=gmail_thread_id,
+                        source="dispatcher",
+                        env=body.env,
+                    )
+                if recipient:
+                    cal.add_alias(
+                        kol_identity_id=body.kol_identity_id,
+                        kind="email",
+                        value=recipient,
+                        source="dispatcher",
+                        env=body.env,
+                    )
+            except _gmail.GmailUnavailable as exc:
+                log.warning("[bridge] gmail draft push failed: %s", exc)
+                gmail_push_status.update(ok=False, error=str(exc))
+        else:
+            gmail_push_status = {
+                "attempted": False,
+                "reason": (
+                    "no recipient resolvable for env=TEST (set "
+                    "KOL_OPS_BRIDGE_TEST_INBOX) or identity has no "
+                    "primary_email"
+                    if not recipient
+                    else "google_token.json missing"
+                ),
+            }
+
     snapshot = body.context_snapshot or {
         "stage": body.stage,
-        "stub": True,
-        "note": "agent-generated via bridge shim (no Gmail MCP in profile)",
+        "stub": gmail_message_id is None,
+        "note": (
+            "pushed to Gmail" if gmail_message_id
+            else "agent-generated; no Gmail push (see gmail_push_status)"
+        ),
+        "gmail_push_status": gmail_push_status,
     }
-    product_sku = body.product_sku or _lookup_campaign_sku(campaign_id, body.env)
     cal.record_draft(
         kol_identity_id=body.kol_identity_id,
         stage=body.stage,
@@ -1014,8 +1094,8 @@ def agent_record_draft(
         campaign_id=campaign_id,
         product_sku=product_sku,
         sub_status="pending_review",
-        gmail_message_id=body.gmail_message_id,
-        gmail_thread_id=body.gmail_thread_id,
+        gmail_message_id=gmail_message_id,
+        gmail_thread_id=gmail_thread_id,
         subject=body.subject,
         body=body.body,
         env=body.env,
@@ -1029,9 +1109,20 @@ def agent_record_draft(
         campaign_id=campaign_id,
         product_sku=product_sku,
         env=body.env,
-        payload={"draft_id": draft_id, "subject": body.subject},
+        payload={
+            "draft_id": draft_id,
+            "subject": body.subject,
+            "gmail_message_id": gmail_message_id,
+            "gmail_thread_id": gmail_thread_id,
+        },
     )
-    return {"draft_id": draft_id, "campaign_id": campaign_id}
+    return {
+        "draft_id": draft_id,
+        "campaign_id": campaign_id,
+        "gmail_message_id": gmail_message_id,
+        "gmail_thread_id": gmail_thread_id,
+        "gmail_push": gmail_push_status,
+    }
 
 
 # ---------------------------------------------------------------------------
