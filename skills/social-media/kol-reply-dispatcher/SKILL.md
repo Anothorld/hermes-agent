@@ -22,7 +22,7 @@ Keep KOL outreach moving without human polling: detect new replies in Gmail, cla
 
    | Order | Strategy | Confidence on match |
    |---|---|---|
-   | 1 | `gmail_thread_id` → Kanban card `gmail_thread_id` field AND `cal.resolve_identity(aliases=[('gmail_thread_id', tid)])` agree | 1.00 |
+   | 1 | `cal.resolve_identity(aliases=[('gmail_thread_id', tid)])` matches a known identity (thread persisted from a prior outreach draft) | 1.00 |
    | 2 | Follow `In-Reply-To` / `References` headers; if any referenced message id is in `cal.kol_identity_alias` (kind=`gmail_message_id`) | 0.90 |
    | 3 | `cal.resolve_identity(aliases=[('email', from_addr)])` matches a known identity (KOL replied from a known address but in a new thread) | 0.80 |
    | 4 | Body mentions exactly one `@handle` that resolves via `cal.resolve_identity(aliases=[('handle', h)])` | 0.60 |
@@ -53,15 +53,7 @@ Rules:
 - If top intent confidence `< 0.7`, **do not draft**. Escalate (see Step 5).
 - If top two intents are within 0.1 of each other, treat as ambiguous → escalate.
 
-Record the intent + confidence on the card under `last_reply`:
-
-```yaml
-last_reply:
-  message_id: <id>
-  received_at: <iso8601>
-  intent: <intent>
-  confidence: <0..1>
-```
+Record the intent + confidence as part of the Step 4b CAL `record_reply` row (fields `intent` and `confidence`). There is no separate per-card scratch; the latest `kol_reply_history` row is the authoritative `last_reply` for this identity.
 
 ### Step 4 — Route by intent
 | Intent | Action |
@@ -69,7 +61,7 @@ last_reply:
 | `interested` / `asks_materials` | Invoke `kol-outreach-product-pitch-email` skill with this card. |
 | `proposes_rate` / `counter_offers` | Parse number + currency. If parse succeeds, invoke `kol-outreach-negotiation-email`. If parse fails, escalate. |
 | `content_submission` | Invoke `kol-outreach-content-review` skill (extracts video URL + notifies operator; does NOT draft). |
-| `declines` | Set `status: closed_declined`. Draft no reply. Add to next escalate digest (info only). |
+| `declines` | Write a `closed_declined` CAL event for this identity. Draft no reply. Add to next escalate digest (info only). |
 | `out_of_office` | Re-label message back to `kol-outreach/replied/ooo`. Do not draft. No escalate. |
 | `other` | Escalate. |
 
@@ -78,9 +70,9 @@ After a successful draft (or `content_submission` routing), move the inbound mes
 ### Step 4b — CAL audit (mandatory, fire-and-forget)
 For every processed inbound message, write CAL **before** the label move (so a crash mid-step doesn't lose the reply):
 
-1. `cal.record_reply(kol_identity_id=<resolved id or NULL>, gmail_message_id=<id>, gmail_thread_id=<tid>, from_addr=<addr>, received_at=<iso8601>, snippet=<≤200 chars>, body=<full body>, intent=<intent>, confidence=<intent confidence>, match_strategy=<chosen strategy from Step 1>, match_confidence=<from Step 1>, handled_action=<routed_skill|escalated|ignored>, card_id=<id>, campaign_id=<id>)`.
+1. `cal.record_reply(kol_identity_id=<resolved id or NULL>, gmail_message_id=<id>, gmail_thread_id=<tid>, from_addr=<addr>, received_at=<iso8601>, snippet=<≤200 chars>, body=<full body>, intent=<intent>, confidence=<intent confidence>, match_strategy=<chosen strategy from Step 1>, match_confidence=<from Step 1>, handled_action=<routed_skill|escalated|ignored>, card_id=NULL, campaign_id=<id>)`. (`card_id` is a legacy column; always NULL in v2.)
 2. `cal.record_event(event_type='reply_received', stage=<KOL's current stage>, sub_status='reply_classified', actor='cron:dispatcher', payload={intent, intent_confidence, match_strategy, match_confidence, gmail_message_id})`.
-3. On escalation: `cal.record_escalation(reason=<low_confidence_reply|low_confidence_match|unknown_sender|parse_failed|other>, kol_identity_id=<or null>, card_id=<or null>, campaign_id=<or null>, classifier_confidence=<x>, ai_recommendation=<one-line>)`.
+3. On escalation: `cal.record_escalation(reason=<low_confidence_reply|low_confidence_match|unknown_sender|parse_failed|other>, kol_identity_id=<or null>, card_id=NULL, campaign_id=<or null>, classifier_confidence=<x>, ai_recommendation=<one-line>)`.
 
 ### Step 5 — Escalate low-confidence / policy cases
 Accumulate an escalate list across this run. At end of run, post **one** chat message:
@@ -110,7 +102,7 @@ Drafts:
 Review in Gmail; agent will not send.
 ```
 
-Append each new `draft_id` to the corresponding card's `notified_drafts` to prevent re-notification.
+Append each new `draft_id` to the corresponding identity's `notified_drafts` set via a `cal.record_event(event_type='draft_notified', stage=<stage>, sub_status=<sub_status>, payload={draft_id})`. Idempotency: before notifying, scan the identity's prior `draft_notified` events; skip any draft id already listed.
 
 ### Step 7 — Exit
 Return a structured run report:
@@ -133,7 +125,7 @@ If `errors > 0`, attach a short error list to the chat escalate message.
 - **Never process a message twice.** The `pending-reply → replied/<intent>` label move is the single source of truth.
 - **Never escalate per-message in real time.** Batch into one chat message per run.
 - **Never start a new Gmail thread** from this skill; always reply on the existing `gmail_thread_id`.
-- **Never change Kanban `status` to `sent_*`** — only the human (by sending the draft) advances to a `sent_*` state. The dispatcher only writes `drafted_*` / `closed_declined`.
+- **Never write a `sent_*` sub_status into CAL.** Only the human (by sending the Gmail draft from their mailbox) advances state to a `sent_*` event. The dispatcher only writes `drafted_*` / `closed_declined` events.
 
 ## Pitfalls
 - Do not treat empty bodies (quoted-only reply) as `interested`; classify as `other` and escalate.

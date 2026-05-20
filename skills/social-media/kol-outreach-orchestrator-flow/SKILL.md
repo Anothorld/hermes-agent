@@ -1,7 +1,7 @@
 ---
 name: kol-outreach-orchestrator-flow
 description: End-to-end KOL outreach orchestrator. Takes product brief + SKU whitelist + budget, runs Instagram KOL discovery, asks user to approve a shortlist in chat, then writes Gmail drafts (never sends) and notifies the user. Reviews happen in Gmail; agent only drafts.
-trigger: When the user wants to start, launch, kick off, or run a KOL outreach campaign for a furniture product — e.g. "run outreach", "start the <SKU> campaign", "launch KOL outreach for <product>", "open a new campaign", "find KOLs and prep emails", or any message that provides a product brief / SKU pool / budget and asks the agent to manage the pipeline through to drafted emails. This skill OWNS the campaign lifecycle; do not bypass it with ad-hoc Kanban cards.
+trigger: When the user wants to start, launch, kick off, or run a KOL outreach campaign for a furniture product — e.g. "run outreach", "start the <SKU> campaign", "launch KOL outreach for <product>", "open a new campaign", "find KOLs and prep emails", or any message that provides a product brief / SKU pool / budget and asks the agent to manage the pipeline through to drafted emails. This skill OWNS the campaign lifecycle; do not bypass it with ad-hoc CAL writes from other skills.
 tags: ["kol", "outreach", "orchestrator", "gmail", "draft", "campaign"]
 ---
 
@@ -110,7 +110,7 @@ Mode branch (single point of divergence — keep it small):
 The `triggered_by` value flows into every CAL write as `actor=<chat|web|cron>` (or a more specific value like `web:operator`).
 
 ## 8-Stage State Machine
-KOL cards live in exactly one of these 8 stages, with sub-status detail. The Kanban card's `stage` + `sub_status` MUST stay in sync with the latest `kol_conversation_events` row.
+KOL records live in exactly one of these 8 stages, with sub-status detail. The single source of truth is the latest `kol_conversation_events` row in CAL (`hermes-agent/plugins/kol-ops-bridge/cal.py`). The KOL Ops Console renders state directly from CAL — there is no Kanban mirror to maintain.
 
 | # | stage | typical sub_status values |
 |---|---|---|
@@ -190,37 +190,13 @@ Full list ↓
 
 If a `notifier` channel is configured (Telegram / Discord / Slack via Hermes gateway), also send the first 3 lines to that channel. Never duplicate the full shortlist into external channels (privacy).
 
-### Step 4 — Parse approval and build per-KOL index cards
+### Step 4 — Parse approval and persist per-KOL identity in CAL
 1. In `web` mode, the approval set arrives via the bridge endpoint's `selected_handles`. In `chat`/`cron` mode, parse the user's reply against the four allowed verbs. If the reply is ambiguous, ask once more with the same template; never guess.
 2. For each approved handle:
-   - **Upsert KOL identity in CAL** first: `kol_identity_id = cal.upsert_identity(handle=<handle>, primary_email=<email or null>, region=<from discovery>, creator_type=<from discovery>, env=<TEST|LIVE>)`. The same identity id MUST be reused for all later events on this handle (one identity, many cards across products).
-   - Create one Kanban index card on board `kol-outreach`, title `kol:<handle>`.
-   - Card body YAML:
-
-     ```yaml
-     campaign_id: <campaign_id>
-     product_sku: <from config>
-     kol_handle: <handle>
-     kol_identity_id: <from cal.upsert_identity>
-     email: null
-     selling_point_group: <group letter or label>
-     creator_type: <from discovery row>
-     match_score: <number>
-     showcase_score: <number>
-     final_fit: <number>
-     draft_ids:
-       initial: null
-       product_pitch: null
-       negotiation: null
-     gmail_thread_id: null
-     status: shortlisted
-     stage: outreach
-     sub_status: email_pending
-     env: <TEST|LIVE>
-     notified_drafts: []
-     ```
-
-   - **CAL**: `cal.record_event(event_type='approved', stage='discovered', sub_status='approved', actor=<triggered_by>, kol_identity_id=<id>, card_id=<id>, product_sku=<...>, campaign_id=<...>, payload={selling_point_group, creator_type, final_fit})`. Old `status` enum is retained for back-compat; canonical truth is `(stage, sub_status)` from the 8-stage table above.
+   - **Upsert KOL identity in CAL**: `kol_identity_id = cal.upsert_identity(handle=<handle>, primary_email=<email or null>, region=<from discovery>, creator_type=<from discovery>, env=<TEST|LIVE>)`. The same identity id MUST be reused for all later events on this handle (one identity, many product campaigns).
+   - **Record approval event in CAL** — this is the only state surface:
+     `cal.record_event(event_type='approved', stage='discovered', sub_status='approved', actor=<triggered_by>, kol_identity_id=<id>, product_sku=<from config>, campaign_id=<id>, payload={selling_point_group, creator_type, match_score, showcase_score, final_fit, env, notified_drafts: []})`.
+   - Per-KOL working state (draft_ids, gmail_thread_id, current sub_status, notified_drafts) is derived from CAL by replaying `kol_conversation_events` + `kol_draft_history` for the identity. Downstream skills query CAL; they do not read from any Kanban card.
 
 ### Step 5 — Email discovery (lightweight)
 For each approved KOL with `email: null`:
@@ -270,11 +246,11 @@ Notifications must be **idempotent**: never re-notify a `draft_id` already in `n
 
 ## Hard Rules
 
-- **Do NOT recreate the v1.1 Kanban review-gate pattern.** Specifically: do not create any task titled `campaign anchor`, `campaign root`, `review campaign brief and assumptions`, `review creator shortlist`, `safety / mode config`, `shortlist creator discovery`, `humanize ... draft`, `review initial outreach email`, `send initial outreach email`, or any per-pipeline-step gate. Do not assign tasks to `kol-scout`. The only Kanban cards this system creates are per-KOL index cards (`title: kol:<handle>`) described in Step 4. Any v1.1 docs found in `docs/_deprecated/` or elsewhere are reference-only and must be ignored.
+- **Do NOT create any Kanban cards or tasks for this pipeline.** As of v2 the KOL outreach pipeline is fully CAL- and Console-driven; no Kanban board (`kol-outreach`, `kol-scout`, or per-step gate cards) is created or read at runtime. Legacy v1.1 docs that reference Kanban gates are deprecated and must be ignored. The only place Kanban still appears is `plugins/kol-ops-bridge/scripts/backfill.py`, a one-shot legacy-data migration tool.
 - Never invoke `gmail.send`, `messages.send`, or any send-equivalent. Drafts only.
 - Never bypass the shortlist approval step, even when discovery returns ≤ 3 candidates.
 - Never read user data outside `~/.hermes/kol-outreach/<campaign_id>/` and the explicitly provided brief.
-- Never write to the Kanban card body without preserving existing fields; merge, do not replace.
+- Never overwrite prior CAL events; always append a new `kol_conversation_events` row so the audit trail stays intact.
 - TEST MODE is mandatory until the user types exactly `LIVE MODE` in chat for this `campaign_id`. Switching back to TEST is allowed at any time with `TEST MODE`.
 
 ## Pitfalls

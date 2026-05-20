@@ -12,7 +12,7 @@ Move one KOL forward from `negotiation.accepted` into `contract.pending` and emi
 **STUB IMPLEMENTATION.** The first release intentionally does not integrate any e-sign provider. The Web console exposes a "mark contract signed" button that calls the bridge `POST /api/plugins/kol-ops-bridge/contract/update` endpoint with `sub_status: signed`. When the project later integrates DocuSign / PandaDoc / etc., the implementation of this skill is the only place that needs to change — the upstream orchestrator, downstream logistics skill, CAL schema, bridge API, and Web UI remain untouched.
 
 ## Inputs (from caller)
-- `campaign_id`, `kol_handle`, `card_id`, `kol_identity_id`
+- `campaign_id`, `kol_handle`, `kol_identity_id` (CAL's `card_id` column is legacy — pass NULL)
 - The accepted negotiation amount + currency (from the latest `kol_negotiation_history` row with `decision == 'accept'`)
 - `triggered_by` (`chat` | `web` | `cron`)
 - `env` (`TEST` | `LIVE`)
@@ -25,15 +25,8 @@ Fail loudly if any required input is missing; never invent values.
 1. Confirm the latest negotiation row for this KOL has `decision == 'accept'` and `human_decision` is `accept` or null. If the negotiation is still under human review, refuse and tell the caller to wait.
 2. Confirm no existing `contract.signed` event exists in CAL for this KOL (avoid double-advance).
 
-### Step 2 — Advance the card
-1. Update the Kanban card body:
-   ```yaml
-   status: contract_pending
-   stage: contract
-   sub_status: pending
-   last_action_at: <iso8601>
-   ```
-2. Append a comment to the Kanban card: `Contract stage entered. Operator action required in KOL Ops Console.`
+### Step 2 — Advance state via CAL
+There is no Kanban card. Step 3's `cal.record_event(event_type='contract_pending', stage='contract', sub_status='pending', ...)` is the single state transition. The KOL Ops Console reads this event and renders the contract stage banner ("Operator action required").
 
 ### Step 3 — Write CAL audit
 Call `cal.record_event` with:

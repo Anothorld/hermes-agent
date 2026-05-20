@@ -1,5 +1,12 @@
 """Backfill the Conversation Audit Layer (CAL) from existing Kanban KOL cards.
 
+DEPRECATED IN RUNTIME — as of v2 the KOL outreach pipeline no longer creates
+or reads Kanban cards (CAL + the KOL Ops Console are the single source of
+truth). This script is retained ONLY as a one-shot legacy-data migration tool
+for installations that still have ``kol:<handle>`` cards from v1.x. Do not
+schedule it; do not call it from any skill. Run it manually once per legacy
+campaign and then archive.
+
 Idempotent: re-running adds no duplicates. Use this once when migrating an
 existing campaign onto the bridge plugin (the skills now write to CAL on every
 new action, but pre-existing cards have no CAL history).

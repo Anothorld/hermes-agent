@@ -10,7 +10,7 @@ Create exactly **one** Gmail draft addressed to one KOL, introducing the brand a
 
 ## Inputs (from caller)
 - `campaign_id` and the path to `~/.hermes/kol-outreach/<campaign_id>/config.yaml`.
-- Kanban card id for this KOL (so the draft id can be written back).
+- `kol_identity_id` from CAL (so the draft can be linked back to the identity row).
 - KOL handle, email, creator type, selling-point group, and the recommendation reason produced by discovery.
 
 If any of these are missing, fail loudly with a chat message; do not invent values.
@@ -54,17 +54,8 @@ Hard content rules:
 2. Apply Gmail label `kol-outreach/pending/initial` to the draft's message.
 3. Capture the returned `draft_id` and `message_id`.
 
-### Step 5 — Write back to Kanban card
-Update the card body, merging (never replacing) these fields:
-
-```yaml
-draft_ids:
-  initial: <draft_id>
-status: drafted_initial
-stage: outreach
-sub_status: initial_drafted
-last_action_at: <iso8601>
-```
+### Step 5 — (removed in v2) Persist state via CAL only
+There is no Kanban card to update. All durable state — `draft_id`, `gmail_thread_id`, `stage='outreach'`, `sub_status='initial_drafted'` — is captured by the CAL writes in Step 6 (`cal.record_draft` + `cal.record_event`) and surfaced to the operator through the KOL Ops Console.
 
 ### Step 6 — CAL audit (mandatory, fire-and-forget)
 Write the draft + a generation-rationale snapshot to the Conversation Audit Layer (`hermes-agent/plugins/kol-ops-bridge/cal.py`). These calls MUST run after Step 5; failure is logged but does not abort the skill (per CAL failure policy).
@@ -98,7 +89,7 @@ Return `{draft_id, message_id, kol_handle}` to the caller. Do not post a chat no
 - Never write a Chinese body; English only (the KOLs are NA).
 - Never include a price, even if the user asks; refuse and escalate to chat.
 - Never address more than one KOL per invocation.
-- Never reuse a draft id across two KOLs; if `draft_ids.initial` is already set on the card, return it without creating a new draft.
+- Never reuse a draft id across two KOLs; if a CAL `kol_draft_history` row with `stage='initial'` already exists for this `(kol_identity_id, campaign_id, env)`, return its `draft_id` without creating a new draft.
 
 ## Pitfalls
 - Do not pull the KOL's first name from the handle if it looks ambiguous; default to the handle.

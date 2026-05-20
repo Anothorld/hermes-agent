@@ -9,7 +9,7 @@ tags: ["kol", "outreach", "content", "review", "video"]
 Extract the submitted video URL from a KOL reply, record it as `content_delivery.submitted_v<n>` in CAL, and notify the operator. Approval / revision is a human decision pushed back from the Web console.
 
 ## Inputs (from caller)
-- `campaign_id`, `kol_handle`, `card_id`, `kol_identity_id`
+- `campaign_id`, `kol_handle`, `kol_identity_id` (CAL's `card_id` column is legacy — pass NULL)
 - The Gmail `message_id`, `thread_id`, `from_addr`, `body`, `received_at` of the inbound reply
 - `triggered_by` (always `cron` for dispatcher-routed invocations; `chat` for manual replays)
 - `env` (`TEST` | `LIVE`)
@@ -38,22 +38,22 @@ Rules:
 - If no whitelisted URL is found, do NOT advance the stage. Instead record a CAL event `content_submission_no_url` and escalate.
 - Reject any URL whose host is on the campaign's `blocked_hosts` list (config-driven).
 
-### Step 3 — Advance the card
-Update the Kanban card body:
-```yaml
-status: content_submitted
-stage: content_delivery
-sub_status: submitted_v<n>
-content:
-  submissions:
-    - version: <n>
-      url: <video_url>
-      received_at: <iso8601>
-      gmail_message_id: <id>
-last_action_at: <iso8601>
+### Step 3 — Advance state via CAL
+No Kanban card to update. Persist the submission inline in the Step 4 CAL event (`event_type='content_submitted'`, `stage='content_delivery'`, `sub_status='submitted_v<n>'`) and include the full submission record in its `payload`:
+
+```json
+{
+  "version": <n>,
+  "video_url": "<url>",
+  "submitted_url_resolved": "<resolved or null>",
+  "received_at": "<iso8601>",
+  "gmail_message_id": "<id>",
+  "gmail_thread_id": "<id>",
+  "from_addr": "<addr>"
+}
 ```
 
-Do not overwrite earlier `content.submissions` entries — append.
+Each submission is its own append-only event in `kol_conversation_events`; the operator reads the full submission history by querying CAL for `event_type='content_submitted'` rows for this `kol_identity_id`.
 
 ### Step 4 — Write CAL audit
 Call `cal.record_event` with:

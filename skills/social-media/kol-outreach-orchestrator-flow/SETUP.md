@@ -84,8 +84,9 @@ cronjob(action="trigger", job_id="...")   # one-off run for testing
 Before flipping a campaign to LIVE:
 
 1. `mode: TEST` and `test_mode_to` set to your own mailbox.
-2. Orchestrate a campaign with 3 mock KOLs (use Instagram handles you control,
-   put your own email in their Kanban cards as `email`).
+2. Orchestrate a campaign with 3 mock KOLs (use Instagram handles you
+   control; the orchestrator will call `cal.upsert_identity` with your
+   own email as `primary_email` so TEST drafts target your inbox).
 3. Verify in Gmail:
    - 3 drafts appear under `kol-outreach/pending/initial`.
    - Each draft's `To:` is the test inbox; first body line reads
