@@ -47,12 +47,29 @@ class BridgeClient:
             return r.json()
         return r.text
 
+    @staticmethod
+    def _unwrap_list(payload: Any, key: str) -> list[dict[str, Any]]:
+        """Return ``payload[key]`` if the bridge wrapped a list in a dict.
+
+        The bridge currently returns ``{"identities": [...]}`` style envelopes
+        for list endpoints, while the console routers declare ``list[dict]``
+        response models. Unwrapping here keeps the router code shape-agnostic.
+        """
+        if isinstance(payload, dict) and isinstance(payload.get(key), list):
+            return payload[key]
+        if isinstance(payload, list):
+            return payload
+        return []
+
     # --- Read passthroughs ---------------------------------------------------
     async def health(self) -> dict[str, Any]:
         return await self._req("GET", "/health")
 
     async def list_identities(self, env: str) -> list[dict[str, Any]]:
-        return await self._req("GET", "/identities", params={"env": env})
+        return self._unwrap_list(
+            await self._req("GET", "/identities", params={"env": env}),
+            "identities",
+        )
 
     async def get_identity(self, identity_id: int) -> dict[str, Any]:
         return await self._req("GET", f"/identities/{identity_id}")
@@ -62,16 +79,25 @@ class BridgeClient:
                                params={"env": env})
 
     async def list_pending_drafts(self, env: str) -> list[dict[str, Any]]:
-        return await self._req("GET", "/drafts/pending", params={"env": env})
+        return self._unwrap_list(
+            await self._req("GET", "/drafts/pending", params={"env": env}),
+            "drafts",
+        )
 
     async def get_draft(self, draft_id: str, env: str) -> dict[str, Any]:
         return await self._req("GET", f"/drafts/{draft_id}", params={"env": env})
 
     async def list_open_escalations(self, env: str) -> list[dict[str, Any]]:
-        return await self._req("GET", "/escalations/open", params={"env": env})
+        return self._unwrap_list(
+            await self._req("GET", "/escalations/open", params={"env": env}),
+            "escalations",
+        )
 
     async def recent_events(self, env: str, limit: int = 100) -> list[dict[str, Any]]:
-        return await self._req("GET", "/events/recent", params={"env": env, "limit": limit})
+        return self._unwrap_list(
+            await self._req("GET", "/events/recent", params={"env": env, "limit": limit}),
+            "events",
+        )
 
     async def latest_event_id(self, env: str) -> int:
         out = await self._req("GET", "/events/latest-id", params={"env": env})
@@ -95,6 +121,25 @@ class BridgeClient:
 
     async def start_campaign(self, campaign_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._req("POST", f"/campaigns/{campaign_id}/start", json=payload)
+
+    async def approve_shortlist(
+        self, campaign_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/campaigns/{campaign_id}/approve-shortlist", json=payload
+        )
+
+    async def get_shortlist(self, campaign_id: str, env: str) -> dict[str, Any]:
+        return await self._req(
+            "GET", f"/campaigns/{campaign_id}/shortlist", params={"env": env}
+        )
+
+    async def inject_inbound_reply(
+        self, campaign_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/campaigns/{campaign_id}/replies/inbound", json=payload
+        )
 
     async def wipe_test(self) -> dict[str, Any]:
         return await self._req("POST", "/admin/wipe-test")

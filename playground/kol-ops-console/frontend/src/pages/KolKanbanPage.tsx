@@ -22,10 +22,14 @@ export function KolKanbanPage() {
   const [identities, setIdentities] = useState<Identity[]>([]);
   const [stageByKol, setStageByKol] = useState<Record<number, string>>({});
   const [err, setErr] = useState<string | null>(null);
+  const [env, setEnv] = useState<'TEST' | 'LIVE'>(() => {
+    const stored = localStorage.getItem('kolEnv');
+    return stored === 'LIVE' ? 'LIVE' : 'TEST';
+  });
 
   const refresh = useCallback(async () => {
     try {
-      const items = await api.get<Identity[]>('/kols');
+      const items = await api.get<Identity[]>(`/kols?env=${env}`);
       setIdentities(items);
       // Best-effort: derive each KOL's current stage from latest event.
       const stages: Record<number, string> = {};
@@ -33,7 +37,7 @@ export function KolKanbanPage() {
         items.map(async (i) => {
           try {
             const tl = await api.get<{ events: Array<{ stage: string | null }> }>(
-              `/kols/${i.id}/timeline`,
+              `/kols/${i.id}/timeline?env=${env}`,
             );
             const last = [...tl.events].reverse().find((e) => e.stage);
             if (last?.stage) stages[i.id] = last.stage;
@@ -46,11 +50,17 @@ export function KolKanbanPage() {
     } catch (ex) {
       setErr(String(ex));
     }
-  }, []);
+  }, [env]);
 
   useEffect(() => {
     refresh();
+    const t = setInterval(refresh, 10_000);
+    return () => clearInterval(t);
   }, [refresh]);
+
+  useEffect(() => {
+    localStorage.setItem('kolEnv', env);
+  }, [env]);
 
   useLiveEvents((evt) => {
     if (evt.type !== 'events') return;
@@ -76,7 +86,29 @@ export function KolKanbanPage() {
 
   return (
     <div className="space-y-3">
-      <h1 className="text-lg font-semibold">KOL Pipeline</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold">
+          KOL Pipeline <span className="ml-2 text-xs text-slate-400">({identities.length} in {env})</span>
+        </h1>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-slate-500">env:</span>
+          <select
+            value={env}
+            onChange={(e) => setEnv(e.target.value as 'TEST' | 'LIVE')}
+            className="rounded border border-slate-300 bg-white px-2 py-0.5"
+          >
+            <option value="TEST">TEST</option>
+            <option value="LIVE">LIVE</option>
+          </select>
+          <button
+            onClick={() => refresh()}
+            className="rounded border border-slate-300 bg-white px-2 py-0.5 text-slate-600 hover:bg-slate-50"
+            title="Refresh now (auto-refreshes every 10s)"
+          >
+            ↻
+          </button>
+        </div>
+      </div>
       <div className="grid grid-cols-8 gap-2">
         {STAGES.map((s) => (
           <div key={s} className="rounded border border-slate-200 bg-white p-2">

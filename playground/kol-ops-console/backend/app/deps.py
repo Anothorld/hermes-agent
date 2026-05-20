@@ -9,10 +9,12 @@ from fastapi import Depends, Header, HTTPException, status
 
 from .bridge_client import BridgeClient
 from .db import get_conn
+from .gateway_client import GatewayClient
 from .security import decode_token
 
 
 _bridge_singleton: BridgeClient | None = None
+_gateway_singleton: GatewayClient | None = None
 
 
 def get_bridge() -> BridgeClient:
@@ -27,6 +29,20 @@ async def shutdown_bridge() -> None:
     if _bridge_singleton is not None:
         await _bridge_singleton.aclose()
         _bridge_singleton = None
+
+
+def get_gateway() -> GatewayClient:
+    global _gateway_singleton
+    if _gateway_singleton is None:
+        _gateway_singleton = GatewayClient()
+    return _gateway_singleton
+
+
+async def shutdown_gateway() -> None:
+    global _gateway_singleton
+    if _gateway_singleton is not None:
+        await _gateway_singleton.aclose()
+        _gateway_singleton = None
 
 
 def current_user(
@@ -61,4 +77,12 @@ def require_role(*allowed: str):
     return _checker
 
 
-__all__ = ["get_bridge", "shutdown_bridge", "current_user", "require_role", "get_conn"]
+__all__ = [
+    "get_bridge",
+    "shutdown_bridge",
+    "get_gateway",
+    "shutdown_gateway",
+    "current_user",
+    "require_role",
+    "get_conn",
+]

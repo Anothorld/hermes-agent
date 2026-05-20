@@ -8,6 +8,55 @@ tags: ["kol", "outreach", "orchestrator", "gmail", "draft", "campaign"]
 ## Goal
 Run a complete KOL outreach campaign for a furniture product, end-to-end, while keeping the human in control through **two approval surfaces only**: (a) a single chat approval of the KOL shortlist, and (b) the Gmail drafts inbox for every outbound email. The agent **never sends mail** — it only creates Gmail drafts and notifies the user that drafts are ready.
 
+## ⚠️ MANDATORY OBSERVABILITY CONTRACT (read FIRST)
+
+The operator console (kol-ops-console) derives every visible piece of campaign
+state — current stage, KOLs contacted, "is the agent still alive?" — from the
+`kol-ops-bridge` CAL events you emit. A run that ends with **zero bridge
+events** is treated as **FAILED** by the UI, regardless of what files you wrote.
+
+**You do NOT have MCP access to `cal.upsert_identity` / `cal.record_event`.**
+**You DO have the `terminal` tool.** The bridge exposes two HTTP shims for you:
+
+```
+# Register a discovered KOL + emit a `discovered` event (one call per handle)
+curl -s -X POST http://127.0.0.1:8080/api/plugins/kol-ops-bridge/campaigns/<campaign_id>/identities \
+  -H 'Content-Type: application/json' \
+  -d '{"handle":"<ig_handle>","platform":"instagram",
+       "display_name":"<name>","env":"<TEST|LIVE>",
+       "product_sku":"<sku>","actor":"agent"}'
+# -> {"identity_id": 42, "campaign_id": "..."}
+
+# Emit a stage transition (one call per stage change)
+curl -s -X POST http://127.0.0.1:8080/api/plugins/kol-ops-bridge/campaigns/<campaign_id>/events \
+  -H 'Content-Type: application/json' \
+  -d '{"kol_identity_id":42,"event_type":"stage_changed",
+       "stage":"outreach","env":"<TEST|LIVE>",
+       "product_sku":"<sku>","actor":"agent"}'
+# -> {"event_id": 123, "campaign_id": "..."}
+```
+
+HARD RULES:
+
+1. After ONE `skill_view`, your next 1–3 tool calls MUST be the `identities`
+   POST(s) above (at least one). Do NOT call `write_file` before at least one
+   identity is registered.
+2. After every stage transition (`outreach` → `product_pick` → `negotiation` →
+   `contract` → `logistics` → `content_delivery` → `closed`), POST a fresh
+   `stage_changed` event — even if no email was sent yet.
+3. If discovery legitimately turns up zero candidates, register a single
+   placeholder identity with `handle="no_match_<campaign_id>"`, emit a
+   `stage_changed` with `stage="closed"`, then exit.
+4. **Do not claim** in your final response that you "emitted record_event" /
+   "upserted an identity" unless the corresponding curl actually returned HTTP
+   200 with an `identity_id` / `event_id` in the terminal output. Hallucinated
+   observability is a graded failure for this skill.
+
+This contract is non-negotiable in `web` mode and strongly recommended in
+`chat` / `cron` mode.
+
+---
+
 Hard defaults:
 - **Draft-only**: every outbound message is created via `gmail drafts.create` / `drafts.update`. Never call any `send` API.
 - **TEST MODE is default**: until the user types `LIVE MODE` in chat, every draft's `to` field is rewritten to the campaign's `test_mode_to` address.
@@ -91,7 +140,38 @@ The legacy `status` field is retained as a free-form pointer for backwards compa
 
 ### Step 3 — Notify user for shortlist approval (mandatory)
 In `triggered_by=web` mode, do NOT post the chat prompt. Instead:
-1. `cal.record_event(event_type='shortlist_ready', ...)` for the campaign.
+1. `cal.record_event(event_type='shortlist_ready', ...)` for the campaign. The
+   payload MUST include a structured `candidates` array — handle-only payloads
+   are deprecated and will render an empty review panel in the console.
+
+   Schema (each candidate, all scores `int 0..100`):
+   ```json
+   {
+     "candidates": [
+       {
+         "handle": "creator_one",
+         "platform": "instagram",
+         "audience_fit": 88,
+         "brand_safety": 94,
+         "engagement_quality": 76,
+         "niche_match": 91,
+         "reason": "54k IG, 4.6% ER, weekly eco-yoga content, no fast-fashion sponsors in last 30 posts",
+         "evidence_url": "https://www.instagram.com/creator_one/"
+       }
+     ]
+   }
+   ```
+   - `audience_fit` — demographic + geo + language alignment to the brand brief.
+   - `brand_safety` — content moderation review: controversial topics, prior
+     sponsor red flags, hate speech, NSFW, political extremism. Higher = safer.
+   - `engagement_quality` — true ER, comment depth, bot/giveaway suppression.
+   - `niche_match` — topical overlap with the product SKU (not just follower count).
+   - `reason` — ONE concrete sentence citing 2-3 observable signals (follower
+     count, ER, recent topic mentions, prior partnerships). Never write generic
+     copy like "good fit".
+   - `evidence_url` — optional; primary profile URL is fine.
+   Always emit a candidate row for every identity registered in Step 2, even
+   when scores are low — the operator decides who to keep.
 2. Exit the agent run cleanly. The Web operator approves via `POST /api/plugins/kol-ops-bridge/campaigns/{id}/approve-shortlist`; a fresh agent session resumes at Step 4 when the approval webhook arrives.
 
 In `triggered_by=chat` mode (default), post **one** chat message using this fixed template, then **stop and wait** for the user's reply. Do not move on without explicit approval.
