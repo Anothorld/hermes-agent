@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .db import _connect, init_db
-from .deps import shutdown_bridge
+from .deps import shutdown_bridge, shutdown_gateway
 from .routers import (
     admin,
     auth,
@@ -63,6 +63,7 @@ async def _lifespan(app: FastAPI):
     yield
     await events_router.hub.stop()
     await shutdown_bridge()
+    await shutdown_gateway()
 
 
 def create_app() -> FastAPI:
