@@ -19,9 +19,12 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib.util
 import logging
+import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
 
@@ -40,7 +43,7 @@ def _load_pkg() -> ModuleType:
     pkg = ModuleType(_PKG_NAME)
     pkg.__path__ = [str(_PLUGIN_ROOT)]  # type: ignore[attr-defined]
     sys.modules[_PKG_NAME] = pkg
-    for sub in ("schema", "cal", "plugin_api"):
+    for sub in ("schema", "cal", "gmail_client", "gmail_poller", "plugin_api"):
         spec = importlib.util.spec_from_file_location(
             f"{_PKG_NAME}.{sub}", _PLUGIN_ROOT / f"{sub}.py"
         )
@@ -54,7 +57,31 @@ def _load_pkg() -> ModuleType:
 def create_app() -> FastAPI:
     _load_pkg()
     plugin_api = sys.modules[f"{_PKG_NAME}.plugin_api"]
-    app = FastAPI(title="kol-ops-bridge (standalone)")
+    gmail_poller = sys.modules[f"{_PKG_NAME}.gmail_poller"]
+
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        # Gmail reply-poller runs as a single bg task; opt-out via env var.
+        if os.environ.get("KOL_OPS_BRIDGE_DISABLE_GMAIL_POLLER") == "1":
+            logging.getLogger(__name__).info(
+                "[serve] gmail poller disabled via env var"
+            )
+            yield
+            return
+        task = asyncio.create_task(
+            gmail_poller.run_forever(),
+            name="kol-ops-bridge-gmail-poller",
+        )
+        try:
+            yield
+        finally:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    app = FastAPI(title="kol-ops-bridge (standalone)", lifespan=_lifespan)
     app.include_router(plugin_api.router, prefix=_MOUNT)
 
     @app.get("/")

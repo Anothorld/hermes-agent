@@ -350,6 +350,68 @@ def mark_draft_sent(*, draft_id: str, sent_at: Optional[str] = None, env: str = 
     _safe_write("mark_draft_sent", _do)
 
 
+def attach_gmail_ids_to_draft(
+    *,
+    draft_id: str,
+    gmail_message_id: str,
+    gmail_thread_id: str,
+    env: str = "LIVE",
+) -> None:
+    """Backfill Gmail IDs on a draft row (used when Gmail push happens
+    asynchronously after the CAL row is created)."""
+
+    def _do():
+        with _connect() as conn:
+            conn.execute(
+                """UPDATE kol_draft_history
+                   SET gmail_message_id = ?, gmail_thread_id = ?
+                   WHERE draft_id = ? AND env = ?""",
+                (gmail_message_id, gmail_thread_id, draft_id, env),
+            )
+
+    _safe_write("attach_gmail_ids_to_draft", _do)
+
+
+def find_draft_by_thread_id(
+    *,
+    gmail_thread_id: str,
+    env: str = "LIVE",
+) -> Optional[dict[str, Any]]:
+    """Look up the most recent draft for a Gmail thread (reply matching)."""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM kol_draft_history
+                   WHERE gmail_thread_id = ? AND env = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (gmail_thread_id, env),
+            ).fetchone()
+            return dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[CAL] find_draft_by_thread_id failed: %s", exc)
+        return None
+
+
+def find_draft_by_message_id(
+    *,
+    gmail_message_id: str,
+    env: str = "LIVE",
+) -> Optional[dict[str, Any]]:
+    """Look up a draft by the outbound Gmail message id (In-Reply-To match)."""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM kol_draft_history
+                   WHERE gmail_message_id = ? AND env = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (gmail_message_id, env),
+            ).fetchone()
+            return dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[CAL] find_draft_by_message_id failed: %s", exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Reply history
 # ---------------------------------------------------------------------------

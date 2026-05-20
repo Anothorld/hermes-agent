@@ -287,6 +287,7 @@ def gmail_get(args):
             "date": headers.get("Date", ""),
             "labels": msg.get("labelIds", []),
             "body": _extract_message_body(msg),
+            "headers": headers,
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
@@ -306,6 +307,7 @@ def gmail_get(args):
         "date": headers.get("Date", ""),
         "labels": msg.get("labelIds", []),
         "body": _extract_message_body(msg),
+        "headers": headers,
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
