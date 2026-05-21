@@ -150,6 +150,63 @@ class BridgeClient:
             params["campaign_id"] = campaign_id
         return await self._req("GET", f"/facts/{identity_id}", params=params)
 
+    async def write_facts_multi(
+        self, identity_id: int, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/facts/{identity_id}/multi", json=body
+        )
+
+    async def get_dispatch_context(
+        self,
+        identity_id: int,
+        campaign_id: str,
+        env: str = "LIVE",
+    ) -> dict[str, Any]:
+        return await self._req(
+            "GET", f"/identities/{identity_id}/dispatch-context",
+            params={"campaign_id": campaign_id, "env": env},
+        )
+
+    async def route_discovery(
+        self, campaign_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST",
+            f"/campaigns/{campaign_id}/candidates/route-discovery",
+            json=body,
+        )
+
+    # ------------------------------------------------------------ Policies
+    async def get_policy(
+        self, scope: str, owner_user_id: Optional[int] = None
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if owner_user_id is not None:
+            params["owner_user_id"] = owner_user_id
+        return await self._req("GET", f"/policies/{scope}", params=params)
+
+    async def put_policy(
+        self, scope: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req("PUT", f"/policies/{scope}", json=body)
+
+    async def policy_history(
+        self,
+        scope: str,
+        owner_user_id: Optional[int] = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": limit}
+        if owner_user_id is not None:
+            params["owner_user_id"] = owner_user_id
+        return await self._req(
+            "GET", f"/policies/{scope}/history", params=params
+        )
+
+    async def parsed_escalation_rules(self) -> dict[str, Any]:
+        return await self._req("GET", "/policies/escalation_rules/parsed")
+
     # ----------------------------------------------------------- Approvals
     async def list_approvals(
         self, status: str = "pending", env: str = "LIVE"

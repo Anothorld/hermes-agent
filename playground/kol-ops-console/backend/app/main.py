@@ -20,10 +20,15 @@ from .routers import (
     content,
     contract,
     drafts,
+    escalations,
     events as events_router,
+    facts,
+    goals,
     kols,
     logistics,
+    policies,
     products,
+    relationships,
 )
 from .security import hash_password
 
@@ -89,6 +94,11 @@ def create_app() -> FastAPI:
     app.include_router(logistics.router)
     app.include_router(content.router)
     app.include_router(campaigns.router)
+    app.include_router(facts.router)
+    app.include_router(goals.router)
+    app.include_router(relationships.router)
+    app.include_router(escalations.router)
+    app.include_router(policies.router)
     app.include_router(admin.router)
     app.include_router(events_router.router)  # /ws
     return app
