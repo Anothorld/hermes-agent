@@ -1,7 +1,7 @@
 ---
 name: kol-archival-writer
-description: After a campaign engagement closes (status `done` or `aborted`), back-fills durable cross-campaign facts on the KOL's `kol_identity` and `kol_relationship` rows: total_collabs, last_outcome, default_shipping_address (if drift was approved), preferred_compensation_mode, response_time_avg_h, last_engaged_at, plus a one-line `relationship_notes` summary. Writes nothing to per-campaign `kol_facts` (that namespace is closed); writes only to identity/relationship via dedicated bridge endpoints. Idempotent on `meta.archival_done==true`.
-trigger: Invoked by `kol-reply-dispatcher` (or a closing cron) when `goals.archival.status == "active"` AND `meta.archival_done != true`. Pre-condition: the campaign-level closing goal (`content_review_and_golive` done OR `engagement_aborted` done) must already be marked.
+description: After a campaign engagement closes (status `done` or `aborted`), back-fills durable cross-campaign facts on the KOL's `kol_identity` and `kol_relationship` rows: total_collabs, last_outcome, default_shipping_address (if drift was approved), preferred_compensation_mode, response_time_avg_h, last_engaged_at, plus a one-line `relationship_notes` summary. Writes nothing to per-campaign `kol_facts` (that namespace is closed); writes only to identity/relationship via dedicated bridge endpoints. Idempotent on `approval.archival_done==true`.
+trigger: Invoked by `kol-reply-dispatcher` (or a closing cron) when `goals.archival.status == "active"` AND `approval.archival_done != true`. Pre-condition: the campaign-level closing goal (`content_review_and_golive` done OR `engagement_aborted` done) must already be marked.
 tags: ["kol", "archival", "kol_identity", "kol_relationship", "meta-lane"]
 ---
 
@@ -18,7 +18,7 @@ decision and pre-populated defaults.
 - **No fact-namespace writes.** Per-campaign `kol_facts` is frozen
   after archival; this skill writes only via identity/relationship
   endpoints.
-- **Idempotent.** If `meta.archival_done==true`, abort
+- **Idempotent.** If `approval.archival_done==true`, abort
   `{"skipped":"already_archived"}`.
 - **Closing goal precondition.** Aborts if neither
   `content_review_and_golive` nor `engagement_aborted` is `done`.
@@ -39,7 +39,7 @@ Read:
 - `goals.archival.status`, `goals.content_review_and_golive.status`,
   `goals.engagement_aborted.status`.
 - `relationship.total_collabs` (current).
-- All `offer.*` keys (latest), `fulfillment.*` keys, `publish.*` keys,
+- All `offer.*` keys (latest), `fulfillment.*` keys, `fulfillment.*` keys,
   `approval.identity_drift_review` if present.
 - Inbox metadata (response_time_avg_h is computed by the bridge or
   falls back to the existing relationship value).
@@ -50,8 +50,8 @@ Read:
 1. `engagement_aborted.status == "done"` → `last_outcome = "aborted"`
    + capture `last_outcome_reason` from
    `approval.engagement_abort_reason` if present.
-2. `publish.golive_done == true` → `last_outcome = "delivered"`.
-3. `publish.draft_approved && !publish.golive_done` →
+2. `fulfillment.golive_done == true` → `last_outcome = "delivered"`.
+3. `fulfillment.draft_approved && !fulfillment.golive_done` →
    `last_outcome = "approved_no_golive"` (rare; treat like delivered).
 4. Otherwise → `last_outcome = "incomplete"` (defensive).
 
@@ -86,7 +86,7 @@ a TODO rather than freelancing fact writes):
 - `POST /api/plugins/kol-ops-bridge/identities/{id}/relationships/{campaign_id}/update`
 
 Each call atomic; partial application not allowed. After both succeed,
-write `meta.archival_done=true` + `meta.archival_done_at` via
+write `approval.archival_done=true` + `approval.archival_done_at` via
 `write-facts-multi` (this is the LAST per-campaign fact written).
 
 ### Step 4 — Return result envelope
@@ -124,7 +124,7 @@ This skill never drafts an email. `body: null` always.
   promotion, notes appended.
 
 ### Idempotent
-`meta.archival_done=true` already. Aborts `{"skipped":"already_archived"}`.
+`approval.archival_done=true` already. Aborts `{"skipped":"already_archived"}`.
 
 ## Pitfalls
 - Promoting a new shipping address WITHOUT operator approval — silently
@@ -134,5 +134,5 @@ This skill never drafts an email. `body: null` always.
   field is a running ledger, not a current-state field.
 - Forgetting to increment `total_collabs` (or wrongly counting an
   aborted engagement toward it). Branch on outcome.
-- Writing more `kol_facts.*` keys after `meta.archival_done=true`.
+- Writing more `kol_facts.*` keys after `approval.archival_done=true`.
   The fact namespace is closed.

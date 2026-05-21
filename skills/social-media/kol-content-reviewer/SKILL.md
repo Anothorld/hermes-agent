@@ -1,7 +1,7 @@
 ---
 name: kol-content-reviewer
-description: Reviews the KOL's submitted draft (link or attachment) against `campaign_config.audit_standards_md`. Three branches — (A) approve: standards met → write `publish.draft_approved=true`; (B) request_revision: minor/scoped issues → draft itemized feedback list and write `publish.revision_requested_count++`; (C) escalate: major brand-safety / off-policy / >2 revision rounds → open escalation. Side effect of approval is to enable `golive-and-boost`.
-trigger: Invoked by `kol-reply-dispatcher` when `active_goals_by_lane.publish == "content_review"` AND `fulfillment.draft_submitted == true` AND `publish.draft_approved != true`.
+description: Reviews the KOL's submitted draft (link or attachment) against `campaign_config.audit_standards_md`. Three branches — (A) approve: standards met → write `fulfillment.draft_approved=true`; (B) request_revision: minor/scoped issues → draft itemized feedback list and write `fulfillment.revision_requested_count++`; (C) escalate: major brand-safety / off-policy / >2 revision rounds → open escalation. Side effect of approval is to enable `golive-and-boost`.
+trigger: Invoked by `kol-reply-dispatcher` when `active_goals_by_lane.publish == "content_review"` AND `fulfillment.draft_submitted == true` AND `fulfillment.draft_approved != true`.
 tags: ["kol", "content-review", "draft-generator", "publish-lane"]
 ---
 
@@ -15,16 +15,16 @@ substantive creative judgments outside `audit_standards_md`.
 - **Standards in, decisions out.** Every revision item must cite a
   specific clause of `audit_standards_md` (or a contract clause).
   Items not grounded in standards must NOT be requested.
-- **Bounded revision rounds.** After `publish.revision_requested_count >= 2`
+- **Bounded revision rounds.** After `fulfillment.revision_requested_count >= 2`
   the next pass MUST escalate, not request a third round.
 - **No clause invention.** If the draft violates something not covered
   by `audit_standards_md`, escalate with `goal=content_review reason="off-policy issue not covered by audit standards: <excerpt>"`.
-- **Idempotent.** If `publish.draft_approved==true`, abort
+- **Idempotent.** If `fulfillment.draft_approved==true`, abort
   `{"skipped":"already_approved"}`.
 
 ## Inputs
 1. `identity_id`, `campaign_id`, `env`, `thread_id`.
-2. Classifier-extracted `publish.draft_url` and/or `publish.draft_excerpt`.
+2. Classifier-extracted `fulfillment.draft_url` and/or `fulfillment.draft_excerpt`.
 3. Operator-supplied `review_findings` (ordered list of
    `{clause_id, severity, excerpt, suggestion}`) — the calling layer
    (web console or LLM scaffolding) does the actual reading; this skill
@@ -40,8 +40,8 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
 Read:
 - `campaign_config.audit_standards_md` — required.
 - `goals.content_review.status` — must be `active`.
-- Latest `publish.revision_requested_count` (default 0).
-- Latest `publish.draft_url` (snapshot from classifier).
+- Latest `fulfillment.revision_requested_count` (default 0).
+- Latest `fulfillment.draft_url` (snapshot from classifier).
 
 ### Step 2 — Branch on `review_findings`
 
@@ -61,9 +61,9 @@ Read:
   message>`. Thanks for the quick turnaround."
 - Write:
   ```
-  "publish": {"publish.draft_approved": true,
-              "publish.draft_approved_at": "<iso8601>",
-              "publish.draft_url_at_approval": "<url>"}
+  "publish": {"fulfillment.draft_approved": true,
+              "fulfillment.draft_approved_at": "<iso8601>",
+              "fulfillment.draft_url_at_approval": "<url>"}
   ```
 
 **Branch B — request_revision:**
@@ -76,9 +76,9 @@ Read:
 - One bullet per finding. Cite clause id inline.
 - Write:
   ```
-  "publish": {"publish.revision_requested_count": <prev+1>,
-              "publish.revision_requested_at": "<iso8601>",
-              "publish.last_revision_findings": <findings json>}
+  "publish": {"fulfillment.revision_requested_count": <prev+1>,
+              "fulfillment.revision_requested_at": "<iso8601>",
+              "fulfillment.last_revision_findings": <findings json>}
   ```
 
 **Branch C — escalate:**

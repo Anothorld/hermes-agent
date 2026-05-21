@@ -105,9 +105,9 @@ lower-priority lane has a paused/aborted blocker, it preempts).
 | `fulfillment.address_*`, `shipping_address` | kol-shipping-intake |
 | `fulfillment.tracking_*`, `delivered_*` | kol-logistics-tracker |
 | `fulfillment.brief_*` | kol-brief-sender |
-| `publish.draft_*`, `revision_*` | kol-content-reviewer |
-| `publish.golive_*`, `posted_*`, `boost_*` | kol-golive-and-boost |
-| `meta.archival_*` | kol-archival-writer |
+| `fulfillment.draft_*`, `revision_*` | kol-content-reviewer |
+| `fulfillment.golive_*`, `posted_*`, `boost_*` | kol-golive-and-boost |
+| `approval.archival_*` | kol-archival-writer |
 | `approval.*` | various (see ApprovalsPage list above) |
 
 ## Notification deep-links (DingTalk)
