@@ -36,6 +36,24 @@ threading state, no Gmail send.
 2. `campaign_id` (mandatory).
 3. `env` (`TEST` or `LIVE`, mandatory).
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. The loader returns a single markdown block enforcing
+**P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "cold_outreach", missing_facts: ["offer.outreach_sent"], next_action: "<one-line summary of this email's purpose>"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the **first section** of the draft prompt — before any
+  goal-specific instructions in this skill's Procedure.
+- failure mode: if the loader fails (bridge unreachable / policy doc
+  missing), use empty-doc fallbacks (`(no company-wide style configured)` /
+  `(no personal style configured)`) — **never block** the draft.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context

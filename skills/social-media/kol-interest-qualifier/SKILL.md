@@ -35,6 +35,20 @@ recording that we asked, but does NOT pre-commit interest as confirmed.
 5. `inbound_excerpt` (1-3 sentence quote of KOL's ambiguous reply,
    for grounding the question).
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "interest_qualification", missing_facts: ["offer.interest_signal"], next_action: "Disambiguate KOL's reply with one focused question"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the first section of the draft prompt.
+- failure mode: empty-doc fallbacks; never block.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context

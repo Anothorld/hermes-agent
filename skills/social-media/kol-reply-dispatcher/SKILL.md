@@ -90,6 +90,38 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
   This is the **server's** view of which goals are now active / satisfied
   / blocked, and supersedes the classifier's `active_goals_by_lane`.
 
+### Step 3.5 — Honor classifier `escalation_hint`
+The classifier's output may include an `escalation_hint` block. When
+`escalation_hint.should_consider == true` for the lane the classifier
+flagged, **immediately open an escalation for that lane and skip
+drafting** — do not invoke a child skill for that lane in Step 4/5:
+
+```
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
+  --identity-id <identity_id> --campaign-id "<campaign_id>" \
+  --env <TEST|LIVE> \
+  --json '{"rule_id": "<escalation_hint.matched_rule_id>",
+            "lane": "<lane>",
+            "goal_name": "<active goal in that lane>",
+            "severity": "<rule severity, default normal>",
+            "question_to_operator": "<escalation_hint.suggested_question>",
+            "required_facts_to_resume": <escalation_hint.required_facts_to_resume>,
+            "resume_context": {"matched_rule_id": "<id>",
+                                 "source": "classifier"}}'
+```
+
+Notes:
+- The Bridge automatically tags `force_human_takeover_hint=true` in
+  `resume_context` when the new escalation's `attempts_count` reaches
+  `max_escalation_depth` (parsed from `policies/escalation_rules`,
+  default `3`). **Never auto-abort** the goal — the depth-hit case
+  still escalates to a human.
+- Fallback: if the `escalation_rules` policy is missing or the
+  classifier was invoked without it, `escalation_hint.should_consider`
+  is implicitly `false` and this step is a no-op.
+- A lane that opened an escalation here **must not** also be picked
+  as primary author in Step 5; it is treated as `blocked`.
+
 ### Step 4 — Per-lane next-action decision
 For each lane in `{commerce, fulfillment, publish, meta}`, given the
 server-side goal_state from Step 3's re-fetch:
