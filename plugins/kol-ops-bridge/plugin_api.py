@@ -466,7 +466,7 @@ def get_lanes(
             if a.get("campaign_id") == campaign_id
         ),
         "open_escalations": sum(
-            1 for e in cal.list_escalations(state="open", env=env)
+            1 for e in cal.list_escalations(state="awaiting_answer", env=env)
             if e.get("campaign_id") == campaign_id
         ),
     }
