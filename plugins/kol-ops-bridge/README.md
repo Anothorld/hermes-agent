@@ -72,6 +72,11 @@ for the contract). The external Web backend additionally holds an
 API key (stored in `~/.hermes/kol-ops-bridge/secrets.yaml`, 600 perm,
 gitignored) that is checked in `_check_external_token` for the subset
 of routes intended for the external console rather than the dashboard.
+The agent-facing CLI resolves the same key from `--bridge-key`,
+`HERMES_KOL_OPS_BRIDGE_KEY`, console compatibility aliases, or that
+`secrets.yaml` file. In source-tree dev mode it also falls back to
+`playground/kol-ops-console/.env`, so gateway-spawned agents do not depend
+on inheriting the console backend's environment.
 
 ## TEST/LIVE isolation
 

@@ -9,9 +9,12 @@ selecting candidates, archiving collabs, persisting policy docs, ...)
 can be invoked from a SKILL.md ``Procedure`` section without letting an
 LLM hand-roll SQL or curl.
 
-Auth: pass ``--bridge-key`` or set ``HERMES_KOL_OPS_BRIDGE_KEY`` in the
-environment.  Open mode (no key) is dev-only — the plugin refuses
-mutating endpoints in that case.
+Auth: pass ``--bridge-key``; otherwise the CLI reads
+``HERMES_KOL_OPS_BRIDGE_KEY`` / console aliases or
+``~/.hermes/kol-ops-bridge/secrets.yaml``.  As a dev-console fallback it
+also reads ``playground/kol-ops-console/.env`` from the source tree.
+Open mode (no key) is dev-only — the plugin refuses mutating endpoints
+in that case.
 
 All env-aware mutating subcommands require an explicit ``--env``
 (``TEST`` or ``LIVE``); we never default it to prevent cross-env writes.

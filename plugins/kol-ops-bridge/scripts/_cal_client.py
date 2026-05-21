@@ -17,6 +17,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -26,7 +27,48 @@ DEFAULT_BASE = os.environ.get(
     "http://127.0.0.1:8080/api/plugins/kol-ops-bridge",
 ).rstrip("/")
 KEY_ENV = "HERMES_KOL_OPS_BRIDGE_KEY"
+KEY_ENV_ALIASES = (
+    KEY_ENV,
+    "KOC_BRIDGE_KEY",
+    "HERMES_KOL_BRIDGE_KEY",
+    "BRIDGE_KEY",
+)
+SECRETS_PATH = Path(os.path.expanduser("~/.hermes/kol-ops-bridge/secrets.yaml"))
+CONSOLE_ENV_PATH = (
+    Path(__file__).resolve().parents[3] / "playground/kol-ops-console/.env"
+)
 ENV_CHOICES = ("TEST", "LIVE")
+
+
+def _load_key_from_kv_file(path: Path, keys: tuple[str, ...]) -> Optional[str]:
+    if not path.exists():
+        return None
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or ":" not in line and "=" not in line:
+                continue
+            sep = ":" if ":" in line else "="
+            key, value = line.split(sep, 1)
+            if key.strip() in keys and value.strip():
+                return value.strip().strip("'\"") or None
+    except OSError:
+        return None
+    return None
+
+
+def load_bridge_key(explicit: Optional[str] = None) -> Optional[str]:
+    """Resolve the bridge key from explicit arg, env aliases, or secrets.yaml."""
+    if explicit and explicit.strip():
+        return explicit.strip()
+    for name in KEY_ENV_ALIASES:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return (
+        _load_key_from_kv_file(SECRETS_PATH, ("bridge_key",))
+        or _load_key_from_kv_file(CONSOLE_ENV_PATH, KEY_ENV_ALIASES)
+    )
 
 
 class CALClient:
@@ -44,7 +86,7 @@ class CALClient:
         timeout: float = 30.0,
     ) -> None:
         self.base = (base or DEFAULT_BASE).rstrip("/")
-        self.bridge_key = bridge_key or os.environ.get(KEY_ENV)
+        self.bridge_key = load_bridge_key(bridge_key)
         self.timeout = timeout
 
     def request(
@@ -102,8 +144,12 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--bridge-key",
-        default=os.environ.get(KEY_ENV),
-        help=f"X-Bridge-Key header value (env {KEY_ENV})",
+        default=None,
+        help=(
+            "X-Bridge-Key header value. Defaults to env "
+            f"{KEY_ENV}, KOC_BRIDGE_KEY, HERMES_KOL_BRIDGE_KEY, BRIDGE_KEY, "
+            "or ~/.hermes/kol-ops-bridge/secrets.yaml."
+        ),
     )
 
 
