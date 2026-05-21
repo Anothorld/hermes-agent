@@ -1,4 +1,13 @@
-"""Thin httpx wrapper around the Hermes ``kol-ops-bridge`` plugin API."""
+"""Thin httpx wrapper around the Hermes ``kol-ops-bridge`` plugin API (v2).
+
+Mirrors the v2.4 endpoint surface (Phase A3). The legacy stage-driven
+methods (push_contract_update / push_logistics_update / push_content_verdict
+/ inject_inbound_reply / list_pending_drafts / get_draft / get_timeline /
+add_alias / list_open_escalations / recent_events / latest_event_id /
+list_identities / start_campaign / approve_shortlist / get_shortlist) have
+been removed; the console UI must migrate to the new fact / goal / lane
+surface in Phase C.
+"""
 
 from __future__ import annotations
 
@@ -27,9 +36,7 @@ class BridgeClient:
         await self._client.aclose()
 
     async def _req(
-        self,
-        method: str,
-        path: str,
+        self, method: str, path: str,
         *,
         params: Optional[dict[str, Any]] = None,
         json: Optional[dict[str, Any]] = None,
@@ -47,99 +54,145 @@ class BridgeClient:
             return r.json()
         return r.text
 
-    @staticmethod
-    def _unwrap_list(payload: Any, key: str) -> list[dict[str, Any]]:
-        """Return ``payload[key]`` if the bridge wrapped a list in a dict.
-
-        The bridge currently returns ``{"identities": [...]}`` style envelopes
-        for list endpoints, while the console routers declare ``list[dict]``
-        response models. Unwrapping here keeps the router code shape-agnostic.
-        """
-        if isinstance(payload, dict) and isinstance(payload.get(key), list):
-            return payload[key]
-        if isinstance(payload, list):
-            return payload
-        return []
-
-    # --- Read passthroughs ---------------------------------------------------
+    # -------------------------------------------------------------- Health
     async def health(self) -> dict[str, Any]:
         return await self._req("GET", "/health")
 
-    async def list_identities(self, env: str) -> list[dict[str, Any]]:
-        return self._unwrap_list(
-            await self._req("GET", "/identities", params={"env": env}),
-            "identities",
-        )
+    # ---------------------------------------------------------- Identities
+    async def upsert_identity(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._req("POST", "/identities", json=body)
 
     async def get_identity(self, identity_id: int) -> dict[str, Any]:
         return await self._req("GET", f"/identities/{identity_id}")
 
-    async def get_timeline(self, identity_id: int, env: str) -> dict[str, Any]:
-        return await self._req("GET", f"/identities/{identity_id}/timeline",
-                               params={"env": env})
+    async def get_relationship(self, identity_id: int) -> dict[str, Any]:
+        return await self._req("GET", f"/identities/{identity_id}/relationship")
 
-    async def list_pending_drafts(self, env: str) -> list[dict[str, Any]]:
-        return self._unwrap_list(
-            await self._req("GET", "/drafts/pending", params={"env": env}),
-            "drafts",
+    async def get_reusable_facts(self, identity_id: int) -> dict[str, Any]:
+        return await self._req(
+            "GET", f"/identities/{identity_id}/relationship/reusable-facts"
         )
 
-    async def get_draft(self, draft_id: str, env: str) -> dict[str, Any]:
-        return await self._req("GET", f"/drafts/{draft_id}", params={"env": env})
-
-    async def list_open_escalations(self, env: str) -> list[dict[str, Any]]:
-        return self._unwrap_list(
-            await self._req("GET", "/escalations/open", params={"env": env}),
-            "escalations",
-        )
-
-    async def recent_events(self, env: str, limit: int = 100) -> list[dict[str, Any]]:
-        return self._unwrap_list(
-            await self._req("GET", "/events/recent", params={"env": env, "limit": limit}),
-            "events",
-        )
-
-    async def latest_event_id(self, env: str) -> int:
-        out = await self._req("GET", "/events/latest-id", params={"env": env})
-        return int(out.get("latest_event_id", 0)) if isinstance(out, dict) else int(out)
-
-    # --- Writes --------------------------------------------------------------
-    async def push_contract_update(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._req("POST", "/contract/update", json=payload)
-
-    async def push_logistics_update(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._req("POST", "/logistics/update", json=payload)
-
-    async def push_content_verdict(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._req("POST", "/content/verdict", json=payload)
-
-    async def resolve_escalation(self, escalation_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._req("POST", f"/escalations/{escalation_id}/resolve", json=payload)
-
-    async def add_alias(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._req("POST", "/identities/aliases", json=payload)
-
-    async def start_campaign(self, campaign_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._req("POST", f"/campaigns/{campaign_id}/start", json=payload)
-
-    async def approve_shortlist(
-        self, campaign_id: str, payload: dict[str, Any]
+    async def get_goals(
+        self, identity_id: int, campaign_id: str, env: str = "LIVE"
     ) -> dict[str, Any]:
         return await self._req(
-            "POST", f"/campaigns/{campaign_id}/approve-shortlist", json=payload
+            "GET", f"/identities/{identity_id}/goals",
+            params={"campaign_id": campaign_id, "env": env},
         )
 
-    async def get_shortlist(self, campaign_id: str, env: str) -> dict[str, Any]:
-        return await self._req(
-            "GET", f"/campaigns/{campaign_id}/shortlist", params={"env": env}
-        )
-
-    async def inject_inbound_reply(
-        self, campaign_id: str, payload: dict[str, Any]
+    async def archive_collab(
+        self, identity_id: int, body: dict[str, Any]
     ) -> dict[str, Any]:
         return await self._req(
-            "POST", f"/campaigns/{campaign_id}/replies/inbound", json=payload
+            "POST", f"/identities/{identity_id}/archive", json=body
         )
 
+    # ----------------------------------------------------------- Campaigns
+    async def upsert_campaign(
+        self, campaign_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req("PUT", f"/campaigns/{campaign_id}", json=body)
+
+    async def get_campaign(self, campaign_id: str) -> dict[str, Any]:
+        return await self._req("GET", f"/campaigns/{campaign_id}")
+
+    async def list_candidates(
+        self, campaign_id: str, env: str = "LIVE"
+    ) -> list[dict[str, Any]]:
+        out = await self._req(
+            "GET", f"/campaigns/{campaign_id}/candidates", params={"env": env}
+        )
+        return out.get("candidates", []) if isinstance(out, dict) else []
+
+    async def upsert_candidate(
+        self, campaign_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/campaigns/{campaign_id}/candidates", json=body
+        )
+
+    async def resolve_relationships(
+        self, campaign_id: str, env: str = "LIVE"
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST",
+            f"/campaigns/{campaign_id}/candidates/resolve-relationships",
+            params={"env": env},
+        )
+
+    async def select_candidates(
+        self, campaign_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/campaigns/{campaign_id}/candidates/select", json=body
+        )
+
+    async def get_lanes(
+        self, campaign_id: str, env: str = "LIVE"
+    ) -> dict[str, Any]:
+        return await self._req(
+            "GET", f"/campaigns/{campaign_id}/lanes", params={"env": env}
+        )
+
+    # --------------------------------------------------------------- Facts
+    async def write_facts(
+        self, identity_id: int, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req("POST", f"/facts/{identity_id}", json=body)
+
+    async def read_facts(
+        self, identity_id: int,
+        campaign_id: Optional[str] = None, env: str = "LIVE",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"env": env}
+        if campaign_id:
+            params["campaign_id"] = campaign_id
+        return await self._req("GET", f"/facts/{identity_id}", params=params)
+
+    # ----------------------------------------------------------- Approvals
+    async def list_approvals(
+        self, status: str = "pending", env: str = "LIVE"
+    ) -> list[dict[str, Any]]:
+        out = await self._req(
+            "GET", "/approvals", params={"status": status, "env": env}
+        )
+        return out.get("approvals", []) if isinstance(out, dict) else []
+
+    async def approve(
+        self, fact_path: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/approvals/{fact_path}/approve", json=body
+        )
+
+    async def reject(
+        self, fact_path: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/approvals/{fact_path}/reject", json=body
+        )
+
+    # --------------------------------------------------------- Escalations
+    async def list_escalations(
+        self, state: Optional[str] = None, env: str = "LIVE"
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"env": env}
+        if state:
+            params["state"] = state
+        out = await self._req("GET", "/escalations", params=params)
+        return out.get("escalations", []) if isinstance(out, dict) else []
+
+    async def open_escalation(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._req("POST", "/escalations", json=body)
+
+    async def resolve_escalation(
+        self, escalation_id: int, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "PATCH", f"/escalations/{escalation_id}", json=body
+        )
+
+    # ---------------------------------------------------------------- Admin
     async def wipe_test(self) -> dict[str, Any]:
         return await self._req("POST", "/admin/wipe-test")
