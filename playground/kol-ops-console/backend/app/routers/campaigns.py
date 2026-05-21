@@ -115,6 +115,10 @@ async def start(
             )
 
     payload = body.model_dump()
+    sku_ref = product["url"] or product["sku"]
+    payload["product_name"] = product["name"]
+    payload["product_url"] = product["url"]
+    payload["sku_whitelist"] = [sku_ref]
     payload["brief"] = _compose_brief(campaign_id, product, body)
     payload["triggered_by"] = "web"
     payload["actor"] = f"web:{user['email']}"
@@ -276,3 +280,63 @@ async def inject_reply(
         },
     )
     return out
+
+
+# Goal status values we treat as "the lane's active column". Anything else
+# (inactive / completed) falls back to None so the UI bucket stays correct.
+_ACTIVE_GOAL_STATES = {"in_progress", "blocked", "awaiting_human"}
+
+
+def _pick_active_per_lane(lanes: dict) -> dict:
+    """Bridge returns ``{lane: [goal_state,...]}``; the console renders a
+    single ``goal`` per lane. Pick the first non-inactive goal; otherwise
+    the last (most advanced) goal so the column is never empty.
+    """
+    out: dict = {"commerce": None, "fulfillment": None, "publish": None, "meta": None}
+    for lane, states in (lanes or {}).items():
+        if not states:
+            continue
+        active = next((s for s in states if s.get("status") in _ACTIVE_GOAL_STATES), None)
+        chosen = active or states[-1]
+        out[lane] = {
+            "goal": chosen.get("goal"),
+            "state": chosen.get("status") or "inactive",
+            "missing_facts": chosen.get("missing_facts") or [],
+            "blocked_reason": chosen.get("blocking_escalation_id") or None,
+        }
+    return out
+
+
+@router.get("/{campaign_id}/lanes")
+async def lanes(
+    campaign_id: str,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+    env: str = Query("LIVE", pattern="^(LIVE|TEST)$"),
+) -> dict:
+    """Kanban data feed: per-identity lane snapshot + top-of-page counts.
+
+    Returns ``{campaign_id, lanes: LaneSnapshot[], counts:
+    {pending_approvals, open_escalations}}``. Bridge errors → 502.
+    """
+    try:
+        raw = await bridge.get_lanes(campaign_id, env=env)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    items_out = []
+    for it in raw.get("items", []):
+        items_out.append({
+            "identity_id": it["identity_id"],
+            "handle": it.get("handle") or f"id{it['identity_id']}",
+            "candidate_status": it.get("candidate_status"),
+            "relationship_status": it.get("relationship_status"),
+            "repeat_count": it.get("repeat_count") or 0,
+            "last_outcome": it.get("last_outcome"),
+            "archived": bool(it.get("archived")),
+            "goals": _pick_active_per_lane(it.get("lanes") or {}),
+        })
+    return {
+        "campaign_id": campaign_id,
+        "lanes": items_out,
+        "counts": raw.get("counts") or {"pending_approvals": 0, "open_escalations": 0},
+    }
