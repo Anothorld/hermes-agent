@@ -26,6 +26,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import cal
+from . import discovery_router
 from .schema import FACT_NAMESPACES, GOAL_NAMES, SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
@@ -169,6 +170,20 @@ class ArchiveBody(BaseModel):
     avg_revision_rounds: Optional[float] = None
     delivery_quality: Optional[float] = None
     decided_by: str = "skill:archival-writer"
+
+
+class RouteDiscoveryBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    selected_by: str = "agent"
+    operator_note: str = ""
+
+
+class FactsWriteMultiBody(BaseModel):
+    campaign_id: Optional[str] = None
+    namespaces: dict[str, dict[str, Any]]
+    source: str = "skill"
+    source_event_id: Optional[int] = None
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +374,36 @@ def select_candidates(
     return {"selected": n}
 
 
+@router.post("/campaigns/{campaign_id}/candidates/route-discovery")
+def route_discovery(
+    campaign_id: str,
+    body: RouteDiscoveryBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Deterministic Discovery → Outreach router.
+
+    Resolves relationship_status for the campaign pool, then for each
+    candidate still in ``candidate_status='discovered'``:
+      - new_prospect → select for cold outreach + write
+        ``identity.outreach_path='cold'``
+      - repeat_kol → select for reengagement outreach + write
+        ``identity.outreach_path='reengagement'``
+      - repeat_kol_needs_review → open one ``reengagement_outreach``
+        escalation
+      - rejected → leave alone
+
+    Idempotent: candidates already past ``discovered`` are reported as
+    ``skipped_already_routed``.
+    """
+    _require_bridge_key(x_bridge_key)
+    return discovery_router.route_discovery_pool(
+        campaign_id=campaign_id,
+        env=body.env,
+        selected_by=body.selected_by,
+        operator_note=body.operator_note,
+    )
+
+
 @router.get("/campaigns/{campaign_id}/lanes")
 def get_lanes(
     campaign_id: str,
@@ -413,6 +458,64 @@ def write_facts(
     except cal.FactNamespaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"written": n}
+
+
+@router.post("/facts/{identity_id}/multi")
+def write_facts_multi(
+    identity_id: int,
+    body: FactsWriteMultiBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Write facts across multiple namespaces in one call.
+
+    Body shape: ``{"campaign_id":..., "source":..., "namespaces":
+    {"<offer|identity|fulfillment|approval>": {"<ns>.<key>": <val>, ...}}}``.
+    All namespaces are pre-validated; an invalid key aborts the whole call
+    before any insert.
+    """
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    try:
+        written = cal.write_facts_multi(
+            identity_id=identity_id,
+            campaign_id=body.campaign_id,
+            namespaces=body.namespaces,
+            source=body.source,
+            source_event_id=body.source_event_id,
+            env=body.env,
+        )
+    except cal.FactNamespaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"written": written}
+
+
+@router.get("/identities/{identity_id}/dispatch-context")
+def get_dispatch_context(
+    identity_id: int,
+    campaign_id: str = Query(...),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Bundle the read snapshots ``kol-reply-dispatcher`` needs in one call.
+
+    Returns ``{goals, lanes, relationship, reusable_facts}`` for a single
+    (identity, campaign) pair. Replaces 4 separate reads with 1.
+    """
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    return {
+        "identity_id": identity_id,
+        "campaign_id": campaign_id,
+        "env": env,
+        "goals": cal.get_goal_state(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        ),
+        "lanes": cal.get_lanes_view(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        ),
+        "relationship": cal.get_relationship(identity_id),
+        "reusable_facts": cal.get_reusable_facts(identity_id),
+    }
 
 
 @router.get("/facts/{identity_id}")
