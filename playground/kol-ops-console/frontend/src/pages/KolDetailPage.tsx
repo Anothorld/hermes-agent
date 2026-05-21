@@ -1,246 +1,166 @@
-import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import { api } from '../api';
-import { StageProgressBar } from '../components/StageProgressBar';
+import { useCallback, useEffect, useState } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { api, GoalState, Lane } from '../api';
+import { GoalProgressBar } from '../components/GoalProgressBar';
+import { FactsEditor } from '../components/FactsEditor';
+import { RepeatKolBadge } from '../components/RepeatKolBadge';
 
-type TimelineEvent = {
-  id: number;
-  event_type: string;
-  stage: string | null;
-  sub_status: string | null;
-  ts: string;
-  actor: string;
-  payload_json: string;
+type GoalsResponse = {
+  identity_id: number;
+  campaign_id: string;
+  goals: Record<Lane, GoalState | null>;
 };
 
-type Draft = {
-  id: number;
-  draft_id: string;
-  stage: string;
-  sub_status: string | null;
-  subject: string | null;
-  body: string | null;
-  context_snapshot_json: string;
-  created_at: string;
-  sent_at: string | null;
-};
-
-type Reply = {
-  id: number;
-  gmail_message_id: string;
-  received_at: string;
-  intent: string | null;
-  confidence: number | null;
-  match_strategy: string;
-  match_confidence: number;
-  snippet: string | null;
-};
-
-type Negotiation = {
-  seq: number;
-  decision: string;
-  kol_request_amount: number | null;
-  agent_counter_amount: number | null;
-  budget_per_kol_at_time: number | null;
-  absolute_floor_at_time: number | null;
-  decided_at: string;
-};
-
-type Identity = {
+type IdentityResponse = {
   id: number;
   handle: string;
   primary_email: string | null;
-  region: string | null;
   creator_type: string | null;
   env: string;
-  notes?: Array<{ id: number; body: string; created_at: string }>;
+  repeat_count?: number;
+  last_outcome?: string | null;
 };
 
-type Timeline = {
-  events: TimelineEvent[];
-  drafts: Draft[];
-  replies: Reply[];
-  negotiations: Negotiation[];
-  escalations: Array<{ id: number; reason: string; ts: string }>;
+type EscalationLite = {
+  id: number;
+  rule_id: string | null;
+  reason: string;
+  state: string;
+  created_at: string;
 };
 
 export function KolDetailPage() {
-  const { id } = useParams<{ id: string }>();
-  const [identity, setIdentity] = useState<Identity | null>(null);
-  const [tl, setTl] = useState<Timeline | null>(null);
-  const [selectedDraft, setSelectedDraft] = useState<Draft | null>(null);
+  const { id } = useParams();
+  const [search] = useSearchParams();
+  const campaignId = search.get('campaign_id') || '';
+  const identityId = Number(id);
+  const [identity, setIdentity] = useState<IdentityResponse | null>(null);
+  const [goals, setGoals] = useState<GoalsResponse | null>(null);
+  const [escalations, setEscalations] = useState<EscalationLite[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
+  const refresh = useCallback(async () => {
+    if (!identityId || !campaignId) {
+      setErr('Need identity id + ?campaign_id=<>');
+      return;
+    }
+    try {
+      const [idResp, goalsResp, esc] = await Promise.all([
+        api.get<IdentityResponse>(`/kols/${identityId}`),
+        api.get<GoalsResponse>(
+          `/identities/${identityId}/goals?campaign_id=${encodeURIComponent(campaignId)}`,
+        ),
+        api.get<EscalationLite[]>(`/escalations?state=open`),
+      ]);
+      setIdentity(idResp);
+      setGoals(goalsResp);
+      setEscalations(
+        (esc || []).filter((e) => (e as unknown as { identity_id?: number }).identity_id === identityId),
+      );
+      setErr(null);
+    } catch (ex) {
+      setErr(String(ex));
+    }
+  }, [identityId, campaignId]);
+
   useEffect(() => {
-    if (!id) return;
-    Promise.all([api.get<Identity>(`/kols/${id}`), api.get<Timeline>(`/kols/${id}/timeline`)])
-      .then(([i, t]) => {
-        setIdentity(i);
-        setTl(t);
-      })
-      .catch((e) => setErr(String(e)));
-  }, [id]);
+    refresh();
+  }, [refresh]);
 
   if (err) return <div className="text-red-600">{err}</div>;
-  if (!identity || !tl) return <div>Loading…</div>;
+  if (!identity || !goals) return <div className="text-sm text-slate-500">Loading…</div>;
 
-  const stage = tl.events.slice().reverse().find((e) => e.stage)?.stage || 'discovered';
+  const lanes: Lane[] = ['commerce', 'fulfillment', 'publish', 'meta'];
+  const activeCommerce = goals.goals.commerce?.goal ?? null;
+  const allMissing = lanes.flatMap((l) => goals.goals[l]?.missing_facts ?? []);
 
   return (
-    <div className="grid grid-cols-3 gap-4">
-      <div className="col-span-2 space-y-4">
-        <div className="flex items-center gap-3">
-          <h1 className="text-xl font-semibold">@{identity.handle}</h1>
-          <span className="text-sm text-slate-500">
-            {identity.creator_type} · {identity.region} · env={identity.env}
-          </span>
-          <Link
-            to={`/kols/${id}/contract`}
-            className="ml-auto rounded bg-slate-100 px-3 py-1 text-sm hover:bg-slate-200"
-          >
-            Contract
-          </Link>
-          <Link
-            to={`/kols/${id}/logistics`}
-            className="rounded bg-slate-100 px-3 py-1 text-sm hover:bg-slate-200"
-          >
-            Logistics
-          </Link>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-lg font-semibold">
+          @{identity.handle}
+          <RepeatKolBadge
+            count={identity.repeat_count || 0}
+            lastOutcome={identity.last_outcome ?? null}
+          />
+        </h1>
+        <div className="text-xs text-slate-500">
+          {identity.primary_email} · {identity.env}
         </div>
-        <StageProgressBar stage={stage} />
+        <Link
+          to={`/kols/${identity.id}/relationship`}
+          className="ml-auto text-xs text-sky-700 hover:underline"
+        >
+          history & reusable facts →
+        </Link>
+      </div>
 
-        <section className="rounded border border-slate-200 bg-white p-3">
-          <h2 className="mb-2 font-medium">Timeline</h2>
+      <GoalProgressBar
+        active={activeCommerce}
+        blocked={!!goals.goals.commerce?.blocked_reason}
+      />
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
+        {lanes.map((lane) => {
+          const g = goals.goals[lane];
+          return (
+            <div
+              key={lane}
+              className="rounded border border-slate-200 bg-white p-3 text-sm"
+            >
+              <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">
+                {lane}
+              </div>
+              <div className="font-medium">{g?.goal ?? <em>idle</em>}</div>
+              <div className="text-xs text-slate-600">state: {g?.state ?? '-'}</div>
+              {g?.blocked_reason && (
+                <div className="mt-1 rounded bg-amber-100 px-2 py-1 text-xs text-amber-900">
+                  blocked: {g.blocked_reason}
+                </div>
+              )}
+              {!!g?.missing_facts?.length && (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {g.missing_facts.map((f) => (
+                    <span
+                      key={f}
+                      className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-700"
+                    >
+                      {f}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {!!escalations.length && (
+        <div className="rounded border border-amber-300 bg-amber-50 p-3">
+          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-amber-800">
+            Open escalations ({escalations.length})
+          </div>
           <ul className="space-y-1 text-sm">
-            {tl.events.map((e) => (
-              <li key={e.id} className="flex gap-2 border-b border-slate-100 py-1">
-                <span className="text-slate-400">{e.ts.slice(0, 16).replace('T', ' ')}</span>
-                <span className="font-medium">{e.event_type}</span>
-                {e.stage && (
-                  <span className="text-emerald-700">
-                    {e.stage}/{e.sub_status ?? '-'}
-                  </span>
-                )}
-                <span className="ml-auto text-xs text-slate-500">{e.actor}</span>
+            {escalations.map((e) => (
+              <li key={e.id}>
+                <Link
+                  to={`/escalations/${e.id}`}
+                  className="text-amber-900 underline-offset-2 hover:underline"
+                >
+                  #{e.id} · {e.rule_id || 'manual'} · {e.reason}
+                </Link>
               </li>
             ))}
           </ul>
-        </section>
+        </div>
+      )}
 
-        <section className="rounded border border-slate-200 bg-white p-3">
-          <h2 className="mb-2 font-medium">Drafts</h2>
-          <ul className="space-y-1 text-sm">
-            {tl.drafts.map((d) => (
-              <li
-                key={d.id}
-                onClick={() => setSelectedDraft(d)}
-                className={
-                  'cursor-pointer rounded px-2 py-1 ' +
-                  (selectedDraft?.id === d.id ? 'bg-emerald-100' : 'hover:bg-slate-50')
-                }
-              >
-                <span className="font-medium">{d.stage}</span>{' '}
-                <span className="text-slate-500">{d.sub_status}</span> ·{' '}
-                <span className="text-slate-400">{d.created_at.slice(0, 16).replace('T', ' ')}</span>
-                {d.sent_at ? (
-                  <span className="ml-2 text-xs text-emerald-700">sent</span>
-                ) : (
-                  <span className="ml-2 text-xs text-amber-600">pending</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
-
-        <section className="rounded border border-slate-200 bg-white p-3">
-          <h2 className="mb-2 font-medium">Replies</h2>
-          <ul className="space-y-1 text-sm">
-            {tl.replies.map((r) => (
-              <li key={r.id} className="border-b border-slate-100 py-1">
-                <span className="text-slate-400">{r.received_at.slice(0, 16).replace('T', ' ')}</span>{' '}
-                <span className="font-medium">{r.intent ?? '?'}</span>{' '}
-                <span className="text-xs text-slate-500">
-                  conf={r.confidence?.toFixed(2)} match={r.match_strategy}/
-                  {r.match_confidence.toFixed(2)}
-                </span>
-                {r.snippet && <div className="text-slate-600">{r.snippet}</div>}
-              </li>
-            ))}
-          </ul>
-        </section>
-
-        <section className="rounded border border-slate-200 bg-white p-3">
-          <h2 className="mb-2 font-medium">Negotiation history</h2>
-          <table className="w-full text-sm">
-            <thead className="text-left text-xs text-slate-500">
-              <tr>
-                <th>#</th>
-                <th>decision</th>
-                <th>ask</th>
-                <th>counter</th>
-                <th>budget</th>
-                <th>floor</th>
-                <th>at</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tl.negotiations.map((n) => (
-                <tr key={n.seq} className="border-t border-slate-100">
-                  <td>{n.seq}</td>
-                  <td className="font-medium">{n.decision}</td>
-                  <td>{n.kol_request_amount ?? '-'}</td>
-                  <td>{n.agent_counter_amount ?? '-'}</td>
-                  <td>{n.budget_per_kol_at_time ?? '-'}</td>
-                  <td>{n.absolute_floor_at_time ?? '-'}</td>
-                  <td className="text-slate-400">{n.decided_at.slice(0, 16).replace('T', ' ')}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      </div>
-
-      <aside className="space-y-3">
-        <section className="rounded border border-slate-200 bg-white p-3">
-          <h2 className="mb-2 font-medium">Generation rationale</h2>
-          {selectedDraft ? (
-            <DraftRationale draft={selectedDraft} />
-          ) : (
-            <p className="text-sm text-slate-500">Select a draft on the left.</p>
-          )}
-        </section>
-      </aside>
-    </div>
-  );
-}
-
-function DraftRationale({ draft }: { draft: Draft }) {
-  let ctx: Record<string, unknown> = {};
-  try {
-    ctx = JSON.parse(draft.context_snapshot_json);
-  } catch {
-    /* ignore */
-  }
-  return (
-    <div className="space-y-2 text-sm">
-      <div>
-        <div className="text-xs uppercase text-slate-500">draft_id</div>
-        <div className="font-mono">{draft.draft_id}</div>
-      </div>
-      <div>
-        <div className="text-xs uppercase text-slate-500">subject</div>
-        <div>{draft.subject}</div>
-      </div>
-      <details>
-        <summary className="cursor-pointer text-xs uppercase text-slate-500">body</summary>
-        <pre className="whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs">{draft.body}</pre>
-      </details>
-      <div>
-        <div className="text-xs uppercase text-slate-500">context</div>
-        <pre className="whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs">
-          {JSON.stringify(ctx, null, 2)}
-        </pre>
-      </div>
+      <FactsEditor
+        identityId={identityId}
+        campaignId={campaignId}
+        factKeys={Array.from(new Set(allMissing))}
+        onSubmitted={refresh}
+      />
     </div>
   );
 }

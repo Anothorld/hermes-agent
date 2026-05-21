@@ -1,7 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api';
-import { StageProgressBar } from '../components/StageProgressBar';
 
 type Product = { sku: string; name: string; url: string | null; tags: string[]; notes: string | null };
 
@@ -345,7 +344,7 @@ function CampaignCard({
           }}
         />
       )}
-      <StageProgressBar stage={c.stage} />
+      <StageBadge stage={c.stage} />
       {c.event_count === 0 && c.run_state && c.run_state !== 'running' && c.run_state !== 'queued' && c.run_state !== 'waiting_for_approval' && (
         <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
           <div className="font-medium">Agent finished without emitting any bridge events.</div>
@@ -772,5 +771,14 @@ export function ProductDetailPage() {
 
       {err && <div className="text-sm text-red-600">{err}</div>}
     </div>
+  );
+}
+
+function StageBadge({ stage }: { stage: string | null }) {
+  if (!stage) return null;
+  return (
+    <span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+      {stage}
+    </span>
   );
 }
