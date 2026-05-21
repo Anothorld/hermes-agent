@@ -5,13 +5,15 @@ import { ProductListPage } from './pages/ProductListPage';
 import { ProductDetailPage } from './pages/ProductDetailPage';
 import { KolKanbanPage } from './pages/KolKanbanPage';
 import { KolDetailPage } from './pages/KolDetailPage';
+import { KolRelationshipPage } from './pages/KolRelationshipPage';
 import { DraftQueuePage } from './pages/DraftQueuePage';
 import { BudgetBoardPage } from './pages/BudgetBoardPage';
 import { ReplyMonitorPage } from './pages/ReplyMonitorPage';
-import { ContractStubPage } from './pages/ContractStubPage';
-import { LogisticsStubPage } from './pages/LogisticsStubPage';
 import { FunnelReportPage } from './pages/FunnelReportPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { EscalationConsolePage } from './pages/EscalationConsolePage';
+import { PolicyEditorPage } from './pages/PolicyEditorPage';
+import { CampaignWizardPage } from './pages/CampaignWizardPage';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
@@ -23,6 +25,9 @@ function Nav() {
   const items = [
     ['/products', 'Products'],
     ['/kols', 'KOLs'],
+    ['/campaigns/new', 'New Campaign'],
+    ['/escalations', 'Escalations'],
+    ['/policies', 'Policies'],
     ['/drafts', 'Drafts'],
     ['/replies', 'Replies'],
     ['/budget', 'Budget'],
@@ -30,7 +35,7 @@ function Nav() {
     ['/settings', 'Settings'],
   ] as const;
   return (
-    <nav className="flex items-center gap-1 border-b border-slate-200 bg-white px-4 py-2">
+    <nav className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-white px-4 py-2">
       <span className="mr-4 font-semibold">KOL Ops</span>
       {items.map(([to, label]) => (
         <Link
@@ -65,13 +70,16 @@ export function App() {
             <Nav />
             <main className="mx-auto max-w-7xl p-4">
               <Routes>
-                <Route path="/" element={<Navigate to="/products" replace />} />
+                <Route path="/" element={<Navigate to="/kols" replace />} />
                 <Route path="/products" element={<ProductListPage />} />
                 <Route path="/products/:sku" element={<ProductDetailPage />} />
                 <Route path="/kols" element={<KolKanbanPage />} />
                 <Route path="/kols/:id" element={<KolDetailPage />} />
-                <Route path="/kols/:id/contract" element={<ContractStubPage />} />
-                <Route path="/kols/:id/logistics" element={<LogisticsStubPage />} />
+                <Route path="/kols/:id/relationship" element={<KolRelationshipPage />} />
+                <Route path="/campaigns/new" element={<CampaignWizardPage />} />
+                <Route path="/escalations" element={<EscalationConsolePage />} />
+                <Route path="/escalations/:id" element={<EscalationConsolePage />} />
+                <Route path="/policies" element={<PolicyEditorPage />} />
                 <Route path="/drafts" element={<DraftQueuePage />} />
                 <Route path="/replies" element={<ReplyMonitorPage />} />
                 <Route path="/budget" element={<BudgetBoardPage />} />
