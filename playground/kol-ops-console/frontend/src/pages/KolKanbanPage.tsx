@@ -32,7 +32,18 @@ function chipColorFor(fact: string): string {
 
 export function KolKanbanPage() {
   const [search, setSearch] = useSearchParams();
-  const campaignId = search.get('campaign_id') || '';
+  // Persist last-used campaign so revisiting /kols doesn't strand the user
+  // on the empty-state. URL takes precedence over localStorage.
+  const campaignId =
+    search.get('campaign_id') || localStorage.getItem('lastCampaignId') || '';
+  useEffect(() => {
+    const fromUrl = search.get('campaign_id');
+    if (fromUrl) localStorage.setItem('lastCampaignId', fromUrl);
+    else if (campaignId) {
+      setSearch({ campaign_id: campaignId }, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
   const [data, setData] = useState<EnrichedSnapshot[]>([]);
   const [counts, setCounts] = useState<{ pending_approvals: number; open_escalations: number }>(
     { pending_approvals: 0, open_escalations: 0 },
@@ -49,7 +60,7 @@ export function KolKanbanPage() {
   const refresh = useCallback(async () => {
     if (!campaignId) {
       setData([]);
-      setErr('Provide ?campaign_id=<id> in the URL to view the Kanban.');
+      setErr(null);
       return;
     }
     try {
@@ -176,6 +187,17 @@ export function KolKanbanPage() {
       />
 
       {err && <div className="text-red-600">{err}</div>}
+
+      {!campaignId && (
+        <div className="rounded border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+          Enter a <code>campaign_id</code> above to load the Kanban, or
+          start a new one in the{' '}
+          <Link to="/campaigns/new" className="text-sky-700 hover:underline">
+            Campaign Wizard
+          </Link>
+          .
+        </div>
+      )}
 
       <div className="flex gap-2">
         <div

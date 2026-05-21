@@ -76,7 +76,7 @@ install_frontend() {
 start_backend() {
   # shellcheck disable=SC1091
   source "$VENV/bin/activate"
-  : "${KOC_HOST:=127.0.0.1}"
+  : "${KOC_HOST:=0.0.0.0}"
   : "${KOC_PORT:=8765}"
   log "backend → http://$KOC_HOST:$KOC_PORT"
   (cd "$BACKEND" && exec uvicorn app.main:app --host "$KOC_HOST" --port "$KOC_PORT" --reload)

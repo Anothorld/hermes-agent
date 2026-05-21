@@ -1,6 +1,6 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, ApiError } from '../api';
+import { api } from '../api';
 
 type Product = { sku: string; name: string; url: string | null; tags: string[]; notes: string | null };
 
@@ -404,30 +404,13 @@ function CampaignCard({
   );
 }
 
-const DEFAULT_FORM = {
-  campaign_id: '',
-  budget_per_kol: '1500',
-  absolute_floor: '2200',
-  budget_total: '12000',
-  headcount_target: '8',
-  test_mode_to: 'tester@example.com',
-  env: 'TEST',
-  brief_extra: '',
-};
-
-const MAX_BRIEF_CHARS = 16_000;
-const BRIEF_ACCEPT = '.txt,.md,text/plain,text/markdown';
-
 export function ProductDetailPage() {
   const { sku } = useParams<{ sku: string }>();
   const [p, setP] = useState<Product | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [campaigns, setCampaigns] = useState<CampaignsPayload>({ campaigns: [], kols: {} });
   const [envFilter, setEnvFilter] = useState<'TEST' | 'LIVE'>('TEST');
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState(DEFAULT_FORM);
   const [msg, setMsg] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   const refreshCampaigns = () => {
     if (!sku) return;
@@ -451,62 +434,6 @@ export function ProductDetailPage() {
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sku, envFilter]);
-
-  const knownIds = useMemo(
-    () => new Set(campaigns.campaigns.map((c) => c.campaign_id)),
-    [campaigns.campaigns],
-  );
-  const hasRunning = campaigns.campaigns.some((c) => c.status === 'running');
-  const dupClient = form.campaign_id.trim() !== '' && knownIds.has(form.campaign_id.trim());
-
-  const start = async (e: FormEvent) => {
-    e.preventDefault();
-    setMsg(null);
-    setErr(null);
-    if (!sku) return;
-    const cid = form.campaign_id.trim();
-    if (!cid) return;
-    if (dupClient) {
-      setErr(
-        `campaign_id "${cid}" already exists for this SKU in ${form.env}. ` +
-          'Choose a different id, or use Mark closed first.',
-      );
-      return;
-    }
-    if (Number(form.budget_per_kol) >= Number(form.absolute_floor)) {
-      setErr('budget_per_kol must be < absolute_floor (refusal-zone rule).');
-      return;
-    }
-    setBusy(true);
-    try {
-      const briefExtra = form.brief_extra.trim();
-      const r = await api.post<{ run_id?: string }>(
-        `/campaigns/${encodeURIComponent(cid)}/start`,
-        {
-          product_sku: sku,
-          budget_per_kol: Number(form.budget_per_kol),
-          absolute_floor: Number(form.absolute_floor),
-          budget_total: Number(form.budget_total),
-          headcount_target: Number(form.headcount_target),
-          test_mode_to: form.test_mode_to,
-          env: form.env,
-          brief_extra: briefExtra ? briefExtra : null,
-        },
-      );
-      setMsg(`Started: run_id=${r.run_id ?? '(none)'}`);
-      setShowForm(false);
-      setForm({ ...DEFAULT_FORM, env: form.env });
-      refreshCampaigns();
-    } catch (ex) {
-      if (ex instanceof ApiError && ex.status === 409) {
-        setErr(`Server rejected: ${ex.body}`);
-      } else {
-        setErr(String(ex));
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const close = async (cid: string, env: string) => {
     try {
@@ -601,20 +528,13 @@ export function ProductDetailPage() {
           >
             Refresh
           </button>
-          <button
-            onClick={() => setShowForm((v) => !v)}
-            className="ml-auto rounded bg-emerald-600 px-3 py-1 text-sm text-white"
-          >
-            {showForm ? 'Cancel' : '+ New campaign'}
-          </button>
         </div>
 
-        {hasRunning && !showForm && (
-          <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            A campaign is currently running for this SKU. Starting another one will be rejected
-            unless you mark the current one closed.
-          </div>
-        )}
+        <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          Campaign launch from the console is disabled in Phase A — the bridge no longer exposes
+          <code className="mx-1 rounded bg-white px-1">/campaigns/&lt;id&gt;/start</code>. Start campaigns via
+          the orchestrator flow; this view stays read-only until the Phase B launch wiring lands.
+        </div>
 
         {campaigns.campaigns.length === 0 ? (
           <div className="rounded border bg-white p-4 text-sm text-slate-500">
@@ -636,139 +556,7 @@ export function ProductDetailPage() {
         )}
       </section>
 
-      {showForm && (
-        <section className="rounded border bg-white p-3">
-          <h2 className="mb-2 font-medium">Start a new campaign</h2>
-          <form onSubmit={start} className="grid grid-cols-2 gap-3 text-sm">
-            <label>
-              campaign_id
-              <input
-                required
-                value={form.campaign_id}
-                onChange={(e) => setForm({ ...form, campaign_id: e.target.value })}
-                className={
-                  'mt-1 block w-full rounded border px-2 py-1 ' +
-                  (dupClient ? 'border-red-500' : '')
-                }
-              />
-              {dupClient && (
-                <span className="text-xs text-red-600">already exists in {form.env}</span>
-              )}
-            </label>
-            <label>
-              env
-              <select
-                value={form.env}
-                onChange={(e) => setForm({ ...form, env: e.target.value })}
-                className="mt-1 block w-full rounded border px-2 py-1"
-              >
-                <option value="TEST">TEST</option>
-                <option value="LIVE">LIVE</option>
-              </select>
-            </label>
-            {(
-              [
-                ['budget_per_kol', 'Budget per KOL (USD)'],
-                ['absolute_floor', 'Absolute floor (USD) — must be > per-KOL'],
-                ['budget_total', 'Total budget (USD)'],
-                ['headcount_target', 'Headcount target'],
-                ['test_mode_to', 'TEST inbox'],
-              ] as const
-            ).map(([k, label]) => (
-              <label key={k}>
-                {label}
-                <input
-                  value={form[k as keyof typeof form]}
-                  onChange={(e) => setForm({ ...form, [k]: e.target.value })}
-                  className="mt-1 block w-full rounded border px-2 py-1"
-                />
-              </label>
-            ))}
-            <div className="col-span-2 space-y-1">
-              <div className="flex items-center justify-between">
-                <label htmlFor="brief_extra" className="font-medium">
-                  Product brief (optional)
-                </label>
-                <div className="flex items-center gap-2 text-xs text-slate-500">
-                  <span>
-                    {form.brief_extra.length.toLocaleString()} / {MAX_BRIEF_CHARS.toLocaleString()} chars
-                  </span>
-                  <label className="cursor-pointer rounded border border-slate-300 px-2 py-0.5 hover:bg-slate-50">
-                    Upload .txt / .md
-                    <input
-                      type="file"
-                      accept={BRIEF_ACCEPT}
-                      className="hidden"
-                      onChange={async (e) => {
-                        const file = e.target.files?.[0];
-                        // Reset so re-selecting the same file fires onChange.
-                        e.target.value = '';
-                        if (!file) return;
-                        const lower = file.name.toLowerCase();
-                        if (!lower.endsWith('.txt') && !lower.endsWith('.md')) {
-                          setErr('Only .txt or .md files are accepted.');
-                          return;
-                        }
-                        if (file.size > MAX_BRIEF_CHARS * 2) {
-                          setErr(`File too large (> ${MAX_BRIEF_CHARS} chars).`);
-                          return;
-                        }
-                        try {
-                          const text = await file.text();
-                          if (text.length > MAX_BRIEF_CHARS) {
-                            setErr(
-                              `File content exceeds ${MAX_BRIEF_CHARS} chars (got ${text.length}).`,
-                            );
-                            return;
-                          }
-                          setErr(null);
-                          setForm((prev) => ({ ...prev, brief_extra: text }));
-                        } catch (ex) {
-                          setErr(`Failed to read file: ${String(ex)}`);
-                        }
-                      }}
-                    />
-                  </label>
-                  {form.brief_extra && (
-                    <button
-                      type="button"
-                      onClick={() => setForm({ ...form, brief_extra: '' })}
-                      className="rounded border border-slate-300 px-2 py-0.5 hover:bg-slate-50"
-                    >
-                      Clear
-                    </button>
-                  )}
-                </div>
-              </div>
-              <textarea
-                id="brief_extra"
-                value={form.brief_extra}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    brief_extra: e.target.value.slice(0, MAX_BRIEF_CHARS),
-                  })
-                }
-                placeholder="Paste a product brief, key selling points, audience notes, etc. Markdown supported."
-                rows={8}
-                className="block w-full rounded border px-2 py-1 font-mono text-xs"
-              />
-              <p className="text-xs text-slate-500">
-                Appended to the auto-generated brief sent to the orchestrator. Leave blank to use
-                only the SKU catalog data.
-              </p>
-            </div>
-            <button
-              disabled={busy || dupClient}
-              className="col-span-2 rounded bg-emerald-600 px-3 py-1 text-white disabled:bg-slate-300"
-            >
-              {busy ? 'Starting…' : 'Start'}
-            </button>
-          </form>
-          {msg && <div className="mt-2 text-sm text-emerald-700">{msg}</div>}
-        </section>
-      )}
-
+      {msg && <div className="text-sm text-emerald-700">{msg}</div>}
       {err && <div className="text-sm text-red-600">{err}</div>}
     </div>
   );

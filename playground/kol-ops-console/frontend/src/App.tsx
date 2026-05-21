@@ -24,17 +24,16 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 }
 
 function Nav() {
+  // Note: deprecated entries (New Campaign / Budget / Reports / Drafts /
+  // Replies) intentionally omitted from the nav. Phase A retired the
+  // drafts + replies persistence layer, and the budget/reports pages are
+  // placeholders. Routes stay mounted so existing bookmarks keep resolving.
   const items = [
     ['/products', 'Products'],
     ['/kols', 'KOLs'],
-    ['/campaigns/new', 'New Campaign'],
     ['/escalations', 'Escalations'],
     ['/approvals', 'Approvals'],
     ['/policies', 'Policies'],
-    ['/drafts', 'Drafts'],
-    ['/replies', 'Replies'],
-    ['/budget', 'Budget'],
-    ['/reports', 'Reports'],
     ['/settings', 'Settings'],
   ] as const;
   return (
