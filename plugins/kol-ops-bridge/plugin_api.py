@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from . import cal
 from . import discovery_router
+from . import policies as _policies
 from .schema import FACT_NAMESPACES, GOAL_NAMES, SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
@@ -184,6 +185,13 @@ class FactsWriteMultiBody(BaseModel):
     source: str = "skill"
     source_event_id: Optional[int] = None
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+class PolicyPutBody(BaseModel):
+    content_md: str
+    updated_by: str
+    owner_user_id: Optional[int] = None
+    title: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -652,3 +660,83 @@ def resolve_escalation(
         final_state=body.final_state,
     )
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Policy documents (Phase E)
+# ---------------------------------------------------------------------------
+
+
+_POLICY_SCOPES = {"company_style", "user_style", "escalation_rules"}
+
+
+def _resolve_owner(scope: str, owner_user_id: Optional[int]) -> Optional[int]:
+    if scope == "user_style":
+        if owner_user_id is None:
+            raise HTTPException(status_code=400, detail="user_style requires owner_user_id")
+        return int(owner_user_id)
+    if owner_user_id is not None:
+        raise HTTPException(status_code=400, detail=f"{scope} must omit owner_user_id")
+    return None
+
+
+@router.get("/policies/{scope}")
+def get_policy(
+    scope: str,
+    owner_user_id: Optional[int] = Query(default=None),
+) -> dict[str, Any]:
+    if scope not in _POLICY_SCOPES:
+        raise HTTPException(status_code=404, detail="unknown scope")
+    owner = _resolve_owner(scope, owner_user_id)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        row = _policies.get_policy(conn, scope=scope, owner_user_id=owner)
+    return {"policy": row}
+
+
+@router.put("/policies/{scope}")
+def put_policy(
+    scope: str,
+    body: PolicyPutBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    if scope not in _POLICY_SCOPES:
+        raise HTTPException(status_code=404, detail="unknown scope")
+    owner = _resolve_owner(scope, body.owner_user_id)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        row = _policies.put_policy(
+            conn,
+            scope=scope,
+            content_md=body.content_md,
+            updated_by=body.updated_by,
+            owner_user_id=owner,
+            title=body.title,
+        )
+    return {"policy": row}
+
+
+@router.get("/policies/{scope}/history")
+def list_policy_history(
+    scope: str,
+    owner_user_id: Optional[int] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    if scope not in _POLICY_SCOPES:
+        raise HTTPException(status_code=404, detail="unknown scope")
+    owner = _resolve_owner(scope, owner_user_id)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = _policies.list_policy_history(
+            conn, scope=scope, owner_user_id=owner, limit=limit
+        )
+    return {"history": rows}
+
+
+@router.get("/policies/escalation_rules/parsed")
+def get_parsed_escalation_rules() -> dict[str, Any]:
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        row = _policies.get_policy(conn, scope="escalation_rules")
+    if not row:
+        return {"top": {}, "rules": [], "version": 0}
+    parsed = _policies.parse_escalation_rules(row["content_md"])
+    parsed["version"] = row["version"]
+    return parsed

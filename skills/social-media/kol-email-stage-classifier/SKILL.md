@@ -33,6 +33,14 @@ extraction in a single LLM pass — never split across goals/stages.
    business decision; that's the dispatcher's job.
 5. `relationship_summary` (optional) — for repeat KOLs: `last_outcome`,
    `preferred_skus`, `preferred_mode`, `default_shipping_address` flag.
+6. `escalation_rules` (Phase E, optional) — parsed payload from
+   `GET /policies/escalation_rules/parsed`:
+   `{ "top": {...}, "rules": [ {"id": str, "signals_match": [str],
+   "severity": str, "suggested_question": str,
+   "required_facts_to_resume": [str]} ] }`.
+   When provided, the classifier MUST run rule-matching after signal
+   extraction (see Procedure step 7) and surface any deterministic match in
+   `escalation_hint`. When absent (e.g. policy doc empty), behave as before.
 
 ## Output Schema
 Exactly one JSON object, keys in this order, no markdown wrapping:
@@ -57,7 +65,10 @@ Exactly one JSON object, keys in this order, no markdown wrapping:
   "ambiguity": "<empty string if none, otherwise a one-sentence description>",
   "escalation_hint": {
     "should_consider": true|false,
-    "reason": "<empty | rule pattern matched | structural ambiguity | over-cap signal>"
+    "reason": "<empty | rule pattern matched | structural ambiguity | over-cap signal>",
+    "matched_rule_id": "<empty | rule_id from escalation_rules>",
+    "suggested_question": "<empty | rule.suggested_question copied verbatim>",
+    "required_facts_to_resume": []
   }
 }
 ```
@@ -128,6 +139,23 @@ Common signals, append-only — emit only when evidence is in the email body:
    `paid_ceiling`, requests SKU outside whitelist, asks to change a contract
    core term, requests deliverables > campaign cap, claims package lost /
    address dispute, multi-round revision overflow.
+7. **Rule matching (Phase E).** If `escalation_rules` is provided, walk
+   each rule in `escalation_rules.rules` and check whether **every** entry
+   in `rule.signals_match` is present in the `signals` array you just
+   emitted (compare by `signal.name`; case-sensitive; no fuzzy match). On
+   the first rule that matches:
+   - Set `escalation_hint.should_consider = true`.
+   - Set `escalation_hint.matched_rule_id = rule.id`.
+   - Copy `rule.suggested_question` verbatim into
+     `escalation_hint.suggested_question`.
+   - Copy `rule.required_facts_to_resume` verbatim into
+     `escalation_hint.required_facts_to_resume`.
+   - Set `escalation_hint.reason = "rule pattern matched"`.
+   If no rule matches but step 6 still triggered (over-cap / structural),
+   leave `matched_rule_id` and `suggested_question` empty strings and
+   `required_facts_to_resume = []`. Rule matching is deterministic — do
+   **not** invent rule_ids and do **not** re-rank rules; the first match
+   in declared order wins.
 
 ## Examples (few-shot mental model)
 
@@ -153,7 +181,9 @@ Common signals, append-only — emit only when evidence is in the email body:
       "evidence": "and budget" }
   ],
   "ambiguity": "",
-  "escalation_hint": { "should_consider": false, "reason": "" }
+  "escalation_hint": { "should_consider": false, "reason": "",
+    "matched_rule_id": "", "suggested_question": "",
+    "required_facts_to_resume": [] }
 }
 ```
 
@@ -183,7 +213,10 @@ Common signals, append-only — emit only when evidence is in the email body:
   "ambiguity": "",
   "escalation_hint": {
     "should_consider": true,
-    "reason": "kol_quote_over_paid_ceiling"
+    "reason": "rule pattern matched",
+    "matched_rule_id": "paid_quote_over_ceiling",
+    "suggested_question": "KOL quote exceeds paid_ceiling — approve override or counter?",
+    "required_facts_to_resume": ["paid_ceiling_override"]
   }
 }
 ```
@@ -203,7 +236,9 @@ Common signals, append-only — emit only when evidence is in the email body:
       "evidence": "Out of office until Aug 19" }
   ],
   "ambiguity": "",
-  "escalation_hint": { "should_consider": false, "reason": "" }
+  "escalation_hint": { "should_consider": false, "reason": "",
+    "matched_rule_id": "", "suggested_question": "",
+    "required_facts_to_resume": [] }
 }
 ```
 
