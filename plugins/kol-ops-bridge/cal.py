@@ -851,7 +851,60 @@ def open_escalation(
                 )
             return esc_id
 
-    return _safe("open_escalation", _do)
+    esc_id = _safe("open_escalation", _do)
+    if esc_id is not None:
+        _notify_escalation_opened(
+            esc_id=esc_id,
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            goal=goal,
+            reason=reason,
+            severity=severity,
+            question=question_to_operator,
+        )
+    return esc_id
+
+
+def _notify_escalation_opened(
+    *,
+    esc_id: int,
+    identity_id: Optional[int],
+    campaign_id: Optional[str],
+    goal: Optional[str],
+    reason: str,
+    severity: str,
+    question: Optional[str],
+) -> None:
+    """Best-effort DingTalk notification for a fresh escalation.
+
+    Failures are swallowed (notifier itself never raises on transport
+    error). We import lazily so the cal module stays usable in test
+    environments that stub out notifier."""
+    try:
+        from . import notifier as _notifier  # local import; avoid cycles
+    except Exception:  # pragma: no cover — defensive
+        return
+    lines = [
+        f"**reason**: {reason}",
+        f"**severity**: {severity}",
+    ]
+    if identity_id:
+        lines.append(f"**identity_id**: {identity_id}")
+    if campaign_id:
+        lines.append(f"**campaign**: {campaign_id}")
+    if goal:
+        lines.append(f"**goal**: {goal}")
+    if question:
+        lines.append(f"**question**: {question}")
+    try:
+        _notifier.notify(
+            kind="escalation",
+            title=f"Escalation #{esc_id} opened",
+            lines=lines,
+            ref={"escalation_id": esc_id},
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("notifier.notify(escalation) failed: %s", exc)
 
 
 def resolve_escalation(
@@ -1004,12 +1057,101 @@ def archive_collab(
 
 
 # ---------------------------------------------------------------------------
+# Stuck-goal scanner (cron-callable)
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_FOLLOWUP_HOURS = 72
+
+
+def check_stuck_goals(*, env: str = "LIVE", now: Optional[str] = None) -> list[dict[str, Any]]:
+    """Scan ``kol_goal_state`` for goals whose ``updated_at`` is older
+    than the campaign's ``followup_intervals[goal]`` (hours; defaults to
+    72h). For each stuck goal, emit a best-effort DingTalk notification
+    and return the matched rows.
+
+    Designed to be called by a cron job (HTTP or CLI). Notifier failures
+    are swallowed; the function itself never raises on transport error.
+    """
+    import datetime as _dt
+    now_iso = now or _now()
+    try:
+        now_dt = _dt.datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return []
+
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT identity_id, campaign_id, goal, lane, status, updated_at
+                 FROM kol_goal_state
+                WHERE status IN ('active', 'blocked') AND env=?""",
+            (env,),
+        ).fetchall()
+
+    # Cache campaign_config followup_intervals lookups.
+    intervals_cache: dict[str, dict[str, Any]] = {}
+    stuck: list[dict[str, Any]] = []
+    for r in rows:
+        cid = r["campaign_id"]
+        if cid not in intervals_cache:
+            cfg = get_campaign_config(cid) or {}
+            intervals_cache[cid] = cfg.get("followup_intervals") or {}
+        interval_hours = intervals_cache[cid].get(r["goal"], _DEFAULT_FOLLOWUP_HOURS)
+        try:
+            updated = _dt.datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            continue
+        age_hours = (now_dt - updated).total_seconds() / 3600.0
+        if age_hours < float(interval_hours):
+            continue
+        rec = {
+            "identity_id": r["identity_id"],
+            "campaign_id": cid,
+            "goal": r["goal"],
+            "lane": r["lane"],
+            "status": r["status"],
+            "age_hours": round(age_hours, 1),
+            "threshold_hours": interval_hours,
+        }
+        stuck.append(rec)
+        _notify_goal_stuck(rec)
+    return stuck
+
+
+def _notify_goal_stuck(rec: Mapping[str, Any]) -> None:
+    try:
+        from . import notifier as _notifier  # local import; avoid cycles
+    except Exception:  # pragma: no cover
+        return
+    lines = [
+        f"**campaign**: {rec.get('campaign_id')}",
+        f"**identity_id**: {rec.get('identity_id')}",
+        f"**goal**: {rec.get('goal')} ({rec.get('lane')})",
+        f"**status**: {rec.get('status')}",
+        f"**age**: {rec.get('age_hours')}h (threshold {rec.get('threshold_hours')}h)",
+    ]
+    try:
+        _notifier.notify(
+            kind="info",
+            title=f"Goal stuck: {rec.get('goal')}",
+            lines=lines,
+            ref={
+                "identity_id": rec.get("identity_id"),
+                "campaign_id": rec.get("campaign_id"),
+            },
+        )
+    except Exception as exc:  # pragma: no cover
+        log.warning("notifier.notify(goal_stuck) failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Public surface
 # ---------------------------------------------------------------------------
 
 __all__ = [
     "FactNamespaceError",
     "archive_collab",
+    "check_stuck_goals",
     "db_path",
     "find_identity_by_handle",
     "get_campaign_config",
