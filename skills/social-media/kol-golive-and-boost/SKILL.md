@@ -1,7 +1,7 @@
 ---
 name: kol-golive-and-boost
-description: After draft approval, drives the post live and boost coordination — confirms posting time, sends final hashtag/mention/handle bundle, optionally requests a no-watermark asset for paid boosting, and provides the boost authorization code if the campaign uses paid amplification. Three modes — (1) prep: send go-live bundle with handles/hashtags + posting-time ask; (2) handle_response: KOL confirms posting time → write `publish.golive_at_planned`; KOL provides post URL → write `publish.posted_url` + `publish.posted_at` + `publish.golive_done=true`; (3) boost_followup: ask for whitelisted boost code or no-watermark asset post-publish.
-trigger: Invoked by `kol-reply-dispatcher` when `active_goals_by_lane.publish == "golive"` AND `publish.draft_approved == true`. `boost_followup` mode runs after `publish.golive_done == true` AND `campaign_config.boost_required == true` AND `publish.boost_handoff_done != true`.
+description: After draft approval, drives the post live and boost coordination — confirms posting time, sends final hashtag/mention/handle bundle, optionally requests a no-watermark asset for paid boosting, and provides the boost authorization code if the campaign uses paid amplification. Three modes — (1) prep: send go-live bundle with handles/hashtags + posting-time ask; (2) handle_response: KOL confirms posting time → write `fulfillment.golive_at_planned`; KOL provides post URL → write `fulfillment.posted_url` + `fulfillment.posted_at` + `fulfillment.golive_done=true`; (3) boost_followup: ask for whitelisted boost code or no-watermark asset post-fulfillment.
+trigger: Invoked by `kol-reply-dispatcher` when `active_goals_by_lane.publish == "golive"` AND `fulfillment.draft_approved == true`. `boost_followup` mode runs after `fulfillment.golive_done == true` AND `campaign_config.boost_required == true` AND `fulfillment.boost_handoff_done != true`.
 tags: ["kol", "golive", "boost", "draft-generator", "publish-lane"]
 ---
 
@@ -28,7 +28,7 @@ URL, and (if applicable) close the boost handoff loop.
 1. `identity_id`, `campaign_id`, `env`, `thread_id`.
 2. `mode`: `prep | handle_response | boost_followup`.
 3. For `handle_response`: classifier-extracted
-   `publish.posted_url_proposed` and/or `publish.golive_at_proposed`.
+   `fulfillment.posted_url_proposed` and/or `fulfillment.golive_at_proposed`.
 
 ## Procedure
 
@@ -40,13 +40,13 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
 Read:
 - `campaign_config.required_mentions`, `required_hashtags`,
   `boost_required`, `boost_meta_partner_code`, `no_watermark_required`.
-- Latest `publish.draft_approved` / `publish.golive_done` /
-  `publish.boost_handoff_done`.
+- Latest `fulfillment.draft_approved` / `fulfillment.golive_done` /
+  `fulfillment.boost_handoff_done`.
 
 ### Step 2 — Branch on mode
 
 **Mode PREP:**
-- Idempotent guard: if `publish.golive_done==true`, skip to
+- Idempotent guard: if `fulfillment.golive_done==true`, skip to
   `boost_followup` mode (or abort).
 - Body skeleton:
   > "All set on our end! When posting, please make sure to:
@@ -57,29 +57,29 @@ Read:
   >
   > What's the planned go-live time? Once it's up, drop the link here
   > and we're done."
-- Write `publish.golive_bundle_sent=true` + `publish.golive_bundle_sent_at`.
+- Write `fulfillment.golive_bundle_sent=true` + `fulfillment.golive_bundle_sent_at`.
 
 **Mode HANDLE_RESPONSE:**
 
 | Signal | Action |
 |---|---|
-| `golive_at_proposed` only (e.g. "going live tomorrow 7pm PT") | write `publish.golive_at_planned=<iso8601>`; draft "Sounds good — talk after it's up." |
-| `posted_url_proposed` validates as URL (host matches platform) | write `publish.posted_url=<url>` + `publish.posted_at=<iso8601>` + `publish.golive_done=true`; draft "Got it, looks great live! Sharing internally." If `boost_required==true`, append "I'll follow up with one more ask re: paid amplification." |
+| `golive_at_proposed` only (e.g. "going live tomorrow 7pm PT") | write `fulfillment.golive_at_planned=<iso8601>`; draft "Sounds good — talk after it's up." |
+| `posted_url_proposed` validates as URL (host matches platform) | write `fulfillment.posted_url=<url>` + `fulfillment.posted_at=<iso8601>` + `fulfillment.golive_done=true`; draft "Got it, looks great live! Sharing internally." If `boost_required==true`, append "I'll follow up with one more ask re: paid amplification." |
 | `posted_url_proposed` invalid | write nothing; reply "Could you re-share the link? It came through truncated." |
 | both | write all three + draft combined ack |
 
 **Mode BOOST_FOLLOWUP:**
-- Idempotent guard: if `publish.boost_handoff_done==true`, abort.
+- Idempotent guard: if `fulfillment.boost_handoff_done==true`, abort.
 - If `boost_meta_partner_code` is configured AND passes safety check:
   > "For paid amplification, please grant our partner code on Meta:
   > `<boost_meta_partner_code>`. Quick guide: `<doc link if any>`."
-- If `no_watermark_required==true` AND `publish.no_watermark_url`
+- If `no_watermark_required==true` AND `fulfillment.no_watermark_url`
   not yet written: append "Could you also share the no-watermark
   version? File or link both work."
-- Write `publish.boost_handoff_done=true` only when ALL required
+- Write `fulfillment.boost_handoff_done=true` only when ALL required
   signals from KOL are captured (boost_code_acknowledged AND
   no_watermark_url, depending on config). Otherwise just
-  `publish.boost_followup_sent=true`.
+  `fulfillment.boost_followup_sent=true`.
 
 ### Step 3 — Return draft envelope
 ```json
