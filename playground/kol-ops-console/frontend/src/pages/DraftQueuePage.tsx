@@ -25,6 +25,9 @@ export function DraftQueuePage() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   const refresh = useCallback(() => {
+    // Note: reconciliation runs on the bridge's background poller; the
+    // previous client-side `/drafts/reconcile` call was removed because
+    // that endpoint never existed (it produced 404 spam in the console).
     api
       .get<Draft[]>(`/drafts/pending?env=${envFilter}`)
       .then((rows) => {

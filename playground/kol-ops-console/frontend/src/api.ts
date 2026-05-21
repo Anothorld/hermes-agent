@@ -28,7 +28,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    if (res.status === 401) setToken(null);
+    if (res.status === 401) {
+      setToken(null);
+      // Hard redirect so RequireAuth picks up the cleared token and the
+      // user lands on the login form instead of a stuck error page.
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+    }
     throw new ApiError(res.status, text);
   }
   const ct = res.headers.get('content-type') || '';
@@ -72,7 +79,12 @@ export type EscalationRow = {
   rule_id: string | null;
   reason: string;
   suggested_question: string | null;
-  state: 'open' | 'resolved' | 'terminated';
+  state:
+    | 'awaiting_answer'
+    | 'answered'
+    | 'resolved'
+    | 're_escalated'
+    | 'aborted';
   parent_id: number | null;
   created_at: string;
   resolved_at: string | null;

@@ -16,9 +16,11 @@ export function EscalationConsolePage() {
 
 function EscalationList() {
   const [rows, setRows] = useState<EscalationRow[]>([]);
-  const [state, setState] = useState<'open' | 'resolved' | 'terminated' | 'all'>(
-    'open',
-  );
+  // Bridge-side states: awaiting_answer | answered | resolved | re_escalated | aborted.
+  // Default to awaiting_answer so operators see the actionable queue first.
+  const [state, setState] = useState<
+    'awaiting_answer' | 'answered' | 'resolved' | 're_escalated' | 'aborted' | 'all'
+  >('awaiting_answer');
   const [err, setErr] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -46,9 +48,11 @@ function EscalationList() {
           onChange={(e) => setState(e.target.value as typeof state)}
           className="rounded border border-slate-300 px-2 py-1 text-sm"
         >
-          <option value="open">open</option>
+          <option value="awaiting_answer">awaiting_answer</option>
+          <option value="answered">answered</option>
           <option value="resolved">resolved</option>
-          <option value="terminated">terminated</option>
+          <option value="re_escalated">re_escalated</option>
+          <option value="aborted">aborted</option>
           <option value="all">all</option>
         </select>
       </div>
@@ -174,7 +178,7 @@ function EscalationDetail({ id }: { id: number }) {
         )}
       </div>
 
-      {row.state !== 'open' ? (
+      {row.state !== 'awaiting_answer' ? (
         <div className="rounded border border-slate-200 bg-white p-3 text-sm text-slate-600">
           Already {row.state}. Operator answer was:{' '}
           <em>{row.operator_answer || '(empty)'}</em>

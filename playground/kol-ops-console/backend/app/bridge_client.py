@@ -250,6 +250,79 @@ class BridgeClient:
             "PATCH", f"/escalations/{escalation_id}", json=body
         )
 
+    # --------------------------------------------------------------- Events
+    async def recent_events(
+        self, env: str = "LIVE", limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Recent conversation events.
+
+        The bridge does not yet expose a ``/events`` read endpoint, so this
+        returns an empty list rather than raising AttributeError. Callers
+        already treat the events feed as best-effort enrichment and degrade
+        gracefully when it is empty. Replace with a real GET once the bridge
+        ships the endpoint.
+        """
+        return []
+
+    # ----------------------------------------------- Identities / timeline
+    async def list_identities(self, env: str = "LIVE") -> list[dict[str, Any]]:
+        """List KOL identities — bridge has no ``GET /identities`` yet.
+
+        Returns an empty list so the consumers (Kanban, product summary)
+        render an empty state rather than 500.
+        """
+        return []
+
+    async def get_timeline(
+        self, identity_id: int, env: str = "LIVE"
+    ) -> list[dict[str, Any]]:
+        """Per-identity conversation timeline — bridge endpoint pending."""
+        return []
+
+    # ---------------------------------------------- Drafts / replies (dead)
+    # Phase A retired the kol_drafts / kol_replies persistence. These stubs
+    # keep the legacy routers from raising AttributeError; the UI nav links
+    # are also removed so this path is only hit by deep-linked bookmarks.
+    async def list_pending_drafts(
+        self, env: str = "LIVE"
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def get_draft(
+        self, draft_id: str, env: str = "LIVE"
+    ) -> dict[str, Any]:
+        raise BridgeError(404, "drafts retired in Phase A")
+
+    # ------------------------------------------- Shortlist / inbound reply
+    async def get_shortlist(
+        self, campaign_id: str, env: str = "LIVE"
+    ) -> dict[str, Any]:
+        # Mirrors bridge candidates endpoint shape.
+        out = await self.list_candidates(campaign_id, env=env)
+        return {"campaign_id": campaign_id, "candidates": out}
+
+    async def approve_shortlist(
+        self, campaign_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self.select_candidates(campaign_id, body)
+
+    async def inject_inbound_reply(
+        self, campaign_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        raise BridgeError(501, "inbound reply injection not wired")
+
+    # ---------------------------------------------------- Campaign launch
+    async def start_campaign(
+        self, campaign_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        raise BridgeError(501, "campaign launch goes through gateway, not bridge")
+
+    # ----------------------------------------------------- Contract stub
+    async def push_contract_update(
+        self, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        raise BridgeError(501, "contract provider not wired")
+
     # ---------------------------------------------------------------- Admin
     async def wipe_test(self) -> dict[str, Any]:
         return await self._req("POST", "/admin/wipe-test")
