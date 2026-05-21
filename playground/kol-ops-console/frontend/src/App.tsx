@@ -6,10 +6,7 @@ import { ProductDetailPage } from './pages/ProductDetailPage';
 import { KolKanbanPage } from './pages/KolKanbanPage';
 import { KolDetailPage } from './pages/KolDetailPage';
 import { KolRelationshipPage } from './pages/KolRelationshipPage';
-import { DraftQueuePage } from './pages/DraftQueuePage';
-import { BudgetBoardPage } from './pages/BudgetBoardPage';
 import { ReplyMonitorPage } from './pages/ReplyMonitorPage';
-import { FunnelReportPage } from './pages/FunnelReportPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { EscalationConsolePage } from './pages/EscalationConsolePage';
 import { ApprovalsPage } from './pages/ApprovalsPage';
@@ -24,10 +21,10 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 }
 
 function Nav() {
-  // Note: deprecated entries (New Campaign / Budget / Reports / Drafts /
-  // Replies) intentionally omitted from the nav. Phase A retired the
-  // drafts + replies persistence layer, and the budget/reports pages are
-  // placeholders. Routes stay mounted so existing bookmarks keep resolving.
+  // Note: New Campaign / Replies entries intentionally omitted from the
+  // main nav (Replies is reachable via deep link for ops review only;
+  // New Campaign launches from a per-product page).  Deprecated
+  // Budget / Reports / Drafts pages were removed in Phase B cleanup.
   const items = [
     ['/products', 'Products'],
     ['/kols', 'KOLs'],
@@ -84,10 +81,7 @@ export function App() {
                 <Route path="/escalations/:id" element={<EscalationConsolePage />} />
                 <Route path="/approvals" element={<ApprovalsPage />} />
                 <Route path="/policies" element={<PolicyEditorPage />} />
-                <Route path="/drafts" element={<DraftQueuePage />} />
                 <Route path="/replies" element={<ReplyMonitorPage />} />
-                <Route path="/budget" element={<BudgetBoardPage />} />
-                <Route path="/reports" element={<FunnelReportPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
             </main>

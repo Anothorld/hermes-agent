@@ -83,14 +83,31 @@ cronjob(action="trigger", job_id="...")   # one-off run for testing
 
 Before flipping a campaign to LIVE:
 
-1. `mode: TEST` and `test_mode_to` set to your own mailbox.
-2. Orchestrate a campaign with 3 mock KOLs (use Instagram handles you
-   control; the orchestrator will call `cal.upsert_identity` with your
-   own email as `primary_email` so TEST drafts target your inbox).
+1. `mode: TEST` and `test_mode_to` set to your own mailbox. Export the
+   same address as the bridge-wide recipient override so every TEST
+   draft (regardless of whether discovery found an email) is forced to
+   land in your inbox:
+   ```bash
+   export KOL_OPS_BRIDGE_TEST_INBOX=<your inbox>
+   # then (re)start the bridge so the override is picked up
+   ```
+   When `KOL_OPS_BRIDGE_TEST_INBOX` is set, the bridge **skips writing
+   the recipient as a per-KOL email alias** (otherwise the shared
+   inbox would pollute every identity's alias set), and the gmail
+   poller **ignores sender-email fallback matches whose `From:` equals
+   the test inbox** (so your own self-replies do not get auto-routed
+   to whichever KOL was indexed first). Both guards activate only in
+   `env=TEST`.
+2. Orchestrate a real campaign — `instagram-kol-discovery` runs the
+   actual Hermes browser + `veedcrawl_metadata` tools and returns a
+   real shortlist. No mock data is required; the discovery skill is the
+   single source of candidates. If the brief is well-specified you can
+   cap the headcount target at 3 for a fast smoke run.
 3. Verify in Gmail:
-   - 3 drafts appear under `kol-outreach/pending/initial`.
-   - Each draft's `To:` is the test inbox; first body line reads
-     `Intended recipient: <real_email>`.
+   - N drafts appear under `kol-outreach/pending/initial` (N = approved
+     handles).
+   - Each draft's `To:` is your `KOL_OPS_BRIDGE_TEST_INBOX`; first body
+     line reads `Intended recipient: <real_email_or_handle>`.
    - No SKU links in the initial draft.
 4. Reply to one of the drafts from the test inbox with text like
    `interested, can you share product info?`. After ≤ 10 minutes, expect a
