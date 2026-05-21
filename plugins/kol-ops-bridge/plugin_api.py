@@ -419,24 +419,44 @@ def get_lanes(
 ) -> dict[str, Any]:
     """Return per-identity lane snapshots for the entire campaign.
 
-    Output: ``{ "items": [ { "identity_id":..., "lanes":{commerce:[...], ...} }, ... ] }``.
-    Suitable for the Web kanban lane filter.
+    Output: ``{ "items": [ { "identity_id":..., "handle":...,
+    "candidate_status":..., "relationship_status":...,
+    "repeat_count":..., "last_outcome":..., "archived": bool,
+    "lanes":{commerce:[...], ...} }, ... ],
+    "counts": {"pending_approvals": N, "open_escalations": M} }``.
+    Suitable for the Web kanban lane filter + top-of-page badges.
     """
     candidates = cal.list_candidates(campaign_id, env=env)
     items = []
     for c in candidates:
         if not c.get("identity_id"):
             continue
+        ident = cal.get_identity(c["identity_id"]) or {}
+        rel = cal.get_relationship(c["identity_id"]) or {}
         items.append({
             "identity_id": c["identity_id"],
+            "handle": ident.get("primary_handle") or f"id{c['identity_id']}",
             "candidate_status": c["candidate_status"],
             "relationship_status": c["relationship_status"],
+            "repeat_count": int(rel.get("total_collabs") or 0),
+            "last_outcome": rel.get("last_outcome"),
+            "archived": c["candidate_status"] in ("archived", "rejected"),
             "lanes": cal.get_lanes_view(
                 identity_id=c["identity_id"],
                 campaign_id=campaign_id, env=env,
             ),
         })
-    return {"items": items}
+    counts = {
+        "pending_approvals": sum(
+            1 for a in cal.list_pending_approvals(env=env)
+            if a.get("campaign_id") == campaign_id
+        ),
+        "open_escalations": sum(
+            1 for e in cal.list_escalations(state="open", env=env)
+            if e.get("campaign_id") == campaign_id
+        ),
+    }
+    return {"items": items, "counts": counts}
 
 
 # ---------------------------------------------------------------------------
