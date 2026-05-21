@@ -37,6 +37,7 @@ export function KolDetailPage() {
   const [identity, setIdentity] = useState<IdentityResponse | null>(null);
   const [goals, setGoals] = useState<GoalsResponse | null>(null);
   const [escalations, setEscalations] = useState<EscalationLite[]>([]);
+  const [pendingApprovals, setPendingApprovals] = useState<number>(0);
   const [err, setErr] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -45,17 +46,23 @@ export function KolDetailPage() {
       return;
     }
     try {
-      const [idResp, goalsResp, esc] = await Promise.all([
+      const [idResp, goalsResp, esc, approvals] = await Promise.all([
         api.get<IdentityResponse>(`/kols/${identityId}`),
         api.get<GoalsResponse>(
           `/identities/${identityId}/goals?campaign_id=${encodeURIComponent(campaignId)}`,
         ),
-        api.get<EscalationLite[]>(`/escalations?state=open`),
+        api.get<EscalationLite[]>(`/escalations?state=awaiting_answer`),
+        api.get<Array<{ identity_id?: number; campaign_id?: string }>>(`/approvals`),
       ]);
       setIdentity(idResp);
       setGoals(goalsResp);
       setEscalations(
         (esc || []).filter((e) => (e as unknown as { identity_id?: number }).identity_id === identityId),
+      );
+      setPendingApprovals(
+        (approvals || []).filter(
+          (a) => a.identity_id === identityId && a.campaign_id === campaignId,
+        ).length,
       );
       setErr(null);
     } catch (ex) {
@@ -92,6 +99,29 @@ export function KolDetailPage() {
           className="ml-auto text-xs text-sky-700 hover:underline"
         >
           history & reusable facts →
+        </Link>
+      </div>
+
+      <div className="flex flex-wrap gap-2 text-xs">
+        <Link
+          to={`/approvals?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identity.id}`}
+          className={`rounded px-2 py-1 ${
+            pendingApprovals > 0
+              ? 'bg-rose-100 text-rose-800 hover:bg-rose-200'
+              : 'bg-slate-100 text-slate-600'
+          }`}
+        >
+          Pending approvals: {pendingApprovals}
+        </Link>
+        <Link
+          to={`/escalations?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identity.id}`}
+          className={`rounded px-2 py-1 ${
+            escalations.length > 0
+              ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
+              : 'bg-slate-100 text-slate-600'
+          }`}
+        >
+          Open escalations: {escalations.length}
         </Link>
       </div>
 
