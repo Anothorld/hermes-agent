@@ -31,6 +31,38 @@ the external Web system uses to start / read / write KOL outreach state.
 - **Python helpers (`cal.py`)** — skills import these to write CAL.
   Failure is logged but never raises (per design: CAL writes must not
   block skill main flow; reconcile job back-fills from Gmail/Kanban).
+- **Safe Bridge CLI (`scripts/kol_bridge_tool.py`)** — deterministic
+  agent-facing wrapper for CAL-affecting operations. Dispatcher agents
+  must call this CLI or the Bridge HTTP API instead of writing SQL or
+  running ad hoc scripts against `~/.hermes/kol-ops-bridge/cal.db`.
+
+## Agent-safe operations
+
+Use the Bridge API, or the CLI wrapper below, for deterministic CRUD-like
+operations:
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py upsert-identity \
+  --env TEST \
+  --primary-handle "home_style_lover" \
+  --platform instagram
+
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-event \
+  --env TEST \
+  --identity-id 9 \
+  --campaign-id "TS8319 Test" \
+  --event-type inbound_reply \
+  --actor gmail:reply-poller \
+  --json '{"payload":{"gmail_message_id":"...","intent":"brief_budget_question","confidence":0.92}}'
+
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts \
+  --env TEST \
+  --identity-id 9 \
+  --json '{"campaign_id":"TS8319 Test","namespace":"offer","source":"skill:negotiation","facts":{"offer.latest_requested_amount":1200,"offer.latest_counter_amount":1000}}'
+```
+
+The wrapper requires explicit `env` for mutating calls and never imports or
+opens CAL SQLite directly.
 
 ## Auth
 

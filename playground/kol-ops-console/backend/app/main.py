@@ -19,15 +19,11 @@ from .routers import (
     auth,
     campaigns,
     candidates,
-    content,
-    contract,
-    drafts,
     escalations,
     events as events_router,
     facts,
     goals,
     kols,
-    logistics,
     policies,
     products,
     relationships,
@@ -95,10 +91,6 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(products.router)
     app.include_router(kols.router)
-    app.include_router(drafts.router)
-    app.include_router(contract.router)
-    app.include_router(logistics.router)
-    app.include_router(content.router)
     app.include_router(campaigns.router)
     app.include_router(candidates.router)
     app.include_router(facts.router)

@@ -39,23 +39,25 @@ app/
   routers/
     auth.py          login / refresh / me.
     products.py      SKU catalog (local table).
-    kols.py          /kols -> bridge identities + local notes merged.
-    timeline.py      /kols/{id}/timeline -> bridge passthrough.
-    drafts.py        /drafts/pending -> bridge passthrough + local approval flag.
-    contract.py      stub workflow endpoints.
-    logistics.py     stub workflow endpoints.
-    content.py       approve/revise verdict + bridge write.
-    campaigns.py     start campaign (proxies to gateway /v1/runs).
-    events.py        WebSocket /ws and SSE bridge relay.
+    kols.py          /kols + /kols/{id} detail payloads.
+    campaigns.py     launch / close / shortlist approval.
+    candidates.py    campaign discovery-pool CRUD + select.
+    facts.py         fact reads / writes.
+    goals.py         goal-state + dispatch-context reads.
+    relationships.py relationship + reusable-facts + archive helpers.
+    escalations.py   list/open/resolve escalations.
+    approvals.py     pending approval.* facts.
+    policies.py      company/user/escalation policy docs.
+    events.py        reply-monitor APIs + WebSocket /ws.
     admin.py         wipe-test, audit log.
 ```
 
 ## RBAC
 
-| Role | Read | Approve drafts | Push contract/logistics | Start campaigns | Wipe TEST | Manage users |
-|---|---|---|---|---|---|---|
-| Owner    | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Operator | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
-| Viewer   | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Role | Read | Approvals / escalations | Start campaigns | Wipe TEST | Manage users |
+|---|---|---|---|---|---|
+| Owner    | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Operator | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Viewer   | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 Every mutating request writes one `audit_log` row.
