@@ -13,8 +13,9 @@ constraints never override the email's actual goal.
 
 ## Runtime Contract
 - **No LLM call.** This skill is pure I/O + template substitution.
-- **No CAL writes.** Reads only `GET /policies/company_style` and
-  `GET /policies/user_style?owner_user_id=<current_user_id>`.
+- **No CAL writes.** Reads only via the deterministic bridge CLI:
+  `kol_bridge_tool.py get-policy --scope company_style` and
+  `kol_bridge_tool.py get-policy --scope user_style --owner-user-id <current_user_id>`.
 - Always returns a fully-formed markdown block — even when one or both
   policies are empty (use the empty-doc fallback below).
 - Output goes verbatim into the caller's prompt; no further escaping.

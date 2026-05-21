@@ -1,4 +1,10 @@
-"""Start campaigns (proxy to bridge ``/campaigns/{id}/start``)."""
+"""Start campaigns (proxy to the Hermes Gateway ``/v1/runs`` API).
+
+Phase B wired the launch path through the gateway directly so the bridge
+stays purely a deterministic CAL writer/reader.  See
+:meth:`gateway_client.GatewayClient.start_run` for the underlying HTTP
+contract.
+"""
 
 from __future__ import annotations
 
@@ -12,16 +18,93 @@ from pydantic import BaseModel, Field
 
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
-from ..deps import current_user, get_bridge, get_conn, require_role
+from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
+from ..gateway_client import GatewayClient, GatewayError
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+
+# Structured system prompt for the launch agent run.  Listed values are
+# the contract that downstream skills (kol-campaign-intake,
+# kol-discovery-to-outreach-router) will read out of the brief.
+_LAUNCH_INSTRUCTIONS = (
+    "You are launching a KOL outreach campaign via the web console.\n"
+    "\n"
+    "## Runtime contract (MEMORIZE before any tool call)\n"
+    "- kol-ops-bridge base URL: http://127.0.0.1:8080/api/plugins/kol-ops-bridge\n"
+    "  (override with HERMES_KOL_OPS_BRIDGE_BASE if needed)\n"
+    "- Bridge auth header: X-Bridge-Key: $HERMES_KOL_OPS_BRIDGE_KEY\n"
+    "  (already in your environment; never echo the value)\n"
+    "- Working directory is /home/pc; the project lives at\n"
+    "  /home/pc/agent_prj/hermes-agent. ALWAYS use absolute paths.\n"
+    "- ALL CAL writes/reads go through the deterministic CLI; never\n"
+    "  hand-craft curl/PUT/POST. Single entry point:\n"
+    "    python /home/pc/agent_prj/hermes-agent/plugins/kol-ops-bridge/\n"
+    "      scripts/kol_bridge_tool.py <cmd> --env <env> [--campaign-id <id>] ...\n"
+    "  Run with `--help` once to enumerate subcommands. Key ones:\n"
+    "    upsert-campaign, get-campaign, add-candidate, list-candidates,\n"
+    "    select-candidates, resolve-relationships, route-discovery,\n"
+    "    upsert-identity, get-identity, get-timeline, archive-identity,\n"
+    "    list-events, write-event, write-facts, write-facts-multi,\n"
+    "    get-goals, open-escalation, resolve-escalation, get-policy,\n"
+    "    set-policy, get-parsed-escalation-rules.\n"
+    "  Large JSON bodies: pass `--json @/tmp/body.json`.\n"
+    "\n"
+    "## Pipeline (run in order, do NOT skip)\n"
+    "1. `skill_view(name='kol-campaign-intake')` then parse the brief\n"
+    "   below and persist campaign_config via\n"
+    "   `kol_bridge_tool.py upsert-campaign --env <env> --campaign-id <id>\n"
+    "     --json @/tmp/campaign.json` (atomic).\n"
+    "   Honor every key in `# campaign_config` verbatim, including\n"
+    "   `discovery_target_count` and `product_pitch`.\n"
+    "2. `skill_view(name='kol-outreach-orchestrator-flow')` to confirm\n"
+    "   the master playbook; for a fresh launch the next step is\n"
+    "   kol-discovery-to-outreach-router -> Instagram KOL discovery.\n"
+    "3. `skill_view(name='instagram-kol-discovery')` and then EXECUTE\n"
+    "   discovery using the built-in BrowserUse tools — `browser_navigate`,\n"
+    "   `browser_snapshot`, `browser_get_images`, `browser_click`,\n"
+    "   `browser_type`, `vision_analyze`. The discovery skill is NOT\n"
+    "   optional and must produce at least `discovery_target_count`\n"
+    "   raw candidates (which is set to 2-4x `headcount_target`).\n"
+    "   Do NOT use the `mcp_chrome_devtools_*` family — those are flaky\n"
+    "   here; stick to `browser_*`.\n"
+    "4. Persist each candidate via the CLI\n"
+    "   (`kol_bridge_tool.py add-candidate --env <env> --campaign-id <id>\n"
+    "     --primary-handle <h> --source discovery:<channel>\n"
+    "     --discovery-score <0..1>` per identity, then\n"
+    "   `resolve-relationships`). After every batch, call\n"
+    "   `list-candidates` once to confirm persistence.\n"
+    "5. STOP after raw candidates are persisted and relationships\n"
+    "   resolved. Do NOT shortlist, draft emails, or send anything —\n"
+    "   the operator reviews the pool in the web console and explicitly\n"
+    "   approves before any outreach goes out.\n"
+    "\n"
+    "## Environment safety\n"
+    "- If `mode: TEST`, route every outbound email to `test_mode_to`.\n"
+    "- If `mode: LIVE`, real addresses may be used but you must still\n"
+    "  wait for operator approval before sending.\n"
+    "- All CLI invocations MUST pass `--env <TEST|LIVE>` matching the\n"
+    "  brief; never rely on a default.\n"
+    "\n"
+    "## Failure handling\n"
+    "- If the bridge returns 401, the X-Bridge-Key header is missing —\n"
+    "  re-issue via the CLI (which reads HERMES_KOL_OPS_BRIDGE_KEY) or\n"
+    "  add `--bridge-key $HERMES_KOL_OPS_BRIDGE_KEY` explicitly.\n"
+    "- If a path returns 404, you almost certainly forgot the\n"
+    "  `/api/plugins/kol-ops-bridge/` prefix or used port 8765 (console)\n"
+    "  instead of 8080 (bridge).\n"
+    "- On 3 consecutive identical failures, STOP and open an escalation\n"
+    "  via `kol_bridge_tool.py open-escalation` rather than looping.\n"
+)
 
 
 def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignBody") -> str:
     tags = json.loads(product["tags_json"] or "[]")
     sku_ref = product["url"] or product["sku"]
+    discovery_target = body.discovery_target_count or max(
+        body.headcount_target * 3, body.headcount_target + 5
+    )
     lines = [
-        "Start a KOL outreach campaign via the web console.",
+        "# campaign_config",
         f"campaign_id: {campaign_id}",
         f"product_sku: {product['sku']}",
         f"product_name: {product['name']}",
@@ -32,6 +115,7 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         f"budget_per_kol: {body.budget_per_kol:g}",
         f"absolute_floor: {body.absolute_floor:g}",
         f"headcount_target: {body.headcount_target}",
+        f"discovery_target_count: {discovery_target}",
         f"test_mode_to: {body.test_mode_to}",
         "triggered_by: web",
     ]
@@ -41,6 +125,15 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         lines.append(f"product_tags: {', '.join(tags)}")
     if product["notes"]:
         lines.extend(["product_notes:", product["notes"]])
+
+    pitch = (body.product_pitch_md or "").strip()
+    if pitch:
+        lines.extend([
+            "",
+            "# product_pitch (markdown - feed to KOL discovery + outreach skills)",
+            pitch,
+        ])
+
     extra = (body.brief_extra or "").strip()
     if extra:
         lines.extend([
@@ -51,9 +144,10 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
     return "\n".join(lines)
 
 
-# Cap operator-supplied brief to keep upstream token cost predictable.
-# 16k chars ~ 4k tokens, plenty for a product one-pager.
+# Cap operator-supplied free-text fields to keep upstream token cost
+# predictable.  16k chars ~ 4k tokens; 64k chars ~ 16k tokens.
 _MAX_BRIEF_EXTRA = 16_000
+_MAX_PRODUCT_PITCH = 64_000
 
 
 class StartCampaignBody(BaseModel):
@@ -64,10 +158,29 @@ class StartCampaignBody(BaseModel):
     headcount_target: int = Field(ge=1, le=200)
     test_mode_to: str
     env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    product_pitch_md: str | None = Field(
+        default=None,
+        max_length=_MAX_PRODUCT_PITCH,
+        description=(
+            "Operator-supplied product selling-points (markdown or plain text).\n"
+            "Required for KOL discovery quality - the discovery skill uses this\n"
+            "to derive search keywords, audience fit and pitch hooks."
+        ),
+    )
+    discovery_target_count: int | None = Field(
+        default=None,
+        ge=1,
+        le=2000,
+        description=(
+            "How many raw KOL candidates discovery should aim for. "
+            "Defaults to max(headcount_target * 3, headcount_target + 5) "
+            "so the operator can review a 2-4x funnel before shortlisting."
+        ),
+    )
     brief_extra: str | None = Field(
         default=None,
         max_length=_MAX_BRIEF_EXTRA,
-        description="Optional operator-supplied product brief (markdown or plain text).",
+        description="Optional free-form operator notes / constraints.",
     )
 
 
@@ -76,6 +189,7 @@ async def start(
     campaign_id: str,
     body: StartCampaignBody,
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
     force: bool = Query(False, description="Override duplicate-campaign guard."),
@@ -119,12 +233,42 @@ async def start(
     payload["product_name"] = product["name"]
     payload["product_url"] = product["url"]
     payload["sku_whitelist"] = [sku_ref]
-    payload["brief"] = _compose_brief(campaign_id, product, body)
+    brief_text = _compose_brief(campaign_id, product, body)
+    payload["brief"] = brief_text
     payload["triggered_by"] = "web"
     payload["actor"] = f"web:{user['email']}"
+
+    # Seed campaign metadata in the bridge first so downstream skills can
+    # find the campaign row before discovery starts writing candidates.
     try:
-        out = await bridge.start_campaign(campaign_id, payload)
+        await bridge.upsert_campaign(
+            campaign_id,
+            {
+                "campaign_id": campaign_id,
+                "title": product["name"],
+                "sku_whitelist": [sku_ref],
+                "paid_ceiling": body.budget_per_kol,
+                "contract_required": True,
+            },
+        )
     except BridgeError as exc:
+        # Non-fatal: the agent's intake step will retry the upsert.  We
+        # log it on the campaign row via audit only.
+        write_audit(
+            conn,
+            actor_user_id=user["id"],
+            action="campaign.upsert_warning",
+            target=campaign_id,
+            payload={"error": str(exc)},
+        )
+
+    try:
+        out = await gateway.start_run(
+            input=brief_text,
+            instructions=_LAUNCH_INSTRUCTIONS,
+            session_id=f"kol-campaign:{body.env}:{campaign_id}",
+        )
+    except GatewayError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
     run_id = out.get("run_id") if isinstance(out, dict) else None
@@ -228,57 +372,6 @@ async def approve_shortlist(
         )
     write_audit(conn, actor_user_id=user["id"], action="campaign.approve_shortlist",
                 target=campaign_id, payload=payload)
-    return out
-
-
-class InboundReplyBody(BaseModel):
-    """Body for the operator's reply-simulation click."""
-
-    kol_identity_id: int = Field(gt=0)
-    body: str = Field(min_length=1, max_length=16_000)
-    intent_hint: str | None = Field(
-        default=None,
-        pattern="^(interested|asking_fee|decline|out_of_office|spam|unknown)$",
-    )
-    from_addr: str | None = None
-    product_sku: str | None = None
-    env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
-
-
-@router.post("/{campaign_id}/replies/inbound")
-async def inject_reply(
-    campaign_id: str,
-    body: InboundReplyBody,
-    bridge: Annotated[BridgeClient, Depends(get_bridge)],
-    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
-    user: Annotated[dict, Depends(require_role("owner", "operator"))],
-) -> dict:
-    """Forward a simulated inbound reply to the bridge for processing."""
-    payload = body.model_dump()
-    payload["actor"] = f"web:{user['email']}"
-    payload["triggered_by"] = "web"
-    try:
-        out = await bridge.inject_inbound_reply(campaign_id, payload)
-    except BridgeError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    new_run_id = out.get("run_id") if isinstance(out, dict) else None
-    if new_run_id:
-        conn.execute(
-            "UPDATE product_campaigns SET run_id=?, status='running' "
-            "WHERE campaign_id=? AND env=?",
-            (new_run_id, campaign_id, body.env),
-        )
-    write_audit(
-        conn,
-        actor_user_id=user["id"],
-        action="campaign.inject_reply",
-        target=campaign_id,
-        payload={
-            "kol_identity_id": body.kol_identity_id,
-            "intent_hint": body.intent_hint,
-            "env": body.env,
-        },
-    )
     return out
 
 

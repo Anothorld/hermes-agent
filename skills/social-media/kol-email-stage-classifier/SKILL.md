@@ -25,8 +25,8 @@ extraction in a single LLM pass — never split across goals/stages.
 2. `thread_summary` — last 3–5 messages, oldest first, condensed.
 3. `current_goal_state` — `{commerce: <goal_name|null>, fulfillment:
    <goal_name|null>, publish: <goal_name|null>}` plus each goal's
-   `missing_facts`. The dispatcher fetches this from
-   `GET /identities/{id}/goals?campaign_id=...`.
+   `missing_facts`. The dispatcher fetches this via
+   `kol_bridge_tool.py get-goals --identity-id <id> --campaign-id <cid> --env TEST|LIVE`.
 4. `campaign_config_summary` — `paid_ceiling`, `commission_band`,
    `sku_whitelist`, `deliverable_count_per_platform`, `contract_required`,
    `audit_standards_md` excerpt. Used **only** as context, never to make a
@@ -34,7 +34,7 @@ extraction in a single LLM pass — never split across goals/stages.
 5. `relationship_summary` (optional) — for repeat KOLs: `last_outcome`,
    `preferred_skus`, `preferred_mode`, `default_shipping_address` flag.
 6. `escalation_rules` (Phase E, optional) — parsed payload from
-   `GET /policies/escalation_rules/parsed`:
+   `kol_bridge_tool.py get-parsed-escalation-rules`:
    `{ "top": {...}, "rules": [ {"id": str, "signals_match": [str],
    "severity": str, "suggested_question": str,
    "required_facts_to_resume": [str]} ] }`.

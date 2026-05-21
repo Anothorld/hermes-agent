@@ -81,6 +81,7 @@ Decision rules (first match wins):
 |-----------|----------|
 | `state != "resolved"` | abort, no decision |
 | `decision_field == "terminate"` | `terminate_goal` |
+| `decision_field.startswith("next_action:")` | `next_action_pivot` (operator picked an explicit next move — see 3e) |
 | `attempts_count >= max_escalation_depth` AND missing_facts NOT fully covered by `operator_facts` | `escalate_again` + `force_human_takeover_hint=true` |
 | `operator_facts` covers all `missing_facts` for `goal_name` | `inject_and_continue` |
 | `operator_answer` contains an `override_config_patch:` block (operator approved a config change, e.g. `campaign_config.compensation_cap_usd=2000`) | `override_and_continue` |
@@ -153,6 +154,32 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
                           "approval.<goal_name>_terminated_reason":"<from operator_answer>"}}}'
 ```
 Goal recompute will mark the lane as aborted on next dispatch.
+
+#### 3e. `next_action_pivot`
+The operator picked an explicit pivot from the console (decision was
+recorded as `next_action:<type>` — e.g. `next_action:resend_brief`,
+`next_action:wait_24h`, `next_action:archive`). Parse the type after the
+colon and:
+
+1. Record the operator's choice as a fact so downstream skills can see it:
+   ```
+   python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
+     --identity-id <identity_id> --env <TEST|LIVE> \
+     --json '{"campaign_id":"<campaign_id>",
+               "source":"skill:kol-escalation-resumer",
+               "namespaces":{
+                 "approval":{"approval.next_action_type":"<type>",
+                             "approval.next_action_for_goal":"<goal_name>"}}}'
+   ```
+2. Route the next step by `<type>`:
+   - `resend_brief` → dispatcher will re-run `kol-brief-sender` on next tick (goal recompute reopens `brief_sent` lane).
+   - `wait_24h` / `wait_<N>h` → write `approval.<goal_name>_next_check_ts`
+     = now + N hours; no skill invoked now.
+   - `archive` → fall through to 3d (`terminate_goal`) for this goal.
+   - any other custom type → leave the fact written; dispatcher's next
+     tick will see it and decide. Do NOT invoke a child skill from here.
+3. Return envelope `decision = "next_action_pivot"` with
+   `next_action_type=<type>`, `body=null`, `subject=null`.
 
 ### Step 4 — Return envelope
 Final assistant message must be a single JSON object:

@@ -194,6 +194,17 @@ class PolicyPutBody(BaseModel):
     title: Optional[str] = None
 
 
+class EventWriteBody(BaseModel):
+    identity_id: int
+    event_type: str
+    actor: str
+    campaign_id: Optional[str] = None
+    goal: Optional[str] = None
+    lane: Optional[str] = None
+    payload: Optional[dict[str, Any]] = None
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
 # ---------------------------------------------------------------------------
 # Health + admin
 # ---------------------------------------------------------------------------
@@ -288,6 +299,76 @@ def get_goal_state(
         raise HTTPException(status_code=404, detail="identity not found")
     return {"goals": cal.get_goal_state(identity_id=identity_id,
                                         campaign_id=campaign_id, env=env)}
+
+
+@router.get("/identities/{identity_id}/timeline")
+def get_identity_timeline(
+    identity_id: int,
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    campaign_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Reverse-chronological event timeline for a single KOL identity."""
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    return {
+        "identity_id": identity_id,
+        "events": cal.list_events(
+            env=env,
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            limit=limit,
+        ),
+    }
+
+
+@router.get("/events/recent")
+def get_recent_events(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    campaign_id: Optional[str] = Query(default=None),
+    since_id: Optional[int] = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Recent conversation events across all identities (optionally a single
+    campaign).  ``since_id`` supports incremental pulls (web SSE / cron
+    pollers); omit it to get the latest page in reverse-chronological order.
+    """
+    return {
+        "events": cal.list_events(
+            env=env,
+            campaign_id=campaign_id,
+            since_id=since_id,
+            limit=limit,
+        ),
+    }
+
+
+@router.post("/events")
+def post_event(
+    body: EventWriteBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Append a row to ``kol_conversation_events``.
+
+    Used by the gmail reply poller + skills that need to record a
+    deterministic event without going through goal recompute first.
+    """
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_identity(body.identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    event_id = cal.write_event(
+        identity_id=body.identity_id,
+        event_type=body.event_type,
+        actor=body.actor,
+        campaign_id=body.campaign_id,
+        goal=body.goal,
+        lane=body.lane,
+        payload=body.payload,
+        env=body.env,
+    )
+    if event_id is None:
+        raise HTTPException(status_code=500, detail="write_event failed")
+    return {"event_id": event_id}
 
 
 @router.post("/identities/{identity_id}/archive")

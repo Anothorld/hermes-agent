@@ -60,3 +60,57 @@ class GatewayClient:
         if r.status_code >= 400:
             raise GatewayError(r.status_code, r.text)
         return r.json()
+
+    async def start_run(
+        self,
+        *,
+        input: str,
+        instructions: Optional[str] = None,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """POST ``/v1/runs`` — start an async agent run, return ``{run_id,...}``.
+
+        Used by the console's "Start campaign" path to dispatch the
+        outreach orchestrator flow against a pre-seeded campaign brief.
+        The gateway returns immediately with a ``run_id`` (HTTP 202);
+        lifecycle status is later polled via :meth:`get_run`.
+        """
+        # Long timeout — the gateway processes the run asynchronously
+        # but the initial 202 response can sit behind cold-start work
+        # (auth, model warm-up, skill discovery).
+        body: dict[str, Any] = {"input": input}
+        if instructions:
+            body["instructions"] = instructions
+        if session_id:
+            body["session_id"] = session_id
+        if model:
+            body["model"] = model
+        url = f"{self._base}/v1/runs"
+        try:
+            r = await self._client.post(
+                url, headers=self._headers, json=body, timeout=30.0
+            )
+        except httpx.HTTPError as exc:
+            raise GatewayError(502, f"gateway unreachable: {exc}") from exc
+        if r.status_code >= 400:
+            raise GatewayError(r.status_code, r.text)
+        return r.json()
+
+    async def stop_run(self, run_id: str) -> dict[str, Any]:
+        """POST ``/v1/runs/{id}/stop`` — interrupt a running agent.
+
+        Returns the gateway's stop ack (typically ``{"status": "stopping"}``).
+        ``404`` is mapped to a no-op return so the console can call this
+        idempotently on already-evicted runs.
+        """
+        url = f"{self._base}/v1/runs/{run_id}/stop"
+        try:
+            r = await self._client.post(url, headers=self._headers)
+        except httpx.HTTPError as exc:
+            raise GatewayError(502, f"gateway unreachable: {exc}") from exc
+        if r.status_code == 404:
+            return {"status": "not_found", "run_id": run_id}
+        if r.status_code >= 400:
+            raise GatewayError(r.status_code, r.text)
+        return r.json()

@@ -14,6 +14,7 @@ from contextlib import suppress
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 
 from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
@@ -52,6 +53,30 @@ async def open_escalations(
     e = (env or get_settings().env).upper()
     try:
         return await bridge.list_open_escalations(e)
+    except BridgeError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+
+class EscalationNextActionBody(BaseModel):
+    next_reply_type: str = Field(
+        ...,
+        pattern="^(product_pitch|brief_clarification|negotiation|content_followup|close_no_reply)$",
+    )
+    human_note: str | None = None
+    env: str = Field(..., pattern="^(LIVE|TEST)$")
+
+
+@router.post("/escalations/{escalation_id}/next-action")
+async def escalation_next_action(
+    escalation_id: int,
+    body: EscalationNextActionBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(current_user)],
+) -> dict:
+    payload = body.model_dump()
+    payload["actor"] = f"web:{user['email']}"
+    try:
+        return await bridge.choose_escalation_next_action(escalation_id, payload)
     except BridgeError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 

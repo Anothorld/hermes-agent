@@ -78,16 +78,33 @@ Read:
 **Last engaged at:**
 - Set `relationship.last_engaged_at = now`.
 
-### Step 3 — Write via dedicated endpoints
-The plugin exposes (Phase B+ commitments — verify presence; if
-missing, abort `{"error":"archival_endpoints_not_available"}` and log
-a TODO rather than freelancing fact writes):
-- `POST /api/plugins/kol-ops-bridge/identities/{id}/update`
-- `POST /api/plugins/kol-ops-bridge/identities/{id}/relationships/{campaign_id}/update`
+### Step 3 — Write via the bridge CLI
+All archival writes go through the deterministic CLI — **never** craft
+raw HTTP or SQL. Two atomic calls:
 
-Each call atomic; partial application not allowed. After both succeed,
-write `approval.archival_done=true` + `approval.archival_done_at` via
-`write-facts-multi` (this is the LAST per-campaign fact written).
+1. **Archive the identity / relationship** (single transaction —
+   identity row + relationship row + closing facts):
+   ```
+   python <PROJECT>/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+     archive-identity --identity-id <id> --campaign-id <cid> \
+     --outcome <delivered|cancelled|no_show|...> \
+     --decided-by skill:archival-writer \
+     --json @/tmp/archive.json
+   ```
+   The JSON body carries the optional `identity_updates`,
+   `relationship_updates`, and `post_mortem_facts` blocks (see
+   `ArchiveBody` schema). If the bridge rejects with
+   `endpoint_not_available`, abort with
+   `{"error":"archival_endpoints_not_available"}` and log a TODO
+   rather than freelancing fact writes.
+
+2. **Stamp the per-campaign closure flag** (must be the LAST write):
+   ```
+   python <PROJECT>/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+     write-facts-multi --env TEST|LIVE --identity-id <id> --json @/tmp/closing.json
+   ```
+   The body sets `approval.archival_done=true` +
+   `approval.archival_done_at` under the `approval` namespace.
 
 ### Step 4 — Return result envelope
 ```json
