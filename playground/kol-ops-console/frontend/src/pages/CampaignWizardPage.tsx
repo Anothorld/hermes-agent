@@ -53,7 +53,7 @@ export function CampaignWizardPage() {
         ...(extra as Partial<CampaignBody>),
       };
       await api.put(`/campaigns/${encodeURIComponent(campaignId)}`, body);
-      nav(`/kols?campaign_id=${encodeURIComponent(campaignId)}`);
+      nav(`/campaigns/${encodeURIComponent(campaignId)}/candidates`);
     } catch (ex) {
       setErr(String(ex));
     } finally {

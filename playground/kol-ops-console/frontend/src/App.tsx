@@ -12,8 +12,10 @@ import { ReplyMonitorPage } from './pages/ReplyMonitorPage';
 import { FunnelReportPage } from './pages/FunnelReportPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { EscalationConsolePage } from './pages/EscalationConsolePage';
+import { ApprovalsPage } from './pages/ApprovalsPage';
 import { PolicyEditorPage } from './pages/PolicyEditorPage';
 import { CampaignWizardPage } from './pages/CampaignWizardPage';
+import { CampaignCandidatesPage } from './pages/CampaignCandidatesPage';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
@@ -27,6 +29,7 @@ function Nav() {
     ['/kols', 'KOLs'],
     ['/campaigns/new', 'New Campaign'],
     ['/escalations', 'Escalations'],
+    ['/approvals', 'Approvals'],
     ['/policies', 'Policies'],
     ['/drafts', 'Drafts'],
     ['/replies', 'Replies'],
@@ -77,8 +80,10 @@ export function App() {
                 <Route path="/kols/:id" element={<KolDetailPage />} />
                 <Route path="/kols/:id/relationship" element={<KolRelationshipPage />} />
                 <Route path="/campaigns/new" element={<CampaignWizardPage />} />
+                <Route path="/campaigns/:id/candidates" element={<CampaignCandidatesPage />} />
                 <Route path="/escalations" element={<EscalationConsolePage />} />
                 <Route path="/escalations/:id" element={<EscalationConsolePage />} />
+                <Route path="/approvals" element={<ApprovalsPage />} />
                 <Route path="/policies" element={<PolicyEditorPage />} />
                 <Route path="/drafts" element={<DraftQueuePage />} />
                 <Route path="/replies" element={<ReplyMonitorPage />} />
