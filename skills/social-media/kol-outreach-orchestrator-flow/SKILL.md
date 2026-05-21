@@ -1,262 +1,143 @@
 ---
 name: kol-outreach-orchestrator-flow
-description: End-to-end KOL outreach orchestrator. Takes product brief + SKU whitelist + budget, runs Instagram KOL discovery, asks user to approve a shortlist in chat, then writes Gmail drafts (never sends) and notifies the user. Reviews happen in Gmail; agent only drafts.
-trigger: When the user wants to start, launch, kick off, or run a KOL outreach campaign for a furniture product — e.g. "run outreach", "start the <SKU> campaign", "launch KOL outreach for <product>", "open a new campaign", "find KOLs and prep emails", or any message that provides a product brief / SKU pool / budget and asks the agent to manage the pipeline through to drafted emails. This skill OWNS the campaign lifecycle; do not bypass it with ad-hoc CAL writes from other skills.
-tags: ["kol", "outreach", "orchestrator", "gmail", "draft", "campaign"]
+description: Top-level KOL outreach lifecycle map for the v2.4 goal-driven architecture. This skill is documentation/onboarding for the operator; it does NOT itself dispatch turns. Day-to-day routing is handled by `kol-discovery-to-outreach-router` (discovery side) and `kol-reply-dispatcher` (inbound side). Use this skill to understand the 10-goal × 4-lane state machine, the SKILL inventory, and the operator's two approval surfaces (chat shortlist + Gmail drafts + ApprovalsPage / EscalationConsolePage).
+trigger: Use when an operator asks "how does the KOL pipeline work end-to-end?", "which skill handles X?", or "where is decision Y made?". Also useful as orientation when onboarding a new campaign brief. Do NOT invoke this skill on the per-turn KOL reply path — that's the dispatcher's job.
+tags: ["kol", "orchestrator", "lifecycle", "documentation", "meta"]
 ---
 
-## Goal
-Run a complete KOL outreach campaign for a furniture product, end-to-end, while keeping the human in control through **two approval surfaces only**: (a) a single chat approval of the KOL shortlist, and (b) the Gmail drafts inbox for every outbound email. The agent **never sends mail** — it only creates Gmail drafts and notifies the user that drafts are ready.
-
-## ⚠️ MANDATORY OBSERVABILITY CONTRACT (read FIRST)
-
-The operator console (kol-ops-console) derives every visible piece of campaign
-state — current stage, KOLs contacted, "is the agent still alive?" — from the
-`kol-ops-bridge` CAL events you emit. A run that ends with **zero bridge
-events** is treated as **FAILED** by the UI, regardless of what files you wrote.
-
-**You do NOT have MCP access to `cal.upsert_identity` / `cal.record_event`.**
-**You DO have the `terminal` tool.** The bridge exposes two HTTP shims for you:
+## Architecture in one diagram
 
 ```
-# Register a discovered KOL + emit a `discovered` event (one call per handle)
-curl -s -X POST http://127.0.0.1:8080/api/plugins/kol-ops-bridge/campaigns/<campaign_id>/identities \
-  -H 'Content-Type: application/json' \
-  -d '{"handle":"<ig_handle>","platform":"instagram",
-       "display_name":"<name>","env":"<TEST|LIVE>",
-       "product_sku":"<sku>","actor":"agent"}'
-# -> {"identity_id": 42, "campaign_id": "..."}
+                +----------------------+
+   campaign --> | kol-campaign-intake  |  (operator free-text → campaign_config)
+   brief        +----------+-----------+
+                           |
+                           v
+                +----------------------+
+   discovery -> | instagram-kol-       |  (find candidate handles)
+                | discovery            |
+                +----------+-----------+
+                           |
+                           v
+                +-----------------------------+
+                | kol-discovery-to-outreach-  |  (route candidates → cold / reengage)
+                | router                      |
+                +------+----------------+-----+
+                       |                |
+                       v                v
+        +--------------------+   +-----------------------+
+        | kol-cold-outreach  |   | kol-reengagement-     |
+        |                    |   | outreach              |
+        +---------+----------+   +-----------+-----------+
+                  |                          |
+                  | first KOL reply lands in inbox
+                  v                          v
+                +---------------------------------------+
+                | kol-email-stage-classifier            |  (side-effect-free
+                +---------------------+-----------------+   classification)
+                                      |
+                                      v
+                +---------------------------------------+
+                | kol-reply-dispatcher                  |  (1 reads + 1 writes,
+                +---+---+---+----+---+---+---+----+-----+   then delegates)
+                    |   |   |    |   |   |   |    |
+        +-----------+   |   |    |   |   |   |    +----- (publish lane)
+        | (commerce lane)|   |    |   (fulfillment lane)         |
+        v               v   v    v   v   v   v                  v
++--------------+ +-----+ +-+ +--+ +-+ +-+ +-+               +-----+
+|interest-     | |prod-| |dl| |pr| |sh| |lt| |bs|           |c-r| |gb|
+|qualifier     | |sel  | |c | |st| |i | |  | |  |           |   | |  |
++--------------+ +-----+ +-+ +-+  +-+ +-+ +-+               +---+ +-+
 
-# Emit a stage transition (one call per stage change)
-curl -s -X POST http://127.0.0.1:8080/api/plugins/kol-ops-bridge/campaigns/<campaign_id>/events \
-  -H 'Content-Type: application/json' \
-  -d '{"kol_identity_id":42,"event_type":"stage_changed",
-       "stage":"outreach","env":"<TEST|LIVE>",
-       "product_sku":"<sku>","actor":"agent"}'
-# -> {"event_id": 123, "campaign_id": "..."}
+Legend:
+  dlc = kol-deliverables-clarifier        sh = kol-shipping-intake
+  pst = kol-pricing-strategist            lt = kol-logistics-tracker
+        + kol-compensation-negotiator     bs = kol-brief-sender
+  prc = kol-contract-coordinator          c-r = kol-content-reviewer
+                                          gb = kol-golive-and-boost
+
+  archival lane: kol-archival-writer (post-engagement)
 ```
 
-HARD RULES:
+## The 10 goals × 4 lanes
 
-1. After ONE `skill_view`, your next 1–3 tool calls MUST be the `identities`
-   POST(s) above (at least one). Do NOT call `write_file` before at least one
-   identity is registered.
-2. After every stage transition (`outreach` → `product_pick` → `negotiation` →
-   `contract` → `logistics` → `content_delivery` → `closed`), POST a fresh
-   `stage_changed` event — even if no email was sent yet.
-3. If discovery legitimately turns up zero candidates, register a single
-   placeholder identity with `handle="no_match_<campaign_id>"`, emit a
-   `stage_changed` with `stage="closed"`, then exit.
-4. **Do not claim** in your final response that you "emitted record_event" /
-   "upserted an identity" unless the corresponding curl actually returned HTTP
-   200 with an `identity_id` / `event_id` in the terminal output. Hallucinated
-   observability is a graded failure for this skill.
+| Lane | Goals (in typical order) |
+|---|---|
+| commerce | first_contact → interest_qualified → product_locked → deliverables_scope_locked → contract_signed |
+| fulfillment | shipped_and_brief_sent (sub: address_collected, tracking_filled, delivered_confirmed, brief_sent) |
+| publish | content_review_and_golive (sub: draft_approved, golive_done, boost_handoff_done) |
+| meta | engagement_aborted, archival_done |
 
-This contract is non-negotiable in `web` mode and strongly recommended in
-`chat` / `cron` mode.
+Each goal has status ∈ `{not_started, active, paused, done, skipped, aborted}`.
+The dispatcher reads `active_goals_by_lane` from `get-dispatch-context`
+to pick which child SKILL handles the current turn (priority:
+commerce > fulfillment > publish > meta, with severity reversal — if a
+lower-priority lane has a paused/aborted blocker, it preempts).
 
----
+## Two approval surfaces (operator's only manual touchpoints)
 
-Hard defaults:
-- **Draft-only**: every outbound message is created via `gmail drafts.create` / `drafts.update`. Never call any `send` API.
-- **TEST MODE is default**: until the user types `LIVE MODE` in chat, every draft's `to` field is rewritten to the campaign's `test_mode_to` address.
-- **Notify proactively**: agent must push a chat notification when the shortlist is ready and when each draft batch finishes. Do not write drafts silently.
-- **Discovery is delegated**: KOL search runs through the `instagram-kol-discovery` skill; this skill never re-implements crawling.
-- **One campaign at a time**: each invocation owns exactly one `campaign_id`.
+1. **Chat shortlist approval**: after discovery → routing, the operator
+   gets one chat message with the shortlist; one click approves
+   cold/reengagement bucketing.
+2. **ApprovalsPage**: writes that need human OK before automation
+   continues. Backed by `approval.*` facts + a queue:
+   - `approval.compensation_paid_above_ceiling`
+   - `approval.contract_change_request` (cosmetic clause edits)
+   - `approval.identity_drift_review` (new shipping address differs)
+   - `approval.shipping_anomaly` (damaged / wrong item)
+   - `approval.content_review_escalation`
+3. **EscalationConsolePage**: for issues that need an operator to
+   actually compose a reply (off-policy product asks, contested
+   contract clauses, off-cap price asks, package loss, KOL refusing
+   to share address). Different queue from ApprovalsPage; an
+   escalation never auto-resolves from an inbound — operator must
+   close it explicitly.
 
-## Inputs
-The user (or upstream skill) must provide:
+## Operator quick reference: "which skill writes which fact?"
 
-- **Product brief** — category, key features, research/persona doc if available.
-- **SKU whitelist / 选品池** — explicit list of product URLs or SKU ids; nothing outside this list may be linked in any later email.
-- **Budget** — `budget_total`, `budget_per_kol`, `absolute_floor` (USD by default). `absolute_floor` is the **absolute ceiling** of the refusal zone — the maximum the agent may ever counter at; anything at or above it must be escalated to a human. Typical relationship: `budget_per_kol < absolute_floor < budget_total`.
-- **Headcount target** — number of KOLs to engage (default 5-10).
-- **Campaign id** — short slug, e.g. `seb8008-spring`. If missing, derive from product and ask user to confirm.
-- **Test inbox** — `test_mode_to` email for TEST MODE drafts.
+| Fact prefix | Owning SKILL(s) |
+|---|---|
+| `offer.interest_*` | kol-interest-qualifier |
+| `offer.product_locked`, `offer.color_variant_locked` | kol-product-selector |
+| `offer.deliverables_scope` | kol-deliverables-clarifier |
+| `offer.compensation_*` | kol-compensation-negotiator |
+| `offer.contract_*` | kol-contract-coordinator |
+| `fulfillment.address_*`, `shipping_address` | kol-shipping-intake |
+| `fulfillment.tracking_*`, `delivered_*` | kol-logistics-tracker |
+| `fulfillment.brief_*` | kol-brief-sender |
+| `publish.draft_*`, `revision_*` | kol-content-reviewer |
+| `publish.golive_*`, `posted_*`, `boost_*` | kol-golive-and-boost |
+| `meta.archival_*` | kol-archival-writer |
+| `approval.*` | various (see ApprovalsPage list above) |
 
-If any required field is missing, ask the user once in chat with a single consolidated question. Do not start crawling before all required fields are present.
+## Notification deep-links (DingTalk)
 
-## Campaign Config Persistence
-Persist the resolved inputs to `~/.hermes/kol-outreach/<campaign_id>/config.yaml`:
+`plugins/kol-ops-bridge/notifier.py` posts markdown messages with
+deep-links to `HERMES_KOL_CONSOLE_BASE_URL` for:
+- escalations (`/escalations/{id}`)
+- approvals (`/approvals/{id}`)
+- drafts ready for operator review (`/identities/{id}?campaign=...`)
 
-```yaml
-campaign_id: seb8008-spring
-product_brief_path: ...
-sku_whitelist:
-  - https://example.com/sku/seb8008
-budget_total: 12000
-budget_per_kol: 1500
-absolute_floor: 600
-headcount_target: 8
-test_mode_to: tester@example.com
-mode: TEST            # or LIVE, only after explicit user confirmation
-created_at: 2026-05-19T10:00:00Z
-```
+Webhook + secret read from `HERMES_DINGTALK_WEBHOOK` / `HERMES_DINGTALK_SECRET`.
+Failure to notify is logged but never blocks a fact write.
 
-Every downstream skill (initial-email, product-pitch-email, negotiation-email, reply-dispatcher) reads this file. Never duplicate budget or whitelist values inside SKILL prompts.
+## What this SKILL does NOT do
 
-> Use `config.yaml.example` (next to this SKILL.md) as the starting template.
-> Operational setup (Gmail labels, cron registration, TEST MODE dry-run, rollback)
-> lives in `SETUP.md` next to this SKILL.md. Read it before the first campaign.
+- ❌ Does not dispatch per-turn replies (dispatcher's job).
+- ❌ Does not write any facts (it's documentation).
+- ❌ Does not classify inbound (classifier's job).
+- ❌ Does not parse campaign briefs (intake's job).
 
-## Trigger Mode (chat | web | cron)
-This skill accepts a `triggered_by` parameter at invocation. It defaults to `chat` for free-form chat invocations. The external KOL Ops Console invokes via Gateway `POST /v1/runs` with `triggered_by=web` baked into the instructions.
-
-Mode branch (single point of divergence — keep it small):
-- `chat` — Step 3 posts the shortlist approval prompt and **waits** for the user's chat reply with one of the four allowed verbs.
-- `web`  — Step 3 writes the shortlist to disk, writes a `shortlist_ready` event to CAL, then **exits**. The operator approves through `POST /api/plugins/kol-ops-bridge/campaigns/{id}/approve-shortlist`; a fresh agent session resumes from Step 4 when the approval lands.
-- `cron` — same as `chat` but treats absence of a chat user as a hard error (cron should not block on chat approval).
-
-The `triggered_by` value flows into every CAL write as `actor=<chat|web|cron>` (or a more specific value like `web:operator`).
-
-## 8-Stage State Machine
-KOL records live in exactly one of these 8 stages, with sub-status detail. The single source of truth is the latest `kol_conversation_events` row in CAL (`hermes-agent/plugins/kol-ops-bridge/cal.py`). The KOL Ops Console renders state directly from CAL — there is no Kanban mirror to maintain.
-
-| # | stage | typical sub_status values |
-|---|---|---|
-| 1 | `discovered`        | `pool_pending_approval` → `approved` / `rejected` |
-| 2 | `outreach`          | `email_missing` / `initial_drafted` / `initial_sent` / `reply_received` |
-| 3 | `product_pick`      | `pitch_drafted` / `pitch_sent` / `sku_selected` |
-| 4 | `negotiation`       | `accept_drafted` / `counter_drafted` / `refuse_escalated` / `accepted` |
-| 5 | `contract`          | `pending` / `sent_for_signature` / `signed` / `declined` |
-| 6 | `logistics`         | `pending` / `address_collected` / `tracking_filled` / `in_transit` / `delivered` |
-| 7 | `content_delivery`  | `submitted_v<n>` / `revision_requested_v<n>` / `approved_v<n>` |
-| 8 | `closed`            | `closed_success` / `closed_declined` / `closed_abandoned` |
-
-The legacy `status` field is retained as a free-form pointer for backwards compatibility, but the canonical truth is `(stage, sub_status)`.
-
-## Procedure
-
-### Step 1 — Resolve campaign config
-1. Read or create `~/.hermes/kol-outreach/<campaign_id>/config.yaml`.
-2. Validate: SKU whitelist non-empty, `budget_per_kol > 0`, `budget_per_kol < absolute_floor <= budget_total`, `test_mode_to` is a valid email.
-3. Fail fast in chat if validation fails. Do not proceed.
-4. **CAL**: `cal.record_event(event_type='campaign_started', stage='discovered', sub_status=null, actor=<triggered_by>, product_sku=<from config>, campaign_id=<id>, kol_identity_id=null, payload={mode, budget_total, budget_per_kol, absolute_floor, headcount_target})` — use the special identity id `0` (system event) by recording on a campaign-scoped event without an identity. If CAL requires an identity, skip this write; the bridge backend infers campaign start from the first per-KOL event.
-
-### Step 2 — Run discovery
-1. Invoke the `instagram-kol-discovery` skill with the product brief and budget context.
-2. Expect its output to be a grouped Markdown document (groups by product feature / selling point, 3-5 creators each, including data + creator type + recommendation reason).
-3. Persist the raw discovery output to `~/.hermes/kol-outreach/<campaign_id>/shortlist.md`.
-
-### Step 3 — Notify user for shortlist approval (mandatory)
-In `triggered_by=web` mode, do NOT post the chat prompt. Instead:
-1. `cal.record_event(event_type='shortlist_ready', ...)` for the campaign. The
-   payload MUST include a structured `candidates` array — handle-only payloads
-   are deprecated and will render an empty review panel in the console.
-
-   Schema (each candidate, all scores `int 0..100`):
-   ```json
-   {
-     "candidates": [
-       {
-         "handle": "creator_one",
-         "platform": "instagram",
-         "audience_fit": 88,
-         "brand_safety": 94,
-         "engagement_quality": 76,
-         "niche_match": 91,
-         "reason": "54k IG, 4.6% ER, weekly eco-yoga content, no fast-fashion sponsors in last 30 posts",
-         "evidence_url": "https://www.instagram.com/creator_one/"
-       }
-     ]
-   }
-   ```
-   - `audience_fit` — demographic + geo + language alignment to the brand brief.
-   - `brand_safety` — content moderation review: controversial topics, prior
-     sponsor red flags, hate speech, NSFW, political extremism. Higher = safer.
-   - `engagement_quality` — true ER, comment depth, bot/giveaway suppression.
-   - `niche_match` — topical overlap with the product SKU (not just follower count).
-   - `reason` — ONE concrete sentence citing 2-3 observable signals (follower
-     count, ER, recent topic mentions, prior partnerships). Never write generic
-     copy like "good fit".
-   - `evidence_url` — optional; primary profile URL is fine.
-   Always emit a candidate row for every identity registered in Step 2, even
-   when scores are low — the operator decides who to keep.
-2. Exit the agent run cleanly. The Web operator approves via `POST /api/plugins/kol-ops-bridge/campaigns/{id}/approve-shortlist`; a fresh agent session resumes at Step 4 when the approval webhook arrives.
-
-In `triggered_by=chat` mode (default), post **one** chat message using this fixed template, then **stop and wait** for the user's reply. Do not move on without explicit approval.
-
-```
-✅ KOL shortlist ready — <N> candidates across <M> selling-point groups.
-Campaign: <campaign_id>   Mode: TEST   Test inbox: <test_mode_to>
-Please review and reply with ONE of:
-  - approve all
-  - approve <group letters>   (e.g. approve A,C)
-  - approve <handles>         (e.g. approve kathypicos, make.one.studio)
-  - reject <handles>
-Full list ↓
-<grouped markdown from discovery>
-```
-
-If a `notifier` channel is configured (Telegram / Discord / Slack via Hermes gateway), also send the first 3 lines to that channel. Never duplicate the full shortlist into external channels (privacy).
-
-### Step 4 — Parse approval and persist per-KOL identity in CAL
-1. In `web` mode, the approval set arrives via the bridge endpoint's `selected_handles`. In `chat`/`cron` mode, parse the user's reply against the four allowed verbs. If the reply is ambiguous, ask once more with the same template; never guess.
-2. For each approved handle:
-   - **Upsert KOL identity in CAL**: `kol_identity_id = cal.upsert_identity(handle=<handle>, primary_email=<email or null>, region=<from discovery>, creator_type=<from discovery>, env=<TEST|LIVE>)`. The same identity id MUST be reused for all later events on this handle (one identity, many product campaigns).
-   - **Record approval event in CAL** — this is the only state surface:
-     `cal.record_event(event_type='approved', stage='discovered', sub_status='approved', actor=<triggered_by>, kol_identity_id=<id>, product_sku=<from config>, campaign_id=<id>, payload={selling_point_group, creator_type, match_score, showcase_score, final_fit, env, notified_drafts: []})`.
-   - Per-KOL working state (draft_ids, gmail_thread_id, current sub_status, notified_drafts) is derived from CAL by replaying `kol_conversation_events` + `kol_draft_history` for the identity. Downstream skills query CAL; they do not read from any Kanban card.
-
-### Step 5 — Email discovery (lightweight)
-For each approved KOL with `email: null`:
-1. Inspect bio link, public website, link-in-bio aggregator, public business contact.
-2. If a public business email is found, record it on the card with `email_source` and `email_confidence` (0-1).
-3. If no public email is found within reasonable effort, mark the card `status: blocked_no_email` and include it in the next batch notification's escalate list. Do **not** scrape paid or private sources.
-
-### Step 6 — Draft initial outreach emails (delegated)
-For each KOL with an `email` and no `draft_ids.initial`:
-1. Invoke the `kol-outreach-initial-email` skill, passing the campaign config path and the KOL card id.
-2. Receive a `draft_id` back; write it into the card's `draft_ids.initial` and set `status: drafted_initial`.
-
-### Step 7 — Notify user that drafts are ready (mandatory)
-After **all** initial drafts for this batch are written, post **one** chat message:
-
-```
-✉️ <N> initial draft(s) ready in Gmail for review.
-Campaign: <campaign_id>   Mode: TEST
-Label: kol-outreach/pending/initial
-Direct link: https://mail.google.com/mail/u/0/#label/kol-outreach%2Fpending%2Finitial
-Drafts:
-  - @<handle1>  (group <X>)  draft_id=<r-...>
-  - @<handle2>  (group <Y>)  draft_id=<r-...>
-Escalate (no email found):
-  - @<handle3>
-Review in Gmail; agent will not send.
-```
-
-After notifying, append each `draft_id` to the card's `notified_drafts`. Never re-notify the same draft.
-
-### Step 8 — Hand off to dispatcher
-1. Confirm `kol-reply-dispatcher` cronjob is registered (every 10 minutes by default). If not, register it.
-2. Tell the user, in chat, that follow-up replies will be handled automatically by the dispatcher and that the next surface they will see is more drafts (or escalate notifications) in Gmail / chat.
-
-### Step 9 — End of orchestrator run
-Orchestrator returns. Subsequent rounds (product pitch / negotiation) are triggered by the dispatcher, not by this skill.
-
-## Notification Rules
-
-| Trigger | Channel | Required content |
-|---|---|---|
-| Shortlist ready | chat (primary) + notifier (header only) | counts, mode, fixed approval verbs, full markdown in chat |
-| Batch drafts ready | chat (primary) + notifier (header only) | label, Gmail link, per-draft handle / group / `draft_id`, escalate list |
-| Escalate (any) | chat + high-priority notifier | KOL, reason, agent suggestion (continue / drop / human decide) |
-
-Notifications must be **idempotent**: never re-notify a `draft_id` already in `notified_drafts`.
-
-## Hard Rules
-
-- **Do NOT create any Kanban cards or tasks for this pipeline.** As of v2 the KOL outreach pipeline is fully CAL- and Console-driven; no Kanban board (`kol-outreach`, `kol-scout`, or per-step gate cards) is created or read at runtime. Legacy v1.1 docs that reference Kanban gates are deprecated and must be ignored. The only place Kanban still appears is `plugins/kol-ops-bridge/scripts/backfill.py`, a one-shot legacy-data migration tool.
-- Never invoke `gmail.send`, `messages.send`, or any send-equivalent. Drafts only.
-- Never bypass the shortlist approval step, even when discovery returns ≤ 3 candidates.
-- Never read user data outside `~/.hermes/kol-outreach/<campaign_id>/` and the explicitly provided brief.
-- Never overwrite prior CAL events; always append a new `kol_conversation_events` row so the audit trail stays intact.
-- TEST MODE is mandatory until the user types exactly `LIVE MODE` in chat for this `campaign_id`. Switching back to TEST is allowed at any time with `TEST MODE`.
+If you find yourself needing to "run the orchestrator", you almost
+certainly want `kol-reply-dispatcher` (inbound) or
+`kol-discovery-to-outreach-router` (outbound first contact).
 
 ## Pitfalls
-- Do not start email discovery before the user approves the shortlist.
-- Do not notify per draft; batch by intent (`initial`, `product_pitch`, `negotiation`).
-- Do not silently retry a failed draft; surface the error in the next notification with the failing KOL.
-- Do not link any SKU outside the campaign whitelist, even if the KOL asked for it; escalate instead.
-- Do not store secrets (Gmail tokens, API keys) inside the campaign config; rely on Hermes secret manager / env vars.
-- Do not parse the user's approval reply with fuzzy LLM matching; only accept the four allowed verbs. Ambiguous = ask again.
+- Treating this map as the sole source of truth at runtime — the
+  goal machine in `plugins/kol-ops-bridge/goals.py` is authoritative.
+  This SKILL drifts; the code does not.
+- Asking this SKILL to "decide what to do next". It can't. The
+  dispatcher reads `get-dispatch-context` and decides per-turn.
+- Bypassing the dispatcher with ad-hoc child-skill invocations on
+  the inbound path. Always go through the dispatcher so facts and
+  goals stay consistent.
