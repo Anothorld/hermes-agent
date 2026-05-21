@@ -294,31 +294,64 @@ class CloseCampaignBody(BaseModel):
 
 
 @router.post("/{campaign_id}/close")
-def close(
+async def close(
     campaign_id: str,
     body: CloseCampaignBody,
+    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
     env: str = Query(..., pattern="^(LIVE|TEST)$"),
 ) -> dict:
-    """Mark a Web-tracked campaign as no longer running.
+    """Best-effort stop the gateway run, then close the console row.
 
-    Used to clear the duplicate-trigger guard once the operator has handled
-    the run (e.g. cancelled after an upstream 402, or shipped end-to-end).
+    ``Mark closed`` started life as a console-only state flip, but in practice
+    operators expect it to stop the backing agent run as well. We therefore
+    try ``POST /v1/runs/{id}/stop`` when a ``run_id`` is known, but never let
+    gateway errors prevent the row from being closed in the console.
     """
     row = conn.execute(
-        "SELECT status FROM product_campaigns WHERE campaign_id=? AND env=?",
+        "SELECT status, run_id FROM product_campaigns WHERE campaign_id=? AND env=?",
         (campaign_id, env),
     ).fetchone()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not tracked")
+
+    stop_result: dict[str, object] | None = None
+    run_id = row["run_id"]
+    if run_id:
+        try:
+            stop_ack = await gateway.stop_run(run_id)
+            stop_result = {
+                "requested": True,
+                "run_id": run_id,
+                "gateway_status": stop_ack.get("status") if isinstance(stop_ack, dict) else None,
+            }
+        except GatewayError as exc:
+            stop_result = {
+                "requested": False,
+                "run_id": run_id,
+                "error": str(exc),
+            }
+
     conn.execute(
         "UPDATE product_campaigns SET status=? WHERE campaign_id=? AND env=?",
         (body.status, campaign_id, env),
     )
     write_audit(conn, actor_user_id=user["id"], action="campaign.close",
-                target=campaign_id, payload={"env": env, "status": body.status})
-    return {"ok": True, "campaign_id": campaign_id, "env": env, "status": body.status}
+                target=campaign_id, payload={
+                    "env": env,
+                    "status": body.status,
+                    "run_id": run_id,
+                    "stop_result": stop_result,
+                })
+    return {
+        "ok": True,
+        "campaign_id": campaign_id,
+        "env": env,
+        "status": body.status,
+        "run_id": run_id,
+        "stop_result": stop_result,
+    }
 
 
 class ApproveShortlistBody(BaseModel):
