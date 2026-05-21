@@ -36,6 +36,19 @@ type CampaignsPayload = {
   kols: Record<string, KolIdent>;
 };
 
+type CloseCampaignResponse = {
+  campaign_id: string;
+  env: string;
+  status: string;
+  run_id: string | null;
+  stop_result?: {
+    requested?: boolean;
+    run_id?: string;
+    gateway_status?: string | null;
+    error?: string;
+  } | null;
+};
+
 function StatusPill({ s }: { s: CampaignRow['status'] }) {
   const cls =
     s === 'running'
@@ -298,9 +311,9 @@ function CampaignCard({
           <button
             onClick={() => onClose(c.campaign_id, c.env)}
             className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-50"
-            title="Mark as closed in console; does not stop the agent run"
+            title="Best-effort stop the gateway run, then close this campaign in the console"
           >
-            Mark closed
+            Stop + close
           </button>
         )}
         {c.shortlist_ready && !c.shortlist_approved && (
@@ -630,8 +643,25 @@ export function ProductDetailPage() {
   }, [sku, envFilter]);
 
   const close = async (cid: string, env: string) => {
+    setMsg(null);
+    setErr(null);
     try {
-      await api.post(`/campaigns/${encodeURIComponent(cid)}/close?env=${env}`, { status: 'closed' });
+      const out = await api.post<CloseCampaignResponse>(
+        `/campaigns/${encodeURIComponent(cid)}/close?env=${env}`,
+        { status: 'closed' },
+      );
+      const stop = out.stop_result;
+      if (!out.run_id) {
+        setMsg(`Campaign ${cid} closed in console.`);
+      } else if (stop?.gateway_status === 'stopping') {
+        setMsg(`Stop requested for ${out.run_id} and campaign ${cid} was closed.`);
+      } else if (stop?.gateway_status === 'not_found') {
+        setMsg(`Campaign ${cid} closed. Gateway no longer tracks run ${out.run_id}.`);
+      } else if (stop?.error) {
+        setMsg(`Campaign ${cid} closed, but stop request failed: ${stop.error}`);
+      } else {
+        setMsg(`Campaign ${cid} closed in console.`);
+      }
       refreshCampaigns();
     } catch (ex) {
       setErr(String(ex));
