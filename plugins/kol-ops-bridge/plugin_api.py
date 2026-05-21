@@ -225,6 +225,20 @@ def wipe_test(
     return {"ok": True, "schema_version": SCHEMA_VERSION}
 
 
+@router.post("/admin/check-stuck-goals")
+def admin_check_stuck_goals(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Cron-callable scanner. Emits a DingTalk notification per goal whose
+    ``updated_at`` exceeds the campaign's ``followup_intervals[goal]``
+    (defaults to 72h). Returns the matched rows so the caller can audit.
+    """
+    _require_bridge_key(x_bridge_key)
+    stuck = cal.check_stuck_goals(env=env)
+    return {"env": env, "count": len(stuck), "stuck": stuck}
+
+
 # ---------------------------------------------------------------------------
 # Identities + relationship
 # ---------------------------------------------------------------------------
