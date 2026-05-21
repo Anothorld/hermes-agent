@@ -30,6 +30,21 @@ substantive creative judgments outside `audit_standards_md`.
    (web console or LLM scaffolding) does the actual reading; this skill
    composes the email and writes the facts.
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "content_review_and_golive", missing_facts: [<from goal_state>], next_action: "<approve / request revision / escalate>"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the first section of the draft prompt; verbatim audit
+  standards from `campaign_config.audit_standards_md` are P0 content.
+- failure mode: empty-doc fallbacks; never block.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context

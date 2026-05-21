@@ -28,6 +28,20 @@ rather than freelancing a fix.
 4. For `handle_response`: `inbound_excerpt` + classifier-extracted
    `fulfillment.delivery_signal` ∈ `{received | not_received | damaged | wrong_item | silent}`.
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "logistics", missing_facts: [<from goal_state>], next_action: "<send tracking / chase delivery / handle response>"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the first section of the draft prompt.
+- failure mode: empty-doc fallbacks; never block.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context

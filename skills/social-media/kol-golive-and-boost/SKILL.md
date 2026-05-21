@@ -30,6 +30,20 @@ URL, and (if applicable) close the boost handoff loop.
 3. For `handle_response`: classifier-extracted
    `fulfillment.posted_url_proposed` and/or `fulfillment.golive_at_proposed`.
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "content_review_and_golive", missing_facts: [<from goal_state>], next_action: "<confirm go-live / request boost assets>"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the first section of the draft prompt.
+- failure mode: empty-doc fallbacks; never block.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context

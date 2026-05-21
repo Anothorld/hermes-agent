@@ -773,6 +773,31 @@ def write_event(
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_MAX_ESCALATION_DEPTH = 3
+
+
+def _read_max_escalation_depth(conn: sqlite3.Connection) -> int:
+    """Best-effort read of ``max_escalation_depth`` from active
+    ``policies/escalation_rules`` row. Falls back to default on any
+    parse / IO error so escalations never break on a missing policy.
+    """
+    try:
+        from . import policies as _policies  # local import; avoid cycles
+    except Exception:  # pragma: no cover — defensive
+        return _DEFAULT_MAX_ESCALATION_DEPTH
+    try:
+        row = _policies.get_policy(conn, scope="escalation_rules")
+        if not row or not row.get("content_md"):
+            return _DEFAULT_MAX_ESCALATION_DEPTH
+        parsed = _policies.parse_escalation_rules(row["content_md"])
+        val = parsed.get("top", {}).get("max_escalation_depth")
+        if isinstance(val, int) and val >= 1:
+            return val
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("read_max_escalation_depth failed: %s", exc)
+    return _DEFAULT_MAX_ESCALATION_DEPTH
+
+
 def open_escalation(
     *,
     identity_id: Optional[int],
@@ -795,6 +820,17 @@ def open_escalation(
                     (parent_escalation_id,),
                 ).fetchone()
                 attempts = (row["attempts_count"] if row else 0) + 1
+            # Depth-aware hint: when this new escalation already meets
+            # the configured depth, tag resume_context so downstream
+            # consumers (skill kol-escalation-resumer / web console)
+            # surface a "human takeover suggested" badge. We never
+            # auto-abort here — operator must explicitly terminate.
+            ctx: dict[str, Any] = dict(resume_context or {})
+            max_depth = _read_max_escalation_depth(conn)
+            if attempts >= max_depth:
+                ctx["force_human_takeover_hint"] = True
+                ctx.setdefault("max_escalation_depth", max_depth)
+                ctx.setdefault("attempts_count", attempts)
             conn.execute(
                 """INSERT INTO kol_escalations
                    (identity_id, campaign_id, goal, reason, severity, state,
@@ -803,7 +839,7 @@ def open_escalation(
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (identity_id, campaign_id, goal, reason, severity,
                  "awaiting_answer", question_to_operator, parent_escalation_id,
-                 attempts, _j(resume_context or {}), now, now, env),
+                 attempts, _j(ctx), now, now, env),
             )
             esc_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
             if identity_id and campaign_id and goal:

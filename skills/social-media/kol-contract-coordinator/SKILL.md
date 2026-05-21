@@ -35,6 +35,20 @@ is templated outside this plugin (deferred); this skill drives the
    `offer.contract_signed_signal` (`signed | declined | change_requested | silent`),
    `offer.contract_change_kind` (`core | cosmetic | null`).
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "contract_signing", missing_facts: [<from goal_state>], next_action: "<send | chase | acknowledge change request>"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the first section of the draft prompt.
+- failure mode: empty-doc fallbacks; never block.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context

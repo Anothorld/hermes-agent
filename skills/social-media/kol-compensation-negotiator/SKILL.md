@@ -30,6 +30,20 @@ policy, KOL's stated mode/quote, and prior history. Either:
    `kol_quoted_basis`, `kol_mode_signal` (extracted by classifier
    into `facts_extracted.offer`).
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "compensation_negotiation", missing_facts: ["offer.compensation_mode", "offer.agreed_terms"], next_action: "<counter-offer / accept / decline rationale>"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the first section of the draft prompt.
+- failure mode: empty-doc fallbacks; never block.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context

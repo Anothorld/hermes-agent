@@ -30,6 +30,22 @@ classifier on the next inbound).
 2. Optional `extra_inline_notes` (operator-supplied per-KOL notes,
    appended below the standard brief body).
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "content_production", missing_facts: ["fulfillment.brief_sent"], next_action: "Send brief / posting notes / hashtags"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the first section of the draft prompt; verbatim brief
+  body from `campaign_config.brief_template_id` is content (not style) and
+  is **not** subject to P1/P2 rewriting.
+- failure mode: empty-doc fallbacks; never block.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context

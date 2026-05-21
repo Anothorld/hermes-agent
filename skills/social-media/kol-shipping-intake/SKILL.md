@@ -34,6 +34,20 @@ Get a usable shipping address with the fewest possible questions:
 4. Classifier-extracted `fulfillment.shipping_address_proposed` when
    KOL provided one.
 
+## Email Style Preamble (mandatory before drafting)
+
+Before composing any draft, this skill **MUST** invoke
+`kol-email-style-loader` and prepend its output verbatim to the LLM
+prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+
+Call contract:
+- inputs: `goal_brief = {goal: "logistics", missing_facts: ["fulfillment.address_collected"], next_action: "<reuse default / collect new shipping address>"}`,
+  `current_user_id = <operator id from session>`.
+- output: prepend as the first section of the draft prompt.
+- failure mode: empty-doc fallbacks; never block.
+
+>>> include: kol-email-style-loader
+
 ## Procedure
 
 ### Step 1 — Load context
