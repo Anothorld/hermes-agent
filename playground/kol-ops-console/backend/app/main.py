@@ -15,8 +15,10 @@ from .db import _connect, init_db
 from .deps import shutdown_bridge, shutdown_gateway
 from .routers import (
     admin,
+    approvals,
     auth,
     campaigns,
+    candidates,
     content,
     contract,
     drafts,
@@ -94,10 +96,12 @@ def create_app() -> FastAPI:
     app.include_router(logistics.router)
     app.include_router(content.router)
     app.include_router(campaigns.router)
+    app.include_router(candidates.router)
     app.include_router(facts.router)
     app.include_router(goals.router)
     app.include_router(relationships.router)
     app.include_router(escalations.router)
+    app.include_router(approvals.router)
     app.include_router(policies.router)
     app.include_router(admin.router)
     app.include_router(events_router.router)  # /ws
