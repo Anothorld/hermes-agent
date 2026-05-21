@@ -569,6 +569,48 @@ def write_facts(
     return _safe("write_facts", _do)
 
 
+def write_facts_multi(
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    namespaces: Mapping[str, Mapping[str, Any]],
+    source: str = "skill",
+    source_event_id: Optional[int] = None,
+    env: str = "LIVE",
+) -> dict[str, int]:
+    """Write facts across multiple namespaces in one logical operation.
+
+    ``namespaces`` is ``{namespace: {fact_key: value, ...}}``. All namespaces
+    are validated up front (atomic-ish: any ``FactNamespaceError`` aborts the
+    call before any insert). Each non-empty namespace is forwarded to
+    ``write_facts`` (which triggers goal recompute once per call).
+
+    Returns ``{namespace: rows_inserted}``.
+    """
+    # Pre-validate to avoid partial writes when caller passes an invalid key.
+    for ns, facts in namespaces.items():
+        if ns not in FACT_NAMESPACES:
+            raise FactNamespaceError(f"unknown namespace: {ns!r}")
+        prefix = f"{ns}."
+        for k in facts:
+            if not k.startswith(prefix):
+                raise FactNamespaceError(
+                    f"fact_key {k!r} must start with {prefix!r}"
+                )
+
+    written: dict[str, int] = {}
+    for ns, facts in namespaces.items():
+        if not facts:
+            continue
+        n = write_facts(
+            identity_id=identity_id, campaign_id=campaign_id,
+            namespace=ns, facts=facts,
+            source=source, source_event_id=source_event_id, env=env,
+        )
+        written[ns] = int(n or 0)
+    return written
+
+
 def latest_facts_for(
     *, identity_id: int, campaign_id: Optional[str], env: str = "LIVE"
 ) -> dict[str, Any]:

@@ -1,135 +1,221 @@
 ---
 name: kol-reply-dispatcher
-description: Cron-triggered KOL reply listener. Every 10 minutes, pulls unread Gmail replies under kol-outreach/pending-reply, classifies intent, routes to the right draft skill (product-pitch / negotiation / decline), and escalates low-confidence cases to chat. Never sends; never auto-decides budget.
-trigger: Runs on cron `*/10 * * * *` under profile `outreach-operator`. Also runs on demand when the user types "check KOL replies".
-tags: ["kol", "outreach", "dispatcher", "reply", "cron", "gmail", "draft"]
+description: Cron-triggered KOL reply router (formerly intent-routing dispatcher; now goal-state aware). Every 10 minutes, pulls unread Gmail replies plus TEST-mode self-replies, calls `kol-email-stage-classifier` to extract multi-namespace facts and per-lane active goals, writes those facts to the Bridge so goal_state recomputes, then for each lane independently decides next-action by dynamic priority (default commerce > fulfillment > publish; severity-gated reversal allowed). Picks the highest-priority unblocked lane as primary author and degrades the others to side-topics or `approval.pending_topics`. Drafts NO email here; delegates to the chosen child skill or opens an escalation. Never sends; never auto-decides budget; never bypasses Bridge for CAL writes.
+trigger: Runs on cron `*/10 * * * *` under profile `outreach-operator`. Also runs on demand when the user types "check KOL replies", "process inbound replies", or "route latest KOL email".
+tags: ["kol", "outreach", "router", "reply", "cron", "gmail", "goal-state", "lanes"]
 ---
 
 ## Goal
-Keep KOL outreach moving without human polling: detect new replies in Gmail, classify them, and prepare the next drafted email. Hand low-confidence or out-of-policy cases to the human via chat. Drafts only — the dispatcher never sends mail and never modifies budget config.
+Keep KOL outreach moving by classifying each new inbound email, persisting
+its facts so goal_state recomputes, and selecting the next child skill (or
+opening an escalation) per lane — without sending mail, without writing CAL
+directly, and without making a business decision the goal-state machine
+should make.
 
 ## Runtime Contract
-- Frequency: every 10 minutes via Hermes `cronjob`.
-- Profile: `outreach-operator`.
-- Idempotency: a message is processed at most once, tracked via the Gmail label flow described below.
-- Hard stop: if the dispatcher cannot read the campaign config for any reply's `campaign_id`, escalate that thread and continue with the rest.
+- Frequency: every 10 minutes via Hermes `cronjob`. Profile:
+  `outreach-operator`.
+- Cron pre-run: a minimal context collector (Phase B replacement for the
+  legacy `kol_reply_dispatcher.py` script) reports a `pending_replies`
+  array. If absent / empty, exit immediately. Each item must carry: matched
+  `identity_id`, `campaign_id`, `env`, the raw email, the thread summary,
+  and the dispatch-context snapshot (see Step 1). (Until that script lands
+  in a later phase, the agent may invoke this skill on-demand via chat with
+  one email at a time; do **not** auto-sweep Gmail from the LLM directly.)
+- **Bridge is the only CAL writer/reader.** Forbidden: import `cal.py`,
+  open `~/.hermes/kol-ops-bridge/cal.db`, ad-hoc SQL, `execute_code`. Use
+  `plugins/kol-ops-bridge/scripts/kol_bridge_tool.py` (deterministic CLI)
+  or HTTP endpoints under `/api/plugins/kol-ops-bridge/`. Always pass
+  `--env <TEST|LIVE>`; never let it default.
+- **Drafts no email and never sends.** Drafting is delegated to a child
+  skill; sending requires explicit human action in the Gmail Drafts inbox.
+- **Idempotency:** a message is processed at most once. The Gmail label
+  flow (`kol-outreach/pending-reply` → `kol-outreach/handled`) is the
+  authority; the classifier output is informational, not a state machine.
+- **Hard stop:** if `campaign_config` is missing or `goals` cannot be
+  fetched for any reply, open an escalation for that thread with reason
+  `dispatcher_missing_context` and continue with the rest. **Never invoke
+  a drafting child skill without goal_state.**
+- The legacy 9-class intent-routing table is **gone**. Routing is by the
+  server-side goal_state, not by intent.
+
+## Inputs
+1. `pending_replies[]` — see Cron pre-run above.
+2. (Implicit) operator chat context if invoked on demand.
 
 ## Procedure
 
-### Step 1 — Pull unread inbound replies
-1. Query Gmail for messages with label `kol-outreach/pending-reply` and `is:unread`.
-2. For each message, **resolve KOL identity using a multi-strategy match** (record both the chosen strategy and a confidence in [0, 1]):
+### Step 1 — Fetch dispatch context (one call)
+For each `pending_replies[i]`, fetch the bundled context:
 
-   | Order | Strategy | Confidence on match |
-   |---|---|---|
-   | 1 | `cal.resolve_identity(aliases=[('gmail_thread_id', tid)])` matches a known identity (thread persisted from a prior outreach draft) | 1.00 |
-   | 2 | Follow `In-Reply-To` / `References` headers; if any referenced message id is in `cal.kol_identity_alias` (kind=`gmail_message_id`) | 0.90 |
-   | 3 | `cal.resolve_identity(aliases=[('email', from_addr)])` matches a known identity (KOL replied from a known address but in a new thread) | 0.80 |
-   | 4 | Body mentions exactly one `@handle` that resolves via `cal.resolve_identity(aliases=[('handle', h)])` | 0.60 |
-   | — | None of the above | 0.00 → escalate as `unknown_sender` and move on |
+```
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
+  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
+```
 
-3. If `match_confidence < 0.7`, do NOT draft for this message; record a `kol_reply_history` row with `match_strategy='unmatched'` (or the partial match) and add to the escalate batch with reason `low_confidence_match`.
+Response: `{goals, lanes, relationship, reusable_facts}`. This **replaces**
+the legacy `get-goals` + `get-relationship` + `get-reusable-facts` +
+`get-lanes` chain — do not call those individually.
 
-### Step 2 — Load campaign context
-1. Read `campaign_id` from the card; load `~/.hermes/kol-outreach/<campaign_id>/config.yaml`.
-2. Confirm `mode` (TEST/LIVE) and budget fields exist. If config missing/corrupt, escalate.
+### Step 2 — Run the classifier
+Invoke `kol-email-stage-classifier` with `latest_email`, `thread_summary`,
+`current_goal_state` (from Step 1's `goals`), `campaign_config_summary`,
+and (if applicable) `relationship_summary` (from Step 1's `relationship`
++ `reusable_facts`). The classifier returns the JSON shape defined in its
+SKILL.md. **Do not paraphrase or modify** its output.
 
-### Step 3 — Classify intent
-Use the LLM to assign exactly one intent + a confidence score in [0, 1]. Allowed intents:
+### Step 3 — Persist extracted facts (one call across all namespaces)
+Write every non-empty namespace from `facts_extracted` in a single call:
 
-| Intent | Definition |
+```
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
+  --identity-id <identity_id> --env <TEST|LIVE> \
+  --json '{"campaign_id":"<campaign_id>",
+            "source":"email:<message_id>",
+            "namespaces":{
+              "offer":       {"offer.<key>": <val>, ...},
+              "identity":    {"identity.<key>": <val>, ...},
+              "fulfillment": {"fulfillment.<key>": <val>, ...},
+              "approval":    {"approval.<key>": <val>, ...}
+            }}'
+```
+
+- Empty namespaces may be omitted; the Bridge no-ops them.
+- Each fact key MUST be dotted-prefix; the Bridge enforces this with
+  `FactNamespaceError` and **rejects the whole call** before any insert if
+  any key is malformed. If you hit one, abort that reply, open an
+  escalation with reason `fact_namespace_violation`, log raw classifier
+  output, and move on. Do **not** retry with munged keys.
+- After the write, re-fetch dispatch context with `get-dispatch-context`.
+  This is the **server's** view of which goals are now active / satisfied
+  / blocked, and supersedes the classifier's `active_goals_by_lane`.
+
+### Step 4 — Per-lane next-action decision
+For each lane in `{commerce, fulfillment, publish, meta}`, given the
+server-side goal_state from Step 3's re-fetch:
+
+| Server goal status | Lane action |
 |---|---|
-| `interested`        | Positive, wants to know more, no price asked. |
-| `asks_materials`    | Asks for product info / catalog / samples. |
-| `proposes_rate`     | Provides a specific number as a fee ask. |
-| `counter_offers`    | Responds to a prior number with a different number. |
-| `content_submission`| KOL submitted a draft video; body contains a URL on the platform whitelist (youtube/youtu.be/tiktok/instagram/bilibili/vimeo). ONLY valid when the KOL's current stage is `logistics.delivered` or later. |
-| `declines`          | Says no, not a fit, not available. |
-| `out_of_office`     | Auto-reply / away message. |
-| `other`             | Anything else (questions, scheduling, off-topic). |
+| `satisfied` | No next action; lane idle. |
+| `blocked` (has `blocking_escalation_id`) | No next action; the open escalation must resolve first. |
+| `skipped` | No next action. |
+| `aborted` | No next action; KOL is dead in this lane. |
+| `active`, no human gates triggered | Pick the child skill bound to that goal (table below). |
+| `active`, human gates triggered | Open an escalation; do NOT invoke a drafting skill. |
 
-Rules:
-- Confidence must reflect ambiguity (e.g. "sounds cool, what's the budget?" is `interested` ~0.6, `proposes_rate` ~0.4).
-- If top intent confidence `< 0.7`, **do not draft**. Escalate (see Step 5).
-- If top two intents are within 0.1 of each other, treat as ambiguous → escalate.
+Goal → child skill:
 
-Record the intent + confidence as part of the Step 4b CAL `record_reply` row (fields `intent` and `confidence`). There is no separate per-card scratch; the latest `kol_reply_history` row is the authoritative `last_reply` for this identity.
-
-### Step 4 — Route by intent
-| Intent | Action |
+| Goal | Child skill |
 |---|---|
-| `interested` / `asks_materials` | Invoke `kol-outreach-product-pitch-email` skill with this card. |
-| `proposes_rate` / `counter_offers` | Parse number + currency. If parse succeeds, invoke `kol-outreach-negotiation-email`. If parse fails, escalate. |
-| `content_submission` | Invoke `kol-outreach-content-review` skill (extracts video URL + notifies operator; does NOT draft). |
-| `declines` | Write a `closed_declined` CAL event for this identity. Draft no reply. Add to next escalate digest (info only). |
-| `out_of_office` | Re-label message back to `kol-outreach/replied/ooo`. Do not draft. No escalate. |
-| `other` | Escalate. |
+| `cold_outreach` | `kol-cold-outreach` |
+| `reengagement_outreach` | `kol-reengagement-outreach` |
+| `interest_qualification` | `kol-interest-qualifier` |
+| `product_selection` | `kol-product-selector` |
+| `deliverables_scope` | `kol-deliverables-clarifier` |
+| `compensation_negotiation` | `kol-compensation-negotiator` |
+| `contract_signing` | `kol-contract-coordinator` |
+| `logistics` (`address_collected` missing) | `kol-shipping-intake` |
+| `logistics` (post-address) | `kol-logistics-tracker` |
+| `content_production` (no `brief_sent`) | `kol-brief-sender` |
+| `content_production` (`brief_sent` true, no `draft_submitted`) | (wait; no draft yet) |
+| `content_review_and_golive` | `kol-content-reviewer` then `kol-golive-and-boost` |
+| `post_collab_archival` | `kol-archival-writer` |
 
-After a successful draft (or `content_submission` routing), move the inbound message's label from `kol-outreach/pending-reply` to `kol-outreach/replied/<intent>` and mark read. This is the idempotency anchor: never process a message that is not under `pending-reply`.
+Many of these child skills land in later Phase B sub-phases. If the chosen
+skill is not yet present, write an `approval.pending_action_<goal>` fact
+(via `write-facts-multi` from Step 3 or a follow-up call) so an operator
+can pick it up.
 
-### Step 4b — CAL audit (mandatory, fire-and-forget)
-For every processed inbound message, write CAL **before** the label move (so a crash mid-step doesn't lose the reply):
+### Step 5 — Lane priority and primary author selection
+1. Default priority: `commerce > fulfillment > publish > meta`.
+2. **Severity reversal:** if any `fulfillment` or `publish` action carries a
+   `severity ∈ {critical, blocking}` from the classifier's `signals` (e.g.
+   `not_received`, `address_questioned`, `rejects_revisions`,
+   `escalation_pattern_match:*`), it temporarily outranks `commerce`.
+3. Pick the **highest-priority lane that is not blocked/idle** as the
+   primary lane. Invoke its child skill with the full reply context.
+4. For non-primary lanes that have a next action, do NOT invoke their
+   skill. Instead append to the same `write-facts-multi` payload (or issue
+   one follow-up call) under `approval`:
+   ```
+   "approval.pending_topics": ["<lane>:<goal>:<one-line topic>", ...]
+   ```
 
-1. `cal.record_reply(kol_identity_id=<resolved id or NULL>, gmail_message_id=<id>, gmail_thread_id=<tid>, from_addr=<addr>, received_at=<iso8601>, snippet=<≤200 chars>, body=<full body>, intent=<intent>, confidence=<intent confidence>, match_strategy=<chosen strategy from Step 1>, match_confidence=<from Step 1>, handled_action=<routed_skill|escalated|ignored>, card_id=NULL, campaign_id=<id>)`. (`card_id` is a legacy column; always NULL in v2.)
-2. `cal.record_event(event_type='reply_received', stage=<KOL's current stage>, sub_status='reply_classified', actor='cron:dispatcher', payload={intent, intent_confidence, match_strategy, match_confidence, gmail_message_id})`.
-3. On escalation: `cal.record_escalation(reason=<low_confidence_reply|low_confidence_match|unknown_sender|parse_failed|other>, kol_identity_id=<or null>, card_id=NULL, campaign_id=<or null>, classifier_confidence=<x>, ai_recommendation=<one-line>)`.
+### Step 6 — Idempotency labels
+After Step 5 (or an escalation was opened), apply the Gmail label
+`kol-outreach/handled` to that message and remove
+`kol-outreach/pending-reply`. The Gmail label transition is the only
+state-machine for "have we processed this email"; do **not** rely on CAL
+events for re-entry detection.
 
-### Step 5 — Escalate low-confidence / policy cases
-Accumulate an escalate list across this run. At end of run, post **one** chat message:
+### Step 7 — Final report
+Return a JSON summary covering each processed reply:
 
+```json
+[
+  {
+    "identity_id": 42,
+    "campaign_id": "TS8319",
+    "env": "TEST",
+    "primary_lane": "commerce",
+    "primary_goal": "compensation_negotiation",
+    "primary_skill_invoked": "kol-compensation-negotiator",
+    "side_topics": ["fulfillment:logistics:address still pending"],
+    "escalation_opened": null
+  },
+  ...
+]
 ```
-🛎️ KOL replies need a human (<campaign_id>): <N> case(s)
-- @<handle>  intent=<intent> conf=<x.xx>  reason=<low_confidence|ambiguous|unparseable_price|other>
-  Gmail: https://mail.google.com/mail/u/0/#inbox/<thread_id>
-- ...
-Dispatcher took no action on these threads.
+
+## Examples
+
+### Success — single-lane
+KOL replies "I'd love to collaborate, what's the budget?". Step 1 returns
+`outreach.satisfied`. Classifier emits
+`facts_extracted.offer={"offer.interest_signal":"confirmed"}`. Step 3 writes
+that one namespace via `write-facts-multi`. Server re-fetch shows
+`deliverables_scope` active in commerce. Primary author =
+`kol-deliverables-clarifier`.
+
+### Success — multi-lane, severity reversal, single fact write
+KOL replies with both "the package never arrived" and "we should talk price
+again". Classifier emits `facts_extracted.offer={...}` plus
+`facts_extracted.fulfillment={...}` plus `signals=[{name:"not_received",
+severity:"critical"}, ...]`. Step 3's `write-facts-multi` writes BOTH
+namespaces in one call. Re-fetch shows `compensation_negotiation` active
+(commerce) and `logistics` active (fulfillment). Severity reversal →
+primary lane = fulfillment, primary skill = `kol-logistics-tracker`.
+Commerce side-topic written via a second `write-facts-multi` call:
+```
+"approval.pending_topics":
+  ["commerce:compensation_negotiation:KOL re-opened price; defer until package located"]
 ```
 
-If a `notifier` channel is configured, also send the count + first 3 handles to that channel.
+### Failure — namespace violation
+Classifier emits `compensation_mode` (no prefix). Step 3 hits
+`FactNamespaceError` on the whole call (atomic — nothing is written). Open
+escalation with reason `fact_namespace_violation`, log raw classifier
+output, skip drafting.
 
-### Step 6 — Batch "drafts ready" notification
-After all routing is done, post **one** consolidated chat message with all newly created drafts in this run:
-
-```
-✉️ <N> reply draft(s) ready in Gmail.
-Campaign: <campaign_id>   Mode: TEST/LIVE
-By intent:
-  - product_pitch: <count>  label kol-outreach/pending/product_pitch
-  - negotiation:   <count>  label kol-outreach/pending/negotiation
-Drafts:
-  - @<handle>  intent=<intent>  draft_id=<r-...>
-  - ...
-Review in Gmail; agent will not send.
-```
-
-Append each new `draft_id` to the corresponding identity's `notified_drafts` set via a `cal.record_event(event_type='draft_notified', stage=<stage>, sub_status=<sub_status>, payload={draft_id})`. Idempotency: before notifying, scan the identity's prior `draft_notified` events; skip any draft id already listed.
-
-### Step 7 — Exit
-Return a structured run report:
-
-```yaml
-processed: <N>
-drafted:
-  product_pitch: <n1>
-  negotiation:   <n2>
-escalated: <n3>
-errors: <n4>
-```
-
-If `errors > 0`, attach a short error list to the chat escalate message.
-
-## Hard Rules
-- **Never send.** Drafts only.
-- **Never modify** `~/.hermes/kol-outreach/<campaign_id>/config.yaml`.
-- **Never bypass the 0.7 confidence threshold.**
-- **Never process a message twice.** The `pending-reply → replied/<intent>` label move is the single source of truth.
-- **Never escalate per-message in real time.** Batch into one chat message per run.
-- **Never start a new Gmail thread** from this skill; always reply on the existing `gmail_thread_id`.
-- **Never write a `sent_*` sub_status into CAL.** Only the human (by sending the Gmail draft from their mailbox) advances state to a `sent_*` event. The dispatcher only writes `drafted_*` / `closed_declined` events.
+### Failure — missing config
+`campaign_config` not in the snapshot. Step 1's `get-dispatch-context`
+returns 404. Open escalation `dispatcher_missing_context`. Do NOT proceed.
 
 ## Pitfalls
-- Do not treat empty bodies (quoted-only reply) as `interested`; classify as `other` and escalate.
-- Do not chain dispatcher runs — if a draft skill fails, log the error on the card and continue with the next message; do not retry inline.
-- Do not "merge" multiple inbound messages on the same thread into one classification; classify only the newest unread message, but feed prior context to the draft skills.
-- Do not rely on the KOL's prior intent; classify fresh every run.
-- Do not skip the `notifier` channel just because chat already received the message — both are required when a `notifier` is configured.
+- The classifier's `active_goals_by_lane` is a **hint**, not the truth.
+  Always re-fetch `get-dispatch-context` after writing facts and trust the
+  server.
+- Side-topics only via `approval.pending_topics` — never silently drop a
+  non-primary-lane action.
+- A reply that fits **no** active goal still needs a label transition;
+  mark `kol-outreach/handled` and add an `approval.unmatched_reply` fact
+  so the operator notices.
+- `write-facts-multi` is atomic on validation: a single bad key blocks the
+  whole batch. Treat it as transactional and don't try to "salvage" valid
+  namespaces by retrying piecemeal — fix the classifier output instead.
+- The legacy 9-class intent table is no longer authoritative; if a SKILL.md
+  elsewhere references it, treat that reference as stale documentation
+  pending Phase B cleanup.
+- Bridge open mode (no `X-Bridge-Key`) silently allows mutation but logs a
+  WARN; in production cron you must set `HERMES_KOL_OPS_BRIDGE_KEY` so a
+  rotation incident doesn't go unnoticed.
