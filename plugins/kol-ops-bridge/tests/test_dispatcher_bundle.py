@@ -95,7 +95,7 @@ def test_write_facts_multi_rejects_unprefixed_key(cal_db):
 
 def test_dispatch_context_bundle_shape(cal_db):
     """The plugin_api ``/identities/{id}/dispatch-context`` route just
-    stitches these four reads. We assert the ingredients are coherent."""
+    stitches these five reads. We assert the ingredients are coherent."""
     cal = cal_db
     iid = _seed(cal)
     cal.upsert_relationship(
@@ -108,8 +108,10 @@ def test_dispatch_context_bundle_shape(cal_db):
         identity_id=iid, campaign_id=CAMPAIGN, env="LIVE")
     rel = cal.get_relationship(iid)
     reusable = cal.get_reusable_facts(iid)
+    cfg = cal.get_campaign_config(CAMPAIGN)
 
     assert isinstance(goals, list) and len(goals) >= 10
     assert set(lanes.keys()) >= {"commerce", "fulfillment", "publish", "meta"}
     assert rel and rel["last_outcome"] == "satisfied"
     assert isinstance(reusable, dict)
+    assert cfg and cfg["campaign_id"] == CAMPAIGN
