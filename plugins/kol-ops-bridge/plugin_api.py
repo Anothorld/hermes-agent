@@ -498,8 +498,10 @@ def get_dispatch_context(
 ) -> dict[str, Any]:
     """Bundle the read snapshots ``kol-reply-dispatcher`` needs in one call.
 
-    Returns ``{goals, lanes, relationship, reusable_facts}`` for a single
-    (identity, campaign) pair. Replaces 4 separate reads with 1.
+    Returns ``{goals, lanes, relationship, reusable_facts, campaign_config}``
+    for a single (identity, campaign) pair. Replaces 5 separate reads
+    with 1. ``campaign_config`` is ``None`` if the campaign row is
+    missing (caller must surface that as a routing error).
     """
     if not cal.get_identity(identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
@@ -515,6 +517,7 @@ def get_dispatch_context(
         ),
         "relationship": cal.get_relationship(identity_id),
         "reusable_facts": cal.get_reusable_facts(identity_id),
+        "campaign_config": cal.get_campaign_config(campaign_id),
     }
 
 

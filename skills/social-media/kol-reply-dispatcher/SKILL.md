@@ -53,7 +53,7 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
   --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
 ```
 
-Response: `{goals, lanes, relationship, reusable_facts}`. This **replaces**
+Response: `{goals, lanes, relationship, reusable_facts, campaign_config}`. This **replaces**
 the legacy `get-goals` + `get-relationship` + `get-reusable-facts` +
 `get-lanes` chain — do not call those individually.
 
@@ -61,7 +61,7 @@ the legacy `get-goals` + `get-relationship` + `get-reusable-facts` +
 Invoke `kol-email-stage-classifier` with `latest_email`, `thread_summary`,
 `current_goal_state` (from Step 1's `goals`), `campaign_config_summary`,
 and (if applicable) `relationship_summary` (from Step 1's `relationship`
-+ `reusable_facts`). The classifier returns the JSON shape defined in its
++ `reusable_facts` + `campaign_config`). The classifier returns the JSON shape defined in its
 SKILL.md. **Do not paraphrase or modify** its output.
 
 ### Step 3 — Persist extracted facts (one call across all namespaces)
