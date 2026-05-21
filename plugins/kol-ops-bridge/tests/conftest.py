@@ -26,7 +26,7 @@ def _load_package() -> types.ModuleType:
     pkg.__path__ = [str(_PLUGIN_ROOT)]
     sys.modules[_PKG_NAME] = pkg
 
-    for sub in ("schema", "goals", "cal", "discovery_router"):
+    for sub in ("schema", "goals", "policies", "cal", "discovery_router"):
         spec = importlib.util.spec_from_file_location(
             f"{_PKG_NAME}.{sub}",
             _PLUGIN_ROOT / f"{sub}.py",
