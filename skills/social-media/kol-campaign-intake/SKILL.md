@@ -76,13 +76,16 @@ For each REQUIRED field, attempt extraction in this order:
 | all green | proceed to Step 4 |
 
 ### Step 4 — Persist
-Call the campaign-config write endpoint (Phase A+ commitments —
-verify presence):
+Use the deterministic bridge CLI (never hand-roll HTTP or SQL) to
+upsert the campaign config atomically:
 ```
-POST /api/plugins/kol-ops-bridge/campaigns/<id>/config
-body: {"env":"TEST|LIVE", "config": <parsed>, "source":"skill:kol-campaign-intake"}
+python <PROJECT>/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+  upsert-campaign --env TEST|LIVE --campaign-id <id> --json @/tmp/campaign.json
 ```
-Endpoint must be atomic (creates campaign row + config row in one
+The JSON body mirrors `CampaignUpsertBody`: `{title, paid_ceiling,
+contract_required, sku_whitelist, brief_template_id, ...}`. The CLI
+already injects `X-Bridge-Key` from `HERMES_KOL_OPS_BRIDGE_KEY`. The
+endpoint is atomic (creates the campaign row + config row in one
 transaction, or none).
 
 Do NOT write any `kol_facts.*` (this skill is identity-agnostic).

@@ -324,10 +324,13 @@ def gmail_draft(args):
             message["from"] = args.from_header
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        draft_message = {"raw": raw}
+        if args.thread_id:
+            draft_message["threadId"] = args.thread_id
         result = _run_gws(
             ["gmail", "users", "drafts", "create"],
             params={"userId": "me"},
-            body={"message": {"raw": raw}},
+            body={"message": draft_message},
         )
         print(json.dumps({
             "status": "drafted",
@@ -347,8 +350,11 @@ def gmail_draft(args):
         message["from"] = args.from_header
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    draft_message = {"raw": raw}
+    if args.thread_id:
+        draft_message["threadId"] = args.thread_id
     result = service.users().drafts().create(
-        userId="me", body={"message": {"raw": raw}}
+        userId="me", body={"message": draft_message}
     ).execute()
     print(json.dumps({
         "status": "drafted",
@@ -1118,6 +1124,7 @@ def main():
     p.add_argument("--cc", default="")
     p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
     p.add_argument("--html", action="store_true", help="Store body as HTML")
+    p.add_argument("--thread-id", default="", help="Thread ID for threading")
     p.set_defaults(func=gmail_draft)
 
     p = gmail_sub.add_parser("send")

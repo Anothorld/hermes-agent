@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api';
 
@@ -64,12 +64,10 @@ function RunStatePill({ s }: { s: string | null }) {
 function KolList({
   ids,
   kols,
-  onSimulateReply,
   emptyText = 'no KOL events yet',
 }: {
   ids: number[];
   kols: Record<string, KolIdent>;
-  onSimulateReply?: (kolId: number, kolLabel: string) => void;
   emptyText?: string;
 }) {
   if (ids.length === 0) return <span className="text-xs text-slate-400">{emptyText}</span>;
@@ -84,15 +82,6 @@ function KolList({
               {label}
               {k?.platform && <span className="ml-1 text-slate-400">({k.platform})</span>}
             </Link>
-            {onSimulateReply && (
-              <button
-                onClick={() => onSimulateReply(id, label)}
-                className="rounded border border-slate-300 px-1 text-[10px] text-slate-500 hover:bg-white"
-                title="Simulate an inbound Gmail reply from this KOL"
-              >
-                sim reply
-              </button>
-            )}
           </li>
         );
       })}
@@ -285,13 +274,11 @@ function CampaignCard({
   kols,
   onClose,
   onApprove,
-  onSimulateReply,
 }: {
   c: CampaignRow;
   kols: Record<string, KolIdent>;
   onClose: (id: string, env: string) => void;
   onApprove: (id: string, env: string, selectedHandles: string[]) => Promise<void>;
-  onSimulateReply: (campaignId: string, env: string, kolId: number, kolLabel: string) => void;
 }) {
   const [showReview, setShowReview] = useState(false);
   return (
@@ -396,11 +383,218 @@ function CampaignCard({
         <KolList
           ids={c.contacted_kol_ids}
           kols={kols}
-          onSimulateReply={(id, label) => onSimulateReply(c.campaign_id, c.env, id, label)}
           emptyText="暂无已建联 KOL — 审批 shortlist 后将生成初邀草稿"
         />
       </div>
     </li>
+  );
+}
+
+function LaunchCampaignForm({
+  sku,
+  env,
+  onLaunched,
+  onError,
+}: {
+  sku: string;
+  env: 'TEST' | 'LIVE';
+  onLaunched: (runId: string | null, campaignId: string) => void;
+  onError: (msg: string) => void;
+}) {
+  // Sensible defaults so the operator can launch with one click; all
+  // fields are still editable for tuning per-campaign.
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const defaultCampaignId = `${sku}-${today}`;
+  const [campaignId, setCampaignId] = useState(defaultCampaignId);
+  const [budgetPerKol, setBudgetPerKol] = useState<number>(120);
+  const [absoluteFloor, setAbsoluteFloor] = useState<number>(60);
+  const [budgetTotal, setBudgetTotal] = useState<number>(1200);
+  const [headcountTarget, setHeadcountTarget] = useState<number>(10);
+  const [discoveryTargetOverride, setDiscoveryTargetOverride] = useState<number | ''>('');
+  const [testModeTo, setTestModeTo] = useState<string>('');
+  const [productPitchMd, setProductPitchMd] = useState<string>('');
+  const [briefExtra, setBriefExtra] = useState<string>('');
+  const [busy, setBusy] = useState(false);
+
+  // Live preview of the discovery target so the operator can tune the funnel.
+  const discoveryDefault = Math.max(headcountTarget * 3, headcountTarget + 5);
+  const discoveryEffective = discoveryTargetOverride === '' ? discoveryDefault : discoveryTargetOverride;
+
+  // Sync default campaign_id when sku changes.
+  useEffect(() => {
+    setCampaignId(`${sku}-${today}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sku]);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    if (env === 'TEST' && !testModeTo.trim()) {
+      onError('TEST 模式必须填写 test_mode_to（接收测试邮件的地址）');
+      return;
+    }
+    if (!productPitchMd.trim()) {
+      onError('product_pitch_md 必填：请粘贴产品的卖点 / 类别 / 受众 / 送样策略，供 KOL discovery 使用');
+      return;
+    }
+    setBusy(true);
+    try {
+      const body: Record<string, unknown> = {
+        product_sku: sku,
+        env,
+        budget_per_kol: budgetPerKol,
+        absolute_floor: absoluteFloor,
+        budget_total: budgetTotal,
+        headcount_target: headcountTarget,
+        product_pitch_md: productPitchMd,
+        brief_extra: briefExtra || null,
+      };
+      if (testModeTo.trim()) body.test_mode_to = testModeTo.trim();
+      if (discoveryTargetOverride !== '') {
+        body.discovery_target_count = discoveryTargetOverride;
+      }
+      const r = await api.post<{ run_id?: string }>(
+        `/campaigns/${encodeURIComponent(campaignId)}/start`,
+        body,
+      );
+      onLaunched(r.run_id ?? null, campaignId);
+    } catch (ex) {
+      onError(String(ex));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-2 text-xs">
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex flex-col">
+          <span className="text-slate-500">campaign_id</span>
+          <input
+            value={campaignId}
+            onChange={(e) => setCampaignId(e.target.value)}
+            className="rounded border px-2 py-1 font-mono"
+            required
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-slate-500">budget_per_kol (USD)</span>
+          <input
+            type="number"
+            min={0}
+            value={budgetPerKol}
+            onChange={(e) => setBudgetPerKol(Number(e.target.value))}
+            className="w-24 rounded border px-2 py-1"
+            required
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-slate-500">absolute_floor (USD)</span>
+          <input
+            type="number"
+            min={0}
+            value={absoluteFloor}
+            onChange={(e) => setAbsoluteFloor(Number(e.target.value))}
+            className="w-24 rounded border px-2 py-1"
+            required
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-slate-500">budget_total (USD)</span>
+          <input
+            type="number"
+            min={0}
+            value={budgetTotal}
+            onChange={(e) => setBudgetTotal(Number(e.target.value))}
+            className="w-24 rounded border px-2 py-1"
+            required
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-slate-500">headcount_target</span>
+          <input
+            type="number"
+            min={1}
+            value={headcountTarget}
+            onChange={(e) => setHeadcountTarget(Number(e.target.value))}
+            className="w-20 rounded border px-2 py-1"
+            required
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-slate-500">
+            discovery_target_count{' '}
+            <span className="text-slate-400">(默认 {discoveryDefault} ≈3×)</span>
+          </span>
+          <input
+            type="number"
+            min={headcountTarget}
+            value={discoveryTargetOverride}
+            onChange={(e) => {
+              const v = e.target.value;
+              setDiscoveryTargetOverride(v === '' ? '' : Number(v));
+            }}
+            placeholder={String(discoveryDefault)}
+            className="w-24 rounded border px-2 py-1"
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-slate-500">
+            test_mode_to {env === 'TEST' && <span className="text-amber-600">*</span>}
+          </span>
+          <input
+            type="email"
+            value={testModeTo}
+            onChange={(e) => setTestModeTo(e.target.value)}
+            placeholder="me@example.com"
+            className="w-56 rounded border px-2 py-1"
+          />
+        </label>
+      </div>
+      <label className="flex flex-col">
+        <span className="text-slate-500">
+          product_pitch_md <span className="text-amber-600">*</span>
+          <span className="ml-1 text-slate-400">
+            (markdown，供 KOL discovery 提炼关键词 / 受众 / 送样策略)
+          </span>
+        </span>
+        <textarea
+          value={productPitchMd}
+          onChange={(e) => setProductPitchMd(e.target.value)}
+          rows={6}
+          className="rounded border px-2 py-1 font-mono"
+          placeholder={'例如：\n# Povison ABC 桌\n- 实木桃花心材\n- 60”餐桌\n- 适合美式 / 中古类家居博主\n- 送样策略：gifted 优先，避免现金'}
+          required
+        />
+      </label>
+      <label className="flex flex-col">
+        <span className="text-slate-500">brief_extra (额外要求 / 备注)</span>
+        <textarea
+          value={briefExtra}
+          onChange={(e) => setBriefExtra(e.target.value)}
+          rows={2}
+          className="rounded border px-2 py-1"
+          placeholder="例如：仅 US 区 KOL、要求英文邮件、避免与品牌 X 合作过的人..."
+        />
+      </label>
+      <div className="flex items-center justify-between">
+        <span className="text-slate-400">
+          环境：<strong className={env === 'LIVE' ? 'text-red-600' : 'text-emerald-700'}>{env}</strong>
+          {env === 'LIVE' && '（会真实发邮件，请谨慎）'}
+          <span className="ml-3">
+            discovery 目标：<strong>{discoveryEffective}</strong> 名
+            · 入池后人工筛选至 {headcountTarget} 名
+          </span>
+        </span>
+        <button
+          type="submit"
+          disabled={busy}
+          className="rounded bg-emerald-600 px-3 py-1 font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+        >
+          {busy ? '提交中…' : `Start campaign in ${env}`}
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -462,40 +656,6 @@ export function ProductDetailPage() {
     }
   };
 
-  const simulateReply = async (
-    cid: string,
-    env: string,
-    kolId: number,
-    kolLabel: string,
-  ) => {
-    setMsg(null);
-    setErr(null);
-    const replyBody = window.prompt(
-      `Simulate inbound reply from "${kolLabel}":\n\nPaste the reply text below.`,
-      "Hi! Thanks for reaching out — I'm interested. What fee are you offering?",
-    );
-    if (!replyBody) return;
-    const hint = window.prompt(
-      'Optional intent hint (interested / asking_fee / decline / out_of_office / spam / unknown):',
-      'asking_fee',
-    );
-    try {
-      const r = await api.post<{ run_id?: string }>(
-        `/campaigns/${encodeURIComponent(cid)}/replies/inbound`,
-        {
-          kol_identity_id: kolId,
-          body: replyBody,
-          intent_hint: hint || null,
-          env,
-        },
-      );
-      setMsg(`Reply injected for ${kolLabel} · classification run ${r.run_id ?? '(none)'}`);
-      refreshCampaigns();
-    } catch (ex) {
-      setErr(`Inject reply failed: ${String(ex)}`);
-    }
-  };
-
   if (err && !p) return <div className="text-red-600">{err}</div>;
   if (!p) return <div>Loading…</div>;
 
@@ -530,10 +690,18 @@ export function ProductDetailPage() {
           </button>
         </div>
 
-        <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-          Campaign launch from the console is disabled in Phase A — the bridge no longer exposes
-          <code className="mx-1 rounded bg-white px-1">/campaigns/&lt;id&gt;/start</code>. Start campaigns via
-          the orchestrator flow; this view stays read-only until the Phase B launch wiring lands.
+        <div className="rounded border border-slate-200 bg-white p-3">
+          <LaunchCampaignForm
+            sku={p.sku}
+            env={envFilter}
+            onLaunched={(runId, campaignId) => {
+              setMsg(
+                `Campaign ${campaignId} launched in ${envFilter} · gateway run ${runId ?? '(none)'}`,
+              );
+              refreshCampaigns();
+            }}
+            onError={(e) => setErr(e)}
+          />
         </div>
 
         {campaigns.campaigns.length === 0 ? (
@@ -549,7 +717,6 @@ export function ProductDetailPage() {
                 kols={campaigns.kols}
                 onClose={close}
                 onApprove={approveShortlist}
-                onSimulateReply={simulateReply}
               />
             ))}
           </ul>

@@ -2,11 +2,9 @@
 
 Mirrors the v2.4 endpoint surface (Phase A3). The legacy stage-driven
 methods (push_contract_update / push_logistics_update / push_content_verdict
-/ inject_inbound_reply / list_pending_drafts / get_draft / get_timeline /
-add_alias / list_open_escalations / recent_events / latest_event_id /
-list_identities / start_campaign / approve_shortlist / get_shortlist) have
-been removed; the console UI must migrate to the new fact / goal / lane
-surface in Phase C.
+/ inject_inbound_reply / list_pending_drafts / get_draft / add_alias /
+latest_event_id / start_campaign) were retired in the Phase B cleanup as
+the corresponding routers + UI were deleted.
 """
 
 from __future__ import annotations
@@ -252,48 +250,43 @@ class BridgeClient:
 
     # --------------------------------------------------------------- Events
     async def recent_events(
-        self, env: str = "LIVE", limit: int = 200
+        self,
+        env: str = "LIVE",
+        limit: int = 200,
+        campaign_id: str | None = None,
+        since_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Recent conversation events.
-
-        The bridge does not yet expose a ``/events`` read endpoint, so this
-        returns an empty list rather than raising AttributeError. Callers
-        already treat the events feed as best-effort enrichment and degrade
-        gracefully when it is empty. Replace with a real GET once the bridge
-        ships the endpoint.
-        """
-        return []
-
-    # ----------------------------------------------- Identities / timeline
-    async def list_identities(self, env: str = "LIVE") -> list[dict[str, Any]]:
-        """List KOL identities — bridge has no ``GET /identities`` yet.
-
-        Returns an empty list so the consumers (Kanban, product summary)
-        render an empty state rather than 500.
-        """
-        return []
+        """Recent conversation events across all identities (reverse-chrono)."""
+        params: dict[str, Any] = {"env": env, "limit": limit}
+        if campaign_id:
+            params["campaign_id"] = campaign_id
+        if since_id is not None:
+            params["since_id"] = since_id
+        out = await self._req("GET", "/events/recent", params=params)
+        return list(out.get("events") or [])
 
     async def get_timeline(
-        self, identity_id: int, env: str = "LIVE"
+        self,
+        identity_id: int,
+        env: str = "LIVE",
+        campaign_id: str | None = None,
+        limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Per-identity conversation timeline — bridge endpoint pending."""
-        return []
+        """Per-identity event timeline (reverse-chrono)."""
+        params: dict[str, Any] = {"env": env, "limit": limit}
+        if campaign_id:
+            params["campaign_id"] = campaign_id
+        out = await self._req(
+            "GET", f"/identities/{identity_id}/timeline", params=params
+        )
+        return list(out.get("events") or [])
 
     # ---------------------------------------------- Drafts / replies (dead)
-    # Phase A retired the kol_drafts / kol_replies persistence. These stubs
-    # keep the legacy routers from raising AttributeError; the UI nav links
-    # are also removed so this path is only hit by deep-linked bookmarks.
-    async def list_pending_drafts(
-        self, env: str = "LIVE"
-    ) -> list[dict[str, Any]]:
-        return []
+    # Phase A retired the kol_drafts / kol_replies persistence; the related
+    # routers + UI were deleted in Phase B cleanup, so no bridge wrappers
+    # are needed here.
 
-    async def get_draft(
-        self, draft_id: str, env: str = "LIVE"
-    ) -> dict[str, Any]:
-        raise BridgeError(404, "drafts retired in Phase A")
-
-    # ------------------------------------------- Shortlist / inbound reply
+    # ------------------------------------------- Shortlist
     async def get_shortlist(
         self, campaign_id: str, env: str = "LIVE"
     ) -> dict[str, Any]:
@@ -306,22 +299,48 @@ class BridgeClient:
     ) -> dict[str, Any]:
         return await self.select_candidates(campaign_id, body)
 
-    async def inject_inbound_reply(
-        self, campaign_id: str, body: dict[str, Any]
-    ) -> dict[str, Any]:
-        raise BridgeError(501, "inbound reply injection not wired")
+    # ------------------------------------------------- Open escalations
+    async def list_open_escalations(
+        self, env: str = "LIVE"
+    ) -> list[dict[str, Any]]:
+        """Return ``state='awaiting_answer'`` escalations for the env.
 
-    # ---------------------------------------------------- Campaign launch
-    async def start_campaign(
-        self, campaign_id: str, body: dict[str, Any]
-    ) -> dict[str, Any]:
-        raise BridgeError(501, "campaign launch goes through gateway, not bridge")
+        Maps bridge's ``identity_id`` -> ``kol_identity_id`` for the
+        web console which uses the latter naming consistently.
+        """
+        rows = await self.list_escalations(env=env, state="awaiting_answer")
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            if "identity_id" in d and "kol_identity_id" not in d:
+                d["kol_identity_id"] = d["identity_id"]
+            # Surface the open timestamp under a uniform ``ts`` key the
+            # UI already renders.
+            if "ts" not in d and "created_at" in d:
+                d["ts"] = d["created_at"]
+            out.append(d)
+        return out
 
-    # ----------------------------------------------------- Contract stub
-    async def push_contract_update(
-        self, body: dict[str, Any]
+    async def choose_escalation_next_action(
+        self, escalation_id: int, body: dict[str, Any]
     ) -> dict[str, Any]:
-        raise BridgeError(501, "contract provider not wired")
+        """Operator picks the next reply type for an open escalation.
+
+        Bridge has no dedicated endpoint yet; we reuse
+        ``PATCH /escalations/{id}`` with a structured ``decision`` so the
+        bridge's escalation resumer can pick the chosen action from
+        ``resume_context`` on the next dispatch.  ``human_note`` is
+        forwarded as ``operator_answer``.
+        """
+        next_type = body.get("next_reply_type") or "unspecified"
+        actor = body.get("actor") or "web:unknown"
+        payload = {
+            "decision": f"next_action:{next_type}",
+            "decided_by": actor,
+            "operator_answer": body.get("human_note"),
+            "final_state": "answered",
+        }
+        return await self.resolve_escalation(escalation_id, payload)
 
     # ---------------------------------------------------------------- Admin
     async def wipe_test(self) -> dict[str, Any]:

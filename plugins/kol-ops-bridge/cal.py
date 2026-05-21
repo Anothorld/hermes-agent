@@ -768,6 +768,57 @@ def write_event(
     return _safe("write_event", _do)
 
 
+def list_events(
+    *,
+    env: str = "LIVE",
+    identity_id: Optional[int] = None,
+    campaign_id: Optional[str] = None,
+    limit: int = 200,
+    since_id: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Read ``kol_conversation_events`` in reverse-chronological order.
+
+    Used by the console's ReplyMonitor + KolDetail.timeline + the cron
+    poller's watermark logic.  ``since_id`` lets callers do incremental
+    pulls; ``identity_id`` / ``campaign_id`` are optional narrowing
+    filters (combinable).  Results are dicts ready for JSON serialization.
+    """
+    limit = max(1, min(int(limit), 1000))
+    where = ["env = ?"]
+    args: list[Any] = [env]
+    if identity_id is not None:
+        where.append("identity_id = ?")
+        args.append(int(identity_id))
+    if campaign_id is not None:
+        where.append("campaign_id = ?")
+        args.append(campaign_id)
+    if since_id is not None:
+        where.append("id > ?")
+        args.append(int(since_id))
+    sql = (
+        "SELECT id, identity_id, campaign_id, event_type, goal, lane, "
+        "actor, ts, payload_json, env FROM kol_conversation_events "
+        f"WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?"
+    )
+    args.append(limit)
+
+    def _do() -> list[dict[str, Any]]:
+        with _connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                d = dict(r)
+                payload = d.pop("payload_json", None)
+                try:
+                    d["payload"] = json.loads(payload) if payload else {}
+                except (TypeError, ValueError):
+                    d["payload"] = {}
+                out.append(d)
+            return out
+
+    return _safe("list_events", _do) or []
+
+
 # ---------------------------------------------------------------------------
 # Escalations
 # ---------------------------------------------------------------------------
@@ -1164,6 +1215,7 @@ __all__ = [
     "latest_facts_for",
     "list_candidates",
     "list_escalations",
+    "list_events",
     "list_pending_approvals",
     "open_escalation",
     "recompute_goals",
