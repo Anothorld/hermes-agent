@@ -3,6 +3,7 @@
 Covers:
 - ``list-escalations``, ``open-escalation``, ``resolve-escalation``
 - ``list-approvals``, ``approve``, ``reject``
+- ``reconcile-sent``
 - ``get-policy``, ``set-policy``, ``list-policy-history``,
   ``get-parsed-escalation-rules``
 """
@@ -87,6 +88,17 @@ def cmd_reject(args: argparse.Namespace) -> None:
     _approval_decision(args, kind="reject")
 
 
+def cmd_reconcile_sent(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "POST", "/gmail/reconcile-sent",
+        body={
+            "env": args.env,
+            "lookback_days": args.lookback_days,
+            "max_results": args.max_results,
+        },
+    ))
+
+
 # ---------------------------------------------------------------- policies
 def cmd_get_policy(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
@@ -129,6 +141,12 @@ def cmd_get_parsed_escalation_rules(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_check_stuck_goals(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "POST", "/admin/check-stuck-goals", params={"env": args.env},
+    ))
+
+
 # -------------------------------------------------------------- registration
 def register(sub: "argparse._SubParsersAction") -> None:
     # ---- escalations
@@ -158,6 +176,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
               "operator_facts, final_state}. final_state defaults to 'resolved'."),
     )
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.add_argument("--escalation-id", type=int, required=True)
     p.add_argument("--json", required=True, help="JSON body or @path")
     p.set_defaults(func=cmd_resolve_escalation)
@@ -187,10 +206,34 @@ def register(sub: "argparse._SubParsersAction") -> None:
                                       "(use for --extra-facts nested data)")
         p.set_defaults(func=cmd_approve if action == "approve" else cmd_reject)
 
+    p = sub.add_parser(
+        "reconcile-sent",
+        help="POST /gmail/reconcile-sent — mark approved Gmail drafts as sent after they appear in SENT.",
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--lookback-days", type=int, default=7)
+    p.add_argument("--max-results", type=int, default=100)
+    p.set_defaults(func=cmd_reconcile_sent)
+
+    # ---- stuck-goal scan (plan C6: 48h DingTalk cron)
+    p = sub.add_parser(
+        "check-stuck-goals",
+        help=("POST /admin/check-stuck-goals — scan kol_goal_state for goals "
+              "whose updated_at exceeds the campaign's followup_intervals "
+              "(default 72h). For each stuck goal, the bridge emits a "
+              "DingTalk notification. Intended to be invoked by a system "
+              "cron (e.g. every hour)."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.set_defaults(func=cmd_check_stuck_goals)
+
     # ---- policies
     p = sub.add_parser("get-policy",
                        help="GET /policies/{scope} — read latest policy doc.")
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.add_argument("--scope", required=True,
                    choices=("company_style", "user_style", "escalation_rules"))
     p.add_argument("--owner-user-id", type=int, default=None,
@@ -203,6 +246,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
               "Provide --content-md-file or full --json body."),
     )
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.add_argument("--scope", required=True,
                    choices=("company_style", "user_style", "escalation_rules"))
     p.add_argument("--content-md-file", help="Path to markdown file (UTF-8).")
@@ -216,6 +260,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p = sub.add_parser("list-policy-history",
                        help="GET /policies/{scope}/history — previous versions (newest first).")
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.add_argument("--scope", required=True,
                    choices=("company_style", "user_style", "escalation_rules"))
     p.add_argument("--owner-user-id", type=int, default=None)
@@ -228,4 +273,5 @@ def register(sub: "argparse._SubParsersAction") -> None:
               "structured {top, rules, version} dict for the classifier skill."),
     )
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.set_defaults(func=cmd_get_parsed_escalation_rules)

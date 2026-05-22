@@ -94,7 +94,7 @@ def test_open_escalation_notifier_failure_does_not_break_write(cal_db, monkeypat
 
     iid = cal.upsert_identity(primary_handle="stuck-user-2")
     eid = cal.open_escalation(
-        identity_id=iid, campaign_id=CAMPAIGN, goal="cold_outreach",
+        identity_id=iid, campaign_id=CAMPAIGN, goal="outreach",
         reason="something_weird",
     )
     assert eid is not None  # escalation insert succeeded despite notifier crash

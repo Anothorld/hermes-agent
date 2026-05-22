@@ -10,13 +10,16 @@ Create these nested labels under the user's outreach mailbox:
 ```
 kol-outreach/
 ├── pending/
-│   ├── initial            # drafts produced by kol-outreach-initial-email
-│   ├── product_pitch      # drafts produced by kol-outreach-product-pitch-email
-│   └── negotiation        # drafts produced by kol-outreach-negotiation-email
-├── sent/
-│   ├── initial
-│   ├── product_pitch
-│   └── negotiation
+│   ├── cold               # drafts produced by kol-cold-outreach
+│   ├── reengagement       # drafts produced by kol-reengagement-outreach
+│   ├── product            # drafts produced by kol-product-selector
+│   ├── deliverables       # drafts produced by kol-deliverables-clarifier
+│   ├── compensation       # drafts produced by kol-compensation-negotiator
+│   ├── contract           # drafts produced by kol-contract-coordinator
+│   ├── logistics          # drafts produced by kol-logistics-tracker
+│   ├── brief              # drafts produced by kol-brief-sender
+│   └── review             # drafts produced by kol-content-reviewer / kol-golive-and-boost
+├── sent/                  # mirrors the pending/ tree, populated after Gmail send
 ├── pending-reply          # ALL inbound KOL replies land here (filter rule)
 ├── replied/
 │   ├── interested
@@ -126,11 +129,29 @@ cronjob(action="pause", job_id="<dispatcher_job_id>")
 # Drop a campaign
 rm -rf ~/.hermes/kol-outreach/<campaign_id>
 
-# Drop the entire skill suite (uninstall)
+# Drop the entire skill suite (uninstall). The orchestrator-flow is
+# the top-level entry; each per-goal child skill is independent and
+# can be removed selectively.
 rm -rf hermes-agent/skills/social-media/kol-outreach-orchestrator-flow \
-       hermes-agent/skills/social-media/kol-outreach-initial-email \
-       hermes-agent/skills/social-media/kol-outreach-product-pitch-email \
-       hermes-agent/skills/social-media/kol-outreach-negotiation-email \
+       hermes-agent/skills/social-media/kol-cold-outreach \
+       hermes-agent/skills/social-media/kol-reengagement-outreach \
+       hermes-agent/skills/social-media/kol-interest-qualifier \
+       hermes-agent/skills/social-media/kol-product-selector \
+       hermes-agent/skills/social-media/kol-deliverables-clarifier \
+       hermes-agent/skills/social-media/kol-compensation-negotiator \
+       hermes-agent/skills/social-media/kol-pricing-strategist \
+       hermes-agent/skills/social-media/kol-contract-coordinator \
+       hermes-agent/skills/social-media/kol-shipping-intake \
+       hermes-agent/skills/social-media/kol-logistics-tracker \
+       hermes-agent/skills/social-media/kol-brief-sender \
+       hermes-agent/skills/social-media/kol-content-reviewer \
+       hermes-agent/skills/social-media/kol-golive-and-boost \
+       hermes-agent/skills/social-media/kol-email-stage-classifier \
+       hermes-agent/skills/social-media/kol-discovery-to-outreach-router \
+       hermes-agent/skills/social-media/kol-escalation-resumer \
+       hermes-agent/skills/social-media/kol-email-style-loader \
+       hermes-agent/skills/social-media/kol-campaign-intake \
+       hermes-agent/skills/social-media/kol-archival-writer \
        hermes-agent/skills/social-media/kol-reply-dispatcher
 ```
 

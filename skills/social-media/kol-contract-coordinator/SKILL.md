@@ -1,6 +1,6 @@
 ---
 name: kol-contract-coordinator
-description: Handles the contract phase after compensation is agreed. Three branches — (1) initiate: send the contract draft (subject + body referencing the agreed terms), write `offer.contract_sent=true`; (2) chase: nudge a KOL who hasn't signed within the configured follow-up window; (3) handle response: when classifier extracts `offer.contract_signed=true` (acknowledged), no draft needed — just write the fact; when KOL asks to change a CORE clause (exclusivity, IP, payment terms), open escalation and write `approval.contract_change_request`. Skipped automatically when `campaign_config.contract_required=false`.
+description: Handles the contract phase after compensation is agreed. Three branches — (1) initiate: assemble fields, render the POVISON template into a docx, attach to a reply draft, and write `offer.contract_sent=true`; (2) chase: nudge a KOL who hasn't signed within the configured follow-up window; (3) handle response: when classifier extracts `offer.contract_signed=true` (acknowledged), no draft needed — just write the fact; when KOL asks to change a CORE clause (exclusivity, IP, payment terms), open escalation and write `approval.contract_change_request`. Skipped automatically when `campaign_config.contract_required=false`.
 trigger: Invoked by `kol-reply-dispatcher` when `active_goals_by_lane.commerce == "contract_signing"`. Also invoked by a future cron-driven follow-up loop for chase mode (out of scope this phase). Never invoked when `goals.contract_signing.status == "skipped"` (config says no contract).
 tags: ["kol", "contract", "draft-generator", "approval", "commerce-lane"]
 ---
@@ -8,15 +8,16 @@ tags: ["kol", "contract", "draft-generator", "approval", "commerce-lane"]
 ## Goal
 Drive the contract sub-goal from `agreed → sent → signed` (or to
 `escalation` when KOL pushes back on core clauses), without ever
-drafting legally-binding language ourselves. The actual contract PDF
-is templated outside this plugin (deferred); this skill drives the
-**email layer** and the **fact recording**.
+authoring legally-binding language ourselves. Branch I now produces
+a contract docx by mechanically filling the legal-approved POVISON
+template; the agent is the **renderer**, not the **author**.
 
 ## Runtime Contract
 - Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
-- **Never draft contract clauses.** Body says "see attached" or
-  "DocuSign link will follow"; the contract content itself is owned
-  by Legal.
+- **Never invent or rewrite contract clauses.** Branch I renders the
+  fixed template at `plugins/kol-ops-bridge/templates/povison_agreement.docx`
+  with field substitutions only. If a required field is missing
+  (see Step I.1) → escalate, do not improvise.
 - **Core-clause changes are always escalation.** Anything touching
   exclusivity, IP/usage, payment terms, term length, governing law
   → escalation, not negotiation. Cosmetic edits (typos, name
@@ -67,10 +68,76 @@ Read:
 ### Step 2 — Branch on `mode`
 
 **Branch I — initiate:**
-Body skeleton:
-> "Great, glad we're aligned. I'll send the agreement over via
-> `<channel>` with the terms we discussed (`<one-line summary of
-> agreed terms>`). Should land in your inbox within 1 business day."
+
+#### Step I.1 — Assemble contract fields
+Build a JSON dict with the following shape. Pull from
+dispatch-context first; for anything missing, scan the email thread
+(via the inbound excerpts and prior outbound drafts already loaded
+in context) for confirmed values. Do **not** invent values.
+
+```jsonc
+{
+  "date": "<YYYY-MM-DD today, in operator's calendar>",
+  "influencer": {
+    "full_name": "<identity.full_name>",            // REQUIRED
+    "email":     "<identity.primary_email>",        // REQUIRED
+    "phone":     "<identity.phone or '' if absent>",
+    "address":   "<identity.default_shipping_address or '' if absent>",
+    "instagram": "<identity.social_links.instagram or ''>",
+    "tiktok":    "<identity.social_links.tiktok or ''>",
+    "youtube":   "<identity.social_links.youtube or ''>"
+  },
+  "product": {
+    "specs": "<campaign_config.product_specs — short product name + variant + SKU>",  // REQUIRED
+    "link":  "<campaign_config.product_link>"                                          // REQUIRED
+  },
+  "fee": <null when compensation_mode == "free_product"
+          | {"amount":"<integer>", "currency":"USD"} when offer.agreed_terms includes a flat fee>,
+  "deliverables": [                                                                    // REQUIRED, len >= 1
+    {
+      "type":                  "<e.g. 'Short Video + IG Stories + RAW'>",
+      "description":           "<e.g. 'Showcase product per brief'>",
+      "quantity":              "<e.g. '1 video, 3 stories, RAW footage'>",
+      "requirements":          "<e.g. '20-60s vertical, English VO/captions'>",
+      "time_of_uploading":     "<e.g. 'Within 2 weeks of receiving product'>",
+      "platform_of_uploading": "<e.g. 'IG Collab + TikTok + YT Shorts'>"
+    }
+    // append additional rows (Ad Codes, BTS, etc.) if campaign asks for them
+  ]
+}
+```
+
+**Escalate (do NOT render)** when any REQUIRED field is missing or
+when `compensation_mode` is `cash` but `offer.agreed_terms` doesn't
+yield a numeric fee. Open escalation with
+`reason="contract_fields_incomplete: <field list>"` and skip the
+remaining steps.
+
+#### Step I.2 — Render the contract docx
+Run the renderer with the JSON from I.1 piped on stdin. Output path
+lives under HERMES_HOME so it's per-profile.
+
+```bash
+OUT="${HERMES_HOME:-$HOME/.hermes}/kol-ops-bridge/contracts/<env>/<campaign_id>/<identity_id>_$(date +%Y%m%d).docx"
+mkdir -p "$(dirname "$OUT")"
+echo '<fields-json>' | python plugins/kol-ops-bridge/scripts/render_contract.py \
+  --template plugins/kol-ops-bridge/templates/povison_agreement.docx \
+  --output   "$OUT" \
+  --fields   -
+```
+
+The script prints the absolute output path to stdout; capture it as
+`contract_path`. If rendering exits non-zero, treat as
+escalation (`reason="contract_render_failed: <stderr>"`) — do
+**not** send a draft without an attachment.
+
+#### Step I.3 — Compose the email body
+Body skeleton (style preamble from the loader still applies):
+> "Great, glad we're aligned on the terms. Attached is our standard
+> agreement reflecting what we discussed (`<one-line summary of
+> agreed terms>`). Have a look and reply with your signed copy at
+> your convenience — happy to walk through anything that needs
+> clarifying."
 
 Write:
 ```
@@ -78,7 +145,8 @@ write-facts-multi --json '{
   "campaign_id":"...","source":"skill:kol-contract-coordinator",
   "namespaces":{
     "offer":{"offer.contract_sent": true,
-              "offer.contract_sent_at": "<iso8601>"}
+              "offer.contract_sent_at": "<iso8601>",
+              "offer.contract_artifact_path": "<contract_path>"}
   }
 }'
 ```
@@ -121,21 +189,33 @@ Each row prescribes its own fact set; emit one
   "campaign_id": "TS8319",
   "env": "TEST",
   "thread_id": "...",
-  "subject": null,
   "body": "<reply or null>",
+  "attachments": ["<absolute path to rendered docx, or omitted>"],
   "branch_action": "drafted | escalated | acknowledged_only | cosmetic_pending_approval",
   "facts_written": {"offer": 1, "approval": 1},
   "escalation_opened": false
 }
 ```
 
+Do **not** set `to` or `subject` — the dispatcher fills these from the
+inbound message before persisting `approval.reply_draft`.
+`attachments` is REQUIRED for Branch I and must contain exactly the
+`contract_path` from Step I.2. For other branches it is omitted or
+`[]`. The downstream `approval.reply_draft.draft.attachments` field
+is consumed verbatim by the bridge's Gmail wrapper, which validates
+each path exists before creating the draft.
+
 ## Examples
 
 ### Branch I
 KOL just agreed on $1050 flat; classifier said
-`compensation_negotiation` advanced to satisfied. Coordinator drafts
-"I'll send the agreement... 1 business day" and writes
-`offer.contract_sent=true`.
+`compensation_negotiation` advanced to satisfied. Coordinator
+assembles fields (full name, email, deliverables from campaign,
+`fee={amount:1050,currency:USD}`), renders the POVISON template
+into `~/.hermes/kol-ops-bridge/contracts/LIVE/TS8319/42_20260522.docx`,
+drafts "Attached is our standard agreement...", returns an envelope
+with that path under `attachments`, and writes
+`offer.contract_sent=true` + `offer.contract_artifact_path=<path>`.
 
 ### Branch R — core change
 Inbound: "Looks good, but can we cap exclusivity at 30 days?"
@@ -153,8 +233,15 @@ reply. Operator approves later via ApprovalsPage.
 `{"skipped":"contract_not_required"}`.
 
 ## Pitfalls
-- Drafting actual clause language. Always defer to "the agreement"
-  / "the document" / "Legal will share the full terms".
+- **Drafting actual clause language.** Always defer to the rendered
+  template; never rewrite a sentence inside it. If a field is
+  unknown, escalate — leaving a `${...}` placeholder unfilled is
+  blocked by the renderer (it strips unmapped tokens), so a missing
+  fact silently becomes an empty cell unless you check first.
+- **Forgetting `attachments`.** Branch I envelopes without an
+  `attachments` entry will be sent as a clauseless "here's the
+  agreement" body with nothing attached. The bridge does NOT
+  re-attach for you.
 - Treating cosmetic vs core changes the same way. Cosmetic changes
   don't deserve an escalation — they create approval entries
   instead.

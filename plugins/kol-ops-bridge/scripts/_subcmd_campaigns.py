@@ -37,6 +37,8 @@ def cmd_upsert_campaign(args: argparse.Namespace) -> None:
         body.setdefault("contract_required", args.contract_required)
     if args.sku_whitelist:
         body.setdefault("sku_whitelist", args.sku_whitelist)
+    if args.test_mode_to:
+        body.setdefault("test_mode_to", args.test_mode_to)
     print_json(client_from_args(args).request(
         "PUT", f"/campaigns/{args.campaign_id}", body=body,
     ))
@@ -45,6 +47,7 @@ def cmd_upsert_campaign(args: argparse.Namespace) -> None:
 def cmd_get_campaign(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "GET", f"/campaigns/{args.campaign_id}",
+        params={"env": args.env},
     ))
 
 
@@ -94,6 +97,21 @@ def cmd_select_candidates(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_set_candidate_status(args: argparse.Namespace) -> None:
+    body = parse_json_arg(args.json) if args.json else {}
+    body.setdefault("env", args.env)
+    if args.identity_ids:
+        body.setdefault("identity_ids", args.identity_ids)
+    if args.candidate_status:
+        body.setdefault("candidate_status", args.candidate_status)
+    if args.review_reason:
+        body.setdefault("review_reason", args.review_reason)
+    require_keys(body, "identity_ids", "candidate_status")
+    print_json(client_from_args(args).request(
+        "POST", f"/campaigns/{args.campaign_id}/candidates/status", body=body,
+    ))
+
+
 def cmd_route_discovery(args: argparse.Namespace) -> None:
     body = {
         "env": args.env,
@@ -129,6 +147,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
                    metavar="true|false")
     p.add_argument("--sku-whitelist", nargs="+",
                    help="One or more SKU codes or product URLs.")
+    p.add_argument("--test-mode-to", help="TEST-mode recipient for draft/test outbound mail.")
     p.add_argument("--json", help="Full CampaignConfigUpsertBody as JSON or @path")
     p.set_defaults(func=cmd_upsert_campaign)
 
@@ -136,6 +155,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
         "get-campaign", help="GET /campaigns/{id} — read campaign_config.",
     )
     add_common_args(p)
+    add_env_arg(p)
     p.add_argument("--campaign-id", required=True)
     p.set_defaults(func=cmd_get_campaign)
 
@@ -182,6 +202,19 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--selected-by", default="agent")
     p.add_argument("--json", required=True)
     p.set_defaults(func=cmd_select_candidates)
+
+    p = sub.add_parser(
+        "set-candidate-status",
+        help="POST .../candidates/status — mark candidates discovered/rejected/etc.",
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--campaign-id", required=True)
+    p.add_argument("--identity-ids", type=int, nargs="+")
+    p.add_argument("--candidate-status")
+    p.add_argument("--review-reason")
+    p.add_argument("--json", help="Full CandidateStatusBody as JSON or @path")
+    p.set_defaults(func=cmd_set_candidate_status)
 
     p = sub.add_parser(
         "route-discovery",

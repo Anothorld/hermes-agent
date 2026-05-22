@@ -45,7 +45,12 @@ import _subcmd_campaigns  # noqa: E402
 import _subcmd_facts  # noqa: E402
 import _subcmd_governance  # noqa: E402
 import _subcmd_identities  # noqa: E402
-from _cal_client import add_common_args, client_from_args, print_json  # noqa: E402
+from _cal_client import (  # noqa: E402
+    add_common_args,
+    add_env_arg,
+    client_from_args,
+    print_json,
+)
 
 
 def _cmd_health(args: argparse.Namespace) -> None:
@@ -61,6 +66,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     h = sub.add_parser("health", help="GET /health — bridge healthcheck.")
     add_common_args(h)
+    add_env_arg(h, required=False)
     h.set_defaults(func=_cmd_health)
 
     _subcmd_campaigns.register(sub)

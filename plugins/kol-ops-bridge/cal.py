@@ -31,7 +31,7 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Final, Iterable, Mapping, Optional
 
 from .goals import GOALS, Context, all_goals
 from .schema import FACT_NAMESPACES, GOAL_NAMES, recreate_all
@@ -93,6 +93,7 @@ def _bootstrap(path: Path) -> None:
         from .schema import INDEXES, TABLES, VIEWS  # local import avoids cycles
         for ddl in TABLES.values():
             conn.execute(ddl)
+        _ensure_column(conn, "campaign_config", "test_mode_to", "TEXT")
         for ddl in VIEWS.values():
             conn.execute(ddl)
         for idx in INDEXES:
@@ -100,6 +101,12 @@ def _bootstrap(path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def hard_reset() -> None:
@@ -325,8 +332,8 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
     scalar_allowed = {
         "label", "product_unit_price", "barter_policy", "paid_ceiling",
         "deliverable_count_per_platform", "extra_notes", "brief_template_id",
-        "color_variant_policy", "audit_standards_md", "contract_required",
-        "status",
+        "color_variant_policy", "audit_standards_md", "test_mode_to",
+        "contract_required", "status",
     }
 
     def _do() -> str:
@@ -347,6 +354,8 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
                     sets.append(f"{k} = ?")
                     vals.append(v)
             if row:
+                sets.append("env = ?")
+                vals.append(env)
                 if sets:
                     sets.append("updated_at = ?")
                     vals.append(now)
@@ -375,11 +384,17 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
     return _safe("upsert_campaign_config", _do)
 
 
-def get_campaign_config(campaign_id: str) -> Optional[dict[str, Any]]:
+def get_campaign_config(campaign_id: str, *, env: Optional[str] = None) -> Optional[dict[str, Any]]:
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM campaign_config WHERE campaign_id=?", (campaign_id,)
-        ).fetchone()
+        if env is None:
+            row = conn.execute(
+                "SELECT * FROM campaign_config WHERE campaign_id=?", (campaign_id,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM campaign_config WHERE campaign_id=? AND env=?",
+                (campaign_id, env),
+            ).fetchone()
     if not row:
         return None
     out = dict(row)
@@ -452,6 +467,36 @@ def list_candidates(campaign_id: str, *, env: str = "LIVE") -> list[dict[str, An
     return out
 
 
+def set_candidate_status(
+    *,
+    campaign_id: str,
+    identity_ids: Iterable[int],
+    candidate_status: str,
+    review_reason: Optional[str] = None,
+    env: str = "LIVE",
+) -> int:
+    ids = list(identity_ids)
+    if not ids:
+        return 0
+
+    def _do() -> int:
+        with _connect() as conn:
+            now = _now()
+            qmarks = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"""UPDATE campaign_candidates
+                       SET candidate_status=?,
+                           review_reason=COALESCE(?, review_reason),
+                           updated_at=?
+                     WHERE campaign_id=? AND env=? AND identity_id IN ({qmarks})""",
+                [candidate_status, review_reason, now, campaign_id, env, *ids],
+            )
+            return cur.rowcount or 0
+
+    return _safe("set_candidate_status", _do) or 0
+
+
+
 def select_candidates_for_outreach(
     *, campaign_id: str, identity_ids: Iterable[int], selected_by: str, env: str = "LIVE"
 ) -> int:
@@ -521,6 +566,80 @@ class FactNamespaceError(ValueError):
     pass
 
 
+# Per plan A1: each fact key that "moves the deal" should emit a
+# matching per-goal ``event_type`` so the timeline reflects what
+# happened. The mapping is the canonical vocabulary the plan lists.
+# Keys not in the map are still persisted to ``kol_facts`` — they just
+# don't generate a timeline event.
+_FACT_EVENT_TYPE_MAP: Final[dict[str, tuple[str, str, str]]] = {
+    # fact_key -> (event_type, goal, lane)
+    "offer.outreach_sent":                   ("outreach.sent",                 "outreach",                 "commerce"),
+    "offer.interest_signal":                 ("interest.signal_received",      "interest_qualification",   "commerce"),
+    "offer.sku_locked":                      ("product.sku_locked",            "product_selection",        "commerce"),
+    "offer.color_or_variant_locked":         ("product.color_or_variant_locked", "product_selection",      "commerce"),
+    "offer.fit_confirmed":                   ("product.fit_confirmed",         "product_selection",        "commerce"),
+    "offer.deliverable_platforms":           ("deliverables.platforms_set",    "deliverables_scope",       "commerce"),
+    "offer.deliverable_count_per_platform":  ("deliverables.count_set",        "deliverables_scope",       "commerce"),
+    "offer.usage_rights_discussed":          ("deliverables.usage_rights",     "deliverables_scope",       "commerce"),
+    "offer.kol_paid_quote":                  ("compensation.kol_quoted",       "compensation_negotiation", "commerce"),
+    "offer.compensation_mode":               ("compensation.mode_set",         "compensation_negotiation", "commerce"),
+    "offer.agreed_terms":                    ("compensation.agreed",           "compensation_negotiation", "commerce"),
+    "offer.contract_sent":                   ("contract.sent",                 "contract_signing",         "commerce"),
+    "offer.contract_signed":                 ("contract.signed",               "contract_signing",         "commerce"),
+    "offer.contract_declined_reason":        ("contract.declined",             "contract_signing",         "commerce"),
+    "fulfillment.address_collected":         ("logistics.address_collected",   "logistics",               "fulfillment"),
+    "fulfillment.shipping_method":           ("logistics.shipping_method_set", "logistics",               "fulfillment"),
+    "fulfillment.tracking_filled":           ("logistics.tracking_filled",     "logistics",               "fulfillment"),
+    "fulfillment.delivered_confirmed":       ("logistics.delivered",           "logistics",               "fulfillment"),
+    "offer.brief_sent":                      ("content.brief_sent",            "content_production",       "fulfillment"),
+    "offer.draft_submitted":                 ("content.draft_submitted",       "content_production",       "fulfillment"),
+    "offer.review_verdict":                  ("content.review_verdict",        "content_review_and_golive", "publish"),
+    "offer.posted_url":                      ("content.posted",                "content_review_and_golive", "publish"),
+    "offer.boost_assets_status":             ("content.boost_assets_requested", "content_review_and_golive", "publish"),
+}
+
+
+# Per-fact-key value-shape validators. Run at write_facts() time so bad
+# fact shapes fail fast on the writer (skill or CLI) instead of surfacing
+# days later when an operator tries to act on the fact. Adding a new
+# validator is a one-line entry — keep the predicates simple and
+# fact-specific; this is not a general schema framework. Keys absent from
+# this map are written unchanged.
+def _validate_approval_reply_draft(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise FactNamespaceError("approval.reply_draft value must be a dict")
+    draft = value.get("draft")
+    if not isinstance(draft, dict):
+        raise FactNamespaceError("approval.reply_draft must carry a draft object")
+    missing = [
+        k for k in ("subject", "body", "to")
+        if not (isinstance(draft.get(k), str) and draft[k].strip())
+    ]
+    if missing:
+        raise FactNamespaceError(
+            f"approval.reply_draft.draft missing/empty: {', '.join(missing)}"
+        )
+
+
+_FACT_SHAPE_VALIDATORS: Final[dict[str, Callable[[Any], None]]] = {
+    "approval.reply_draft": _validate_approval_reply_draft,
+}
+
+
+def _truthy(v: Any) -> bool:
+    if v is None:
+        return False
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return True
+    if isinstance(v, str):
+        return v.strip() not in {"", "false", "False", "0", "null", "none"}
+    if isinstance(v, (list, tuple, dict)):
+        return len(v) > 0
+    return True
+
+
 def write_facts(
     *,
     identity_id: int,
@@ -534,16 +653,24 @@ def write_facts(
     """Append a batch of facts under one namespace. Validates the
     ``<namespace>.<key>`` contract and rejects unknown namespaces.
 
+    For fact keys in :data:`_FACT_EVENT_TYPE_MAP` whose value is truthy,
+    also emits a matching ``kol_conversation_events`` row so the
+    timeline reflects the per-goal vocabulary from plan A1 without
+    requiring each skill to call ``write-event`` separately.
+
     Returns the number of rows inserted.
     """
     if namespace not in FACT_NAMESPACES:
         raise FactNamespaceError(f"unknown namespace: {namespace!r}")
     prefix = f"{namespace}."
-    for k in facts:
+    for k, v in facts.items():
         if not k.startswith(prefix):
             raise FactNamespaceError(
                 f"fact_key {k!r} must start with {prefix!r}"
             )
+        validator = _FACT_SHAPE_VALIDATORS.get(k)
+        if validator is not None:
+            validator(v)
 
     def _do() -> int:
         with _connect() as conn:
@@ -560,6 +687,21 @@ def write_facts(
                      source, source_event_id, now, env),
                 )
                 n += 1
+                # Auto-emit per-goal event_type when a meaningful fact
+                # transitions from absent/falsy to truthy. Skip for
+                # decision-style approvals (those have their own paths).
+                mapped = _FACT_EVENT_TYPE_MAP.get(k)
+                if (mapped and campaign_id and _truthy(v)):
+                    event_type, goal, lane = mapped
+                    conn.execute(
+                        """INSERT INTO kol_conversation_events
+                           (identity_id, campaign_id, event_type, goal, lane,
+                            actor, ts, payload_json, env)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (identity_id, campaign_id, event_type, goal, lane,
+                         source, now,
+                         _j({"fact_key": k, "fact_value": v}), env),
+                    )
             # Trigger goal recompute inline (cheap; under 50ms typical).
             if campaign_id:
                 _recompute_goals_inner(conn, identity_id=identity_id,
@@ -592,11 +734,14 @@ def write_facts_multi(
         if ns not in FACT_NAMESPACES:
             raise FactNamespaceError(f"unknown namespace: {ns!r}")
         prefix = f"{ns}."
-        for k in facts:
+        for k, v in facts.items():
             if not k.startswith(prefix):
                 raise FactNamespaceError(
                     f"fact_key {k!r} must start with {prefix!r}"
                 )
+            validator = _FACT_SHAPE_VALIDATORS.get(k)
+            if validator is not None:
+                validator(v)
 
     written: dict[str, int] = {}
     for ns, facts in namespaces.items():
@@ -851,7 +996,7 @@ def _read_max_escalation_depth(conn: sqlite3.Connection) -> int:
 
 def open_escalation(
     *,
-    identity_id: Optional[int],
+    identity_id: Optional[int] = None,
     reason: str,
     campaign_id: Optional[str] = None,
     goal: Optional[str] = None,
@@ -893,6 +1038,22 @@ def open_escalation(
                  attempts, _j(ctx), now, now, env),
             )
             esc_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+            # Phase F state-machine closure: when a child escalation is
+            # opened, the parent must transition out of any non-terminal
+            # state (``awaiting_answer`` / ``answered`` / ``resuming`` /
+            # ``resolved``) into ``re_escalated`` so the parent never
+            # silently stays "resolved" while a child is pending. This
+            # was the root cause of stuck ``answered`` parents observed
+            # in earlier runs.
+            if parent_escalation_id is not None:
+                conn.execute(
+                    """UPDATE kol_escalations
+                          SET state='re_escalated', updated_at=?
+                        WHERE id=?
+                          AND state IN ('awaiting_answer','answered',
+                                        'resuming','resolved')""",
+                    (now, parent_escalation_id),
+                )
             if identity_id and campaign_id and goal:
                 conn.execute(
                     """UPDATE kol_goal_state SET status='blocked',
@@ -958,6 +1119,16 @@ def _notify_escalation_opened(
         log.warning("notifier.notify(escalation) failed: %s", exc)
 
 
+VALID_ESCALATION_STATES: Final[frozenset[str]] = frozenset({
+    "open", "awaiting_answer", "answered", "resuming",
+    "resolved", "re_escalated", "aborted",
+})
+
+
+class EscalationStateError(ValueError):
+    """Raised when resolve_escalation is called with an unknown final_state."""
+
+
 def resolve_escalation(
     *,
     escalation_id: int,
@@ -967,6 +1138,12 @@ def resolve_escalation(
     operator_facts: Optional[Mapping[str, Any]] = None,
     final_state: str = "resolved",
 ) -> Optional[int]:
+    if final_state not in VALID_ESCALATION_STATES:
+        raise EscalationStateError(
+            f"unknown final_state {final_state!r}; "
+            f"must be one of {sorted(VALID_ESCALATION_STATES)}"
+        )
+
     def _do() -> int:
         with _connect() as conn:
             now = _now()
@@ -1006,6 +1183,64 @@ def resolve_escalation(
     return _safe("resolve_escalation", _do)
 
 
+def note_rejected_draft(
+    *,
+    escalation_id: int,
+    fact_path: str,
+    note: Optional[str],
+    decided_by: str,
+) -> bool:
+    """Append a rejected-draft entry to an escalation's resume_context.
+
+    Used when the operator rejects an ``approval.reply_draft`` linked to
+    an open escalation: instead of opening a derived escalation, we
+    leave a breadcrumb on the original so the operator (or a later
+    agent run) can see what was tried and why it was refused.
+    """
+    def _do() -> bool:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT resume_context_json FROM kol_escalations WHERE id=?",
+                (escalation_id,),
+            ).fetchone()
+            if not row:
+                return False
+            ctx = _jl(row["resume_context_json"], {}) or {}
+            history = list(ctx.get("rejected_drafts") or [])
+            history.append({
+                "fact_path": fact_path,
+                "note": note or "",
+                "decided_by": decided_by,
+                "decided_at": _now(),
+            })
+            ctx["rejected_drafts"] = history[-10:]
+            conn.execute(
+                "UPDATE kol_escalations SET resume_context_json=?, updated_at=? WHERE id=?",
+                (_j(ctx), _now(), escalation_id),
+            )
+            return True
+
+    return bool(_safe("note_rejected_draft", _do))
+
+
+def get_escalation_campaign_id(escalation_id: int) -> Optional[str]:
+    """Return the ``campaign_id`` of an escalation row, or None.
+
+    Used by the bridge HTTP layer to inherit campaign scope when an
+    ``approval.*`` fact is written with a ``linked_escalation_id`` but
+    no ``campaign_id`` in the body.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT campaign_id FROM kol_escalations WHERE id=?",
+            (escalation_id,),
+        ).fetchone()
+    if not row:
+        return None
+    cid = row["campaign_id"]
+    return str(cid) if cid else None
+
+
 def list_escalations(*, state: Optional[str] = None, env: str = "LIVE") -> list[dict[str, Any]]:
     with _connect() as conn:
         if state:
@@ -1032,8 +1267,14 @@ def list_escalations(*, state: Optional[str] = None, env: str = "LIVE") -> list[
 
 
 def list_pending_approvals(*, env: str = "LIVE") -> list[dict[str, Any]]:
-    """Return latest ``approval.*`` facts whose value has no
-    ``decision`` field set yet. Heuristic; UI uses this as queue.
+    """Return latest ``approval.*`` facts that actually need an operator
+    decision. A fact is "pending" only when its value is a JSON object
+    with no ``decision`` field set yet (or set to ``"pending"``).
+
+    Scalar-valued ``approval.*`` facts (e.g. ``approval.<goal>_terminated
+    = true`` from skill 3d, ``approval.next_action_type = "<type>"`` from
+    skill 3e) are skill-internal markers consumed by downstream skills,
+    not items requiring a console decision, so they are excluded here.
     """
     with _connect() as conn:
         rows = conn.execute(
@@ -1045,9 +1286,9 @@ def list_pending_approvals(*, env: str = "LIVE") -> list[dict[str, Any]]:
     out = []
     for r in rows:
         val = _jl(r["fact_value"], None)
-        decision = None
-        if isinstance(val, dict):
-            decision = val.get("decision")
+        if not isinstance(val, dict):
+            continue
+        decision = val.get("decision")
         if decision in (None, "pending"):
             out.append({
                 "identity_id": r["identity_id"],
@@ -1056,6 +1297,81 @@ def list_pending_approvals(*, env: str = "LIVE") -> list[dict[str, Any]]:
                 "value": val,
                 "captured_at": r["captured_at"],
             })
+    return out
+
+
+def list_decided_approvals(
+    *, status: str, env: str = "LIVE"
+) -> list[dict[str, Any]]:
+    """Return decided ``approval.*`` facts whose ``value.decision``
+    matches ``status``. ``status`` must be one of ``approved`` /
+    ``rejected`` / ``all`` (``all`` returns both approved and rejected,
+    not pending — pending is served by ``list_pending_approvals``).
+    """
+    if status not in ("approved", "rejected", "all"):
+        raise ValueError(f"unknown status: {status!r}")
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM kol_facts_latest
+                WHERE fact_namespace='approval' AND env=?
+                ORDER BY id DESC""",
+            (env,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        val = _jl(r["fact_value"], None)
+        if not isinstance(val, dict):
+            continue
+        decision = val.get("decision")
+        if status == "all":
+            if decision not in ("approved", "rejected"):
+                continue
+        elif decision != status:
+            continue
+        out.append({
+            "identity_id": r["identity_id"],
+            "campaign_id": r["campaign_id"],
+            "fact_key": r["fact_key"],
+            "value": val,
+            "captured_at": r["captured_at"],
+        })
+    return out
+
+
+def list_approved_reply_drafts(*, env: str = "LIVE") -> list[dict[str, Any]]:
+    """Return approved ``approval.reply_draft`` facts not yet marked sent."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM kol_facts_latest
+                WHERE fact_namespace='approval'
+                  AND fact_key='approval.reply_draft'
+                  AND env=?
+                ORDER BY id DESC""",
+            (env,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        identity_id = int(r["identity_id"])
+        campaign_id = r["campaign_id"]
+        facts = latest_facts_for(
+            identity_id=identity_id, campaign_id=campaign_id, env=env
+        )
+        if facts.get("offer.outreach_sent") is True:
+            continue
+        value = _jl(r["fact_value"], None)
+        if not isinstance(value, dict) or value.get("decision") != "approved":
+            continue
+        gmail_draft = value.get("gmail_draft")
+        if not isinstance(gmail_draft, dict) or not gmail_draft.get("thread_id"):
+            continue
+        out.append({
+            "identity_id": identity_id,
+            "campaign_id": campaign_id,
+            "fact_key": r["fact_key"],
+            "value": value,
+            "gmail_draft": gmail_draft,
+            "captured_at": r["captured_at"],
+        })
     return out
 
 
@@ -1206,6 +1522,7 @@ __all__ = [
     "db_path",
     "find_identity_by_handle",
     "get_campaign_config",
+    "get_escalation_campaign_id",
     "get_goal_state",
     "get_identity",
     "get_lanes_view",
@@ -1217,6 +1534,8 @@ __all__ = [
     "list_escalations",
     "list_events",
     "list_pending_approvals",
+    "list_decided_approvals",
+    "list_approved_reply_drafts",
     "open_escalation",
     "recompute_goals",
     "resolve_candidate_relationships",

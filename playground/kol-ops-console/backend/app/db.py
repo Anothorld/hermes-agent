@@ -58,16 +58,34 @@ SCHEMA = [
         campaign_id TEXT NOT NULL,
         env TEXT NOT NULL CHECK (env IN ('LIVE','TEST')),
         run_id TEXT,
+        test_mode_to TEXT,
         started_at TEXT NOT NULL,
         started_by_user_id INTEGER,
         status TEXT NOT NULL DEFAULT 'running'
             CHECK (status IN ('running','closed','cancelled')),
         PRIMARY KEY (campaign_id, env)
     )""",
+    # Per-campaign run registry. ``product_campaigns.run_id`` only holds the
+    # latest outreach run; replies / drafts / resumes each spawn their own
+    # gateway run with a distinct session_id. This table is the authoritative
+    # list of every run we want the transcript panel to attach to, so the
+    # panel can multiplex multiple gateway SSE feeds for one campaign.
+    """CREATE TABLE IF NOT EXISTS product_campaign_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id TEXT NOT NULL,
+        env TEXT NOT NULL CHECK (env IN ('LIVE','TEST')),
+        run_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('outreach','reply','draft','resume')),
+        session_id TEXT,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        UNIQUE (run_id)
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_kol_notes_identity ON kol_notes(kol_identity_id)",
     "CREATE INDEX IF NOT EXISTS idx_approvals_target ON approvals(target_kind, target_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaigns_sku ON product_campaigns(sku, env)",
+    "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_cid ON product_campaign_runs(campaign_id, env, started_at DESC)",
 ]
 
 
@@ -92,6 +110,11 @@ def init_db() -> None:
     try:
         for ddl in SCHEMA:
             conn.execute(ddl)
+        cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(product_campaigns)")
+        }
+        if "test_mode_to" not in cols:
+            conn.execute("ALTER TABLE product_campaigns ADD COLUMN test_mode_to TEXT")
     finally:
         conn.close()
 

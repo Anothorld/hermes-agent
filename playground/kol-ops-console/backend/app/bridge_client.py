@@ -95,6 +95,22 @@ class BridgeClient:
     async def get_campaign(self, campaign_id: str) -> dict[str, Any]:
         return await self._req("GET", f"/campaigns/{campaign_id}")
 
+    async def parse_campaign_intent(
+        self, text: str, env: str = "LIVE"
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", "/campaigns/parse",
+            json={"text": text, "env": env},
+        )
+
+    async def append_campaign_facts_from_text(
+        self, campaign_id: str, text: str, appended_by: str, env: str = "LIVE"
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/campaigns/{campaign_id}/facts-from-text",
+            json={"text": text, "appended_by": appended_by, "env": env},
+        )
+
     async def list_candidates(
         self, campaign_id: str, env: str = "LIVE"
     ) -> list[dict[str, Any]]:
@@ -228,6 +244,9 @@ class BridgeClient:
             "POST", f"/approvals/{fact_path}/reject", json=body
         )
 
+    async def reconcile_sent(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._req("POST", "/gmail/reconcile-sent", json=body)
+
     # --------------------------------------------------------- Escalations
     async def list_escalations(
         self, state: Optional[str] = None, env: str = "LIVE"
@@ -264,6 +283,9 @@ class BridgeClient:
             params["since_id"] = since_id
         out = await self._req("GET", "/events/recent", params=params)
         return list(out.get("events") or [])
+
+    async def write_event(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._req("POST", "/events", json=body)
 
     async def get_timeline(
         self,

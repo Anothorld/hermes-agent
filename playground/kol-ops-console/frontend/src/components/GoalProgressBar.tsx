@@ -5,7 +5,7 @@
  * plus an implicit `meta` lane for archival.
  */
 export const GOAL_COLUMNS = [
-  { goal: 'cold_outreach', label: 'Outreach', lane: 'commerce' },
+  { goal: 'outreach', label: 'Outreach', lane: 'commerce' },
   { goal: 'interest_qualification', label: 'Interest', lane: 'commerce' },
   { goal: 'product_selection', label: 'Product', lane: 'commerce' },
   { goal: 'deliverables_scope', label: 'Deliverables', lane: 'commerce' },

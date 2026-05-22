@@ -1,0 +1,27 @@
+campaign_slug: ts8319-media-console
+product_name: TS8319 media console
+product_url: 未在brief中提供
+key_features:
+  - 18-20英寸级深度导向，适配市面90%设备摆放
+  - 正反双面透气设计，强调设备散热
+  - 多储物空间连通线缆孔，便于线缆管理
+  - 中央玻璃展示层 + 栅栏元素 + 滑动门 + 六档灯带
+  - 中间背板可拆卸，方便大型设备检修与透气
+  - 18mm厚板材，FSC/CARB认证，基本整装交付
+emotional_value: 让影音爱好者在保持客厅/影音室设计感的同时，终于拥有一个真正懂设备的电视柜。
+functional_value: 解决AV功放/条形音响等设备的深度、散热、线缆管理、信号无遮挡与检修空间问题。
+buyer_persona: 北美US/CA，25-50岁，偏男性，家庭中有独立影音区或高规格客厅影音系统的影音设备使用者，也可覆盖游戏/黑胶等设备型空间用户。
+primary_purchase_driver: D. Device / Specialized Use
+target_geo: US/CA
+budget_per_creator: unknown
+mode: TEST
+assumptions:
+  - 未提供正式商品页URL，需后续补充
+  - 未提供SKU whitelist，当前仅以TS8319为单SKU campaign anchor记录，后续邮件阶段不能外扩到其他SKU
+  - 未提供budget_total / budget_per_kol / absolute_floor，当前仅能执行到shortlist准备与人工确认前置，不进入正式邮件起草发送环节
+  - 默认目标地区为北美US/CA
+  - 默认模式为TEST
+test_mailbox: [REDACTED]
+subject_prefix: [TEST MODE]
+source_brief: /mnt/c/Users/PC/Downloads/TS8319.md
+note: This card is auto-completed at creation. It is the audit anchor for the campaign and the parent of the brief review gate. Do not block this card to wait for review — that is what T_brief_review is for.

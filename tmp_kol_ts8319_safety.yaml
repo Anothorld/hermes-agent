@@ -1,0 +1,6 @@
+mode: TEST
+test_mailbox: [REDACTED]
+subject_prefix: [TEST MODE]
+warning: outreach-operator will use Google Workspace / Gmail drafts in later steps; if token is stale, later draft/send tasks may fail loudly.
+safety: TEST MODE — recipient must be [REDACTED]. Do not send to any other address.
+note: informational only; auto-completed on creation.

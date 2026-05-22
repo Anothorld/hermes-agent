@@ -146,18 +146,21 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p = sub.add_parser("get-identity",
                        help="GET /identities/{id} — read the identity row.")
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.add_argument("--identity-id", type=int, required=True)
     p.set_defaults(func=cmd_get_identity)
 
     p = sub.add_parser("get-relationship",
                        help="GET /identities/{id}/relationship — identity-level relationship row.")
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.add_argument("--identity-id", type=int, required=True)
     p.set_defaults(func=cmd_get_relationship)
 
     p = sub.add_parser("get-reusable-facts",
                        help="GET .../relationship/reusable-facts — facts reusable across campaigns.")
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.add_argument("--identity-id", type=int, required=True)
     p.set_defaults(func=cmd_get_reusable_facts)
 
@@ -195,6 +198,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
               "post-mortem facts (outcome / preferred_skus / quality scores)."),
     )
     add_common_args(p)
+    add_env_arg(p, required=False)
     p.add_argument("--identity-id", type=int, required=True)
     p.add_argument("--campaign-id")
     p.add_argument("--outcome", help="e.g. 'shipped', 'cancelled', 'no_show'")

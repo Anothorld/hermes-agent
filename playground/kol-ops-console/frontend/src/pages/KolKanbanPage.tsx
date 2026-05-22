@@ -112,7 +112,7 @@ export function KolKanbanPage() {
       row.goals.fulfillment?.goal,
       row.goals.publish?.goal,
     ].filter(Boolean) as string[];
-    const primary = goalNames[goalNames.length - 1] || 'cold_outreach';
+    const primary = goalNames[goalNames.length - 1] || 'outreach';
     if (grouped[primary]) grouped[primary].push(row);
     else if (visibleColumns.length > 0) {
       const firstGoal = visibleColumns[0].goal;
@@ -224,7 +224,7 @@ export function KolKanbanPage() {
                   return (
                     <li key={k.identity_id} className="rounded border border-slate-100 bg-slate-50 p-2 text-sm">
                       <Link
-                        to={`/kols/${k.identity_id}?campaign_id=${encodeURIComponent(campaignId)}`}
+                        to={`/kols/${k.identity_id}?campaign_id=${encodeURIComponent(campaignId)}&env=${env}`}
                         className={
                           'block font-medium hover:text-emerald-700 ' +
                           (blocked ? 'text-amber-700' : 'text-slate-800')
@@ -256,13 +256,13 @@ export function KolKanbanPage() {
                       )}
                       <div className="mt-1.5 flex gap-1.5">
                         <Link
-                          to={`/kols/${k.identity_id}?campaign_id=${encodeURIComponent(campaignId)}#facts`}
+                          to={`/kols/${k.identity_id}?campaign_id=${encodeURIComponent(campaignId)}&env=${env}#facts`}
                           className="rounded border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100"
                         >
                           补字段
                         </Link>
                         <Link
-                          to={`/escalations?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${k.identity_id}`}
+                          to={`/escalations?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${k.identity_id}&env=${env}`}
                           className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 hover:bg-amber-100"
                         >
                           升级

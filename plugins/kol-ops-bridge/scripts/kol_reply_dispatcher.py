@@ -21,7 +21,7 @@ written so a later tick (or operator) can resume.
 
 Environment::
 
-    HERMES_KOL_OPS_BRIDGE_BASE   default http://127.0.0.1:8080
+    HERMES_KOL_OPS_BRIDGE_BASE   default http://127.0.0.1:8080/api/plugins/kol-ops-bridge
     HERMES_KOL_OPS_BRIDGE_KEY    required for mutating endpoints
     HERMES_GATEWAY_BASE          default http://127.0.0.1:8642
     HERMES_GATEWAY_KEY           Bearer token for /v1/runs
@@ -31,15 +31,17 @@ Environment::
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional
 
 # Make sibling modules importable when run via `python scripts/foo.py`.
 _PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -62,6 +64,44 @@ _GATEWAY_BASE = os.environ.get(
     "HERMES_GATEWAY_BASE", "http://127.0.0.1:8642"
 ).rstrip("/")
 _GATEWAY_KEY = os.environ.get("HERMES_GATEWAY_KEY")
+
+# Console-side run registry. Best-effort: failure here must not block reply
+# dispatch. The console may not be installed on every host running the
+# dispatcher, so we tolerate missing DB or missing table silently.
+_CONSOLE_DB_PATH = Path(
+    os.environ.get("KOC_DB_PATH")
+    or str(Path.home() / ".hermes/kol-ops-console/app.db")
+).expanduser()
+
+
+def _register_console_run(
+    *,
+    campaign_id: Optional[str],
+    env: str,
+    run_id: str,
+    session_id: str,
+) -> None:
+    if not campaign_id or not run_id:
+        return
+    try:
+        if not _CONSOLE_DB_PATH.exists():
+            return
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        conn = sqlite3.connect(
+            str(_CONSOLE_DB_PATH), timeout=5.0, isolation_level=None
+        )
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute(
+                """INSERT OR IGNORE INTO product_campaign_runs
+                        (campaign_id, env, run_id, kind, session_id, started_at)
+                    VALUES (?,?,?,?,?,?)""",
+                (campaign_id, env, run_id, "reply", session_id, now),
+            )
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        log.warning("console run-registry insert skipped: %s", exc)
 
 
 # ---------------------------------------------------------------- watermark
@@ -111,20 +151,18 @@ def _http_json(
 
 
 def _gateway_run(*, instructions: str, input_text: str, session_id: str) -> Optional[str]:
-    if not _GATEWAY_KEY:
-        log.warning("HERMES_GATEWAY_KEY not set; skipping run for %s", session_id)
-        return None
     body = {
         "input": input_text,
         "instructions": instructions,
         "session_id": session_id,
         "conversation_history": [],
     }
+    headers = {"Authorization": f"Bearer {_GATEWAY_KEY}"} if _GATEWAY_KEY else None
     try:
         out = _http_json(
             "POST",
             f"{_GATEWAY_BASE}/v1/runs",
-            headers={"Authorization": f"Bearer {_GATEWAY_KEY}"},
+            headers=headers,
             body=body,
             timeout=30.0,
         )
@@ -149,7 +187,9 @@ def _match_identity(
     if not msg.in_reply_to and not msg.thread_id:
         return None
     try:
-        page = _BRIDGE.request("GET", "/events/recent")
+        page = _BRIDGE.request(
+            "GET", "/events/recent", params={"env": env, "limit": 1000},
+        )
     except SystemExit as exc:
         log.error("bridge /events/recent failed: %s", exc)
         return None
@@ -168,19 +208,74 @@ def _match_identity(
 # ---------------------------------------------------------------- main loop
 _DISPATCHER_INSTRUCTIONS = (
     "You are running the `kol-reply-dispatcher` skill. Read the supplied "
-    "dispatch context, classify the inbound reply, persist facts via the "
-    "bridge CLI, then route to the appropriate child skill OR open an "
-    "escalation per the skill's Step 3.5. Do not draft any emails outside "
-    "the documented procedure."
+    "pending_replies array and dispatch context, classify the inbound reply, "
+    "persist facts via the bridge CLI, then route to the appropriate child "
+    "skill OR open an escalation per the skill's Step 3.5. If a child skill "
+    "returns a draft envelope, persist it back to CAL as a `kol_reply_draft_ready` "
+    "event and an `approval.reply_draft` fact for operator review. Do not send "
+    "mail directly."
 )
 
 
-def _process_message(msg: GmailMessage, env: str) -> bool:
-    """Returns True if message was matched + dispatched."""
+def _clip_text(text: str, limit: int = 12000) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n... [truncated {len(text) - limit} chars]"
+
+
+def _dispatch_context(identity_id: int, campaign_id: Optional[str], env: str) -> dict[str, Any]:
+    if not campaign_id:
+        return {"error": "missing_campaign_id"}
+    try:
+        return _BRIDGE.request(
+            "GET",
+            f"/identities/{identity_id}/dispatch-context",
+            params={"campaign_id": campaign_id, "env": env},
+        )
+    except SystemExit as exc:
+        log.error("bridge dispatch-context failed for identity=%s campaign=%s: %s",
+                  identity_id, campaign_id, exc)
+        return {"error": "dispatch_context_unavailable", "detail": str(exc)}
+
+
+def _pending_reply_payload(
+    *,
+    msg: GmailMessage,
+    identity_id: int,
+    campaign_id: Optional[str],
+    env: str,
+) -> dict[str, Any]:
+    context = _dispatch_context(identity_id, campaign_id, env)
+    return {
+        "identity_id": identity_id,
+        "campaign_id": campaign_id,
+        "env": env,
+        "latest_email": {
+            "message_id": msg.message_id,
+            "thread_id": msg.thread_id,
+            "from": msg.from_addr,
+            "to": msg.to,
+            "subject": msg.subject,
+            "date": msg.date,
+            "in_reply_to": msg.in_reply_to,
+            "references": msg.references,
+            "snippet": msg.snippet,
+            "body": _clip_text(msg.body),
+        },
+        "thread_summary": _clip_text(msg.snippet or msg.body, 2000),
+        "dispatch_context": context,
+    }
+
+
+ProcessStatus = Literal["dispatched", "skipped", "retry"]
+
+
+def _process_message(msg: GmailMessage, env: str) -> ProcessStatus:
+    """Return whether the message was dispatched, skipped, or should retry."""
     matched = _match_identity(msg, env=env)
     if not matched:
         log.info("[skip] msg=%s no identity match (from=%s)", msg.message_id, msg.from_addr)
-        return False
+        return "skipped"
     identity_id, campaign_id = matched
 
     event_body = {
@@ -203,25 +298,36 @@ def _process_message(msg: GmailMessage, env: str) -> bool:
         _BRIDGE.request("POST", "/events", body=event_body)
     except SystemExit as exc:
         log.error("bridge POST /events failed for msg=%s: %s", msg.message_id, exc)
-        return False
+        return "retry"
 
     session_id = f"kol-reply:{env}:{identity_id}:{msg.message_id}"
-    input_text = json.dumps(
-        {
-            "identity_id": identity_id,
-            "campaign_id": campaign_id,
-            "env": env,
-            "inbound_message_id": msg.message_id,
-            "inbound_thread_id": msg.thread_id,
-        },
-        indent=2,
-    )
-    _gateway_run(
+    input_text = json.dumps({
+        "pending_replies": [
+            _pending_reply_payload(
+                msg=msg,
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                env=env,
+            )
+        ],
+    }, indent=2, ensure_ascii=False)
+    run_id = _gateway_run(
         instructions=_DISPATCHER_INSTRUCTIONS,
         input_text=input_text,
         session_id=session_id,
     )
-    return True
+    if not run_id:
+        log.error("gateway dispatch did not return run_id for msg=%s", msg.message_id)
+        return "retry"
+    _register_console_run(
+        campaign_id=campaign_id,
+        env=env,
+        run_id=run_id,
+        session_id=session_id,
+    )
+    log.info("dispatched msg=%s identity=%s campaign=%s run_id=%s",
+             msg.message_id, identity_id, campaign_id, run_id)
+    return "dispatched"
 
 
 def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int]:
@@ -237,6 +343,7 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
 
     matched = 0
     skipped = 0
+    retry = 0
     for stub in messages:
         if stub.message_id in seen:
             continue
@@ -245,17 +352,21 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
         except GmailUnavailable as exc:
             log.warning("gmail get %s failed: %s", stub.message_id, exc)
             continue
-        if _process_message(full, env=env):
+        status = _process_message(full, env=env)
+        if status == "dispatched":
             matched += 1
-        else:
+            seen.add(full.message_id)
+        elif status == "skipped":
             skipped += 1
-        seen.add(full.message_id)
+            seen.add(full.message_id)
+        else:
+            retry += 1
 
     # Bound the seen-set so the state file doesn't grow forever.
     state[f"seen_{env}"] = sorted(seen)[-2000:]
     state[f"last_run_{env}"] = int(time.time())
     _save_state(state)
-    return {"matched": matched, "skipped": skipped, "scanned": len(messages)}
+    return {"matched": matched, "skipped": skipped, "retry": retry, "scanned": len(messages)}
 
 
 def main(argv: Optional[list[str]] = None) -> int:

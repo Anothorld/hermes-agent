@@ -19,6 +19,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,6 +29,7 @@ from pydantic import BaseModel, Field
 from . import cal
 from . import discovery_router
 from . import policies as _policies
+from .gmail_client import GmailClient, GmailUnavailable
 from .schema import FACT_NAMESPACES, GOAL_NAMES, SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
@@ -103,6 +105,7 @@ class CampaignConfigUpsertBody(BaseModel):
     sku_whitelist: Optional[list[str]] = None
     color_variant_policy: Optional[str] = None
     audit_standards_md: Optional[str] = None
+    test_mode_to: Optional[str] = None
     followup_intervals: Optional[dict[str, Any]] = None
     contract_required: Optional[bool] = None
     status: Optional[str] = None
@@ -122,6 +125,13 @@ class CandidateUpsertBody(BaseModel):
 class CandidateSelectBody(BaseModel):
     identity_ids: list[int]
     selected_by: str
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+class CandidateStatusBody(BaseModel):
+    identity_ids: list[int]
+    candidate_status: str = Field(pattern="^(discovered|shortlisted|selected_for_outreach|needs_review|rejected|archived)$")
+    review_reason: Optional[str] = None
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 
@@ -161,6 +171,12 @@ class ApprovalDecisionBody(BaseModel):
     note: Optional[str] = None
     extra_facts: Optional[dict[str, Any]] = None
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+class ReconcileSentBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    lookback_days: int = Field(default=7, ge=1, le=90)
+    max_results: int = Field(default=100, ge=1, le=500)
 
 
 class ArchiveBody(BaseModel):
@@ -411,9 +427,151 @@ def upsert_campaign_config(
     return {"ok": True, "campaign_id": campaign_id}
 
 
+class CampaignParseBody(BaseModel):
+    text: str = Field(min_length=1, max_length=10_000)
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+@router.post("/campaigns/parse")
+def parse_campaign_intent(
+    body: CampaignParseBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Free-text → ``campaign_config`` draft (no DB write).
+
+    Deterministic regex-driven shim — covers the common Chinese/English
+    operator phrasings ("预算 1500", "IG 5 / TT 5", "commission 12%",
+    "测试收件 johnny@..."). The frontend wizard previews the result and
+    asks the operator to confirm / edit before calling
+    ``PUT /campaigns/{id}``. Unrecognised fields are returned in
+    ``unparsed_lines`` so the operator still sees their input.
+    """
+    return _parse_campaign_text(body.text)
+
+
+class FactsFromTextBody(BaseModel):
+    text: str = Field(min_length=1, max_length=10_000)
+    appended_by: str = Field(min_length=1, max_length=120)
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+@router.post("/campaigns/{campaign_id}/facts-from-text")
+def append_campaign_facts_from_text(
+    campaign_id: str,
+    body: FactsFromTextBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Append a free-text note to ``campaign_config.extra_notes``.
+
+    Used by the Campaign Wizard's ``extra_notes`` 区域 so operators can
+    drop ad-hoc context onto an existing campaign without overwriting
+    structured fields. The note is timestamped + signed for audit.
+    """
+    cfg = cal.get_campaign_config(campaign_id, env=body.env)
+    if not cfg:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    existing = (cfg.get("extra_notes") or "").rstrip()
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    appended = f"\n\n---\n[{stamp} by {body.appended_by}]\n{body.text.strip()}"
+    cal.upsert_campaign_config(
+        campaign_id=campaign_id,
+        env=body.env,
+        extra_notes=(existing + appended).lstrip(),
+    )
+    return {"ok": True, "campaign_id": campaign_id, "appended_at": stamp}
+
+
+# ----- helpers for /campaigns/parse ---------------------------------------
+
+_PLATFORM_ALIASES = {
+    "ig": "instagram", "instagram": "instagram", "insta": "instagram",
+    "tt": "tiktok", "tiktok": "tiktok",
+    "yt": "youtube", "youtube": "youtube",
+    "xhs": "xiaohongshu", "rednote": "xiaohongshu",
+}
+
+
+def _parse_campaign_text(text: str) -> dict[str, Any]:
+    """Best-effort regex parser for operator briefs.
+
+    Recognises (case-insensitive):
+    - 预算 / budget <amount> [总 / total / 单 / per]
+    - IG 5 / TikTok 3 / xhs 2 → deliverable_platforms + count
+    - commission 12% / 抽成 12% → commission_band
+    - paid ceiling 800 / 上限 800 → paid_ceiling
+    - 测试收件 / test_mode_to <email>
+    - 标签 / label <text>
+    - 跑 <campaign_id>
+    """
+    import re
+
+    raw = text.strip()
+    out: dict[str, Any] = {}
+    unparsed: list[str] = []
+
+    def m(pattern: str, flags: int = re.IGNORECASE) -> Optional["re.Match[str]"]:
+        return re.search(pattern, raw, flags)
+
+    if (h := m(r"跑\s*([A-Za-z0-9\-_]+)")):
+        out["campaign_id"] = h.group(1)
+    if (h := m(r"\b(?:label|标签|名称)\s*[:：]?\s*([^\n,，；;]+)")):
+        out["label"] = h.group(1).strip()
+
+    if (h := m(r"\b(?:单价|unit\s*price)\s*[:：]?\s*\$?(\d+(?:\.\d+)?)")):
+        out["product_unit_price"] = float(h.group(1))
+    if (h := m(r"\b(?:paid[\s_-]*ceiling|预算上限|上限|cap)\s*[:：]?\s*\$?(\d+(?:\.\d+)?)")):
+        out["paid_ceiling"] = float(h.group(1))
+    elif (h := m(r"\b(?:预算|budget)\s*[:：]?\s*\$?(\d+(?:\.\d+)?)")):
+        out["paid_ceiling"] = float(h.group(1))
+
+    if (h := m(r"\b(?:commission|抽成|分成)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*%\s*(?:[-–~至到]\s*(\d+(?:\.\d+)?)\s*%)?")):
+        lo = float(h.group(1))
+        hi = float(h.group(2)) if h.group(2) else lo
+        out["commission_band"] = {"min": lo / 100, "max": hi / 100}
+
+    platforms: list[str] = []
+    counts: list[int] = []
+    for alias, canonical in _PLATFORM_ALIASES.items():
+        # Match "IG 5", "instagram x 5", "instagram*5", "instagram：5"
+        match = re.search(
+            rf"\b{alias}\b[\s xX×*：:]+(\d+)", raw, re.IGNORECASE,
+        )
+        if match and canonical not in platforms:
+            platforms.append(canonical)
+            counts.append(int(match.group(1)))
+    if platforms:
+        out["deliverable_platforms"] = platforms
+        # Single uniform count if all equal; otherwise use the first
+        if len(set(counts)) == 1:
+            out["deliverable_count_per_platform"] = counts[0]
+        else:
+            out["deliverable_count_per_platform"] = counts[0]
+            unparsed.append(
+                "deliverable_count_per_platform varies per platform "
+                f"({dict(zip(platforms, counts))}); applied first value"
+            )
+
+    if (h := m(r"\b(?:test[\s_-]*mode[\s_-]*to|测试收件|test\s*inbox)\s*[:：]?\s*([\w.+-]+@[\w-]+\.[\w.-]+)")):
+        out["test_mode_to"] = h.group(1)
+
+    if m(r"\bcontract[\s_-]*required\s*[:：]?\s*(false|no|不需要|不签)\b"):
+        out["contract_required"] = False
+    elif m(r"\b(?:不签合同|no\s+contract)\b"):
+        out["contract_required"] = False
+
+    if (h := m(r"\b(?:sku|SKU|whitelist|白名单)\s*[:：]?\s*((?:[A-Z]+[A-Z0-9_-]*)(?:\s*[,，、/]\s*[A-Z]+[A-Z0-9_-]*)*)")):
+        skus = re.split(r"[,，、/]\s*", h.group(1))
+        out["sku_whitelist"] = [s.strip() for s in skus if s.strip()]
+
+    return {"parsed": out, "unparsed_lines": unparsed, "raw": raw}
+
+
 @router.get("/campaigns/{campaign_id}")
-def get_campaign_config(campaign_id: str) -> dict[str, Any]:
-    cfg = cal.get_campaign_config(campaign_id)
+def get_campaign_config(
+    campaign_id: str,
+    env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    cfg = cal.get_campaign_config(campaign_id, env=env)
     if not cfg:
         raise HTTPException(status_code=404, detail="campaign not found")
     return cfg
@@ -475,6 +633,23 @@ def select_candidates(
         selected_by=body.selected_by, env=body.env,
     )
     return {"selected": n}
+
+
+@router.post("/campaigns/{campaign_id}/candidates/status")
+def set_candidate_status(
+    campaign_id: str,
+    body: CandidateStatusBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    n = cal.set_candidate_status(
+        campaign_id=campaign_id,
+        identity_ids=body.identity_ids,
+        candidate_status=body.candidate_status,
+        review_reason=body.review_reason,
+        env=body.env,
+    )
+    return {"updated": n}
 
 
 @router.post("/campaigns/{campaign_id}/candidates/route-discovery")
@@ -568,10 +743,13 @@ def write_facts(
     _require_bridge_key(x_bridge_key)
     if not cal.get_identity(identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
+    campaign_id = body.campaign_id or _inherit_campaign_id_from_escalation(
+        namespace=body.namespace, facts=body.facts,
+    )
     try:
         n = cal.write_facts(
             identity_id=identity_id,
-            campaign_id=body.campaign_id,
+            campaign_id=campaign_id,
             namespace=body.namespace,
             facts=body.facts,
             source=body.source,
@@ -581,6 +759,34 @@ def write_facts(
     except cal.FactNamespaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"written": n}
+
+
+def _inherit_campaign_id_from_escalation(
+    *, namespace: str, facts: dict[str, Any]
+) -> Optional[str]:
+    """Backstop for the draft-preview path: when an agent writes an
+    ``approval.*`` fact carrying a ``linked_escalation_id`` but forgets
+    to set ``campaign_id`` in the request body, look up the escalation
+    row and return its campaign_id so the resulting fact inherits scope.
+    Returns None when not applicable (non-approval namespace, no linked
+    escalation, escalation not found, or escalation itself unscoped).
+    """
+    if namespace != "approval":
+        return None
+    for value in facts.values():
+        if not isinstance(value, dict):
+            continue
+        linked = value.get("linked_escalation_id")
+        if linked is None:
+            continue
+        try:
+            escalation_id = int(linked)
+        except (TypeError, ValueError):
+            continue
+        cid = cal.get_escalation_campaign_id(escalation_id)
+        if cid:
+            return cid
+    return None
 
 
 @router.post("/facts/{identity_id}/multi")
@@ -599,10 +805,17 @@ def write_facts_multi(
     _require_bridge_key(x_bridge_key)
     if not cal.get_identity(identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
+    campaign_id = body.campaign_id
+    if not campaign_id:
+        approval_facts = body.namespaces.get("approval")
+        if isinstance(approval_facts, dict):
+            campaign_id = _inherit_campaign_id_from_escalation(
+                namespace="approval", facts=approval_facts,
+            )
     try:
         written = cal.write_facts_multi(
             identity_id=identity_id,
-            campaign_id=body.campaign_id,
+            campaign_id=campaign_id,
             namespaces=body.namespaces,
             source=body.source,
             source_event_id=body.source_event_id,
@@ -664,12 +877,15 @@ def read_facts(
 
 @router.get("/approvals")
 def list_approvals(
-    status: str = Query(default="pending", pattern="^(pending|all)$"),
+    status: str = Query(
+        default="pending",
+        pattern="^(pending|approved|rejected|all)$",
+    ),
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     if status == "pending":
         return {"approvals": cal.list_pending_approvals(env=env)}
-    raise HTTPException(status_code=501, detail="status=all not implemented yet")
+    return {"approvals": cal.list_decided_approvals(status=status, env=env)}
 
 
 def _approve_or_reject(
@@ -679,7 +895,29 @@ def _approve_or_reject(
         raise HTTPException(status_code=400, detail="fact_path must start with 'approval.'")
     if not cal.get_identity(body.identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
-    value: dict[str, Any] = {"decision": decision, "decided_by": body.decided_by}
+    previous_value = None
+    if body.campaign_id:
+        previous_value = cal.latest_facts_for(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+        ).get(fact_path)
+    if isinstance(previous_value, dict):
+        value: dict[str, Any] = dict(previous_value)
+    elif previous_value is None:
+        value = {}
+    else:
+        value = {"value": previous_value}
+    gmail_draft: dict[str, Any] | None = None
+    if decision == "approved" and fact_path == "approval.reply_draft":
+        gmail_draft = _create_gmail_draft_for_reply_approval(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            approval_value=value,
+            env=body.env,
+        )
+        value["gmail_draft"] = gmail_draft
+    value.update({"decision": decision, "decided_by": body.decided_by})
     if body.note:
         value["note"] = body.note
     if body.extra_facts:
@@ -695,21 +933,253 @@ def _approve_or_reject(
         )
     except cal.FactNamespaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    derived_escalation_id = None
-    if decision == "rejected":
-        derived_escalation_id = cal.open_escalation(
+    if gmail_draft is not None:
+        event_id = cal.write_event(
             identity_id=body.identity_id,
             campaign_id=body.campaign_id,
-            reason=f"approval_rejected:{fact_path}",
-            severity="normal",
-            question_to_operator=(
-                f"Approval {fact_path} 已被驳回（{body.note or '无理由'}）。"
-                "请告诉 agent 应该如何回复 KOL。"
-            ),
+            event_type="outbound_draft_created",
+            goal="outreach",
+            lane="commerce",
+            actor=f"approval:{body.decided_by}",
+            payload={"fact_path": fact_path, "gmail_draft": gmail_draft},
             env=body.env,
         )
+        cal.write_facts(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            namespace="offer",
+            facts={
+                "offer.outreach_draft_created": True,
+                "offer.gmail_draft_id": gmail_draft.get("draft_id"),
+                "offer.gmail_thread_id": gmail_draft.get("thread_id"),
+            },
+            source="gmail:draft-created",
+            source_event_id=event_id,
+            env=body.env,
+        )
+    derived_escalation_id = None
+    linked_escalation_id: Optional[int] = None
+    if decision == "rejected":
+        # An approval.reply_draft is always tied to an *open* escalation —
+        # the operator rejecting the draft means "try again on the same
+        # escalation". Opening a derived escalation here was creating an
+        # unbounded chain (escalation → draft → rejected → escalation
+        # → draft → ...). For reply-draft rejections we instead leave a
+        # breadcrumb on the linked escalation; for any other approval
+        # type we keep the legacy behaviour of opening a follow-up.
+        raw_link = value.get("linked_escalation_id") or value.get("escalation_id")
+        try:
+            linked_escalation_id = int(raw_link) if raw_link is not None else None
+        except (TypeError, ValueError):
+            linked_escalation_id = None
+        if fact_path == "approval.reply_draft" and linked_escalation_id is not None:
+            cal.note_rejected_draft(
+                escalation_id=linked_escalation_id,
+                fact_path=fact_path,
+                note=body.note,
+                decided_by=body.decided_by,
+            )
+        else:
+            derived_escalation_id = cal.open_escalation(
+                identity_id=body.identity_id,
+                campaign_id=body.campaign_id,
+                reason=f"approval_rejected:{fact_path}",
+                severity="normal",
+                question_to_operator=(
+                    f"Approval {fact_path} 已被驳回（{body.note or '无理由'}）。"
+                    "请告诉 agent 应该如何回复 KOL。"
+                ),
+                env=body.env,
+            )
     return {"ok": True, "decision": decision,
-            "derived_escalation_id": derived_escalation_id}
+            "derived_escalation_id": derived_escalation_id,
+            "linked_escalation_id": linked_escalation_id,
+            "gmail_draft": gmail_draft}
+
+
+def _resolve_thread_id_from_events(
+    *,
+    identity_id: int,
+    campaign_id: str | None,
+    env: str,
+    candidate_thread_id: str | None,
+    source_message_id: str | None,
+) -> str | None:
+    """Verify (and if necessary, correct) the Gmail ``thread_id`` an
+    upstream drafting skill placed on an ``approval.reply_draft``.
+
+    Past incident: a drafting skill stored the inbound ``message_id``
+    where Gmail expects a ``threadId``. Gmail's drafts.create then
+    returns 404 ``Requested entity was not found``. To prevent that
+    class of failure, we cross-check against ``kol_conversation_events``
+    (which carries authoritative ``message_id`` and ``thread_id`` from
+    the dispatcher). If the candidate matches a known message_id, swap
+    it for the corresponding thread_id; if it already matches a known
+    thread_id, leave it; otherwise return it unchanged (best-effort).
+    """
+    candidates = {c for c in (candidate_thread_id, source_message_id) if c}
+    if not candidates:
+        return candidate_thread_id
+    try:
+        events = cal.list_events(
+            env=env, identity_id=identity_id,
+            campaign_id=campaign_id, limit=200,
+        )
+    except Exception:  # noqa: BLE001 — defensive lookup, never fail the draft path
+        return candidate_thread_id
+    for ev in events:
+        payload = ev.get("payload") if isinstance(ev, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        ev_thread = payload.get("thread_id")
+        ev_msg = payload.get("message_id")
+        if not isinstance(ev_thread, str) or not ev_thread:
+            continue
+        if candidate_thread_id and ev_thread == candidate_thread_id:
+            return ev_thread
+        if isinstance(ev_msg, str) and ev_msg and ev_msg in candidates:
+            return ev_thread
+    return candidate_thread_id
+
+
+def _resolve_envelope_from_inbound(
+    *,
+    identity_id: int,
+    campaign_id: str | None,
+    env: str,
+    source_message_id: str | None,
+    thread_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Recover (to, subject) for a reply draft from the inbound event.
+
+    Child draft envelopes (e.g. kol-compensation-negotiator) intentionally
+    return ``subject: null`` and omit ``to`` — the recipient is the inbound
+    sender. The dispatcher should fill these in, but historically didn't,
+    leaving the operator unable to approve. We re-derive them here from the
+    ``kol_inbound_reply`` event whose payload carries ``from_addr`` and
+    ``subject``. Matched by ``message_id``, falling back to ``thread_id``.
+    Returns (None, None) when no matching event is found.
+    """
+    if not source_message_id and not thread_id:
+        return None, None
+    try:
+        events = cal.list_events(
+            env=env, identity_id=identity_id,
+            campaign_id=campaign_id, limit=200,
+        )
+    except Exception:  # noqa: BLE001 — defensive lookup, never fail the draft path
+        return None, None
+    for ev in events:
+        if ev.get("event_type") != "kol_inbound_reply":
+            continue
+        payload = ev.get("payload") if isinstance(ev, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        ev_msg = payload.get("message_id")
+        ev_thread = payload.get("thread_id")
+        matches = (
+            (source_message_id and ev_msg == source_message_id)
+            or (thread_id and ev_thread == thread_id)
+        )
+        if not matches:
+            continue
+        from_addr = str(payload.get("from_addr") or "").strip() or None
+        in_subj = str(payload.get("subject") or "").strip()
+        subject = None
+        if in_subj:
+            subject = in_subj if in_subj.lower().startswith("re:") else f"Re: {in_subj}"
+        return from_addr, subject
+    return None, None
+
+
+def _create_gmail_draft_for_reply_approval(
+    *,
+    identity_id: int,
+    campaign_id: str | None,
+    approval_value: dict[str, Any],
+    env: str,
+) -> dict[str, Any]:
+    draft = approval_value.get("draft")
+    if not isinstance(draft, dict):
+        raise HTTPException(status_code=400, detail="approval.reply_draft has no draft object")
+    subject = str(draft.get("subject") or "").strip()
+    body = str(draft.get("body") or "").strip()
+    to_addr = str(draft.get("to") or "").strip()
+    if not subject or not to_addr:
+        # Child skill contracts allow subject=null and may omit `to` (the
+        # recipient is the inbound sender). Recover from the inbound event
+        # before failing the operator's approve click.
+        src_msg = str(approval_value.get("source_message_id") or "") or None
+        thr = str(draft.get("thread_id") or "") or None
+        recovered_to, recovered_subject = _resolve_envelope_from_inbound(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=env,
+            source_message_id=src_msg,
+            thread_id=thr,
+        )
+        if not to_addr and recovered_to:
+            to_addr = recovered_to
+        if not subject and recovered_subject:
+            subject = recovered_subject
+    missing = [
+        name for name, val in (("subject", subject), ("body", body), ("to", to_addr))
+        if not val
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"approval.reply_draft draft missing required field(s): {', '.join(missing)}",
+        )
+    raw_thread_id = str(draft.get("thread_id") or "") or None
+    raw_source_msg = str(approval_value.get("source_message_id") or "") or None
+    resolved_thread_id = _resolve_thread_id_from_events(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        candidate_thread_id=raw_thread_id,
+        source_message_id=raw_source_msg,
+    )
+    raw_attachments = draft.get("attachments") or []
+    if not isinstance(raw_attachments, list):
+        raise HTTPException(
+            status_code=400,
+            detail="approval.reply_draft draft.attachments must be a list of paths",
+        )
+    attachment_paths: list[str] = []
+    for item in raw_attachments:
+        path_str = str(item or "").strip()
+        if not path_str:
+            continue
+        if not Path(path_str).is_file():
+            raise HTTPException(
+                status_code=400,
+                detail=f"draft attachment not found on disk: {path_str}",
+            )
+        attachment_paths.append(path_str)
+    client = GmailClient()
+    if not client.is_available():
+        raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    try:
+        result = client.create_draft(
+            to=to_addr,
+            subject=subject,
+            body=body,
+            cc=str(draft.get("cc") or "") or None,
+            html=bool(draft.get("html")),
+            thread_id=resolved_thread_id,
+            attachments=attachment_paths or None,
+        )
+    except GmailUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "draft_id": result.draft_id,
+        "message_id": result.message_id,
+        "thread_id": result.thread_id,
+        "identity_id": identity_id,
+        "campaign_id": campaign_id,
+        "env": env,
+    }
 
 
 @router.post("/approvals/{fact_path}/approve")
@@ -732,6 +1202,69 @@ def reject(
     return _approve_or_reject(fact_path=fact_path, decision="rejected", body=body)
 
 
+@router.post("/gmail/reconcile-sent")
+def reconcile_sent(
+    body: ReconcileSentBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    client = GmailClient()
+    if not client.is_available():
+        raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    try:
+        sent_thread_ids = client.list_sent_thread_ids(
+            lookback_days=body.lookback_days,
+            max_results=body.max_results,
+        )
+    except GmailUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    reconciled: list[dict[str, Any]] = []
+    for row in cal.list_approved_reply_drafts(env=body.env):
+        gmail_draft = row.get("gmail_draft") if isinstance(row, dict) else {}
+        thread_id = gmail_draft.get("thread_id") if isinstance(gmail_draft, dict) else None
+        if not thread_id or thread_id not in sent_thread_ids:
+            continue
+        identity_id = int(row["identity_id"])
+        campaign_id = row.get("campaign_id")
+        event_id = cal.write_event(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            event_type="outbound_sent",
+            goal="outreach",
+            lane="commerce",
+            actor="gmail:sent-reconcile",
+            payload={"thread_id": thread_id, "gmail_draft": gmail_draft},
+            env=body.env,
+        )
+        cal.write_facts(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            namespace="offer",
+            facts={
+                "offer.outreach_sent": True,
+                "offer.outreach_sent_at": now,
+                "offer.gmail_sent_thread_id": thread_id,
+            },
+            source="gmail:sent-reconcile",
+            source_event_id=event_id,
+            env=body.env,
+        )
+        reconciled.append({
+            "identity_id": identity_id,
+            "campaign_id": campaign_id,
+            "thread_id": thread_id,
+            "event_id": event_id,
+        })
+    return {
+        "ok": True,
+        "env": body.env,
+        "sent_threads_seen": len(sent_thread_ids),
+        "reconciled_count": len(reconciled),
+        "reconciled": reconciled,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Escalations
 # ---------------------------------------------------------------------------
@@ -751,7 +1284,29 @@ def open_escalation(
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
     _require_bridge_key(x_bridge_key)
-    eid = cal.open_escalation(**body.model_dump(exclude_none=True))
+    payload = body.model_dump(exclude_none=True)
+    # Enrich resume_context with the authoritative Gmail thread_id when
+    # only a source_message_id is supplied. This prevents downstream
+    # drafting skills from mis-using the message_id as a thread_id (past
+    # incident: Gmail drafts.create returned 404 because thread_id was
+    # actually a message_id).
+    ctx = payload.get("resume_context") or {}
+    if (
+        isinstance(ctx, dict)
+        and ctx.get("source_message_id")
+        and not ctx.get("thread_id")
+    ):
+        thread_id = _resolve_thread_id_from_events(
+            identity_id=payload.get("identity_id") or 0,
+            campaign_id=payload.get("campaign_id"),
+            env=payload.get("env") or "LIVE",
+            candidate_thread_id=None,
+            source_message_id=str(ctx["source_message_id"]),
+        )
+        if thread_id:
+            ctx["thread_id"] = thread_id
+            payload["resume_context"] = ctx
+    eid = cal.open_escalation(**payload)
     if eid is None:
         raise HTTPException(status_code=500, detail="open_escalation failed")
     return {"escalation_id": eid}
@@ -764,16 +1319,17 @@ def resolve_escalation(
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
     _require_bridge_key(x_bridge_key)
-    if body.final_state not in {"resolved", "re_escalated", "aborted", "answered"}:
-        raise HTTPException(status_code=400, detail="invalid final_state")
-    cal.resolve_escalation(
-        escalation_id=escalation_id,
-        decision=body.decision,
-        decided_by=body.decided_by,
-        operator_answer=body.operator_answer,
-        operator_facts=body.operator_facts,
-        final_state=body.final_state,
-    )
+    try:
+        cal.resolve_escalation(
+            escalation_id=escalation_id,
+            decision=body.decision,
+            decided_by=body.decided_by,
+            operator_answer=body.operator_answer,
+            operator_facts=body.operator_facts,
+            final_state=body.final_state,
+        )
+    except cal.EscalationStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
 
 

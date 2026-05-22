@@ -1,6 +1,6 @@
 ---
 name: kol-reengagement-outreach
-description: Generates the FIRST outreach email for a REPEAT KOL ("repeat_kol" path). Reads campaign config + identity facts + relationship history (last_outcome, preferred_skus, preferred_mode, default_shipping_address) via the Bridge dispatch-context, composes a warm "back again" opening that references the prior collab and proposes the most likely next collab shape, writes outbound facts (`offer.outreach_sent=true`, `offer.outreach_path=reengagement`) via the Bridge, and returns the draft envelope as JSON for the caller to persist. Never sends mail directly.
+description: Generates the FIRST outreach email draft for a REPEAT KOL ("repeat_kol" path). Reads campaign config + identity facts + relationship history (last_outcome, preferred_skus, preferred_mode, default_shipping_address) via the Bridge dispatch-context, composes a warm "back again" opening that references the prior collab and proposes the most likely next collab shape, writes draft-ready facts (`offer.outreach_draft_ready=true`, `offer.outreach_path=reengagement`) via the Bridge, and returns the draft envelope as JSON for the caller to persist. Never sends mail directly.
 trigger: Invoked by `kol-discovery-to-outreach-router` for candidates assigned `identity.outreach_path=reengagement` (i.e. `relationship_status=repeat_kol`, NOT `repeat_kol_needs_review` — those open an escalation instead). Or on demand when the user says "draft a re-engagement email to <handle>".
 tags: ["kol", "outreach", "reengagement", "repeat-collab", "draft-generator", "commerce-lane"]
 ---
@@ -26,6 +26,8 @@ no Gmail send.
   skill. Defense-in-depth.
 - **Single-shot per (identity, campaign).** If
   `offer.outreach_sent=true` already, abort with `{"skipped":"already_sent"}`.
+  If `offer.outreach_draft_ready=true` already, abort with
+  `{"skipped":"draft_already_ready"}`.
 - **No price talk in the opening.** May reference prior mode
   ("happy to do another gifted collab" / "if commission works again
   for you") but does NOT quote numbers.
@@ -47,7 +49,7 @@ prompt. The loader returns a single markdown block enforcing
 **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
 
 Call contract:
-- inputs: `goal_brief = {goal: "reengagement_outreach", missing_facts: ["offer.outreach_sent"], next_action: "<one-line summary referencing prior collab>"}`,
+- inputs: `goal_brief = {goal: "reengagement_outreach", missing_facts: ["offer.outreach_draft_ready"], next_action: "<one-line summary referencing prior collab>"}`,
   `current_user_id = <operator id from session>`.
 - output: prepend as the **first section** of the draft prompt — before any
   goal-specific instructions in this skill's Procedure.
@@ -106,11 +108,11 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
   --json '{"campaign_id":"<campaign_id>",
             "source":"skill:kol-reengagement-outreach",
             "namespaces":{
-              "offer":    {"offer.outreach_sent": true,
+              "offer":    {"offer.outreach_draft_ready": true,
                             "offer.outreach_path": "reengagement",
                             "offer.proposed_mode": "<gifted|paid|commission|hybrid>",
                             "offer.proposed_skus": ["sku-a","sku-b"]},
-              "identity": {"identity.last_outreach_at": "<iso8601>"}
+              "identity": {"identity.last_outreach_draft_at": "<iso8601>"}
             }}'
 ```
 
@@ -168,4 +170,6 @@ should have caught this upstream and opened an escalation instead.
   proposing paid). Mode escalations belong to the
   `kol-compensation-negotiator` after the reply.
 - Do not redraft if `outreach_sent=true`; abort with `already_sent`.
+  Do not redraft if `outreach_draft_ready=true`; abort with
+  `draft_already_ready`.
 - Do not call `cal.py` / direct SQL / `execute_code`.

@@ -140,8 +140,13 @@ def route_discovery_pool(
         esc_id = cal.open_escalation(
             identity_id=entry["identity_id"],
             campaign_id=campaign_id,
-            goal="reengagement_outreach",
+            # Per goals.py, the canonical goal name is ``outreach``.
+            # Cold vs reengagement is tracked via ``meta.path`` (see
+            # OUTREACH_PATH_REENGAGEMENT above), not a separate goal row.
+            goal="outreach",
             reason=f"repeat_kol_needs_review:{entry['last_outcome']}",
+            resume_context={"path": "reengagement",
+                            "last_outcome": entry["last_outcome"]},
             question_to_operator=(
                 operator_note
                 or "Prior collab risk surfaced; confirm whether to proceed."

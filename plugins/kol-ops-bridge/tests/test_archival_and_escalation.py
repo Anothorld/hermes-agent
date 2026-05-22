@@ -16,6 +16,45 @@ def _bootstrap_campaign(cal, cid):
                                contract_required=True)
 
 
+def test_campaign_upsert_repairs_env_for_existing_row(cal_db):
+    cal = cal_db
+    cid = "TS8125-TEST-20260521"
+    cal.upsert_campaign_config(campaign_id=cid, label="preseed")
+    assert cal.get_campaign_config(cid)["env"] == "LIVE"
+
+    cal.upsert_campaign_config(campaign_id=cid, env="TEST", label="agent upsert")
+
+    assert cal.get_campaign_config(cid, env="TEST")["env"] == "TEST"
+    assert cal.get_campaign_config(cid, env="LIVE") is None
+
+
+def test_campaign_upsert_persists_test_mode_to(cal_db):
+    cal = cal_db
+    cid = "TS8136-TEST-20260521"
+
+    cal.upsert_campaign_config(
+        campaign_id=cid,
+        env="TEST",
+        test_mode_to="johnny@povison-collab.com",
+    )
+
+    assert cal.get_campaign_config(cid, env="TEST")["test_mode_to"] == "johnny@povison-collab.com"
+
+
+def test_campaign_level_escalation_without_identity(cal_db):
+    cal = cal_db
+    _bootstrap_campaign(cal, CAMPAIGN_A)
+
+    eid = cal.open_escalation(
+        campaign_id=CAMPAIGN_A,
+        env="TEST",
+        reason="discovery stopped after repeated browser failures",
+    )
+
+    rows = cal.list_escalations(env="TEST")
+    assert any(r["id"] == eid and r["identity_id"] is None for r in rows)
+
+
 def test_archive_collab_writes_relationship_and_facts(cal_db):
     cal = cal_db
     _bootstrap_campaign(cal, CAMPAIGN_A)

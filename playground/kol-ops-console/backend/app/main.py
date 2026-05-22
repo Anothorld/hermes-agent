@@ -26,6 +26,7 @@ from .routers import (
     kols,
     policies,
     products,
+    reply_watcher,
     relationships,
 )
 from .security import hash_password
@@ -99,6 +100,7 @@ def create_app() -> FastAPI:
     app.include_router(escalations.router)
     app.include_router(approvals.router)
     app.include_router(policies.router)
+    app.include_router(reply_watcher.router)
     app.include_router(admin.router)
     app.include_router(events_router.router)  # /ws
     return app
