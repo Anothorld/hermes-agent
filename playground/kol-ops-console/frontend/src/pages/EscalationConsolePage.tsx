@@ -163,6 +163,21 @@ function extractMissingFields(r: EscalationRow): string[] {
   return out.slice(0, 6);
 }
 
+function contextText(r: EscalationRow, key: string): string | null {
+  const ctx = (r.resume_context ?? {}) as Record<string, unknown>;
+  const value = ctx[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function reasonDetails(r: EscalationRow): string[] {
+  const details = [
+    contextText(r, 'operator_summary'),
+    contextText(r, 'source_reason'),
+    contextText(r, 'reason'),
+  ].filter((value): value is string => Boolean(value));
+  return [...new Set(details)];
+}
+
 // Common words / snake_case tokens in escalation prose that aren't
 // config fields; suppress them so the chip row stays signal-only.
 const CONFIG_FIELD_BLOCKLIST = new Set<string>([
@@ -295,6 +310,8 @@ function EscalationDetail({ id }: { id: number }) {
     });
   }, [row]);
 
+  const detailedReasons = useMemo(() => (row ? reasonDetails(row) : []), [row]);
+
   function collectFacts(): Record<string, unknown> {
     const facts: Record<string, unknown> = {};
     for (const k of factKeys) {
@@ -363,7 +380,28 @@ function EscalationDetail({ id }: { id: number }) {
         <div>identity: <Link to={`/kols/${row.identity_id}?campaign_id=${encodeURIComponent(row.campaign_id)}`} className="text-sky-700 hover:underline">{row.identity_id}</Link></div>
         <div>campaign: {row.campaign_id}</div>
         <div>rule: {row.rule_id ?? '—'} · state: {row.state}</div>
-        <div>reason: {row.reason}</div>
+        <div className="mt-2 rounded bg-slate-50 p-2">
+          <div className="text-xs uppercase tracking-wide text-slate-500">Reason code</div>
+          <div className="mt-0.5 font-mono text-xs text-slate-800">{row.reason}</div>
+          {detailedReasons.length > 0 && (
+            <div className="mt-2 space-y-1">
+              <div className="text-xs uppercase tracking-wide text-slate-500">Why this exists</div>
+              {detailedReasons.map((detail) => (
+                <div key={detail} className="text-sm text-slate-700">{detail}</div>
+              ))}
+            </div>
+          )}
+        </div>
+        {row.suggested_question && (
+          <div className="mt-2 rounded border border-sky-200 bg-sky-50 p-2 text-sky-950">
+            <div className="text-xs font-semibold uppercase tracking-wide text-sky-700">
+              Action required
+            </div>
+            <div className="mt-1 whitespace-pre-wrap text-sm leading-relaxed">
+              {row.suggested_question}
+            </div>
+          </div>
+        )}
         {extractMissingFields(row).length > 0 && (
           <div className="mt-1 flex flex-wrap items-center gap-1">
             <span className="text-xs text-slate-500">missing:</span>
@@ -375,11 +413,6 @@ function EscalationDetail({ id }: { id: number }) {
                 {f}
               </span>
             ))}
-          </div>
-        )}
-        {row.suggested_question && (
-          <div className="mt-1 rounded bg-sky-50 p-2 text-sky-900">
-            ❓ {row.suggested_question}
           </div>
         )}
         {row.parent_id && (

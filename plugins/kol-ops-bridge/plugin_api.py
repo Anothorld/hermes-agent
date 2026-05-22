@@ -21,7 +21,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -888,6 +888,32 @@ def list_approvals(
     return {"approvals": cal.list_decided_approvals(status=status, env=env)}
 
 
+def _linked_escalation_id(value: Mapping[str, Any]) -> Optional[int]:
+    raw_link = value.get("linked_escalation_id") or value.get("escalation_id")
+    try:
+        return int(raw_link) if raw_link is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _mark_linked_reply_escalation_handled(
+    *, escalation_id: int, env: str, decided_by: str
+) -> Optional[int]:
+    row = next(
+        (r for r in cal.list_escalations(env=env) if r.get("id") == escalation_id),
+        None,
+    )
+    if not row or row.get("state") not in {"awaiting_answer", "answered", "resuming"}:
+        return None
+    return cal.resolve_escalation(
+        escalation_id=escalation_id,
+        decision="resume",
+        decided_by=decided_by,
+        operator_answer="Linked approval.reply_draft was approved; escalation handled by draft approval.",
+        final_state="resolved",
+    )
+
+
 def _approve_or_reject(
     *, fact_path: str, decision: str, body: ApprovalDecisionBody
 ) -> dict[str, Any]:
@@ -908,6 +934,8 @@ def _approve_or_reject(
         value = {}
     else:
         value = {"value": previous_value}
+    linked_escalation_id: Optional[int] = _linked_escalation_id(value)
+    handled_escalation_id: Optional[int] = None
     gmail_draft: dict[str, Any] | None = None
     if decision == "approved" and fact_path == "approval.reply_draft":
         gmail_draft = _create_gmail_draft_for_reply_approval(
@@ -957,8 +985,13 @@ def _approve_or_reject(
             source_event_id=event_id,
             env=body.env,
         )
+        if linked_escalation_id is not None:
+            handled_escalation_id = _mark_linked_reply_escalation_handled(
+                escalation_id=linked_escalation_id,
+                env=body.env,
+                decided_by=body.decided_by,
+            )
     derived_escalation_id = None
-    linked_escalation_id: Optional[int] = None
     if decision == "rejected":
         # An approval.reply_draft is always tied to an *open* escalation —
         # the operator rejecting the draft means "try again on the same
@@ -967,11 +1000,6 @@ def _approve_or_reject(
         # → draft → ...). For reply-draft rejections we instead leave a
         # breadcrumb on the linked escalation; for any other approval
         # type we keep the legacy behaviour of opening a follow-up.
-        raw_link = value.get("linked_escalation_id") or value.get("escalation_id")
-        try:
-            linked_escalation_id = int(raw_link) if raw_link is not None else None
-        except (TypeError, ValueError):
-            linked_escalation_id = None
         if fact_path == "approval.reply_draft" and linked_escalation_id is not None:
             cal.note_rejected_draft(
                 escalation_id=linked_escalation_id,
@@ -994,6 +1022,7 @@ def _approve_or_reject(
     return {"ok": True, "decision": decision,
             "derived_escalation_id": derived_escalation_id,
             "linked_escalation_id": linked_escalation_id,
+            "handled_escalation_id": handled_escalation_id,
             "gmail_draft": gmail_draft}
 
 

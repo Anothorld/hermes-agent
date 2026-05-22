@@ -152,8 +152,10 @@ def _normalize_escalation_row(raw: dict[str, Any]) -> dict[str, Any]:
     ctx = out.get("resume_context") or {}
     if isinstance(ctx, dict):
         out.setdefault("rule_id", ctx.get("matched_rule_id") or ctx.get("rule_id"))
-        if not out.get("suggested_question"):
-            out["suggested_question"] = ctx.get("suggested_question")
+    if not out.get("suggested_question"):
+        out["suggested_question"] = out.get("question_to_operator")
+    if not out.get("suggested_question") and isinstance(ctx, dict):
+        out["suggested_question"] = ctx.get("suggested_question")
     return out
 
 

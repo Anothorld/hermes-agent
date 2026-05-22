@@ -109,3 +109,47 @@ def test_no_prior_value_still_writes_decision(cal_db):
     ).get("approval.baz")
     assert latest["decision"] == "approved"
     assert "value" not in latest
+
+
+def test_approved_linked_reply_draft_resolves_escalation(cal_db, monkeypatch):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="t4", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="C4", env="TEST",
+                                  test_mode_to="t@x.com")
+    escalation_id = cal_db.open_escalation(
+        identity_id=iid,
+        campaign_id="C4",
+        env="TEST",
+        goal="compensation_negotiation",
+        reason="paid_quote_over_ceiling",
+        question_to_operator="Approve cap or provide counter guidance?",
+    )
+    cal_db.write_facts(
+        identity_id=iid,
+        campaign_id="C4",
+        namespace="approval",
+        facts={"approval.reply_draft": {
+            "decision": "pending",
+            "linked_escalation_id": escalation_id,
+            "draft": {"to": "t@x.com", "subject": "s", "body": "b"},
+        }},
+        source="resumer",
+        env="TEST",
+    )
+    monkeypatch.setattr(
+        plugin_api,
+        "_create_gmail_draft_for_reply_approval",
+        lambda **_: {"draft_id": "d1", "thread_id": "t1"},
+    )
+
+    out = plugin_api._approve_or_reject(
+        fact_path="approval.reply_draft",
+        decision="approved",
+        body=_body(plugin_api, iid, "C4"),
+    )
+
+    rows = {r["id"]: r for r in cal_db.list_escalations(env="TEST")}
+    assert out["linked_escalation_id"] == escalation_id
+    assert out["handled_escalation_id"] == escalation_id
+    assert rows[escalation_id]["state"] == "resolved"
+    assert rows[escalation_id]["operator_answer"].startswith("Linked approval.reply_draft was approved")
