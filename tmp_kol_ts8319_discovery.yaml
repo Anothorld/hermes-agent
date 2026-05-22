@@ -1,0 +1,34 @@
+goal: produce a shortlist of 5-10 North America Instagram creators for TS8319, a device-friendly media console / TV stand
+inputs:
+  - campaign anchor body
+  - source brief: /mnt/c/Users/PC/Downloads/TS8319.md
+campaign_context:
+  primary_driver: Device / Specialized Use
+  buyer_world:
+    - home theater
+    - AV receiver
+    - gaming setup
+    - vinyl / hi-fi
+    - media room upgrade
+  selling_points:
+    - extra-deep console for AV gear fit
+    - front/back ventilation for heat management
+    - cable routing and device organization
+    - signal / sound-friendly storage
+    - design-forward look with slatted wood, glass center bay, sliding doors, ambient lighting
+output_schema:
+  - handle
+  - profile_url
+  - followers
+  - avg_views
+  - engagement_rate
+  - audience_match_score
+  - showcase_score
+  - final_fit
+  - best_role
+  - why_fits
+  - red_flags
+hard_qualification: NA creator + audience, >=100k followers, ER>=3%, avg views>=30k, individual blogger, no competitor conflict
+notes:
+  - prioritize setup / home theater / gaming-room / vinyl-system / media-room creators before generic decor creators
+  - group shortlist by selling-point angle

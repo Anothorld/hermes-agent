@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api';
+import AgentTranscriptPanel from '../components/AgentTranscriptPanel';
 
 type Product = { sku: string; name: string; url: string | null; tags: string[]; notes: string | null };
 
@@ -17,6 +18,7 @@ type CampaignRow = {
   last_event_ts: string | null;
   kol_identity_ids: number[];
   contacted_kol_ids: number[];
+  candidate_count: number;
   shortlist_ready: boolean;
   shortlist_approved: boolean;
   event_count: number;
@@ -34,6 +36,20 @@ type KolIdent = {
 type CampaignsPayload = {
   campaigns: CampaignRow[];
   kols: Record<string, KolIdent>;
+};
+
+type ReplyWatcherStatus = {
+  running: boolean;
+  pid: number | null;
+  env: 'TEST' | 'LIVE' | null;
+  interval: number | null;
+  lookback_days: number | null;
+  max_results: number | null;
+  started_at: string | null;
+  stopped_at: string | null;
+  log_path: string | null;
+  command: string[] | null;
+  state_path: string;
 };
 
 type CloseCampaignResponse = {
@@ -72,6 +88,115 @@ function RunStatePill({ s }: { s: string | null }) {
       ? 'bg-amber-100 text-amber-800'
       : 'bg-slate-100 text-slate-700';
   return <span className={`rounded px-2 py-0.5 text-xs ${cls}`} title="Gateway run_state">agent: {s}</span>;
+}
+
+function ReplyWatcherPanel({
+  status,
+  env,
+  interval,
+  busy,
+  onEnvChange,
+  onIntervalChange,
+  onStart,
+  onStop,
+  onRestart,
+  onSyncSent,
+  onRefresh,
+}: {
+  status: ReplyWatcherStatus | null;
+  env: 'TEST' | 'LIVE';
+  interval: number;
+  busy: boolean;
+  onEnvChange: (env: 'TEST' | 'LIVE') => void;
+  onIntervalChange: (interval: number) => void;
+  onStart: () => void;
+  onStop: () => void;
+  onRestart: () => void;
+  onSyncSent: () => void;
+  onRefresh: () => void;
+}) {
+  const running = status?.running ?? false;
+  const pillCls = running ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600';
+  return (
+    <div className="rounded border border-slate-200 bg-white p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-medium">Reply watcher</h3>
+            <span className={`rounded px-2 py-0.5 text-xs ${pillCls}`}>
+              {running ? `running · ${status?.env}` : 'stopped'}
+            </span>
+            {status?.pid && <span className="text-xs text-slate-500">pid {status.pid}</span>}
+          </div>
+          <div className="text-xs text-slate-500">
+            Gmail replies → CAL inbound event → reply router → draft approval or escalation.
+          </div>
+          {status?.log_path && (
+            <div className="break-all text-xs text-slate-400">log: {status.log_path}</div>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <select
+            value={env}
+            onChange={(event) => onEnvChange(event.target.value as 'TEST' | 'LIVE')}
+            className="rounded border px-2 py-1"
+            disabled={busy}
+          >
+            <option value="TEST">TEST</option>
+            <option value="LIVE">LIVE</option>
+          </select>
+          <label className="inline-flex items-center gap-1 text-slate-600">
+            interval
+            <input
+              type="number"
+              min={15}
+              max={3600}
+              value={interval}
+              onChange={(event) => onIntervalChange(Number(event.target.value) || 60)}
+              className="w-20 rounded border px-2 py-1"
+              disabled={busy}
+            />
+            sec
+          </label>
+          <button
+            onClick={onStart}
+            disabled={busy || running}
+            className="rounded border border-emerald-300 px-2 py-1 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+          >
+            Start
+          </button>
+          <button
+            onClick={onRestart}
+            disabled={busy}
+            className="rounded border border-sky-300 px-2 py-1 text-sky-700 hover:bg-sky-50 disabled:opacity-50"
+          >
+            Restart / switch
+          </button>
+          <button
+            onClick={onStop}
+            disabled={busy || !running}
+            className="rounded border border-rose-300 px-2 py-1 text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+          >
+            Stop
+          </button>
+          <button
+            onClick={onRefresh}
+            disabled={busy}
+            className="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+          >
+            Refresh
+          </button>
+          <button
+            onClick={onSyncSent}
+            disabled={busy}
+            className="rounded border border-indigo-300 px-2 py-1 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+          >
+            Sync sent
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function KolList({
@@ -294,6 +419,10 @@ function CampaignCard({
   onApprove: (id: string, env: string, selectedHandles: string[]) => Promise<void>;
 }) {
   const [showReview, setShowReview] = useState(false);
+  const [retryingDrafts, setRetryingDrafts] = useState(false);
+  const approvedHandles = c.kol_identity_ids
+    .map((id) => kols[String(id)]?.primary_handle)
+    .filter((handle): handle is string => Boolean(handle));
   return (
     <li className="space-y-2 rounded border bg-white p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -316,13 +445,13 @@ function CampaignCard({
             Stop + close
           </button>
         )}
-        {c.shortlist_ready && !c.shortlist_approved && (
+        {(c.shortlist_ready || c.candidate_count > 0) && !c.shortlist_approved && (
           <button
             onClick={() => setShowReview((v) => !v)}
             className="rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800 hover:bg-emerald-100"
-            title="Review the agent's shortlist with scores + reasons, then approve a subset"
+            title="Review discovered candidates with scores + reasons, then approve a subset"
           >
-            {showReview ? '× Close review' : '✓ Review shortlist'}
+            {showReview ? '× Close review' : `✓ Review candidates (${c.candidate_count})`}
           </button>
         )}
         {c.shortlist_ready && c.shortlist_approved && (
@@ -332,6 +461,23 @@ function CampaignCard({
           >
             shortlist approved
           </span>
+        )}
+        {c.shortlist_approved && c.contacted_kol_ids.length === 0 && approvedHandles.length > 0 && (
+          <button
+            onClick={async () => {
+              setRetryingDrafts(true);
+              try {
+                await onApprove(c.campaign_id, c.env, approvedHandles);
+              } finally {
+                setRetryingDrafts(false);
+              }
+            }}
+            disabled={retryingDrafts}
+            className="rounded border border-sky-300 bg-sky-50 px-2 py-0.5 text-xs text-sky-800 hover:bg-sky-100 disabled:opacity-50"
+            title="Rerun post-approval outreach draft generation for the approved candidates"
+          >
+            {retryingDrafts ? 'Retrying…' : 'Retry draft run'}
+          </button>
         )}
       </div>
       {showReview && (
@@ -345,7 +491,7 @@ function CampaignCard({
         />
       )}
       <StageBadge stage={c.stage} />
-      {c.event_count === 0 && c.run_state && c.run_state !== 'running' && c.run_state !== 'queued' && c.run_state !== 'waiting_for_approval' && (
+      {c.event_count === 0 && c.candidate_count === 0 && c.run_state && c.run_state !== 'running' && c.run_state !== 'queued' && c.run_state !== 'waiting_for_approval' && (
         <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
           <div className="font-medium">Agent finished without emitting any bridge events.</div>
           <div className="mt-0.5">
@@ -375,7 +521,7 @@ function CampaignCard({
         </div>
         <div>
           <div className="font-medium text-slate-500">events</div>
-          <div>{c.event_count}</div>
+          <div>{c.event_count} · candidates {c.candidate_count}</div>
         </div>
       </div>
       <div>
@@ -399,6 +545,19 @@ function CampaignCard({
           emptyText="暂无已建联 KOL — 审批 shortlist 后将生成初邀草稿"
         />
       </div>
+      {c.run_id && (
+        <div className="space-y-1">
+          <AgentTranscriptPanel campaignId={c.campaign_id} env={c.env} live={c.status === 'running'} />
+          <div className="flex justify-end text-[11px]">
+            <Link
+              to={`/campaigns/${encodeURIComponent(c.campaign_id)}/transcript?env=${c.env}&live=${c.status === 'running' ? '1' : '0'}`}
+              className="text-sky-700 hover:underline"
+            >
+              open in full screen →
+            </Link>
+          </div>
+        </div>
+      )}
     </li>
   );
 }
@@ -419,9 +578,9 @@ function LaunchCampaignForm({
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const defaultCampaignId = `${sku}-${today}`;
   const [campaignId, setCampaignId] = useState(defaultCampaignId);
-  const [budgetPerKol, setBudgetPerKol] = useState<number>(120);
-  const [absoluteFloor, setAbsoluteFloor] = useState<number>(60);
-  const [budgetTotal, setBudgetTotal] = useState<number>(1200);
+  const [budgetPerKol, setBudgetPerKol] = useState<number>(500);
+  const [absoluteFloor, setAbsoluteFloor] = useState<number>(1000);
+  const [budgetTotal, setBudgetTotal] = useState<number>(12000);
   const [headcountTarget, setHeadcountTarget] = useState<number>(10);
   const [discoveryTargetOverride, setDiscoveryTargetOverride] = useState<number | ''>('');
   const [testModeTo, setTestModeTo] = useState<string>('');
@@ -618,12 +777,27 @@ export function ProductDetailPage() {
   const [campaigns, setCampaigns] = useState<CampaignsPayload>({ campaigns: [], kols: {} });
   const [envFilter, setEnvFilter] = useState<'TEST' | 'LIVE'>('TEST');
   const [msg, setMsg] = useState<string | null>(null);
+  const [watcherStatus, setWatcherStatus] = useState<ReplyWatcherStatus | null>(null);
+  const [watcherEnv, setWatcherEnv] = useState<'TEST' | 'LIVE'>('TEST');
+  const [watcherInterval, setWatcherInterval] = useState(60);
+  const [watcherBusy, setWatcherBusy] = useState(false);
 
   const refreshCampaigns = () => {
     if (!sku) return;
     api
       .get<CampaignsPayload>(`/products/${encodeURIComponent(sku)}/campaigns?env=${envFilter}`)
       .then(setCampaigns)
+      .catch((e) => setErr(String(e)));
+  };
+
+  const refreshWatcher = () => {
+    api
+      .get<ReplyWatcherStatus>('/reply-watcher/status')
+      .then((status) => {
+        setWatcherStatus(status);
+        if (status.running && status.env) setWatcherEnv(status.env);
+        if (status.interval) setWatcherInterval(status.interval);
+      })
       .catch((e) => setErr(String(e)));
   };
 
@@ -641,6 +815,58 @@ export function ProductDetailPage() {
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sku, envFilter]);
+
+  useEffect(() => {
+    refreshWatcher();
+    const t = setInterval(refreshWatcher, 5_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const mutateWatcher = async (action: 'start' | 'stop' | 'restart') => {
+    setMsg(null);
+    setErr(null);
+    setWatcherBusy(true);
+    try {
+      const body = action === 'stop' ? undefined : {
+        env: watcherEnv,
+        interval: watcherInterval,
+        lookback_days: 3,
+        max_results: 50,
+      };
+      const status = await api.post<ReplyWatcherStatus>(`/reply-watcher/${action}`, body);
+      setWatcherStatus(status);
+      setMsg(
+        status.running
+          ? `Reply watcher running in ${status.env} · pid ${status.pid}`
+          : 'Reply watcher stopped.',
+      );
+    } catch (ex) {
+      setErr(`Reply watcher ${action} failed: ${String(ex)}`);
+    } finally {
+      setWatcherBusy(false);
+    }
+  };
+
+  const syncSent = async () => {
+    setMsg(null);
+    setErr(null);
+    setWatcherBusy(true);
+    try {
+      const out = await api.post<{ reconciled_count?: number; sent_threads_seen?: number }>(
+        '/reply-watcher/reconcile-sent',
+        { env: watcherEnv, lookback_days: 7, max_results: 100 },
+      );
+      setMsg(
+        `Sent sync complete · ${out.reconciled_count ?? 0} reconciled · ${out.sent_threads_seen ?? 0} sent threads seen`,
+      );
+      refreshCampaigns();
+    } catch (ex) {
+      setErr(`Sent sync failed: ${String(ex)}`);
+    } finally {
+      setWatcherBusy(false);
+    }
+  };
 
   const close = async (cid: string, env: string) => {
     setMsg(null);
@@ -733,6 +959,20 @@ export function ProductDetailPage() {
             onError={(e) => setErr(e)}
           />
         </div>
+
+        <ReplyWatcherPanel
+          status={watcherStatus}
+          env={watcherEnv}
+          interval={watcherInterval}
+          busy={watcherBusy}
+          onEnvChange={setWatcherEnv}
+          onIntervalChange={setWatcherInterval}
+          onStart={() => mutateWatcher('start')}
+          onStop={() => mutateWatcher('stop')}
+          onRestart={() => mutateWatcher('restart')}
+          onSyncSent={syncSent}
+          onRefresh={refreshWatcher}
+        />
 
         {campaigns.campaigns.length === 0 ? (
           <div className="rounded border bg-white p-4 text-sm text-slate-500">

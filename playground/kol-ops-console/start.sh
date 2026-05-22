@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./start.sh                        # start bridge + backend + frontend (Ctrl-C stops all)
+#   ./start.sh restart                # stop existing dev servers, then start all
 #   ./start.sh bridge                 # only kol-ops-bridge plugin (port 8080)
 #   ./start.sh backend                # only console backend
 #   ./start.sh frontend               # only frontend
@@ -35,6 +36,34 @@ load_env() {
     source "$ENV_FILE"
     set +a
   fi
+  resolve_hermes_home
+}
+
+resolve_hermes_home() {
+  # When HERMES_HOME is unset and ~/.hermes/active_profile names a
+  # non-default profile, point HERMES_HOME at that profile dir so the
+  # bridge — and any subprocess it spawns (Gmail CLI, dispatcher,
+  # reply watcher) — reads the right google_token.json / poller_state.
+  # Without this, bridge subprocesses warn "[HERMES_HOME fallback]" and
+  # load the default profile's Gmail token, causing thread/draft lookups
+  # to silently target the wrong mailbox.
+  if [[ -n "${HERMES_HOME:-}" ]]; then
+    return
+  fi
+  local active_path="$HOME/.hermes/active_profile"
+  [[ -f "$active_path" ]] || return
+  local profile
+  profile="$(tr -d '\n\r \t' < "$active_path" 2>/dev/null || true)"
+  if [[ -z "$profile" || "$profile" == "default" ]]; then
+    return
+  fi
+  local profile_dir="$HOME/.hermes/profiles/$profile"
+  if [[ ! -d "$profile_dir" ]]; then
+    warn "active_profile=$profile but $profile_dir is missing; leaving HERMES_HOME unset"
+    return
+  fi
+  export HERMES_HOME="$profile_dir"
+  log "HERMES_HOME → $profile_dir (active_profile=$profile)"
 }
 
 ensure_jwt_secret() {
@@ -83,8 +112,9 @@ start_backend() {
 }
 
 start_frontend() {
-  log "frontend → http://localhost:5173"
-  (cd "$FRONTEND" && exec npm run dev -- --host)
+  : "${KOC_FRONTEND_PORT:=5173}"
+  log "frontend → http://localhost:$KOC_FRONTEND_PORT"
+  (cd "$FRONTEND" && exec npm run dev -- --host --port "$KOC_FRONTEND_PORT")
 }
 
 start_bridge() {
@@ -106,9 +136,76 @@ run_cli() {
   (cd "$BACKEND" && exec python -m app.cli "$@")
 }
 
+list_port_pids() {
+  local port="$1"
+  if command -v lsof >/dev/null; then
+    lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+  elif command -v fuser >/dev/null; then
+    fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' || true
+  else
+    warn "cannot inspect port $port; install lsof or psmisc/fuser for restart cleanup"
+  fi
+}
+
+stop_port_listeners() {
+  local label="$1"
+  local port="$2"
+  local pids=()
+  mapfile -t pids < <(list_port_pids "$port" | awk 'NF' | sort -u)
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    log "no existing $label listener on port $port"
+    return
+  fi
+  warn "stopping existing $label listener(s) on port $port: ${pids[*]}"
+  kill "${pids[@]}" 2>/dev/null || true
+}
+
+restart_existing() {
+  load_env
+  : "${KOC_PORT:=8765}"
+  : "${KOC_BRIDGE_PORT:=8080}"
+  : "${KOC_FRONTEND_PORT:=5173}"
+  stop_port_listeners "bridge" "$KOC_BRIDGE_PORT"
+  stop_port_listeners "backend" "$KOC_PORT"
+  stop_port_listeners "frontend" "$KOC_FRONTEND_PORT"
+  ensure_jwt_secret
+  [[ -d "$VENV" ]] || install_backend
+  [[ -d "$FRONTEND/node_modules" ]] || install_frontend
+}
+
+start_all() {
+  load_env
+  ensure_jwt_secret
+  [[ -d "$VENV" ]] || install_backend
+  [[ -d "$FRONTEND/node_modules" ]] || install_frontend
+
+  pids=()
+  cleanup() {
+    log "shutting down ($*)"
+    for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done
+    wait 2>/dev/null || true
+  }
+  trap 'cleanup EXIT' EXIT
+  trap 'cleanup INT; exit 130' INT
+  trap 'cleanup TERM; exit 143' TERM
+
+  start_bridge &
+  pids+=("$!")
+  start_backend &
+  pids+=("$!")
+  start_frontend &
+  pids+=("$!")
+  log "bridge + backend + frontend started; Ctrl-C to stop. pids=${pids[*]}"
+  wait -n "${pids[@]}"
+}
+
 mode="${1:-all}"
 
 case "$mode" in
+  restart)
+    restart_existing
+    start_all
+    ;;
   install)
     install_backend
     install_frontend
@@ -136,31 +233,9 @@ case "$mode" in
     start_frontend
     ;;
   all)
-    load_env
-    ensure_jwt_secret
-    [[ -d "$VENV" ]] || install_backend
-    [[ -d "$FRONTEND/node_modules" ]] || install_frontend
-
-    pids=()
-    cleanup() {
-      log "shutting down ($*)"
-      for p in "${pids[@]:-}"; do kill "$p" 2>/dev/null || true; done
-      wait 2>/dev/null || true
-    }
-    trap 'cleanup EXIT' EXIT
-    trap 'cleanup INT; exit 130' INT
-    trap 'cleanup TERM; exit 143' TERM
-
-    start_bridge &
-    pids+=("$!")
-    start_backend &
-    pids+=("$!")
-    start_frontend &
-    pids+=("$!")
-    log "bridge + backend + frontend started; Ctrl-C to stop. pids=${pids[*]}"
-    wait -n "${pids[@]}"
+    start_all
     ;;
   *)
-    die "unknown mode: $mode (use: all|bridge|backend|frontend|install|reset-password|add-user|list-users)"
+    die "unknown mode: $mode (use: all|restart|bridge|backend|frontend|install|reset-password|add-user|list-users)"
     ;;
 esac

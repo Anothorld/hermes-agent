@@ -1,0 +1,12 @@
+gate: human approval required
+action: review campaign brief and assumptions
+mode: TEST
+checklist:
+  - product_name / product_url / key_features correct?
+  - emotional_value, functional_value, buyer_persona match the brand intent?
+  - primary_purchase_driver is the right A/B/C/D/E?
+  - target_geo acceptable?
+  - mode is TEST (default)
+  - assumptions acceptable? especially missing URL / SKU whitelist / budget fields
+how_to_approve: hermes kanban unblock <this_id>; then hermes kanban complete <this_id>
+how_to_reject: hermes kanban comment <this_id> "fix X"; orchestrator updates anchor and re-blocks this card

@@ -105,11 +105,13 @@ Read:
   "campaign_id": "TS8319",
   "env": "TEST",
   "thread_id": "...",
-  "subject": null,
   "body": "<reply or null>",
   "facts_written": {"publish": <n>}
 }
 ```
+
+Do **not** set `to` or `subject` — the dispatcher fills these from the
+inbound message before persisting `approval.reply_draft`.
 
 ## Examples
 

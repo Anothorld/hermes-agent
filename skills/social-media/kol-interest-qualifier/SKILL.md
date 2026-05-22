@@ -95,13 +95,13 @@ reply (via classifier on the next inbound) sets that.
   "campaign_id": "TS8319",
   "env": "TEST",
   "thread_id": "<thread_id>",
-  "subject": null,
   "body": "<the reply>",
   "facts_written": {"offer": 2}
 }
 ```
-`subject: null` because this is a reply in an existing thread — the
-caller appends to the existing subject with "Re:" automatically.
+
+Do **not** set `to` or `subject` — the dispatcher fills these from the
+inbound message before persisting `approval.reply_draft`.
 
 ## Examples
 

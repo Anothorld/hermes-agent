@@ -1,0 +1,15 @@
+gate: human approval required
+mode: TEST
+checklist:
+  - shortlist matches the brief audience?
+  - hard qualification (followers / ER / avg views) all satisfied?
+  - red_flags acceptable?
+  - competitor conflicts ruled out?
+  - creators have sufficient original-shoot capability?
+how_to_approve:
+  - 'comment this card with a line starting EXACTLY with "APPROVE: @handle_a, @handle_b, ..."'
+  - hermes kanban unblock <this_id>
+  - hermes kanban complete <this_id>
+  - tell the orchestrator in the main chat to build Layer B
+how_to_reject: comment with reason; orchestrator re-runs discovery or adjusts brief
+trigger_protocol: APPROVE line is the machine-parsed source of truth.

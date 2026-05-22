@@ -78,6 +78,34 @@ The agent-facing CLI resolves the same key from `--bridge-key`,
 `playground/kol-ops-console/.env`, so gateway-spawned agents do not depend
 on inheriting the console backend's environment.
 
+## Stuck-goal scan (DingTalk follow-up)
+
+`POST /admin/check-stuck-goals` scans `kol_goal_state` for goals whose
+`updated_at` exceeds the campaign's `followup_intervals[goal]` (default
+72h) and emits a DingTalk card per stuck row via the bridge's
+notifier. The endpoint is idempotent — it just reads + notifies.
+
+Wire it to a system cron (or any external scheduler) so the operator
+gets pinged when a deal hasn't moved in a long time. Sample crontab:
+
+```cron
+# Every hour at :17, scan stuck goals in both envs (TEST first so
+# fixtures don't drown out real LIVE pings).
+17 * * * * cd /home/pc/agent_prj/hermes-agent && \
+  ./.venv/bin/python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+    check-stuck-goals --env TEST >/dev/null 2>&1
+23 * * * * cd /home/pc/agent_prj/hermes-agent && \
+  ./.venv/bin/python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+    check-stuck-goals --env LIVE >/dev/null 2>&1
+```
+
+Override the default 72h threshold per campaign via `campaign_config.
+followup_intervals` (e.g. `{"compensation_negotiation": 48}`). Plan C6
+recommends 48h for most flow goals — set it during campaign creation
+or via `PUT /campaigns/{id}`. Notification env vars: see
+`notifier.py` (`HERMES_DINGTALK_WEBHOOK`, `HERMES_DINGTALK_SECRET`,
+`HERMES_KOL_CONSOLE_BASE_URL`).
+
 ## TEST/LIVE isolation
 
 Every row carries an `env` column (`TEST` | `LIVE`). The reconcile / clean

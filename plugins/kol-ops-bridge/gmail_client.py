@@ -127,8 +127,14 @@ class GmailClient:
         cc: Optional[str] = None,
         html: bool = False,
         thread_id: Optional[str] = None,
+        attachments: Optional[list[str]] = None,
     ) -> DraftResult:
-        """Create a Gmail draft. Returns IDs; raises on any failure."""
+        """Create a Gmail draft. Returns IDs; raises on any failure.
+
+        ``attachments`` is a list of absolute file paths to attach. Each path
+        must exist at draft-creation time (the underlying CLI raises
+        FileNotFoundError otherwise — surfaced as :class:`GmailUnavailable`).
+        """
         if not to:
             raise GmailUnavailable("recipient (to) is required")
         cmd = [
@@ -143,6 +149,10 @@ class GmailClient:
             cmd.append("--html")
         if thread_id:
             cmd.extend(["--thread-id", thread_id])
+        for path in attachments or []:
+            if not path:
+                continue
+            cmd.extend(["--attach", str(path)])
         payload = self._invoke(cmd)
         return DraftResult(
             draft_id=str(payload.get("draftId", "")),
@@ -343,12 +353,14 @@ class GmailClient:
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()
             raise GmailUnavailable(
-                f"gmail call failed (exit {result.returncode}): {err[:500]}"
+                f"gmail call failed (exit {result.returncode}): {err[-4000:]}"
             )
 
         stdout = (result.stdout or "").strip()
         if not stdout:
             return {}
+        if stdout == "No messages found.":
+            return []
         try:
             return json.loads(stdout)
         except json.JSONDecodeError as exc:

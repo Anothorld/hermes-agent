@@ -125,12 +125,14 @@ Do NOT set `sku_locked` until KOL replies confirming a single SKU.
   "campaign_id": "TS8319",
   "env": "TEST",
   "thread_id": "...",
-  "subject": null,
   "body": "<reply>",
   "branch": "A_confirm | B_propose | C_escalated",
   "facts_written": {"offer": <n>}
 }
 ```
+
+Do **not** set `to` or `subject` — the dispatcher fills these from the
+inbound message before persisting `approval.reply_draft`.
 
 ## Examples
 

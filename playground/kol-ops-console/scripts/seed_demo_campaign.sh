@@ -160,15 +160,65 @@ post "/identities/${H_ID}/archive" -d @- <<JSON
 JSON
 _cand "$H_ID" reengagement
 
-echo ">> I. archived (rejected) — leave as 'rejected' candidate status"
+echo ">> I. content_production (brief sent, awaiting draft)"
 I_ID=$(_upsert demo_iris iris@example.com)
 _cand "$I_ID"
-# Bridge does not currently expose a 'set candidate status' route; the
-# console will display this row under 'pending' until a downstream skill
-# rejects it. Left here so the demo includes a low-fit signal.
-_facts "$I_ID" identity '{"identity.tier":"low_fit"}'
+_facts "$I_ID" offer '{"offer.outreach_sent":true,"offer.interest_signal":"confirmed","offer.sku_locked":"SKU-CHAIR","offer.color_or_variant_locked":true,"offer.fit_confirmed":true,"offer.deliverable_platforms":["instagram"],"offer.deliverable_count_per_platform":1,"offer.usage_rights_discussed":true,"offer.compensation_mode":"gifted","offer.agreed_terms":{"mode":"gifted"},"offer.contract_sent":true,"offer.contract_signed":true,"offer.brief_sent":true}'
+_facts "$I_ID" fulfillment '{"fulfillment.address_collected":"123 Demo St","fulfillment.shipping_method":"UPS","fulfillment.tracking_filled":"1Z999AA10123456784","fulfillment.delivered_confirmed":true}'
+
+echo ">> J. content_review_and_golive (draft submitted)"
+J_ID=$(_upsert demo_jay jay@example.com)
+_cand "$J_ID"
+_facts "$J_ID" offer '{"offer.outreach_sent":true,"offer.interest_signal":"confirmed","offer.sku_locked":"SKU-LAMP","offer.color_or_variant_locked":true,"offer.fit_confirmed":true,"offer.deliverable_platforms":["instagram"],"offer.deliverable_count_per_platform":1,"offer.usage_rights_discussed":true,"offer.compensation_mode":"gifted","offer.agreed_terms":{"mode":"gifted"},"offer.contract_sent":true,"offer.contract_signed":true,"offer.brief_sent":true,"offer.draft_submitted":true}'
+_facts "$J_ID" fulfillment '{"fulfillment.address_collected":"456 Demo Ave","fulfillment.shipping_method":"FedEx","fulfillment.tracking_filled":"FX99887766","fulfillment.delivered_confirmed":true}'
+
+echo ">> K. repeat_kol_needs_review (prior collab disputed)"
+K_ID=$(_upsert demo_kara kara@example.com)
+post "/identities/${K_ID}/archive" -d @- <<JSON
+{"campaign_id": "DEMO-PRIOR-2024", "env": "${ENV}",
+ "outcome": "disputed", "preferred_skus": ["SKU-LAMP"],
+ "preferred_mode": "paid", "delivery_quality": 0.4}
+JSON
+_cand "$K_ID" reengagement
+post "/campaigns/${CID}/candidates/resolve-relationships" -d '{"env":"TEST"}'
+
+echo ">> L. hybrid negotiation mid-flight (barter + cash supplement quoted)"
+L_ID=$(_upsert demo_leo leo@example.com)
+_cand "$L_ID"
+_facts "$L_ID" offer '{"offer.outreach_sent":true,"offer.interest_signal":"confirmed","offer.sku_locked":"SKU-TABLE","offer.color_or_variant_locked":true,"offer.fit_confirmed":true,"offer.deliverable_platforms":["instagram","tiktok"],"offer.deliverable_count_per_platform":2,"offer.usage_rights_discussed":true,"offer.compensation_mode":"hybrid","offer.kol_paid_quote":600.0}'
+
+echo ">> M. re_escalated chain (parent answered → child awaiting)"
+M_ID=$(_upsert demo_mia mia@example.com)
+_cand "$M_ID"
+_facts "$M_ID" offer '{"offer.outreach_sent":true,"offer.interest_signal":"confirmed","offer.sku_locked":"SKU-LAMP","offer.color_or_variant_locked":true,"offer.fit_confirmed":true,"offer.deliverable_platforms":["instagram"],"offer.deliverable_count_per_platform":1,"offer.usage_rights_discussed":true,"offer.compensation_mode":"paid","offer.kol_paid_quote":1200.0}'
+M_PARENT=$(post /escalations -d @- <<JSON | jq -r '.escalation_id'
+{"identity_id": ${M_ID}, "campaign_id": "${CID}", "env": "${ENV}",
+ "goal": "compensation_negotiation",
+ "reason": "paid_over_ceiling",
+ "question_to_operator": "KOL quoted \$1200 > paid_ceiling \$800. Approve?",
+ "resume_context": {"required_facts_to_resume":
+                    ["approval.paid_ceiling_override", "offer.agreed_terms"]}}
+JSON
+)
+# Mark parent as 'answered' to mimic resumer-mid-decision state
+curl -sS "${H[@]}" -X PATCH "${BRIDGE_URL}/escalations/${M_PARENT}" \
+     -d "{\"decision\":\"resume\",\"decided_by\":\"op:seed\",\"operator_answer\":\"看着办吧，但不要超过 1000\",\"final_state\":\"answered\"}" >/dev/null
+echo
+# Open a child escalation — bridge will auto-flip parent to re_escalated.
+post /escalations -d @- <<JSON
+{"identity_id": ${M_ID}, "campaign_id": "${CID}", "env": "${ENV}",
+ "goal": "compensation_negotiation",
+ "reason": "operator_answer_ambiguous",
+ "parent_escalation_id": ${M_PARENT},
+ "question_to_operator": "Operator said 'within 1000' — counter-offer $950 or push for gifted?",
+ "resume_context": {"required_facts_to_resume":
+                    ["offer.agreed_terms"]}}
+JSON
 
 echo ">> seed complete."
-echo "   - 9 KOLs in campaign ${CID}"
+echo "   - 13 KOLs in campaign ${CID} (A-M) covering all 9 goal states + special scenarios"
+echo "   - Goal coverage: A=outreach, B=interest, E=product (escalation), D=deliverables/compensation+approval,"
+echo "     L=compensation hybrid, F=contract, G=logistics, I=content_production, J=content_review"
+echo "   - Special: C=repeat success, H=reengagement, K=repeat_needs_review, M=re_escalated chain"
 echo "   - bridge URL: ${BRIDGE_URL}"
 echo "   - launch console: cd playground/kol-ops-console && ./start.sh"

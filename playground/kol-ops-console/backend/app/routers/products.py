@@ -58,7 +58,9 @@ def _summarize_events(
     for ev in events:
         if campaign_id is not None and ev.get("campaign_id") != campaign_id:
             continue
-        if product_sku is not None and ev.get("product_sku") != product_sku:
+        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        event_sku = ev.get("product_sku") or payload.get("product_sku")
+        if product_sku is not None and event_sku != product_sku:
             continue
         matched.append(ev)
     if not matched:
@@ -88,16 +90,21 @@ def _summarize_events(
     kol_ids: list[int] = []
     seen: set[int] = set()
     for ev in matched:
-        kid = ev.get("kol_identity_id")
+        kid = ev.get("identity_id")
         if isinstance(kid, int) and kid not in seen:
             seen.add(kid)
             kol_ids.append(kid)
     contacted_ids: list[int] = []
     contacted_seen: set[int] = set()
+    draft_event_types = {
+        "initial_drafted",
+        "kol_initial_outreach_draft_ready",
+        "outbound_draft_created",
+    }
     for ev in matched:
-        if ev.get("event_type") != "initial_drafted":
+        if ev.get("event_type") not in draft_event_types:
             continue
-        kid = ev.get("kol_identity_id")
+        kid = ev.get("identity_id")
         if isinstance(kid, int) and kid not in contacted_seen:
             contacted_seen.add(kid)
             contacted_ids.append(kid)
@@ -116,6 +123,26 @@ def _summarize_events(
         "shortlist_approved": has_approved,
         "event_count": len(matched),
     }
+
+
+async def _get_identity_map(
+    bridge: BridgeClient,
+    identity_ids: set[int],
+) -> dict[str, dict[str, Any]]:
+    """Fetch identities by id; tolerate missing rows so campaigns still render."""
+    out: dict[str, dict[str, Any]] = {}
+    for iid in sorted(identity_ids):
+        try:
+            ident = await bridge.get_identity(iid)
+        except BridgeError:
+            continue
+        out[str(iid)] = {
+            "id": iid,
+            "display_name": ident.get("display_name"),
+            "primary_handle": ident.get("primary_handle"),
+            "platform": ident.get("platform"),
+        }
+    return out
 
 
 async def _sync_run_states(
@@ -140,9 +167,8 @@ async def _sync_run_states(
             updates[r["campaign_id"]] = {"run_state": "unknown", "run_error": None}
             continue
         if info is None:
-            # Gateway no longer remembers it (>1h after terminal). Treat as closed.
-            new_status = "closed"
-            updates[r["campaign_id"]] = {"run_state": "completed", "run_error": None}
+            updates[r["campaign_id"]] = {"run_state": "unknown", "run_error": None}
+            continue
         else:
             state = str(info.get("status") or "").lower()
             updates[r["campaign_id"]] = {
@@ -333,7 +359,22 @@ async def list_product_campaigns(
     campaigns: list[dict] = []
     for r in rows:
         summary = _summarize_events(events, campaign_id=r["campaign_id"], product_sku=sku)
-        needed_ids.update(summary["kol_identity_ids"])
+        try:
+            candidates = await bridge.list_candidates(r["campaign_id"], env=e)
+        except BridgeError:
+            candidates = []
+        visible_candidates = [
+            c for c in candidates if c.get("candidate_status") not in {"rejected", "archived"}
+        ]
+        selected_count = sum(
+            1 for c in visible_candidates
+            if c.get("candidate_status") == "selected_for_outreach"
+        )
+        candidate_ids = [
+            c.get("identity_id") for c in visible_candidates if isinstance(c.get("identity_id"), int)
+        ]
+        kol_identity_ids = list(dict.fromkeys([*summary["kol_identity_ids"], *candidate_ids]))
+        needed_ids.update(kol_identity_ids)
         gw = run_state_map.get(r["campaign_id"], {})
         campaigns.append({
             "campaign_id": r["campaign_id"],
@@ -345,21 +386,11 @@ async def list_product_campaigns(
             "run_state": gw.get("run_state"),
             "run_error": gw.get("run_error"),
             **summary,
+            "kol_identity_ids": kol_identity_ids,
+            "candidate_count": len(visible_candidates),
+            "shortlist_ready": summary["shortlist_ready"] or bool(visible_candidates),
+            "shortlist_approved": summary["shortlist_approved"] or selected_count > 0,
         })
 
-    kols: dict[str, dict[str, Any]] = {}
-    if needed_ids:
-        try:
-            identities = await bridge.list_identities(e)
-        except BridgeError:
-            identities = []
-        for ident in identities:
-            iid = ident.get("id")
-            if isinstance(iid, int) and iid in needed_ids:
-                kols[str(iid)] = {
-                    "id": iid,
-                    "display_name": ident.get("display_name"),
-                    "primary_handle": ident.get("primary_handle"),
-                    "platform": ident.get("platform"),
-                }
+    kols = await _get_identity_map(bridge, needed_ids) if needed_ids else {}
     return {"campaigns": campaigns, "kols": kols}

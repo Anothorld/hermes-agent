@@ -1,6 +1,6 @@
 ---
 name: kol-cold-outreach
-description: Generates the FIRST outreach email to a brand-new KOL ("new_prospect" path). Reads campaign config + identity facts via the Bridge dispatch-context, composes a concise barter-first opening (no price, no contract talk), writes outbound facts (`offer.outreach_sent=true`, `offer.outreach_path=cold`) via the Bridge, and returns the draft envelope as JSON for the caller to persist. Never sends mail directly. Does not handle replies — the next inbound flows back through `kol-reply-dispatcher`.
+description: Generates the FIRST outreach email draft to a brand-new KOL ("new_prospect" path). Reads campaign config + identity facts via the Bridge dispatch-context, composes a concise barter-first opening (no price, no contract talk), writes draft-ready facts (`offer.outreach_draft_ready=true`, `offer.outreach_path=cold`) via the Bridge, and returns the draft envelope as JSON for the caller to persist. Never sends mail directly. Does not handle replies — the next inbound flows back through `kol-reply-dispatcher`.
 trigger: Invoked by `kol-discovery-to-outreach-router` for candidates assigned `identity.outreach_path=cold` (i.e. `relationship_status=new_prospect` who were just selected for outreach), or on demand when the user says "draft a cold outreach to <handle>". Never auto-runs from a cron — only chained.
 tags: ["kol", "outreach", "cold", "first-contact", "draft-generator", "commerce-lane"]
 ---
@@ -8,8 +8,8 @@ tags: ["kol", "outreach", "cold", "first-contact", "draft-generator", "commerce-
 ## Goal
 Produce one well-targeted opening email to a new KOL — barter-first,
 brand-introduction tone, no quotes, no contract terms — and atomically
-record on the Bridge that we've reached out. No reply handling, no
-threading state, no Gmail send.
+record on the Bridge that an operator-reviewable draft is ready. No
+reply handling, no threading state, no Gmail send.
 
 ## Runtime Contract
 - Profile: `outreach-operator`.
@@ -22,7 +22,8 @@ threading state, no Gmail send.
   lives outside this SKILL and is deferred to a later phase.
 - **Single-shot:** This skill runs once per (identity, campaign). If
   `offer.outreach_sent` is already true, abort and return
-  `{"skipped": "already_sent"}`; do **not** redraft.
+  `{"skipped": "already_sent"}`. If `offer.outreach_draft_ready` is
+  already true, abort and return `{"skipped": "draft_already_ready"}`.
 - **No price talk:** never mention compensation, paid rate, commission
   percentage, or contract terms. The opening offers product collab
   (gifted-first); price is owned by `kol-compensation-negotiator`.
@@ -44,7 +45,7 @@ prompt. The loader returns a single markdown block enforcing
 **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
 
 Call contract:
-- inputs: `goal_brief = {goal: "cold_outreach", missing_facts: ["offer.outreach_sent"], next_action: "<one-line summary of this email's purpose>"}`,
+- inputs: `goal_brief = {goal: "cold_outreach", missing_facts: ["offer.outreach_draft_ready"], next_action: "<one-line summary of this email's purpose>"}`,
   `current_user_id = <operator id from session>`.
 - output: prepend as the **first section** of the draft prompt — before any
   goal-specific instructions in this skill's Procedure.
@@ -94,9 +95,9 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
   --json '{"campaign_id":"<campaign_id>",
             "source":"skill:kol-cold-outreach",
             "namespaces":{
-              "offer":    {"offer.outreach_sent": true,
+              "offer":    {"offer.outreach_draft_ready": true,
                             "offer.outreach_path": "cold"},
-              "identity": {"identity.last_outreach_at": "<iso8601>"}
+              "identity": {"identity.last_outreach_draft_at": "<iso8601>"}
             }}'
 ```
 
@@ -130,8 +131,9 @@ draft to Gmail.
 ### Success
 Brand-new KOL `@alice` selected for outreach. Step 1 confirms
 `outreach.status=active`, `total_collabs=0`. Step 2 composes a 4-para
-barter-first email. Step 3 writes 2 offer facts + 1 identity fact in
-one call. Step 4 returns `{subject, body, to, thread_id: null, ...}`.
+barter-first email. Step 3 writes 2 draft-ready offer facts + 1
+identity fact in one call. Step 4 returns
+`{subject, body, to, thread_id: null, ...}`.
 
 ### Failure — wrong path
 Step 1 reveals `total_collabs=3`. Skill aborts with

@@ -53,6 +53,59 @@ export const api = {
     request<T>(p, { method: 'PATCH', body: body ? JSON.stringify(body) : undefined }),
 };
 
+// ---------- SSE helper ----------
+
+export type SseEvent = { event: string; data: string };
+
+export type SseHandle = {
+  cancel: () => void;
+};
+
+// Subscribe to an SSE endpoint that requires Bearer auth. EventSource
+// can't set custom headers, so we use fetch + ReadableStream and parse
+// the wire format ourselves (event: / data: / blank-line frame).
+export function streamLines(path: string, onEvent: (ev: SseEvent) => void, onError?: (e: unknown) => void): SseHandle {
+  const ctrl = new AbortController();
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: 'text/event-stream' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  (async () => {
+    try {
+      const res = await fetch(`${API_BASE}${path}`, { headers, signal: ctrl.signal });
+      if (!res.ok || !res.body) {
+        onError?.(new ApiError(res.status, await res.text().catch(() => '')));
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // Split on blank lines = end of one SSE frame.
+        let idx = buf.indexOf('\n\n');
+        while (idx >= 0) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          idx = buf.indexOf('\n\n');
+          let evt = 'message';
+          const dataLines: string[] = [];
+          for (const line of raw.split('\n')) {
+            if (line.startsWith(':')) continue;
+            if (line.startsWith('event:')) evt = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+          }
+          if (dataLines.length) onEvent({ event: evt, data: dataLines.join('\n') });
+        }
+      }
+    } catch (e) {
+      if ((e as { name?: string })?.name !== 'AbortError') onError?.(e);
+    }
+  })();
+  return { cancel: () => ctrl.abort() };
+}
+
 // ---------- v2.4 KOL agent types ----------
 
 export type Lane = 'commerce' | 'fulfillment' | 'publish' | 'meta';
@@ -82,6 +135,7 @@ export type EscalationRow = {
   state:
     | 'awaiting_answer'
     | 'answered'
+    | 'resuming'
     | 'resolved'
     | 're_escalated'
     | 'aborted';
@@ -89,6 +143,12 @@ export type EscalationRow = {
   created_at: string;
   resolved_at: string | null;
   operator_answer: string | null;
+  // resume_context_json deserialised by the bridge — includes
+  // `required_facts_to_resume` (used to drive the structured facts
+  // form), `force_human_takeover_hint` (depth-aware badge),
+  // `max_escalation_depth`, `attempts_count`, etc.
+  resume_context?: Record<string, unknown> | null;
+  attempts_count?: number | null;
 };
 
 export type Policy = {

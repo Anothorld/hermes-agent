@@ -43,13 +43,14 @@ function nsOf(key: string): Namespace | 'other' {
 interface Props {
   identityId: number;
   campaignId?: string;
+  env?: 'TEST' | 'LIVE';
   /** Dotted, namespace-prefixed fact keys to render. Missing-facts list
    *  from goal state is the typical caller. */
   factKeys: string[];
   onSubmitted?: (resp: unknown) => void;
 }
 
-export function FactsEditor({ identityId, campaignId, factKeys, onSubmitted }: Props) {
+export function FactsEditor({ identityId, campaignId, env, factKeys, onSubmitted }: Props) {
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -98,6 +99,7 @@ export function FactsEditor({ identityId, campaignId, factKeys, onSubmitted }: P
       }
       const body = {
         campaign_id: campaignId,
+        env,
         source: 'console',
         namespaces,
       };

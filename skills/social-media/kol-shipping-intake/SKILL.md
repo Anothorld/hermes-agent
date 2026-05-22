@@ -101,13 +101,15 @@ Atomic `write-facts-multi` calls; never partial.
   "campaign_id": "TS8319",
   "env": "TEST",
   "thread_id": "...",
-  "subject": null,
   "body": "<reply or null>",
   "branch_action": "asked | confirmed_default | new_address_with_drift | partial_followup | escalated",
   "facts_written": {"fulfillment": <n>, "approval": <n>},
   "escalation_opened": false
 }
 ```
+
+Do **not** set `to` or `subject` — the dispatcher fills these from the
+inbound message before persisting `approval.reply_draft`.
 
 ## Examples
 

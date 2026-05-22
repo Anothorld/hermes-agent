@@ -117,7 +117,6 @@ For `mode=gifted` with no number, omit `proposed_amount` /
   "campaign_id": "TS8319",
   "env": "TEST",
   "thread_id": "...",
-  "subject": null,
   "body": "<reply>",
   "branch": "A_draft | B_escalated",
   "strategist": { ...full strategist JSON... },
@@ -125,8 +124,21 @@ For `mode=gifted` with no number, omit `proposed_amount` /
 }
 ```
 
+Do **not** set `to` or `subject` — the dispatcher fills these from the
+inbound message before persisting `approval.reply_draft`.
+
 `strategist` is included for audit; the dispatcher logs it but
 doesn't act on it.
+
+### Refinement input (operator-triggered regeneration)
+If the input includes a non-empty `operator_refinement_prompt` field,
+treat it as a hard constraint on the **content** of the new draft
+(tone, what to add, what to remove, specific phrasing to use).
+The strategist's mode and numbers should still be respected; the
+prompt only shapes the prose. Do **not** rewrite `offer.*` facts on
+a refinement run — return the new envelope only. The strategist
+block may be carried over unchanged from the prior draft if no facts
+have changed.
 
 ## Examples
 

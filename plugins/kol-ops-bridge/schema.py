@@ -91,6 +91,7 @@ TABLES: dict[str, str] = {
             sku_whitelist_json                TEXT NOT NULL DEFAULT '[]',
             color_variant_policy              TEXT,
             audit_standards_md                TEXT,
+            test_mode_to                      TEXT,
             followup_intervals_json           TEXT NOT NULL DEFAULT '{}',
             contract_required                 INTEGER NOT NULL DEFAULT 1,
             status                            TEXT NOT NULL DEFAULT 'draft',  -- draft|approved|active|closed

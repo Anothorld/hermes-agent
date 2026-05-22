@@ -28,7 +28,11 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email import encoders as email_encoders
+import mimetypes
 from pathlib import Path
 
 # Ensure sibling modules (_hermes_home) are importable when run standalone.
@@ -313,15 +317,50 @@ def gmail_get(args):
 
 
 
+def _build_outbound_message(args):
+    """Return a MIME message for gmail draft/send, attaching files if requested.
+
+    Uses MIMEText when no attachments are present (preserves prior behavior);
+    otherwise wraps the body + each attachment in a MIMEMultipart envelope.
+    Missing attachment paths raise FileNotFoundError so the caller fails loudly
+    rather than silently dropping the file.
+    """
+    attachments = list(getattr(args, "attach", None) or [])
+    body_part = MIMEText(args.body, "html" if args.html else "plain")
+    if not attachments:
+        message = body_part
+    else:
+        message = MIMEMultipart()
+        message.attach(body_part)
+        for path_str in attachments:
+            path = Path(path_str).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError(f"attachment not found: {path}")
+            ctype, encoding = mimetypes.guess_type(str(path))
+            if ctype is None or encoding is not None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            part = MIMEBase(maintype, subtype)
+            part.set_payload(path.read_bytes())
+            email_encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=path.name,
+            )
+            message.attach(part)
+    message["to"] = args.to
+    message["subject"] = args.subject
+    if args.cc:
+        message["cc"] = args.cc
+    if args.from_header:
+        message["from"] = args.from_header
+    return message
+
+
 def gmail_draft(args):
     if _gws_binary():
-        message = MIMEText(args.body, "html" if args.html else "plain")
-        message["to"] = args.to
-        message["subject"] = args.subject
-        if args.cc:
-            message["cc"] = args.cc
-        if args.from_header:
-            message["from"] = args.from_header
+        message = _build_outbound_message(args)
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         draft_message = {"raw": raw}
@@ -341,13 +380,7 @@ def gmail_draft(args):
         return
 
     service = build_service("gmail", "v1")
-    message = MIMEText(args.body, "html" if args.html else "plain")
-    message["to"] = args.to
-    message["subject"] = args.subject
-    if args.cc:
-        message["cc"] = args.cc
-    if args.from_header:
-        message["from"] = args.from_header
+    message = _build_outbound_message(args)
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     draft_message = {"raw": raw}
@@ -366,13 +399,7 @@ def gmail_draft(args):
 
 def gmail_send(args):
     if _gws_binary():
-        message = MIMEText(args.body, "html" if args.html else "plain")
-        message["to"] = args.to
-        message["subject"] = args.subject
-        if args.cc:
-            message["cc"] = args.cc
-        if args.from_header:
-            message["from"] = args.from_header
+        message = _build_outbound_message(args)
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         body = {"raw": raw}
@@ -388,13 +415,7 @@ def gmail_send(args):
         return
 
     service = build_service("gmail", "v1")
-    message = MIMEText(args.body, "html" if args.html else "plain")
-    message["to"] = args.to
-    message["subject"] = args.subject
-    if args.cc:
-        message["cc"] = args.cc
-    if args.from_header:
-        message["from"] = args.from_header
+    message = _build_outbound_message(args)
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     body = {"raw": raw}
@@ -1125,6 +1146,7 @@ def main():
     p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
     p.add_argument("--html", action="store_true", help="Store body as HTML")
     p.add_argument("--thread-id", default="", help="Thread ID for threading")
+    p.add_argument("--attach", action="append", default=[], metavar="PATH", help="File to attach (repeatable)")
     p.set_defaults(func=gmail_draft)
 
     p = gmail_sub.add_parser("send")
@@ -1135,6 +1157,7 @@ def main():
     p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
     p.add_argument("--html", action="store_true", help="Send body as HTML")
     p.add_argument("--thread-id", default="", help="Thread ID for threading")
+    p.add_argument("--attach", action="append", default=[], metavar="PATH", help="File to attach (repeatable)")
     p.set_defaults(func=gmail_send)
 
     p = gmail_sub.add_parser("reply")

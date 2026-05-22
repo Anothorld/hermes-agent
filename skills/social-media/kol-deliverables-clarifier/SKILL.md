@@ -59,6 +59,19 @@ Read:
 If platforms or count missing → abort
 `{"error":"campaign_config_incomplete","missing":[...]}`.
 
+When the dispatcher converts that abort into an escalation, it MUST
+include the same list as a structured field in `resume_context` so the
+operator UI can render it as chips (not just buried prose):
+
+```
+open-escalation --json '{"identity_id":...,"campaign_id":"...",
+  "goal":"deliverables_scope",
+  "reason":"campaign_config_incomplete_for_scope_reply",
+  "question_to_operator":"...names the missing fields in plain text...",
+  "resume_context":{"missing_config_fields":["deliverable_platforms",
+                                              "deliverable_count_per_platform"]}}'
+```
+
 ### Step 2 — Decide the response shape
 **Branch A — KOL asked scope question:** propose framework explicitly:
 
@@ -110,12 +123,14 @@ next inbound confirms agreement.
   "campaign_id": "TS8319",
   "env": "TEST",
   "thread_id": "...",
-  "subject": null,
   "body": "<reply>",
   "branch": "A_propose | B_escalated | C_defer_price",
   "facts_written": {"offer": <n>}
 }
 ```
+
+Do **not** set `to` or `subject` — the dispatcher fills these from the
+inbound message before persisting `approval.reply_draft`.
 
 ## Examples
 

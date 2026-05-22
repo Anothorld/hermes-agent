@@ -173,8 +173,113 @@ can pick it up.
    "approval.pending_topics": ["<lane>:<goal>:<one-line topic>", ...]
    ```
 
+### Step 5.5 — Persist draft or escalation outcome
+If Step 5 invoked a child skill and the child returns a draft envelope,
+persist it before reporting success. The dispatcher itself still does not
+send mail; it creates an operator-review artifact in CAL.
+
+**Envelope enrichment (mandatory).** Reply-side child skills return
+content only — they do not know the recipient or subject. Before writing
+the fact, build a `<merged draft envelope>` from the child's envelope
+plus the inbound `latest_email` you already have in Step 1's
+`pending_replies` payload:
+
+- `to` ← `latest_email.from`
+- `subject` ← `latest_email.subject` (prefixed with `Re: ` unless it
+  already starts with `Re:` / `re:` / `RE:`)
+- `body`, `thread_id`, and any other fields keep the child's value
+
+Use `<merged draft envelope>` (not `<child draft envelope>`) in both
+writes below.
+
+```
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-event \
+  --identity-id <identity_id> --campaign-id "<campaign_id>" \
+  --env <TEST|LIVE> --event-type kol_reply_draft_ready \
+  --actor agent:kol-reply-dispatcher \
+  --json '{"payload":{"source_message_id":"<inbound_message_id>",
+                       "primary_lane":"<lane>",
+                       "primary_goal":"<goal>",
+                       "child_skill":"<skill>",
+                       "draft":<merged draft envelope>}}'
+```
+
+Then write one approval fact so the web console / operator queue can find
+the draft even if the agent transcript is later compacted:
+
+```
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
+  --identity-id <identity_id> --env <TEST|LIVE> \
+  --json '{"campaign_id":"<campaign_id>",
+            "source":"draft:<inbound_message_id>",
+            "namespaces":{"approval":{
+              "approval.reply_draft":{
+                "decision":"pending",
+                "source_message_id":"<inbound_message_id>",
+                "primary_lane":"<lane>",
+                "primary_goal":"<goal>",
+                "child_skill":"<skill>",
+                "draft":<merged draft envelope>
+              }}}}'
+```
+
+The bridge rejects an `approval.reply_draft` whose `draft` is missing
+non-empty `subject` / `body` / `to` — if write-facts-multi 400s with
+`approval.reply_draft.draft missing/empty: ...`, your enrichment step
+did not run.
+
+If the selected child skill cannot produce a draft because required facts
+are missing, open an escalation instead of returning a free-text failure.
+When the child returned `{"error":"campaign_config_incomplete","missing":[...]}`
+(or any other structured missing-fact signal), the escalation MUST forward
+that list as `resume_context.missing_config_fields` so the operator UI
+can render it as chips. Example:
+
+```
+open-escalation --json '{"identity_id":...,"campaign_id":"...",
+  "goal":"<active goal>",
+  "reason":"campaign_config_incomplete_for_<lane>_reply",
+  "question_to_operator":"Campaign config is incomplete for <goal>: <fields> are empty/null. <context>",
+  "resume_context":{"missing_config_fields":["deliverable_platforms",
+                                              "deliverable_count_per_platform"],
+                     "source":"child_skill_abort",
+                     "child_skill":"<skill name>"}}'
+```
+
+Every processed reply must end in exactly one durable outcome:
+`kol_reply_draft_ready`, `open-escalation`, or `approval.pending_action_*`.
+
+### Step 5.6 — Refinement runs (operator-triggered regeneration)
+When the brief is an `approval_refine` (operator clicked 优化/重新生成
+on the Approvals page), the input carries `operator_refinement_prompt`
+and the full prior `approval.reply_draft` value under
+`current_value_json`. In that mode:
+
+- Skip Steps 1–4 (no classification, no fact-write, no skill selection).
+  Re-invoke **the same** `child_skill` named in `current_value_json`.
+- Pass through the original inbound context (recover from
+  `kol_inbound_reply` events for `source_message_id` if needed) **plus**
+  the `operator_refinement_prompt` as an extra input field. The child
+  skill treats it as a hard constraint on the new draft's *content*
+  (tone, additions, removals) and must still return the same envelope
+  shape (`Step 5 — Return draft envelope`).
+- Do **not** rewrite `offer.*` or any other domain facts on a refinement
+  run — it is content-only.
+- Apply the **same envelope enrichment as Step 5.5** to the child's new
+  envelope: fill `to` and `subject` from the recovered inbound
+  `kol_inbound_reply` event (`from_addr` and `Re: <subject>`). The
+  bridge's write-time validator will reject a sparse `draft` here too.
+- Persist the result by rewriting the same `approval.reply_draft` fact
+  via `write-facts-multi`. The new value MUST keep `decision="pending"`,
+  `source_message_id`, `primary_lane`, `primary_goal`, `child_skill`,
+  and `linked_escalation_id`; set `draft` to the new **merged** envelope;
+  prepend the prior `draft` into `previous_drafts` (cap 5); and append
+  `{prompt, at, by}` to `refinement_history` (cap 5).
+- Do **not** open a new escalation, do **not** send mail, do **not**
+  create a Gmail draft. Skip Step 6.
+
 ### Step 6 — Idempotency labels
-After Step 5 (or an escalation was opened), apply the Gmail label
+After Step 5.5 (or an escalation was opened), apply the Gmail label
 `kol-outreach/handled` to that message and remove
 `kol-outreach/pending-reply`. The Gmail label transition is the only
 state-machine for "have we processed this email"; do **not** rely on CAL
@@ -193,6 +298,8 @@ Return a JSON summary covering each processed reply:
     "primary_goal": "compensation_negotiation",
     "primary_skill_invoked": "kol-compensation-negotiator",
     "side_topics": ["fulfillment:logistics:address still pending"],
+    "draft_event_written": true,
+    "approval_fact_written": "approval.reply_draft",
     "escalation_opened": null
   },
   ...

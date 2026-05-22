@@ -1,7 +1,7 @@
 ---
 name: kol-discovery-to-outreach-router
-description: After a campaign's KOL discovery pool is populated, this skill calls the Bridge's deterministic Discovery → Outreach router to partition the pool into new_prospect / repeat_kol / repeat_kol_needs_review / rejected, mark cold vs re-engagement outreach, and open escalations for historically risky KOLs. Drafts NO email; never sends; one tool call.
-trigger: When the user says any of "process the discovery pool", "route discovered KOLs to outreach", "split candidates into cold vs reengagement", "after discovery, decide who gets which outreach", or when the orchestrator-flow finishes a discovery sweep and asks for outreach assignment.
+description: After a campaign's KOL discovery pool is populated, this skill calls the Bridge's deterministic Discovery to Outreach router to partition the pool into new_prospect / repeat_kol / repeat_kol_needs_review / rejected, mark cold vs re-engagement outreach, and open escalations for historically risky KOLs. Drafts NO email; never sends; one tool call.
+trigger: When the user says any of "process the discovery pool", "route discovered KOLs to outreach", "split candidates into cold vs reengagement", "after discovery, decide who gets which outreach", or when the post-approval orchestrator needs to confirm outreach assignment before invoking first-outreach draft skills.
 tags: ["kol", "discovery", "router", "outreach", "relationship", "repeat-kol"]
 ---
 
@@ -21,8 +21,9 @@ never re-derive them.
   direct `~/.hermes/kol-ops-bridge/cal.db` access, ad-hoc SQL,
   `execute_code` against the DB.
 - `env` is mandatory (`TEST` or `LIVE`).
-- Drafts no email and never sends mail. The next-email decision is owned
-  by `kol-cold-outreach` / `kol-reengagement-outreach`.
+- Drafts no email and never sends mail. The post-approval orchestrator
+  invokes `kol-cold-outreach` / `kol-reengagement-outreach` after this
+  routing step when the operator has approved candidates.
 - Idempotent: re-running on an already-routed pool only acts on
   candidates whose `candidate_status='discovered'`.
 
@@ -75,8 +76,10 @@ final assistant message verbatim:
 }
 ```
 
-Then explicitly **stop**. The cold-outreach / reengagement-outreach
-skills run on their own triggers; the router does not invoke them.
+Then explicitly **stop**. The router does not invoke draft skills. After
+operator approval, the post-approval orchestrator must invoke
+`kol-cold-outreach` / `kol-reengagement-outreach` for the approved IDs
+and persist returned drafts as approval records.
 
 ## Examples
 

@@ -13,6 +13,7 @@ import { ApprovalsPage } from './pages/ApprovalsPage';
 import { PolicyEditorPage } from './pages/PolicyEditorPage';
 import { CampaignWizardPage } from './pages/CampaignWizardPage';
 import { CampaignCandidatesPage } from './pages/CampaignCandidatesPage';
+import { AgentTranscriptPage } from './pages/AgentTranscriptPage';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
@@ -77,6 +78,7 @@ export function App() {
                 <Route path="/kols/:id/relationship" element={<KolRelationshipPage />} />
                 <Route path="/campaigns/new" element={<CampaignWizardPage />} />
                 <Route path="/campaigns/:id/candidates" element={<CampaignCandidatesPage />} />
+                <Route path="/campaigns/:cid/transcript" element={<AgentTranscriptPage />} />
                 <Route path="/escalations" element={<EscalationConsolePage />} />
                 <Route path="/escalations/:id" element={<EscalationConsolePage />} />
                 <Route path="/approvals" element={<ApprovalsPage />} />
