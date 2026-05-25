@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, EscalationRow } from '../api';
+import { parseConflictBody, startedAtMs, useInflightLock } from '../useInflightLock';
+import InboundEmailCard, { type InboundEmail } from '../components/InboundEmailCard';
 
 /**
  * Escalation operator console.
@@ -239,6 +241,9 @@ function EscalationDetail({ id }: { id: number }) {
   const [done, setDone] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  const [inbound, setInbound] = useState<InboundEmail | null>(null);
+  const [inboundLoaded, setInboundLoaded] = useState(false);
+
   const refresh = useCallback(async () => {
     try {
       const all = await api.get<EscalationRow[]>(`/escalations?env=${env}`);
@@ -252,6 +257,31 @@ function EscalationDetail({ id }: { id: number }) {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Look up the inbound email tied to this escalation. We only fetch once
+  // per (id, env) — the underlying CAL events are append-only and won't
+  // change while the operator is reading.
+  useEffect(() => {
+    let alive = true;
+    setInboundLoaded(false);
+    setInbound(null);
+    api
+      .get<{ inbound: InboundEmail | null }>(
+        `/escalations/${id}/inbound-context?env=${env}`,
+      )
+      .then((r) => {
+        if (!alive) return;
+        setInbound(r.inbound ?? null);
+      })
+      .catch(() => {
+        // 404 / 502 is non-fatal — the card renders the "no inbound on file"
+        // fallback when inbound stays null.
+      })
+      .finally(() => alive && setInboundLoaded(true));
+    return () => {
+      alive = false;
+    };
+  }, [id, env]);
 
   // When the triggering skill embeds ``required_facts_to_resume`` in
   // ``resume_context``, prefill the structured-facts form with those
@@ -342,6 +372,8 @@ function EscalationDetail({ id }: { id: number }) {
     }
   }
 
+  const draftLock = useInflightLock(`draft.lock.escalation:${id}`);
+
   async function previewDraft() {
     setBusy(true);
     setErr(null);
@@ -350,12 +382,28 @@ function EscalationDetail({ id }: { id: number }) {
         `/escalations/${id}/preview-draft`,
         { operator_answer: answer, operator_facts: collectFacts(), env },
       );
+      draftLock.acquire(resp.run_id ?? null);
       setDone(
         `Draft requested (run ${resp.run_id?.slice(0, 8) ?? '?'}…). ` +
         `Check the Approvals page in 30–60s for an approval.reply_draft.`,
       );
     } catch (ex) {
-      setErr(String(ex));
+      // If the backend says "already in flight", reflect that run in the
+      // local lock so the button stays disabled even though THIS tab
+      // didn't start the run (another tab or the resume path did).
+      const conflict = parseConflictBody(ex);
+      if (conflict?.error === 'draft_already_in_flight') {
+        draftLock.acquire(
+          conflict.run_id ?? null,
+          startedAtMs(conflict.started_at),
+        );
+        setDone(
+          conflict.message
+            ?? 'A draft for this escalation is already being generated.',
+        );
+      } else {
+        setErr(String(ex));
+      }
     } finally {
       setBusy(false);
     }
@@ -424,6 +472,14 @@ function EscalationDetail({ id }: { id: number }) {
           </div>
         )}
       </div>
+
+      {inboundLoaded && (
+        <InboundEmailCard
+          inbound={inbound}
+          title="触发此 escalation 的 KOL 回信"
+          variant="rose"
+        />
+      )}
 
       {row.state !== 'awaiting_answer' ? (
         <div className="rounded border border-slate-200 bg-white p-3 text-sm text-slate-600">
@@ -553,15 +609,23 @@ function EscalationDetail({ id }: { id: number }) {
           <div className="grid grid-cols-1 gap-2 pt-1 md:grid-cols-3">
             <div className="rounded border border-sky-200 bg-sky-50/50 p-2">
               <button
-                disabled={busy}
+                disabled={busy || draftLock.locked}
                 onClick={previewDraft}
                 className="w-full rounded border border-sky-600 px-3 py-1 text-sm text-sky-700 hover:bg-sky-100 disabled:opacity-50"
               >
-                生成邮件草稿
+                {draftLock.locked
+                  ? `草稿生成中… (${draftLock.remainingSeconds}s)`
+                  : '生成邮件草稿'}
               </button>
               <p className="mt-1 text-[11px] leading-snug text-slate-600">
                 让 AI 根据你的答复先<strong>试起草</strong>一封回信，结果出现在 <strong>Approvals</strong> 页面供审核。
                 <span className="text-slate-500"> 本 escalation 保持打开；每个 escalation 同一时间只会保留一份待审草稿。</span>
+                {draftLock.locked && (
+                  <span className="mt-1 block text-amber-700">
+                    上次请求已发出，约 30–60s 后在 Approvals 页面可见；
+                    刷新页面或换 tab 也不会重复触发。
+                  </span>
+                )}
               </p>
             </div>
             <div className="rounded border border-emerald-200 bg-emerald-50/50 p-2">

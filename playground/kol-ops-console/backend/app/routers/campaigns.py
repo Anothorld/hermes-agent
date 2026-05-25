@@ -182,12 +182,32 @@ _APPROVAL_INSTRUCTIONS = (
 )
 
 
+def _selected_variants(product: sqlite3.Row, variant_ids: list[str] | None) -> list[dict[str, Any]]:
+    """Filter the product's known variants down to the ones the campaign opted in to.
+
+    Empty ``variant_ids`` (or missing variants column) means "all known
+    variants are in scope". Returns ``[]`` when the product has no variants
+    on record — downstream callers treat that as a single implicit variant.
+    """
+    try:
+        all_variants = json.loads(product["variants_json"] or "[]") if "variants_json" in product.keys() else []
+    except (json.JSONDecodeError, TypeError):
+        all_variants = []
+    if not all_variants:
+        return []
+    if not variant_ids:
+        return list(all_variants)
+    wanted = {str(v) for v in variant_ids}
+    return [v for v in all_variants if str(v.get("id")) in wanted]
+
+
 def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignBody") -> str:
     tags = json.loads(product["tags_json"] or "[]")
     sku_ref = product["url"] or product["sku"]
     discovery_target = body.discovery_target_count or max(
         body.headcount_target * 3, body.headcount_target + 5
     )
+    selected_variants = _selected_variants(product, body.product_variant_ids)
     lines = [
         "# campaign_config",
         f"campaign_id: {campaign_id}",
@@ -210,6 +230,29 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         lines.append(f"product_tags: {', '.join(tags)}")
     if product["notes"]:
         lines.extend(["product_notes:", product["notes"]])
+
+    if body.deliverable_platforms:
+        lines.append(
+            "deliverable_platforms: " + ", ".join(body.deliverable_platforms)
+        )
+    if body.deliverable_count_per_platform is not None:
+        lines.append(
+            f"deliverable_count_per_platform: {body.deliverable_count_per_platform}"
+        )
+    if body.audit_standards_md and body.audit_standards_md.strip():
+        lines.extend(["", "# audit_standards_md", body.audit_standards_md.strip()])
+
+    if selected_variants:
+        lines.extend(["", "# product_variants (operator-selected, KOL may pick one)"])
+        for v in selected_variants:
+            attrs = v.get("attributes") or {}
+            attr_bits = " ".join(f"{k}={val}" for k, val in attrs.items())
+            line = f"- id: {v.get('id')} | label: {v.get('label') or v.get('id')}"
+            if attr_bits:
+                line += f" | {attr_bits}"
+            if v.get("url"):
+                line += f" | url: {v.get('url')}"
+            lines.append(line)
 
     pitch = (body.product_pitch_md or "").strip()
     if pitch:
@@ -318,6 +361,29 @@ class StartCampaignBody(BaseModel):
         max_length=_MAX_BRIEF_EXTRA,
         description="Optional free-form operator notes / constraints.",
     )
+    product_variant_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "IDs of the product variants this campaign is offering. Must be a "
+            "subset of the SKU's known variants. None or empty = all known "
+            "variants are in play; the KOL may pick any."
+        ),
+    )
+    # The contract-coordinator skill blocks rendering until campaign_config
+    # has these set. We capture them at launch time so the readiness gate is
+    # achievable without a separate config-edit step.
+    deliverable_platforms: list[str] | None = Field(
+        default=None,
+        description="e.g. ['instagram','tiktok','youtube']. Required for contract readiness.",
+    )
+    deliverable_count_per_platform: int | None = Field(
+        default=None, ge=1, le=20,
+        description="How many pieces of content per platform.",
+    )
+    audit_standards_md: str | None = Field(
+        default=None, max_length=8_000,
+        description="Brand/legal compliance standards the content review skill enforces.",
+    )
 
 
 @router.post("/{campaign_id}/start")
@@ -331,11 +397,26 @@ async def start(
     force: bool = Query(False, description="Override duplicate-campaign guard."),
 ) -> dict:
     product = conn.execute(
-        "SELECT sku, name, url, tags_json, notes FROM products WHERE sku=?",
+        "SELECT sku, name, url, tags_json, notes, pitch_md, selling_points, variants_json "
+        "FROM products WHERE sku=?",
         (body.product_sku,),
     ).fetchone()
     if not product:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "sku not found")
+    # Validate operator-selected variants against the product catalog.
+    if body.product_variant_ids:
+        known = {
+            str(v.get("id")) for v in (
+                json.loads(product["variants_json"] or "[]")
+                if product["variants_json"] else []
+            )
+        }
+        unknown = [vid for vid in body.product_variant_ids if str(vid) not in known]
+        if unknown:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"unknown product variants: {unknown}; refresh the product detail page",
+            )
 
     # Anti-duplicate guard. The bridge does not currently dedupe, so the
     # console owns this check. ``force=true`` lets the operator re-fire
@@ -376,19 +457,40 @@ async def start(
 
     # Seed campaign metadata in the bridge first so downstream skills can
     # find the campaign row before discovery starts writing candidates.
-    try:
-        await bridge.upsert_campaign(
-            campaign_id,
-            {
-                "campaign_id": campaign_id,
-                "title": product["name"],
-                "sku_whitelist": [sku_ref],
-                "paid_ceiling": body.budget_per_kol,
-                "contract_required": True,
-                "test_mode_to": body.test_mode_to,
-                "env": body.env,
-            },
+    selected_variants = _selected_variants(product, body.product_variant_ids)
+    color_variant_policy: str | None = None
+    if selected_variants:
+        labels = [v.get("label") or v.get("id") for v in selected_variants]
+        color_variant_policy = "operator_selected: " + " | ".join(str(x) for x in labels)
+    extra_notes_chunks: list[str] = []
+    if product["selling_points"]:
+        extra_notes_chunks.append(f"# selling_points\n{product['selling_points']}")
+    if selected_variants:
+        extra_notes_chunks.append(
+            "# product_variants\n"
+            + json.dumps(selected_variants, ensure_ascii=False)
         )
+    extra_notes = "\n\n".join(extra_notes_chunks) or None
+    try:
+        upsert_body: dict[str, Any] = {
+            "label": product["name"],
+            "sku_whitelist": [sku_ref],
+            "paid_ceiling": body.budget_per_kol,
+            "contract_required": True,
+            "test_mode_to": body.test_mode_to,
+            "env": body.env,
+        }
+        if color_variant_policy:
+            upsert_body["color_variant_policy"] = color_variant_policy
+        if extra_notes:
+            upsert_body["extra_notes"] = extra_notes
+        if body.deliverable_platforms:
+            upsert_body["deliverable_platforms"] = body.deliverable_platforms
+        if body.deliverable_count_per_platform is not None:
+            upsert_body["deliverable_count_per_platform"] = body.deliverable_count_per_platform
+        if body.audit_standards_md and body.audit_standards_md.strip():
+            upsert_body["audit_standards_md"] = body.audit_standards_md.strip()
+        await bridge.upsert_campaign(campaign_id, upsert_body)
     except BridgeError as exc:
         # Non-fatal: the agent's intake step will retry the upsert.  We
         # log it on the campaign row via audit only.
@@ -1346,6 +1448,497 @@ def _pick_active_per_lane(lanes: dict) -> dict:
             "blocked_reason": chosen.get("blocking_escalation_id") or None,
         }
     return out
+
+
+class PatchCampaignConfigBody(BaseModel):
+    """Subset of CampaignConfigUpsertBody the operator may tweak after a
+    launch. Used to clear readiness blockers (deliverables / audit standards
+    / variant policy) without re-running the gateway agent."""
+
+    deliverable_platforms: list[str] | None = None
+    deliverable_count_per_platform: int | None = Field(default=None, ge=1, le=20)
+    audit_standards_md: str | None = Field(default=None, max_length=8_000)
+    color_variant_policy: str | None = Field(default=None, max_length=2_000)
+    extra_notes: str | None = Field(default=None, max_length=8_000)
+    paid_ceiling: float | None = Field(default=None, gt=0)
+    contract_required: bool | None = None
+    env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
+
+
+@router.patch("/{campaign_id}/config")
+async def patch_campaign_config(
+    campaign_id: str,
+    body: PatchCampaignConfigBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """Persist operator-supplied campaign_config edits.
+
+    The bridge ``PUT /campaigns/{id}`` is itself an upsert — we send only the
+    fields the operator actually changed (model_dump(exclude_none=True))
+    so untouched columns retain their value.
+    """
+    payload = body.model_dump(exclude_none=True)
+    env = payload.pop("env", "TEST")
+    payload["env"] = env
+    if "audit_standards_md" in payload:
+        payload["audit_standards_md"] = payload["audit_standards_md"].strip() or None
+        if payload["audit_standards_md"] is None:
+            payload.pop("audit_standards_md")
+    try:
+        await bridge.upsert_campaign(campaign_id, payload)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    write_audit(
+        conn, actor_user_id=user["id"], action="campaign.config_patch",
+        target=campaign_id, payload=payload,
+    )
+    return {"ok": True, "campaign_id": campaign_id, "patched": list(payload.keys())}
+
+
+# ---------------------------------------------------------------------------
+# Contract readiness
+# ---------------------------------------------------------------------------
+#
+# Pre-flight checklist for the contract phase. Aggregates the per-KOL
+# state the contract-coordinator skill validates at render time (Step I.1
+# in kol-contract-coordinator/SKILL.md) and surfaces it BEFORE the agent
+# attempts to send / sign anything. The console renders a green/red
+# checklist so the operator can fix gaps proactively instead of waiting
+# for an escalation to fire.
+#
+# Required (matches contract-coordinator + render_contract.py):
+#   identity.full_name, primary_email, phone
+#   fulfillment.shipping_address  → street, city, state, zip, email, phone
+#                                    AND a confirmed full_name
+#   product.specs                  → derived from product variants + lock
+#   product.link                   → product url or selected variant url
+#   campaign.deliverables          → at least 1 deliverable_platform with
+#                                    a positive count_per_platform
+#   offer.fee | compensation_mode  → fee for "cash", or mode=="free_product"
+#                                    is acceptable
+_REQUIRED_ADDRESS_FIELDS = ("street", "city", "state", "zip", "email", "phone", "full_name")
+
+
+def _addr_value(addr: Any, *keys: str) -> str | None:
+    if not isinstance(addr, dict):
+        return None
+    for key in keys:
+        value = addr.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        # ``state`` is sometimes encoded as ``region``; ``zip`` as
+        # ``postal_code``. Normalise here so the readiness view doesn't
+        # complain about a missing zip when the underlying shipping skill
+        # used postal_code.
+        if key == "state":
+            r = addr.get("region")
+            if isinstance(r, str) and r.strip():
+                return r.strip()
+        if key == "zip":
+            for alt in ("postal_code", "postcode", "zip_code"):
+                v = addr.get(alt)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+    return None
+
+
+def _check(ok: bool, value: Any, *, label: str, why: str | None = None) -> dict[str, Any]:
+    return {"ok": ok, "value": value, "label": label, "why": why}
+
+
+@router.get("/{campaign_id}/contract-readiness")
+async def contract_readiness(
+    campaign_id: str,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    _: Annotated[dict, Depends(current_user)],
+    identity_id: int = Query(..., ge=1),
+    env: str = Query("TEST", pattern="^(LIVE|TEST)$"),
+) -> dict[str, Any]:
+    """Return the contract-readiness checklist for one (campaign, KOL).
+
+    Schema::
+
+        {
+          "campaign_id": "...", "identity_id": 42, "env": "TEST",
+          "ready": false, "blockers": ["identity.full_name", ...],
+          "sections": {
+            "identity": {"full_name": {ok, value, label, why}, ...},
+            "shipping_address": {"street": {...}, "city": {...}, ...},
+            "product":  {"specs": {...}, "link": {...}, "variant_locked": {...}},
+            "campaign": {"deliverables": {...}, "contract_required": {...}},
+            "offer":    {"compensation_mode": {...}, "fee": {...}},
+          }
+        }
+    """
+    # 1. KOL identity row.
+    try:
+        ident = await bridge.get_identity(identity_id)
+    except BridgeError:
+        ident = {}
+    if not isinstance(ident, dict):
+        ident = {}
+
+    # 2. Campaign config (deliverables, contract_required) — best-effort.
+    try:
+        camp_cfg = await bridge.get_campaign(campaign_id)
+    except BridgeError:
+        camp_cfg = {}
+    if not isinstance(camp_cfg, dict):
+        camp_cfg = {}
+
+    # 3. Per-(identity, campaign) facts.
+    try:
+        facts_resp = await bridge.read_facts(identity_id, campaign_id=campaign_id, env=env)
+        facts: dict[str, Any] = facts_resp.get("facts", {}) if isinstance(facts_resp, dict) else {}
+    except BridgeError:
+        facts = {}
+
+    # 4. Local product row (variants + url + selling points).
+    pc_row = conn.execute(
+        "SELECT sku FROM product_campaigns WHERE campaign_id=? AND env=? LIMIT 1",
+        (campaign_id, env),
+    ).fetchone()
+    product_row = None
+    if pc_row is not None:
+        product_row = conn.execute(
+            "SELECT sku, name, url, variants_json FROM products WHERE sku=?",
+            (pc_row["sku"],),
+        ).fetchone()
+
+    # --- identity facts ---
+    full_name = (
+        ident.get("full_name")
+        or facts.get("identity.full_name")
+        or ident.get("display_name")
+    )
+    primary_email = ident.get("primary_email") or facts.get("identity.primary_email")
+    phone = (
+        ident.get("phone")
+        or facts.get("identity.phone")
+        or facts.get("identity.phone_number")
+    )
+
+    # --- shipping address ---
+    addr = facts.get("fulfillment.shipping_address") or ident.get("default_shipping_address")
+    addr_check = {}
+    for key in _REQUIRED_ADDRESS_FIELDS:
+        if key == "full_name":
+            val = _addr_value(addr, "full_name", "name") or full_name
+            addr_check[key] = _check(bool(val), val, label="收件人姓名")
+        elif key == "email":
+            val = _addr_value(addr, "email") or primary_email
+            addr_check[key] = _check(bool(val), val, label="Email")
+        elif key == "phone":
+            val = _addr_value(addr, "phone", "phone_number") or phone
+            addr_check[key] = _check(bool(val), val, label="Phone")
+        else:
+            val = _addr_value(addr, key)
+            addr_check[key] = _check(bool(val), val, label=key.title())
+
+    # --- product (specs / link / variant lock) ---
+    variants = []
+    if product_row is not None:
+        try:
+            variants = json.loads(product_row["variants_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            variants = []
+    sku_locked = facts.get("offer.sku_locked")
+    variant_locked = facts.get("offer.color_or_variant_locked")
+    variant_match = next(
+        (v for v in variants if str(v.get("id")) == str(variant_locked)),
+        None,
+    )
+    product_link = None
+    if variant_match and variant_match.get("url"):
+        product_link = variant_match["url"]
+    elif product_row is not None:
+        product_link = product_row["url"]
+    product_name = product_row["name"] if product_row is not None else None
+    specs_bits: list[str] = []
+    if product_name:
+        specs_bits.append(str(product_name))
+    if variant_match:
+        specs_bits.append(str(variant_match.get("label") or variant_match.get("id")))
+    elif sku_locked:
+        specs_bits.append(str(sku_locked))
+    product_specs = " · ".join(specs_bits) if specs_bits else None
+
+    # --- campaign deliverables ---
+    deliverable_platforms = camp_cfg.get("deliverable_platforms") or []
+    deliverable_count = camp_cfg.get("deliverable_count_per_platform")
+    has_deliverables = bool(deliverable_platforms) and isinstance(deliverable_count, int) and deliverable_count > 0
+    contract_required = bool(camp_cfg.get("contract_required", True))
+
+    # --- offer (fee / compensation_mode) ---
+    compensation_mode = facts.get("offer.compensation_mode")
+    agreed_terms = facts.get("offer.agreed_terms")
+    fee_value: Any = None
+    if isinstance(agreed_terms, dict):
+        fee_value = agreed_terms.get("fee") or agreed_terms.get("amount")
+    elif isinstance(agreed_terms, (int, float)):
+        fee_value = agreed_terms
+    fee_ok = (
+        compensation_mode in ("free_product", "gifted", "commission_no_product")
+        or (fee_value is not None and (isinstance(fee_value, (int, float)) and fee_value > 0))
+    )
+
+    sections: dict[str, Any] = {
+        "identity": {
+            "full_name": _check(bool(full_name), full_name, label="Full Name"),
+            "primary_email": _check(bool(primary_email), primary_email, label="Email"),
+            "phone": _check(bool(phone), phone, label="Phone"),
+        },
+        "shipping_address": addr_check,
+        "product": {
+            "specs": _check(
+                bool(product_specs) and bool(variant_match or (variants == [] and sku_locked)),
+                product_specs,
+                label="PRODUCT_SPECS",
+                why=(
+                    None if (variant_match or (variants == [] and sku_locked))
+                    else "尚未确认 KOL 选定的 variant (offer.color_or_variant_locked)"
+                ),
+            ),
+            "link": _check(bool(product_link), product_link, label="PRODUCT_LINK"),
+            "variant_locked": _check(
+                variants == [] or bool(variant_match),
+                (variant_match or {"id": variant_locked}) if variant_locked else None,
+                label="Variant locked",
+                why=(
+                    None if (variants == [] or variant_match)
+                    else "offer.color_or_variant_locked 未在产品 variant 列表里 — 检查 KOL 选品"
+                ),
+            ),
+        },
+        "campaign": {
+            "deliverables": _check(
+                has_deliverables,
+                {"platforms": deliverable_platforms, "count": deliverable_count},
+                label="Deliverables",
+                why=(
+                    None if has_deliverables
+                    else "campaign_config 还缺 deliverable_platforms / deliverable_count_per_platform"
+                ),
+            ),
+            "contract_required": _check(
+                True, contract_required,
+                label="contract_required",
+                why=None if contract_required else "此 campaign 标了 contract_required=false，可跳过合同",
+            ),
+        },
+        "offer": {
+            "compensation_mode": _check(
+                bool(compensation_mode), compensation_mode, label="Compensation mode",
+            ),
+            "fee": _check(
+                fee_ok, fee_value if fee_value is not None else agreed_terms,
+                label="Fee / agreed terms",
+                why=None if fee_ok else (
+                    "cash 模式下必须有 offer.agreed_terms 包含 numeric fee；"
+                    "free_product / commission_no_product 可跳过"
+                ),
+            ),
+        },
+    }
+
+    # If contract is explicitly not required, the whole readiness gate is
+    # auto-satisfied — surface that without iterating through every blocker.
+    if not contract_required:
+        return {
+            "campaign_id": campaign_id,
+            "identity_id": identity_id,
+            "env": env,
+            "ready": True,
+            "blockers": [],
+            "skipped_reason": "contract_required=false",
+            "sections": sections,
+        }
+
+    blockers: list[str] = []
+    for section_name, checks in sections.items():
+        if section_name == "campaign":
+            # contract_required is a status, not a gating check
+            for key, chk in checks.items():
+                if key == "contract_required":
+                    continue
+                if not chk["ok"]:
+                    blockers.append(f"{section_name}.{key}")
+            continue
+        for key, chk in checks.items():
+            if not chk["ok"]:
+                blockers.append(f"{section_name}.{key}")
+    return {
+        "campaign_id": campaign_id,
+        "identity_id": identity_id,
+        "env": env,
+        "ready": len(blockers) == 0,
+        "blockers": blockers,
+        "sections": sections,
+    }
+
+
+class ShippingAddressBody(BaseModel):
+    full_name: str | None = Field(default=None, max_length=200)
+    street: str | None = Field(default=None, max_length=300)
+    city: str | None = Field(default=None, max_length=120)
+    state: str | None = Field(default=None, max_length=120)
+    zip: str | None = Field(default=None, max_length=40)
+    email: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, max_length=80)
+
+
+class IdentityFactsPatchBody(BaseModel):
+    """Operator-side writes for the contract-readiness blockers."""
+
+    identity_id: int = Field(ge=1)
+    env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
+    # Updates that map onto kol_identity columns (handled via bridge PUT).
+    primary_handle: str | None = None
+    platform: str | None = Field(default=None, max_length=80)
+    primary_email: str | None = Field(default=None, max_length=200)
+    display_name: str | None = Field(default=None, max_length=200)
+    # Updates that live as facts in the ``identity`` namespace.
+    full_name: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, max_length=80)
+    # Structured shipping address. Persisted both as fact
+    # (fulfillment.shipping_address) and as identity-column
+    # default_shipping_address so the next campaign reuses it.
+    shipping_address: ShippingAddressBody | None = None
+    campaign_id: str | None = None
+
+
+@router.post("/{campaign_id}/contract-readiness/fill-blockers")
+async def fill_contract_blockers(
+    campaign_id: str,
+    body: IdentityFactsPatchBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """One-shot write to clear the contract-readiness blockers.
+
+    Splits the operator-supplied fields into three sinks:
+
+    * ``kol_identity`` columns (primary_email, display_name,
+      default_shipping_address) — bridge ``PUT /identities``.
+    * ``identity.*`` facts (full_name, phone) — bridge ``POST /facts/{id}``.
+    * ``fulfillment.shipping_address`` fact — same endpoint, different
+      namespace, scoped to ``campaign_id`` so the campaign-specific
+      shipping address doesn't retro-affect other campaigns.
+
+    Returns the list of sinks actually touched so the UI can give targeted
+    feedback ("identity updated · shipping address written").
+    """
+    # 1) Look up the existing identity so we have its handle/platform.
+    try:
+        ident = await bridge.get_identity(body.identity_id)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if not isinstance(ident, dict) or not ident.get("primary_handle"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "identity not found")
+
+    touched: list[str] = []
+    env = body.env
+    cid = body.campaign_id or campaign_id
+
+    addr_obj: dict[str, Any] | None = None
+    if body.shipping_address is not None:
+        raw = body.shipping_address.model_dump(exclude_none=True)
+        # Strip whitespace; treat empty strings as absent.
+        cleaned = {k: v.strip() for k, v in raw.items() if isinstance(v, str) and v.strip()}
+        if cleaned:
+            addr_obj = cleaned
+
+    # 2) Update kol_identity columns where applicable.
+    identity_patch: dict[str, Any] = {
+        "primary_handle": ident.get("primary_handle"),
+        "platform": ident.get("platform") or "instagram",
+        "env": env,
+    }
+    has_identity_patch = False
+    if body.primary_email and body.primary_email.strip():
+        identity_patch["primary_email"] = body.primary_email.strip()
+        has_identity_patch = True
+    if body.display_name and body.display_name.strip():
+        identity_patch["display_name"] = body.display_name.strip()
+        has_identity_patch = True
+    if addr_obj is not None:
+        identity_patch["default_shipping_address"] = addr_obj
+        has_identity_patch = True
+    if has_identity_patch:
+        try:
+            await bridge.upsert_identity(identity_patch)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        touched.append("identity_columns")
+
+    # 3) Write identity.* facts (full_name / phone).
+    identity_facts: dict[str, Any] = {}
+    if body.full_name and body.full_name.strip():
+        identity_facts["identity.full_name"] = body.full_name.strip()
+    if body.phone and body.phone.strip():
+        identity_facts["identity.phone"] = body.phone.strip()
+
+    # 4) Write fulfillment.shipping_address fact (campaign-scoped) when
+    # a structured object was supplied.
+    fulfillment_facts: dict[str, Any] = {}
+    if addr_obj is not None:
+        fulfillment_facts["fulfillment.shipping_address"] = addr_obj
+        # Mark address_collected so the shipping-intake skill skips re-asking.
+        fulfillment_facts["fulfillment.address_collected"] = True
+
+    if identity_facts or fulfillment_facts:
+        namespaces: dict[str, dict[str, Any]] = {}
+        if identity_facts:
+            namespaces["identity"] = identity_facts
+        if fulfillment_facts:
+            namespaces["fulfillment"] = fulfillment_facts
+        try:
+            await bridge.write_facts_multi(
+                body.identity_id,
+                {
+                    "campaign_id": cid,
+                    "namespaces": namespaces,
+                    "source": f"console:{user['email']}",
+                    "env": env,
+                },
+            )
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        if identity_facts:
+            touched.append("identity_facts")
+        if fulfillment_facts:
+            touched.append("fulfillment_facts")
+
+    if not touched:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "no fields supplied; pass at least one of full_name / phone / primary_email / display_name / shipping_address",
+        )
+
+    write_audit(
+        conn, actor_user_id=user["id"],
+        action="contract.fill_blockers", target=campaign_id,
+        payload={
+            "identity_id": body.identity_id,
+            "env": env,
+            "touched": touched,
+            "fields": [
+                k for k in (
+                    "full_name", "phone", "primary_email", "display_name",
+                    "shipping_address",
+                ) if getattr(body, k, None) is not None
+            ],
+        },
+    )
+    return {
+        "ok": True,
+        "identity_id": body.identity_id,
+        "touched": touched,
+    }
 
 
 @router.get("/{campaign_id}/lanes")

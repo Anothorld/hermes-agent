@@ -291,6 +291,11 @@ def _process_message(msg: GmailMessage, env: str) -> ProcessStatus:
             "from_addr": msg.from_addr,
             "subject": msg.subject,
             "snippet": msg.snippet,
+            # Persist the (clipped) body so the operator console can render
+            # the actual email that triggered downstream escalations /
+            # reply_draft approvals — snippet alone is too lossy for that
+            # diagnostic surface.
+            "body": _clip_text(msg.body, 8000),
             "date": msg.date,
         },
     }

@@ -23,7 +23,13 @@ SCHEMA = [
         url TEXT,
         tags_json TEXT,
         notes TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        pitch_md TEXT,
+        selling_points TEXT,
+        variants_json TEXT,
+        default_budget_per_kol REAL,
+        default_budget_total REAL,
+        default_absolute_floor REAL
     )""",
     """CREATE TABLE IF NOT EXISTS kol_notes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,13 +76,19 @@ SCHEMA = [
     # gateway run with a distinct session_id. This table is the authoritative
     # list of every run we want the transcript panel to attach to, so the
     # panel can multiplex multiple gateway SSE feeds for one campaign.
+    # ``dedup_key`` is the in-flight uniqueness signal for runs that must
+    # not be triggered twice while a previous one is still working (currently
+    # preview-draft and refine — both write the same approval.reply_draft
+    # fact). For runs that are intrinsically idempotent or per-event
+    # (outreach launch, reply dispatch), it stays NULL.
     """CREATE TABLE IF NOT EXISTS product_campaign_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         campaign_id TEXT NOT NULL,
         env TEXT NOT NULL CHECK (env IN ('LIVE','TEST')),
         run_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('outreach','reply','draft','resume')),
+        kind TEXT NOT NULL CHECK (kind IN ('outreach','reply','draft','resume','refine')),
         session_id TEXT,
+        dedup_key TEXT,
         started_at TEXT NOT NULL,
         ended_at TEXT,
         UNIQUE (run_id)
@@ -86,6 +98,7 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaigns_sku ON product_campaigns(sku, env)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_cid ON product_campaign_runs(campaign_id, env, started_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_dedup ON product_campaign_runs(dedup_key, started_at DESC)",
 ]
 
 
@@ -108,6 +121,10 @@ def init_db() -> None:
     path = get_settings().db_path
     conn = _connect(path)
     try:
+        # Run schema upgrades BEFORE the idempotent CREATE TABLE/INDEX loop
+        # below. The dedup_key index in SCHEMA references a column that may
+        # not exist on legacy DBs until the migration adds it.
+        _migrate_product_campaign_runs(conn)
         for ddl in SCHEMA:
             conn.execute(ddl)
         cols = {
@@ -115,8 +132,97 @@ def init_db() -> None:
         }
         if "test_mode_to" not in cols:
             conn.execute("ALTER TABLE product_campaigns ADD COLUMN test_mode_to TEXT")
+        product_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(products)")
+        }
+        for col, ddl in (
+            ("pitch_md", "TEXT"),
+            ("selling_points", "TEXT"),
+            ("variants_json", "TEXT"),
+            ("default_budget_per_kol", "REAL"),
+            ("default_budget_total", "REAL"),
+            ("default_absolute_floor", "REAL"),
+        ):
+            if col not in product_cols:
+                conn.execute(f"ALTER TABLE products ADD COLUMN {col} {ddl}")
     finally:
         conn.close()
+
+
+def _migrate_product_campaign_runs(conn: sqlite3.Connection) -> None:
+    """Bring an existing ``product_campaign_runs`` table up to the current
+    schema. Two things may need fixing on an older DB:
+
+    1. The CHECK constraint on ``kind`` may not include ``'refine'`` —
+       which silently dropped every refine registration via
+       ``INSERT OR IGNORE`` (SQLite IGNORE skips CHECK violations too,
+       not just UNIQUE).
+    2. The ``dedup_key`` column may be missing.
+
+    (1) requires rebuilding the table because SQLite cannot ALTER a CHECK
+    constraint in place. (2) is a plain ADD COLUMN.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='product_campaign_runs'"
+    ).fetchone()
+    existing_sql = row["sql"] if row else ""
+    if not existing_sql:
+        # Fresh DB — let CREATE TABLE IF NOT EXISTS in SCHEMA build it.
+        return
+    cols = {
+        r["name"] for r in conn.execute("PRAGMA table_info(product_campaign_runs)")
+    }
+    needs_check_fix = "'refine'" not in existing_sql
+    if needs_check_fix:
+        # autocommit mode (isolation_level=None) — wrap explicitly so the
+        # rebuild is atomic.
+        conn.execute("BEGIN")
+        try:
+            conn.execute(
+                "ALTER TABLE product_campaign_runs "
+                "RENAME TO product_campaign_runs_old"
+            )
+            conn.execute(
+                """CREATE TABLE product_campaign_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT NOT NULL,
+                    env TEXT NOT NULL CHECK (env IN ('LIVE','TEST')),
+                    run_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('outreach','reply','draft','resume','refine')),
+                    session_id TEXT,
+                    dedup_key TEXT,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    UNIQUE (run_id)
+                )"""
+            )
+            old_cols = "campaign_id, env, run_id, kind, session_id, started_at, ended_at"
+            conn.execute(
+                f"INSERT INTO product_campaign_runs "
+                f"({old_cols}) "
+                f"SELECT {old_cols} FROM product_campaign_runs_old"
+            )
+            conn.execute("DROP TABLE product_campaign_runs_old")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        # Recreate indexes that were dropped with the old table.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_cid "
+            "ON product_campaign_runs(campaign_id, env, started_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_dedup "
+            "ON product_campaign_runs(dedup_key, started_at DESC)"
+        )
+    elif "dedup_key" not in cols:
+        conn.execute("ALTER TABLE product_campaign_runs ADD COLUMN dedup_key TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_dedup "
+            "ON product_campaign_runs(dedup_key, started_at DESC)"
+        )
 
 
 def get_conn() -> Iterator[sqlite3.Connection]:

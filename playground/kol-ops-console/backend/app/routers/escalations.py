@@ -13,7 +13,15 @@ from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
-from ..run_registry import register_run
+from ..run_registry import get_inflight_run, register_run
+
+
+def _preview_draft_dedup_key(escalation_id: int) -> str:
+    """Stable key for deduping preview-draft + resume-draft runs for one
+    escalation. The escalation-level resume run reuses this same key when
+    it would also draft (require_draft=True) so a preview followed
+    immediately by a resume cannot produce two parallel drafts."""
+    return f"draft:escalation:{escalation_id}"
 
 router = APIRouter(prefix="/escalations", tags=["escalations"])
 
@@ -61,6 +69,12 @@ _DRAFT_PREVIEW_INSTRUCTIONS = (
     "  ``campaign_id`` to the campaign_id from the brief above and "
     "  include ``linked_escalation_id`` in the fact value so the "
     "  console can correlate this preview with the escalation.\n"
+    "- Preserve dollar amounts exactly. Never place JSON containing `$` "
+    "  amounts in an unquoted heredoc or inline double-quoted shell "
+    "  string; bash expands `$3000` to `000` and `$800` to `00`. Use "
+    "  `cat <<'JSON' > /tmp/draft.json` or Python `json.dump`, then pass "
+    "  `--json @/tmp/draft.json`. Re-read the fact and reject outputs "
+    "  containing `000 quote` or `00 total`.\n"
     "- In TEST mode, route any draft target to campaign_config.test_mode_to.\n"
     "- Never send email. Do not create Gmail drafts here — the operator "
     "  approves the preview separately on the Approvals page, which is "
@@ -197,17 +211,27 @@ def _compose_resume_brief(
             "Because this escalation was opened by the reply dispatcher "
             "for an inbound KOL message and no preview draft exists yet, "
             "you MUST also produce a reply draft for the operator to "
-            "review: invoke the appropriate drafting skill for the active "
-            "goal (kol-deliverables-clarifier for deliverables_scope, "
-            "kol-compensation-negotiator for compensation_negotiation, "
-            "kol-contract-coordinator for contract_signing, etc.) and "
-            "write exactly one approval.reply_draft fact via "
-            "`kol_bridge_tool.py write-facts --namespace approval --json "
-            "@/tmp/draft.json`. The JSON body MUST set campaign_id to the "
-            "campaign_id above and the fact value MUST include "
-            "linked_escalation_id pointing at the escalation_id above. "
-            "Do not call resolve-escalation; the escalation has already "
-            "been resolved by the console."
+            "review. BEFORE invoking any drafting skill, re-check that "
+            "no pending approval.reply_draft fact already linked to "
+            "this escalation exists: run `kol_bridge_tool.py "
+            "list-approvals --status pending --env <env>` and look for "
+            "a row where `value.linked_escalation_id` equals the "
+            "escalation_id above. If one is already present (a parallel "
+            "preview-draft run beat us to it), DO NOT draft again — "
+            "skip the drafting step entirely and just summarize that "
+            "the existing draft will be reviewed on the Approvals "
+            "page. Otherwise, invoke the appropriate drafting skill "
+            "for the active goal (kol-deliverables-clarifier for "
+            "deliverables_scope, kol-compensation-negotiator for "
+            "compensation_negotiation, kol-contract-coordinator for "
+            "contract_signing, etc.) and write exactly one "
+            "approval.reply_draft fact via `kol_bridge_tool.py "
+            "write-facts --namespace approval --json @/tmp/draft.json`. "
+            "The JSON body MUST set campaign_id to the campaign_id "
+            "above and the fact value MUST include linked_escalation_id "
+            "pointing at the escalation_id above. Do not call "
+            "resolve-escalation; the escalation has already been "
+            "resolved by the console."
         )
     return "\n".join([
         "# escalation_resume",
@@ -289,6 +313,96 @@ async def list_escalations(
     return [_normalize_escalation_row(r) for r in rows if isinstance(r, dict)]
 
 
+def _pick_inbound_for_escalation(
+    *,
+    events: list[dict[str, Any]],
+    escalation_created_at: str | None,
+) -> dict[str, Any] | None:
+    """Find the kol_inbound_reply event most likely to have triggered the
+    escalation.
+
+    Strategy: prefer the most recent inbound whose ts is ≤ the
+    escalation's created_at (the inbound that caused the dispatcher to
+    open the escalation). Fall back to the most recent inbound on the
+    timeline if no created_at is available or none precedes it.
+    Returns a normalized dict ``{from_addr, subject, body, snippet, date,
+    message_id, thread_id, ts}`` or None.
+    """
+    inbounds = [
+        ev for ev in events
+        if isinstance(ev, dict) and ev.get("event_type") == "kol_inbound_reply"
+    ]
+    if not inbounds:
+        return None
+    # Bridge ``list_events`` returns reverse-chronological (newest first).
+    if escalation_created_at:
+        for ev in inbounds:
+            ev_ts = ev.get("ts") or ""
+            if ev_ts and ev_ts <= escalation_created_at:
+                return _shape_inbound(ev)
+    return _shape_inbound(inbounds[0])
+
+
+def _shape_inbound(ev: dict[str, Any]) -> dict[str, Any]:
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    return {
+        "event_id": ev.get("id"),
+        "ts": ev.get("ts"),
+        "from_addr": payload.get("from_addr"),
+        "subject": payload.get("subject"),
+        "body": payload.get("body"),
+        "snippet": payload.get("snippet"),
+        "date": payload.get("date"),
+        "message_id": payload.get("message_id"),
+        "thread_id": payload.get("thread_id"),
+    }
+
+
+@router.get("/{escalation_id}/inbound-context")
+async def escalation_inbound_context(
+    escalation_id: int,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+    env: Optional[str] = Query(None),
+) -> dict[str, Any]:
+    """Return the inbound email that most likely triggered this escalation.
+
+    Looks up the escalation, then the KOL's per-campaign timeline, then
+    picks the latest ``kol_inbound_reply`` whose timestamp precedes the
+    escalation's ``created_at``. Returns ``{escalation_id, inbound: {...}}``
+    or ``{inbound: null}`` when no inbound is on file (e.g. discovery-
+    phase escalations like missing campaign_config).
+    """
+    escalation = await _find_escalation(bridge, escalation_id, env)
+    if escalation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "escalation not found")
+    e = (env or escalation.get("env") or "TEST").upper()
+    identity_id = escalation.get("identity_id")
+    campaign_id = escalation.get("campaign_id")
+    if not isinstance(identity_id, int):
+        return {"escalation_id": escalation_id, "inbound": None}
+    try:
+        events = await bridge.get_timeline(
+            identity_id,
+            env=e,
+            campaign_id=campaign_id if isinstance(campaign_id, str) else None,
+            limit=200,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    inbound = _pick_inbound_for_escalation(
+        events=events,
+        escalation_created_at=escalation.get("created_at"),
+    )
+    return {
+        "escalation_id": escalation_id,
+        "identity_id": identity_id,
+        "campaign_id": campaign_id,
+        "env": e,
+        "inbound": inbound,
+    }
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def open_escalation(
     body: OpenEscalationBody,
@@ -334,11 +448,32 @@ async def resolve_escalation(
         env = str(escalation.get("env") or body.env or _env(None)).upper()
         campaign_id = str(escalation["campaign_id"])
         require_draft = False
+        draft_dedup_key: str | None = None
         if _escalation_needs_reply_draft(escalation):
+            # The has-pending check + the agent re-running this check
+            # inside the resume brief together close the race where a
+            # preview-draft was triggered in parallel: the console
+            # advisory check below catches the common case; the
+            # in-brief instruction handles the narrow window between
+            # this check and the agent actually starting to draft.
             already_has_draft = await _has_pending_reply_draft(
                 bridge, escalation_id, env,
             )
             require_draft = not already_has_draft
+            # When this resume would also draft, share the in-flight
+            # dedup key with preview_draft so a concurrent preview is
+            # refused (and vice versa). This is the only place where
+            # resume writes the approval.reply_draft fact.
+            if require_draft:
+                draft_dedup_key = _preview_draft_dedup_key(escalation_id)
+                inflight = get_inflight_run(conn, dedup_key=draft_dedup_key)
+                if inflight is not None:
+                    # A preview-draft is in flight — let the agent
+                    # finish that one instead of racing it. Resume the
+                    # campaign WITHOUT drafting; the existing draft run
+                    # will surface on the Approvals page on its own.
+                    require_draft = False
+                    draft_dedup_key = None
         brief = _compose_resume_brief(
             escalation=escalation,
             operator_answer=body.operator_answer,
@@ -368,6 +503,7 @@ async def resolve_escalation(
                 run_id=run_id,
                 kind="resume",
                 session_id=f"kol-campaign:{env}:{campaign_id}",
+                dedup_key=draft_dedup_key,
             )
     write_audit(
         conn, actor_user_id=user["id"], action="escalation.resolve",
@@ -406,8 +542,37 @@ async def preview_draft(
             status.HTTP_400_BAD_REQUEST,
             "preview-draft requires a campaign-scoped escalation",
         )
+    # Only an open escalation needs a preview draft. Once the operator
+    # has resolved (resume/terminate) or the row has been re-escalated,
+    # drafting again would write a stale fact onto a closed flow.
+    esc_state = str(escalation.get("state") or "").lower()
+    if esc_state and esc_state != "awaiting_answer":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"escalation is already {esc_state}; cannot preview-draft",
+        )
     env = str(escalation.get("env") or body.env or _env(None)).upper()
     campaign_id = str(escalation["campaign_id"])
+    # In-flight dedup: if a draft run for this escalation was started in
+    # the last 5 min, refuse and return the existing run_id so the
+    # frontend can surface "already generating" instead of spawning a
+    # second writer for the same approval.reply_draft fact.
+    dedup_key = _preview_draft_dedup_key(escalation_id)
+    inflight = get_inflight_run(conn, dedup_key=dedup_key)
+    if inflight is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "error": "draft_already_in_flight",
+                "message": (
+                    "A draft run for this escalation is already in "
+                    "progress. Wait for it to finish (typically 30–60 s) "
+                    "or refresh the Approvals page."
+                ),
+                "run_id": inflight.get("run_id"),
+                "started_at": inflight.get("started_at"),
+            },
+        )
     brief = _compose_draft_preview_brief(
         escalation=escalation,
         operator_answer=body.operator_answer,
@@ -433,6 +598,7 @@ async def preview_draft(
             run_id=run_id,
             kind="draft",
             session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+            dedup_key=dedup_key,
         )
     write_audit(
         conn, actor_user_id=user["id"], action="escalation.preview_draft",
