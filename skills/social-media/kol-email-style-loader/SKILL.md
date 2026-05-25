@@ -1,18 +1,23 @@
 ---
 name: kol-email-style-loader
-description: Side-effect-free helper skill that assembles the email generation prompt header from policy_documents (company_style + user_style). Pure template — never calls an LLM, never writes CAL. Must be invoked by every outbound-email skill (cold-outreach, reengagement-outreach, interest-qualifier, product-selector, deliverables-clarifier, compensation-negotiator, contract-coordinator, shipping-intake, logistics-tracker, brief-sender, content-reviewer, golive-and-boost, escalation-resumer) at the very top of their prompt build step.
+description: Side-effect-free helper skill that assembles the email generation prompt header from policy_documents (company_style + user_style) plus the mandatory `humanizer` email polish pass. Pure template — never calls an LLM, never writes CAL. Must be invoked by every outbound-email skill (cold-outreach, reengagement-outreach, interest-qualifier, product-selector, deliverables-clarifier, compensation-negotiator, contract-coordinator, shipping-intake, logistics-tracker, brief-sender, content-reviewer, golive-and-boost, escalation-resumer) at the very top of their prompt build step.
 trigger: Any time a downstream skill is about to ask the LLM to draft an email or message that the operator will see / send. The skill is invoked synchronously, returns a single string block, and the caller appends it as the first section of the LLM prompt — before the goal-specific instructions.
-tags: ["kol", "email", "style", "policy", "template", "no-llm"]
+tags: ["kol", "email", "style", "policy", "template", "humanizer", "no-llm"]
 ---
 
 ## Goal
 Produce the **priority-ordered email generation constraints block** that
 every outbound-email KOL skill prepends to its LLM prompt. The block must
 make the priority contract (P0 > P1 > P2) visible to the model so style
-constraints never override the email's actual goal.
+constraints never override the email's actual goal. The block also requires
+the downstream drafting skill to apply `humanizer` in email mode before it
+returns or persists any subject/body.
 
 ## Runtime Contract
 - **No LLM call.** This skill is pure I/O + template substitution.
+- **Does not run `humanizer` itself.** It emits the mandatory instruction;
+  the downstream drafting skill applies the `humanizer` email pass after
+  composing the first draft and before returning the draft envelope.
 - **No CAL writes.** Reads only via the deterministic bridge CLI:
   `kol_bridge_tool.py get-policy --scope company_style` and
   `kol_bridge_tool.py get-policy --scope user_style --owner-user-id <current_user_id>`.
@@ -45,11 +50,27 @@ constraints never override the email's actual goal.
 ### [P2] Personal style (your own preference)
 <user_style.content_md>
 
+### [P3] Humanizer email polish (mandatory final pass)
+Before returning or persisting the draft envelope, apply `humanizer` in email
+mode to the subject and body. Keep P0 facts exact. The polished email should:
+- sound like a real person wrote it, not a generated template;
+- use a warmer, more feminine voice: gentle, attentive, emotionally aware,
+  and considerate without becoming overly sweet or servile;
+- make the KOL feel seen and cared for, especially around timing, effort,
+  shipping details, revisions, and compensation boundaries;
+- remove AI tells such as generic praise, stiff transitions, rule-of-three
+  phrasing, excessive bolding, emojis, and canned conclusions;
+- preserve all money amounts, SKUs, deadlines, addresses, tracking numbers,
+  contract terms, usage rights, hashtags, handles, and requested next actions
+  exactly as drafted from P0 / campaign facts.
+
 ### Conflict resolution rules
 - If P1 conflicts with P2 → follow P1 (company > personal).
 - If P0 cannot be satisfied while honoring P1 → prioritize P0 and return a
   structured field `style_deviation_reason` describing the deviation.
 - If P2 conflicts with P0 → silently drop the P2 element.
+- If P3 would change any P0 fact → keep the original P0 fact and only polish
+  the surrounding wording.
 - Empty company / personal blocks render as `(no company-wide style configured)`
   / `(no personal style configured)` — do not invent constraints.
 ```
@@ -62,8 +83,9 @@ constraints never override the email's actual goal.
      `(no company-wide style configured)`.
 3. Fetch `GET {bridge}/policies/user_style?owner_user_id={current_user_id}`.
    - If null → use `(no personal style configured)`.
-4. Substitute the four blocks (P0 lines + company body + user body + the
-   verbatim conflict-rules paragraph) into the template above.
+4. Substitute the five blocks (P0 lines + company body + user body + the
+  mandatory humanizer email polish block + the verbatim conflict-rules
+  paragraph) into the template above.
 5. Return the assembled string. Caller is responsible for prepending it
    to the goal-specific prompt.
 
@@ -98,11 +120,27 @@ Sign every email with: Best, POVISON Team.
 ### [P2] Personal style (your own preference)
 I prefer 'Cheers,' as my closer.
 
+### [P3] Humanizer email polish (mandatory final pass)
+Before returning or persisting the draft envelope, apply `humanizer` in email
+mode to the subject and body. Keep P0 facts exact. The polished email should:
+- sound like a real person wrote it, not a generated template;
+- use a warmer, more feminine voice: gentle, attentive, emotionally aware,
+  and considerate without becoming overly sweet or servile;
+- make the KOL feel seen and cared for, especially around timing, effort,
+  shipping details, revisions, and compensation boundaries;
+- remove AI tells such as generic praise, stiff transitions, rule-of-three
+  phrasing, excessive bolding, emojis, and canned conclusions;
+- preserve all money amounts, SKUs, deadlines, addresses, tracking numbers,
+  contract terms, usage rights, hashtags, handles, and requested next actions
+  exactly as drafted from P0 / campaign facts.
+
 ### Conflict resolution rules
 - If P1 conflicts with P2 → follow P1 (company > personal).
 - If P0 cannot be satisfied while honoring P1 → prioritize P0 and return a
   structured field `style_deviation_reason` describing the deviation.
 - If P2 conflicts with P0 → silently drop the P2 element.
+- If P3 would change any P0 fact → keep the original P0 fact and only polish
+  the surrounding wording.
 - Empty company / personal blocks render as `(no company-wide style configured)`
   / `(no personal style configured)` — do not invent constraints.
 ```
@@ -112,13 +150,16 @@ I prefer 'Cheers,' as my closer.
 
 ### Failure (bridge down)
 Output P1 and P2 fall back to the failure stub; P0 is still rendered.
-The downstream email skill drafts using only the goal context.
+P3 is still rendered, so the downstream email skill drafts using the goal
+context and still applies the `humanizer` email pass before returning.
 
 ## Pitfalls (do NOT)
 - Do **NOT** call the LLM here — this is a templating skill.
 - Do **NOT** merge or rewrite the company / user content. Render verbatim.
 - Do **NOT** add extra sections (footers, disclaimers). Caller may add
   those after the constraints block.
+- Do **NOT** let downstream email skills skip the `humanizer` email pass;
+  the pass is mandatory for every non-null KOL email subject/body.
 - Do **NOT** swallow style policies that disagree with goal facts —
   surface the deviation to the next skill via `style_deviation_reason`.
 - Do **NOT** cache: company / personal styles change on operator action;
