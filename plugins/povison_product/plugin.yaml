@@ -1,0 +1,7 @@
+name: povison_product
+version: 0.1.0
+description: "POVISON product lookup tool. Parses a product URL, extracts path and variant, and fetches model product data from Povison's open product API. Auth via POVISON_CLIENT_TOKEN."
+author: Hermes Agent
+kind: backend
+provides_tools:
+  - povison_product_info
