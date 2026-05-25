@@ -11,7 +11,6 @@ import { SettingsPage } from './pages/SettingsPage';
 import { EscalationConsolePage } from './pages/EscalationConsolePage';
 import { ApprovalsPage } from './pages/ApprovalsPage';
 import { PolicyEditorPage } from './pages/PolicyEditorPage';
-import { CampaignWizardPage } from './pages/CampaignWizardPage';
 import { CampaignCandidatesPage } from './pages/CampaignCandidatesPage';
 import { AgentTranscriptPage } from './pages/AgentTranscriptPage';
 
@@ -76,7 +75,7 @@ export function App() {
                 <Route path="/kols" element={<KolKanbanPage />} />
                 <Route path="/kols/:id" element={<KolDetailPage />} />
                 <Route path="/kols/:id/relationship" element={<KolRelationshipPage />} />
-                <Route path="/campaigns/new" element={<CampaignWizardPage />} />
+                <Route path="/campaigns/new" element={<Navigate to="/products" replace />} />
                 <Route path="/campaigns/:id/candidates" element={<CampaignCandidatesPage />} />
                 <Route path="/campaigns/:cid/transcript" element={<AgentTranscriptPage />} />
                 <Route path="/escalations" element={<EscalationConsolePage />} />

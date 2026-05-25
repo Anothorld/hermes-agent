@@ -20,6 +20,7 @@ from ..gateway_client import (
     RUNNING_STATES,
     TERMINAL_STATES,
 )
+from ..product_variants import parse_variants_from_url
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -191,12 +192,47 @@ async def _sync_run_states(
     return updates
 
 
+class ProductVariant(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    label: str | None = None
+    url: str | None = None
+    attributes: dict[str, str] = Field(default_factory=dict)
+
+
 class ProductBody(BaseModel):
     sku: str = Field(min_length=1)
     name: str
     url: str | None = None
     tags: list[str] = Field(default_factory=list)
     notes: str | None = None
+    # Operator-supplied selling-points + pitch markdown captured upfront so
+    # the LaunchCampaignForm can prefill instead of asking each time.
+    pitch_md: str | None = Field(default=None, max_length=64_000)
+    selling_points: str | None = Field(default=None, max_length=8_000)
+    # Known variants (color/size/etc.) the campaign can offer the KOL.
+    # Populated either by the operator manually or by /products/parse-variants.
+    variants: list[ProductVariant] = Field(default_factory=list)
+    # Default budget values surfaced as the LaunchCampaignForm initial state.
+    default_budget_per_kol: float | None = None
+    default_budget_total: float | None = None
+    default_absolute_floor: float | None = None
+
+
+class ParseVariantsBody(BaseModel):
+    url: str = Field(min_length=1, max_length=2_000)
+
+
+def _row_to_product(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    d = dict(row)
+    d["tags"] = json.loads(d.pop("tags_json") or "[]")
+    d["variants"] = json.loads(d.pop("variants_json") or "[]") if d.get("variants_json") is not None else []
+    # Surface the wider product facts (None when never set).
+    d.setdefault("pitch_md", None)
+    d.setdefault("selling_points", None)
+    d.setdefault("default_budget_per_kol", None)
+    d.setdefault("default_budget_total", None)
+    d.setdefault("default_absolute_floor", None)
+    return d
 
 
 @router.get("")
@@ -205,12 +241,23 @@ def list_products(
     _: Annotated[dict, Depends(current_user)],
 ) -> list[dict]:
     rows = conn.execute("SELECT * FROM products ORDER BY created_at DESC").fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["tags"] = json.loads(d.pop("tags_json") or "[]")
-        out.append(d)
-    return out
+    return [_row_to_product(r) for r in rows]
+
+
+@router.post("/parse-variants")
+def parse_variants(
+    body: ParseVariantsBody,
+    _: Annotated[dict, Depends(current_user)],
+) -> dict[str, Any]:
+    """Best-effort: extract a variant token from a merchant URL.
+
+    Used by the product form so operators can paste a Povison-style link
+    (``...?variant=32529``) and have the variant pre-populated as one row in
+    the product's variant list. Pages that don't expose a token return an
+    empty list — operators add variants manually.
+    """
+    variants = parse_variants_from_url(body.url)
+    return {"url": body.url, "variants": variants}
 
 
 @router.get("/summary")
@@ -229,8 +276,10 @@ async def list_products_summary(
     """
     e = _env(env)
     products = conn.execute(
-        "SELECT sku, name, url, tags_json, notes, created_at FROM products "
-        "ORDER BY created_at DESC"
+        "SELECT sku, name, url, tags_json, notes, created_at, "
+        "pitch_md, selling_points, variants_json, "
+        "default_budget_per_kol, default_budget_total, default_absolute_floor "
+        "FROM products ORDER BY created_at DESC"
     ).fetchall()
     pc_rows = conn.execute(
         "SELECT sku, campaign_id, env, run_id, status, started_at "
@@ -267,12 +316,20 @@ async def list_products_summary(
             "contacted_kol_ids": [],
             "event_count": 0,
         }
+        variants = json.loads(p["variants_json"] or "[]") if p["variants_json"] is not None else []
         out.append({
             "sku": sku,
             "name": p["name"],
             "url": p["url"],
             "tags": json.loads(p["tags_json"] or "[]"),
             "notes": p["notes"],
+            "pitch_md": p["pitch_md"],
+            "selling_points": p["selling_points"],
+            "variants": variants,
+            "variant_count": len(variants),
+            "default_budget_per_kol": p["default_budget_per_kol"],
+            "default_budget_total": p["default_budget_total"],
+            "default_absolute_floor": p["default_absolute_floor"],
             "campaigns_total": len(cs),
             "campaigns_running": len(active),
             "active_campaign_ids": [c["campaign_id"] for c in active],
@@ -292,15 +349,33 @@ def upsert_product(
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict:
     now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    variants_payload = [v.model_dump() for v in body.variants]
     conn.execute(
-        """INSERT INTO products (sku, name, url, tags_json, notes, created_at)
-           VALUES (?,?,?,?,?,?)
+        """INSERT INTO products (
+              sku, name, url, tags_json, notes, created_at,
+              pitch_md, selling_points, variants_json,
+              default_budget_per_kol, default_budget_total, default_absolute_floor)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(sku) DO UPDATE SET
              name=excluded.name, url=excluded.url,
-             tags_json=excluded.tags_json, notes=excluded.notes""",
-        (body.sku, body.name, body.url, json.dumps(body.tags), body.notes, now),
+             tags_json=excluded.tags_json, notes=excluded.notes,
+             pitch_md=excluded.pitch_md,
+             selling_points=excluded.selling_points,
+             variants_json=excluded.variants_json,
+             default_budget_per_kol=excluded.default_budget_per_kol,
+             default_budget_total=excluded.default_budget_total,
+             default_absolute_floor=excluded.default_absolute_floor""",
+        (
+            body.sku, body.name, body.url, json.dumps(body.tags), body.notes, now,
+            body.pitch_md, body.selling_points, json.dumps(variants_payload),
+            body.default_budget_per_kol, body.default_budget_total,
+            body.default_absolute_floor,
+        ),
     )
-    write_audit(conn, actor_user_id=user["id"], action="product.upsert", target=body.sku)
+    write_audit(
+        conn, actor_user_id=user["id"], action="product.upsert", target=body.sku,
+        payload={"variant_count": len(variants_payload)},
+    )
     return {"ok": True, "sku": body.sku}
 
 
@@ -313,9 +388,7 @@ def get_product(
     row = conn.execute("SELECT * FROM products WHERE sku=?", (sku,)).fetchone()
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "sku not found")
-    d = dict(row)
-    d["tags"] = json.loads(d.pop("tags_json") or "[]")
-    return d
+    return _row_to_product(row)
 
 
 @router.get("/{sku}/campaigns")

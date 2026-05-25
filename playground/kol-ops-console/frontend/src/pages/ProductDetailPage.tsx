@@ -2,8 +2,29 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api';
 import AgentTranscriptPanel from '../components/AgentTranscriptPanel';
+import ContractReadinessPanel from '../components/ContractReadinessPanel';
+import EditCampaignConfigPanel from '../components/EditCampaignConfigPanel';
 
-type Product = { sku: string; name: string; url: string | null; tags: string[]; notes: string | null };
+type ProductVariant = {
+  id: string;
+  label?: string | null;
+  url?: string | null;
+  attributes?: Record<string, string>;
+};
+
+type Product = {
+  sku: string;
+  name: string;
+  url: string | null;
+  tags: string[];
+  notes: string | null;
+  pitch_md: string | null;
+  selling_points: string | null;
+  variants: ProductVariant[];
+  default_budget_per_kol: number | null;
+  default_budget_total: number | null;
+  default_absolute_floor: number | null;
+};
 
 type CampaignRow = {
   campaign_id: string;
@@ -545,6 +566,30 @@ function CampaignCard({
           emptyText="暂无已建联 KOL — 审批 shortlist 后将生成初邀草稿"
         />
       </div>
+      <EditCampaignConfigPanel campaignId={c.campaign_id} env={c.env} />
+      {c.contacted_kol_ids.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-xs font-medium text-slate-500">
+            Contract readiness (pre-flight before合同生成)
+          </div>
+          <ul className="space-y-2">
+            {c.contacted_kol_ids.map((iid) => {
+              const k = kols[String(iid)];
+              const label = k?.primary_handle ? `@${k.primary_handle}` : k?.display_name || `#${iid}`;
+              return (
+                <li key={iid} className="space-y-1">
+                  <div className="text-[11px] text-slate-500">{label}</div>
+                  <ContractReadinessPanel
+                    campaignId={c.campaign_id}
+                    identityId={iid}
+                    env={c.env}
+                  />
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       {c.run_id && (
         <div className="space-y-1">
           <AgentTranscriptPanel campaignId={c.campaign_id} env={c.env} live={c.status === 'running'} />
@@ -565,11 +610,13 @@ function CampaignCard({
 function LaunchCampaignForm({
   sku,
   env,
+  product,
   onLaunched,
   onError,
 }: {
   sku: string;
   env: 'TEST' | 'LIVE';
+  product: Product;
   onLaunched: (runId: string | null, campaignId: string) => void;
   onError: (msg: string) => void;
 }) {
@@ -578,14 +625,29 @@ function LaunchCampaignForm({
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const defaultCampaignId = `${sku}-${today}`;
   const [campaignId, setCampaignId] = useState(defaultCampaignId);
-  const [budgetPerKol, setBudgetPerKol] = useState<number>(500);
-  const [absoluteFloor, setAbsoluteFloor] = useState<number>(1000);
-  const [budgetTotal, setBudgetTotal] = useState<number>(12000);
+  const [budgetPerKol, setBudgetPerKol] = useState<number>(product.default_budget_per_kol ?? 500);
+  const [absoluteFloor, setAbsoluteFloor] = useState<number>(product.default_absolute_floor ?? 1000);
+  const [budgetTotal, setBudgetTotal] = useState<number>(product.default_budget_total ?? 12000);
   const [headcountTarget, setHeadcountTarget] = useState<number>(10);
   const [discoveryTargetOverride, setDiscoveryTargetOverride] = useState<number | ''>('');
   const [testModeTo, setTestModeTo] = useState<string>('');
-  const [productPitchMd, setProductPitchMd] = useState<string>('');
+  const [productPitchMd, setProductPitchMd] = useState<string>(product.pitch_md ?? '');
   const [briefExtra, setBriefExtra] = useState<string>('');
+  // All known variants are eligible by default — operator can untick to narrow.
+  const [variantPicked, setVariantPicked] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(product.variants.map((v) => [v.id, true])),
+  );
+  // Contract-readiness fields the operator declares upfront so the
+  // post-launch readiness gate has something to check.
+  const [deliverablePlatforms, setDeliverablePlatforms] = useState<Record<string, boolean>>({
+    instagram: true,
+    tiktok: true,
+    youtube: false,
+    twitter: false,
+    blog: false,
+  });
+  const [deliverableCount, setDeliverableCount] = useState<number>(1);
+  const [auditStandardsMd, setAuditStandardsMd] = useState<string>('');
   const [busy, setBusy] = useState(false);
 
   // Live preview of the discovery target so the operator can tune the funnel.
@@ -598,6 +660,22 @@ function LaunchCampaignForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sku]);
 
+  // Re-sync defaults when the parent reloads the product (e.g. variants edited
+  // in the catalog after this form mounted).
+  useEffect(() => {
+    setVariantPicked((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const v of product.variants) {
+        next[v.id] = prev[v.id] ?? true;
+      }
+      return next;
+    });
+  }, [product.variants]);
+
+  const pickedVariantIds = product.variants
+    .filter((v) => variantPicked[v.id])
+    .map((v) => v.id);
+
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (busy) return;
@@ -607,6 +685,25 @@ function LaunchCampaignForm({
     }
     if (!productPitchMd.trim()) {
       onError('product_pitch_md 必填：请粘贴产品的卖点 / 类别 / 受众 / 送样策略，供 KOL discovery 使用');
+      return;
+    }
+    if (product.variants.length > 0 && pickedVariantIds.length === 0) {
+      onError('请至少勾选一个 variant — KOL 选品 / 合同模板需要它');
+      return;
+    }
+    const platforms = Object.entries(deliverablePlatforms)
+      .filter(([, v]) => v)
+      .map(([k]) => k);
+    if (platforms.length === 0) {
+      onError('请至少勾选一个 deliverable platform — 合同模板要求');
+      return;
+    }
+    if (!Number.isFinite(deliverableCount) || deliverableCount < 1) {
+      onError('deliverable_count_per_platform 至少 1');
+      return;
+    }
+    if (!auditStandardsMd.trim() || auditStandardsMd.trim().length < 30) {
+      onError('audit_standards_md 必填（≥30 字符）— 内容审核 / 合同模板必须的依据');
       return;
     }
     setBusy(true);
@@ -625,6 +722,12 @@ function LaunchCampaignForm({
       if (discoveryTargetOverride !== '') {
         body.discovery_target_count = discoveryTargetOverride;
       }
+      if (pickedVariantIds.length > 0) {
+        body.product_variant_ids = pickedVariantIds;
+      }
+      body.deliverable_platforms = platforms;
+      body.deliverable_count_per_platform = deliverableCount;
+      body.audit_standards_md = auditStandardsMd.trim();
       const r = await api.post<{ run_id?: string }>(
         `/campaigns/${encodeURIComponent(campaignId)}/start`,
         body,
@@ -650,7 +753,7 @@ function LaunchCampaignForm({
           />
         </label>
         <label className="flex flex-col">
-          <span className="text-slate-500">budget_per_kol (USD)</span>
+          <span className="text-slate-500">paid_ceiling / KOL (USD)</span>
           <input
             type="number"
             min={0}
@@ -672,7 +775,7 @@ function LaunchCampaignForm({
           />
         </label>
         <label className="flex flex-col">
-          <span className="text-slate-500">budget_total (USD)</span>
+          <span className="text-slate-500">total budget（仅写入 brief, USD）</span>
           <input
             type="number"
             min={0}
@@ -723,11 +826,56 @@ function LaunchCampaignForm({
           />
         </label>
       </div>
+      {product.variants.length > 0 && (
+        <div className="rounded border border-slate-200 p-2">
+          <div className="mb-1 text-xs font-medium text-slate-700">
+            Eligible variants <span className="text-amber-600">*</span>
+            <span className="ml-1 font-normal text-slate-400">
+              (此 campaign 允许 KOL 选哪些规格 — 合同 PRODUCT_SPECS 会用到)
+            </span>
+          </div>
+          <ul className="grid grid-cols-1 gap-1 md:grid-cols-2">
+            {product.variants.map((v) => (
+              <li key={v.id} className="flex items-start gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={!!variantPicked[v.id]}
+                  onChange={(e) =>
+                    setVariantPicked((prev) => ({ ...prev, [v.id]: e.target.checked }))
+                  }
+                />
+                <span>
+                  <span className="font-mono">{v.id}</span>
+                  {v.label && <span className="ml-1 text-slate-600">— {v.label}</span>}
+                  {v.url && (
+                    <a
+                      href={v.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="ml-1 text-emerald-700 underline"
+                    >
+                      url
+                    </a>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {product.variants.length === 0 && (
+        <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+          这个商品在 catalog 里还没录入 variant — 合同模板的 PRODUCT_SPECS 会留空。建议先在
+          {' '}<Link to="/products" className="underline">产品列表</Link>
+          {' '}添加 variant 后再启动 campaign。
+        </div>
+      )}
       <label className="flex flex-col">
         <span className="text-slate-500">
           product_pitch_md <span className="text-amber-600">*</span>
           <span className="ml-1 text-slate-400">
-            (markdown，供 KOL discovery 提炼关键词 / 受众 / 送样策略)
+            (markdown，供 KOL discovery 提炼关键词 / 受众 / 送样策略；产品已存的 pitch 会自动预填)
           </span>
         </span>
         <textarea
@@ -739,6 +887,60 @@ function LaunchCampaignForm({
           required
         />
       </label>
+      <div className="rounded border border-slate-200 p-2">
+        <div className="mb-1 text-xs font-medium text-slate-700">
+          交付要求 <span className="text-amber-600">*</span>
+          <span className="ml-1 font-normal text-slate-400">
+            (合同模板 deliverables 表 + content 审核会用到)
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+          <div>
+            <div className="text-[11px] text-slate-500">Deliverable platforms</div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              {(['instagram', 'tiktok', 'youtube', 'twitter', 'blog'] as const).map((plat) => (
+                <label key={plat} className="inline-flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={!!deliverablePlatforms[plat]}
+                    onChange={(e) =>
+                      setDeliverablePlatforms((prev) => ({ ...prev, [plat]: e.target.checked }))
+                    }
+                  />
+                  {plat}
+                </label>
+              ))}
+            </div>
+          </div>
+          <label className="flex flex-col text-xs">
+            <span className="text-slate-500">deliverable_count_per_platform</span>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={deliverableCount}
+              onChange={(e) => setDeliverableCount(Number(e.target.value))}
+              className="w-24 rounded border px-2 py-1"
+              required
+            />
+          </label>
+        </div>
+        <label className="mt-2 flex flex-col text-xs">
+          <span className="text-slate-500">
+            audit_standards_md <span className="text-amber-600">*</span>
+            <span className="ml-1 text-slate-400">
+              (≥30 字符；合规 / 品牌口径 / 必备 hashtag / 避雷)
+            </span>
+          </span>
+          <textarea
+            value={auditStandardsMd}
+            onChange={(e) => setAuditStandardsMd(e.target.value)}
+            rows={3}
+            className="rounded border px-2 py-1 font-mono"
+            placeholder={'例如：\n- 首句必须出现 #ad / 含 paid partnership 标记\n- 避免医疗 / 政治 / 饮食断言\n- 必须 @povison.official'}
+          />
+        </label>
+      </div>
       <label className="flex flex-col">
         <span className="text-slate-500">brief_extra (额外要求 / 备注)</span>
         <textarea
@@ -927,6 +1129,58 @@ export function ProductDetailPage() {
       )}
       {p.notes && <p className="text-sm text-slate-600">{p.notes}</p>}
 
+      <div className="rounded border bg-white p-3 text-xs">
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+          <div>
+            <div className="font-medium text-slate-500">Selling points</div>
+            <div className="whitespace-pre-wrap text-slate-700">
+              {p.selling_points || <span className="italic text-slate-400">(none recorded)</span>}
+            </div>
+          </div>
+          <div>
+            <div className="font-medium text-slate-500">Launch defaults</div>
+            <div className="text-slate-700">
+              paid ceiling / KOL: {p.default_budget_per_kol ?? '—'} ·
+              total budget (brief only): {p.default_budget_total ?? '—'} ·
+              floor: {p.default_absolute_floor ?? '—'}
+            </div>
+          </div>
+        </div>
+        <div className="mt-2">
+          <div className="font-medium text-slate-500">
+            Variants ({p.variants.length})
+            <Link to="/products" className="ml-2 text-sky-700 hover:underline">
+              edit in catalog →
+            </Link>
+          </div>
+          {p.variants.length === 0 ? (
+            <div className="italic text-slate-400">No variants on record.</div>
+          ) : (
+            <ul className="flex flex-wrap gap-1">
+              {p.variants.map((v) => (
+                <li
+                  key={v.id}
+                  className="inline-flex items-center gap-1 rounded bg-indigo-50 px-2 py-0.5 text-indigo-800"
+                >
+                  <span className="font-mono">{v.id}</span>
+                  {v.label && <span>· {v.label}</span>}
+                  {v.url && (
+                    <a
+                      href={v.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="ml-1 text-emerald-700 hover:underline"
+                    >
+                      ↗
+                    </a>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
       <section className="space-y-2">
         <div className="flex items-center gap-2">
           <h2 className="font-medium">Campaigns</h2>
@@ -950,6 +1204,7 @@ export function ProductDetailPage() {
           <LaunchCampaignForm
             sku={p.sku}
             env={envFilter}
+            product={p}
             onLaunched={(runId, campaignId) => {
               setMsg(
                 `Campaign ${campaignId} launched in ${envFilter} · gateway run ${runId ?? '(none)'}`,

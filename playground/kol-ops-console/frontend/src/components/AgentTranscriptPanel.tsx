@@ -117,12 +117,28 @@ function clip(s: string, max = 400): string {
   return s.length <= max ? s : `${s.slice(0, max)}…`;
 }
 
+function relativeAgo(ts?: string | null): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const diffSec = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 3600) return `${Math.round(diffSec / 60)}m ago`;
+  return `${Math.round(diffSec / 3600)}h ago`;
+}
+
 export default function AgentTranscriptPanel({ campaignId, env, live, variant = 'inline' }: Props) {
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [conn, setConn] = useState<'idle' | 'connecting' | 'live' | 'closed'>('idle');
   const [runs, setRuns] = useState<RunRow[]>([]);
+  // openRuns must drive UI (the "currently running" banner), so keep it in
+  // both a ref (for stable mutation inside the SSE callback) and state (for
+  // re-render). The ref is the source of truth; state is mirrored on
+  // mutate.
   const openRuns = useRef<Set<string>>(new Set());
+  const [openRunsTick, setOpenRunsTick] = useState(0);
+  const bumpOpenRuns = () => setOpenRunsTick((n) => n + 1);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickyBottom = useRef<boolean>(true);
 
@@ -138,6 +154,7 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
     setErr(null);
     setRuns([]);
     openRuns.current = new Set();
+    bumpOpenRuns();
 
     api
       .get<AgentLogResponse>(
@@ -173,7 +190,15 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
         if (ev.event === 'snapshot') {
           const snap = rec as unknown as SnapshotEvent;
           setRuns(snap.runs ?? []);
-          openRuns.current = new Set((snap.runs ?? []).map((r) => r.run_id));
+          // Treat any run that does not yet have an ended_at as still
+          // open. The aggregator will emit run.closed once the gateway
+          // SSE finishes; until then we want the LIVE badge lit.
+          openRuns.current = new Set(
+            (snap.runs ?? [])
+              .filter((r) => !r.ended_at)
+              .map((r) => r.run_id),
+          );
+          bumpOpenRuns();
           setConn('live');
           if (Array.isArray(snap.items) && snap.items.length) {
             setItems(snap.items);
@@ -188,12 +213,16 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
             ...prev,
           ]));
           openRuns.current.add(r.run_id);
+          bumpOpenRuns();
           return;
         }
 
         if (ev.event === 'run.closed' || ev.event === 'run.evicted' || ev.event === 'run.error') {
           const rid = String(rec.run_id ?? '');
-          if (rid) openRuns.current.delete(rid);
+          if (rid) {
+            openRuns.current.delete(rid);
+            bumpOpenRuns();
+          }
           if (openRuns.current.size === 0) setConn('closed');
           return;
         }
@@ -293,6 +322,7 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
             }),
           ]);
           openRuns.current.delete(runId);
+          bumpOpenRuns();
           if (openRuns.current.size === 0) setConn('closed');
           return;
         }
@@ -325,6 +355,19 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
 
   const bodyHeight = variant === 'fullscreen' ? 'h-[calc(100vh-10rem)]' : 'h-72';
 
+  // A run is "currently active" when:
+  //   - the SSE aggregator hasn't sent run.closed / run.evicted / run.error
+  //     for it yet (tracked in openRuns), AND
+  //   - the registry doesn't already have an ended_at timestamp.
+  // We surface this set explicitly so the operator can tell "the agent is
+  // typing right now" apart from "this transcript is finished".
+  const activeRuns = useMemo(
+    () => runs.filter(
+      (r) => !r.ended_at && (live ? openRuns.current.has(r.run_id) : false),
+    ),
+    [runs, live, openRunsTick],
+  );
+
   return (
     <div className="rounded border border-slate-800 bg-slate-900/95 p-2 shadow-inner">
       <div className="mb-1 flex items-center justify-between text-xs">
@@ -332,15 +375,21 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
         <span className="flex items-center gap-2 text-slate-400">
           {runs.length > 0 && (
             <span className="flex items-center gap-1 font-mono text-[10px] text-slate-500">
-              {runs.slice(0, 4).map((r) => (
-                <span
-                  key={r.run_id}
-                  className={`rounded px-1 py-[1px] ${RUN_KIND_TONE[r.kind] ?? 'bg-slate-800 text-slate-300'}`}
-                  title={`${r.kind} · ${r.run_id}`}
-                >
-                  {RUN_KIND_LABEL[r.kind] ?? r.kind}:{r.run_id.slice(0, 6)}
-                </span>
-              ))}
+              {runs.slice(0, 4).map((r) => {
+                const isActive = activeRuns.some((a) => a.run_id === r.run_id);
+                return (
+                  <span
+                    key={r.run_id}
+                    className={`flex items-center gap-1 rounded px-1 py-[1px] ${RUN_KIND_TONE[r.kind] ?? 'bg-slate-800 text-slate-300'}`}
+                    title={`${r.kind} · ${r.run_id}${isActive ? ' · live' : ''}`}
+                  >
+                    {isActive && (
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                    )}
+                    {RUN_KIND_LABEL[r.kind] ?? r.kind}:{r.run_id.slice(0, 6)}
+                  </span>
+                );
+              })}
               {runs.length > 4 && <span>+{runs.length - 4}</span>}
             </span>
           )}
@@ -350,6 +399,28 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
           </span>
         </span>
       </div>
+      {activeRuns.length > 0 && (
+        <div className="mb-1 flex flex-wrap items-center gap-2 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-200">
+          <span className="inline-flex items-center gap-1 font-semibold">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+            ● 当前正在 run 的对话 ({activeRuns.length})
+          </span>
+          {activeRuns.map((r) => (
+            <span
+              key={r.run_id}
+              className="rounded bg-emerald-900/60 px-2 py-0.5 font-mono text-emerald-100"
+              title={r.run_id}
+            >
+              {RUN_KIND_LABEL[r.kind] ?? r.kind} · {r.run_id.slice(0, 8)} · {relativeAgo(r.started_at)}
+            </span>
+          ))}
+        </div>
+      )}
+      {live && activeRuns.length === 0 && conn === 'live' && (
+        <div className="mb-1 rounded border border-slate-700 bg-slate-800/60 px-2 py-1 text-[11px] text-slate-400">
+          监听中，但当前没有 active run — 任何新的 outreach / reply / draft / refine run 会自动显示在这里。
+        </div>
+      )}
       <div
         ref={scrollRef}
         onScroll={onScroll}

@@ -22,6 +22,12 @@ policy, KOL's stated mode/quote, and prior history. Either:
   `{"skipped":"deliverables_not_scoped"}`. Defense-in-depth.
 - **Idempotent on agreed.** If `goals.compensation_negotiation.status == "satisfied"`,
   abort `{"skipped":"already_agreed"}`.
+- **Preserve dollar amounts exactly.** Draft text, strategist notes, and
+  any temporary JSON containing values like `$3000`, `$1500`, or `$800`
+  must be written with Python `json.dump` or a quoted heredoc
+  (`cat <<'JSON' > /tmp/draft.json`). Never put those payloads in an
+  unquoted heredoc or inline double-quoted shell string; bash expands
+  `$3000` to `000` and `$800` to `00`.
 
 ## Inputs
 1. `identity_id`, `campaign_id`, `env`, `thread_id`.
@@ -127,6 +133,11 @@ For `mode=gifted` with no number, omit `proposed_amount` /
 Do **not** set `to` or `subject` — the dispatcher fills these from the
 inbound message before persisting `approval.reply_draft`.
 
+Before returning or persisting any draft envelope, verify that money
+strings still include their currency marker or explicit currency label;
+outputs such as `000 quote` or `00 total` indicate shell expansion and
+must be regenerated with dollar-safe JSON writing.
+
 `strategist` is included for audit; the dispatcher logs it but
 doesn't act on it.
 
@@ -169,3 +180,6 @@ Step 1 reveals `deliverables_scope.status="active"`. Skill aborts
   That flips only on KOL acceptance.
 - Forgetting `offer.proposed_currency` on paid/hybrid drafts; the
   contract-coordinator needs it.
+- Losing dollar signs via shell expansion when writing draft JSON. Use
+  quoted heredocs or Python JSON writers whenever draft text contains
+  `$` amounts.

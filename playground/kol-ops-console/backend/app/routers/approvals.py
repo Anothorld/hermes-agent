@@ -24,7 +24,14 @@ from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
-from ..run_registry import register_run
+from ..run_registry import get_inflight_run, register_run
+
+
+def _refine_dedup_key(identity_id: int, campaign_id: str) -> str:
+    """In-flight key for refine of approval.reply_draft. One operator can
+    only have one refine in flight per (identity, campaign) tuple; two
+    parallel refines would race the last-writer-wins fact update."""
+    return f"refine:{identity_id}:{campaign_id}"
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -73,11 +80,18 @@ class RefineBody(BaseModel):
     `campaign_id` is required: regeneration starts a campaign-scoped
     gateway run so the agent can re-read dispatch context and the
     inbound message.
+
+    ``if_captured_at`` is an optional optimistic-lock token — the
+    ``captured_at`` value the operator saw on the row they're refining.
+    If the bridge's current row has a newer ``captured_at`` (another
+    refine landed first, or the row was approved/rejected), the server
+    refuses with 409 to prevent clobbering a fresher result.
     """
     identity_id: int
     campaign_id: str = Field(min_length=1)
     refinement_prompt: str = Field(min_length=1, max_length=4000)
     env: Optional[str] = Field(default=None, pattern="^(LIVE|TEST)$")
+    if_captured_at: Optional[str] = None
 
 
 _REFINE_DRAFT_INSTRUCTIONS = (
@@ -100,6 +114,11 @@ _REFINE_DRAFT_INSTRUCTIONS = (
     "  \"pending\"), do NOT send mail, do NOT create a Gmail draft.\n"
     "- Persist the result by writing back the SAME approval.reply_draft fact\n"
     "  via `kol_bridge_tool.py write-facts-multi`. The new value MUST:\n"
+    "    * preserve dollar amounts exactly. Never place JSON containing `$`\n"
+    "      amounts in an unquoted heredoc or inline double-quoted shell\n"
+    "      string; bash expands `$3000` to `000` and `$800` to `00`. Write\n"
+    "      JSON with `cat <<'JSON' > /tmp/draft.json` or Python\n"
+    "      `json.dump`, then pass `--json @/tmp/draft.json`;\n"
     "    * keep `decision`, `source_message_id`, `primary_lane`,\n"
     "      `primary_goal`, `child_skill`, `linked_escalation_id` from the\n"
     "      prior value;\n"
@@ -109,6 +128,8 @@ _REFINE_DRAFT_INSTRUCTIONS = (
     "    * append `{prompt, at, by}` to `refinement_history` (cap at 5),\n"
     "      where `by` is the requested_by from the brief and `at` is the\n"
     "      current ISO-8601 UTC timestamp.\n"
+    "- After writing, re-read `approval.reply_draft` and verify that money\n"
+    "  strings did not become placeholders like `000 quote` or `00 total`.\n"
     "- In TEST mode, route any draft target to campaign_config.test_mode_to."
 )
 
@@ -197,6 +218,64 @@ async def _fetch_handles(
 
     pairs = await asyncio.gather(*(_one(i) for i in identity_ids))
     return {iid: handle for iid, handle in pairs}
+
+
+def _shape_inbound(ev: dict[str, Any]) -> dict[str, Any]:
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    return {
+        "event_id": ev.get("id"),
+        "ts": ev.get("ts"),
+        "from_addr": payload.get("from_addr"),
+        "subject": payload.get("subject"),
+        "body": payload.get("body"),
+        "snippet": payload.get("snippet"),
+        "date": payload.get("date"),
+        "message_id": payload.get("message_id"),
+        "thread_id": payload.get("thread_id"),
+    }
+
+
+@router.get("/inbound-context")
+async def approval_inbound_context(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+    identity_id: int = Query(..., ge=1),
+    campaign_id: str = Query(...),
+    message_id: Optional[str] = Query(None),
+    env: Optional[str] = Query(None),
+) -> dict[str, Any]:
+    """Return the inbound email tied to a pending approval.reply_draft.
+
+    The approval value usually contains a ``source_message_id`` we can
+    match against; when absent (older drafts), fall back to the latest
+    inbound on the per-campaign timeline.
+    """
+    e = _env(env)
+    try:
+        events = await bridge.get_timeline(
+            identity_id, env=e, campaign_id=campaign_id, limit=200,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    inbounds = [
+        ev for ev in events
+        if isinstance(ev, dict) and ev.get("event_type") == "kol_inbound_reply"
+    ]
+    chosen: dict[str, Any] | None = None
+    if message_id:
+        for ev in inbounds:
+            payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+            if payload.get("message_id") == message_id:
+                chosen = ev
+                break
+    if chosen is None and inbounds:
+        chosen = inbounds[0]
+    return {
+        "identity_id": identity_id,
+        "campaign_id": campaign_id,
+        "env": e,
+        "inbound": _shape_inbound(chosen) if chosen else None,
+    }
 
 
 @router.get("")
@@ -418,6 +497,26 @@ async def refine(
             "refine is only supported for approval.reply_draft",
         )
     env = _env(body.env)
+    # In-flight dedup: a previous refine for the same (identity, campaign)
+    # may still be writing back the fact. Block the duplicate at this
+    # layer so the frontend can keep the button disabled across page
+    # refreshes — the local React busy state alone resets on reload.
+    dedup_key = _refine_dedup_key(body.identity_id, body.campaign_id)
+    inflight = get_inflight_run(conn, dedup_key=dedup_key)
+    if inflight is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "error": "refine_already_in_flight",
+                "message": (
+                    "A refine run for this approval is already in "
+                    "progress. Wait for the new draft to appear "
+                    "(typically 30–60 s) before requesting another."
+                ),
+                "run_id": inflight.get("run_id"),
+                "started_at": inflight.get("started_at"),
+            },
+        )
     try:
         raw = await bridge.list_approvals(status="pending", env=env)
     except BridgeError as exc:
@@ -442,6 +541,28 @@ async def refine(
             status.HTTP_400_BAD_REQUEST,
             "approval.reply_draft value is not an object — cannot refine",
         )
+    # Optimistic lock: refuse if the row moved since the operator opened
+    # the refine UI (a concurrent refine, an approve, or a reject all
+    # change captured_at). Best-effort — only enforced when the client
+    # sent a token.
+    if body.if_captured_at is not None:
+        current_captured_at = current_row.get("captured_at")
+        if (current_captured_at is not None
+                and str(current_captured_at) != str(body.if_captured_at)):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "error": "stale_draft",
+                    "message": (
+                        "This draft has been updated by another action "
+                        "since you opened it. Refresh the Approvals "
+                        "page to see the latest version before "
+                        "refining."
+                    ),
+                    "current_captured_at": current_captured_at,
+                    "expected_captured_at": body.if_captured_at,
+                },
+            )
     brief = _compose_refine_brief(
         fact_path=fact_path,
         identity_id=body.identity_id,
@@ -470,6 +591,7 @@ async def refine(
             run_id=run_id,
             kind="refine",
             session_id=f"kol-campaign-draft:{env}:{body.campaign_id}",
+            dedup_key=dedup_key,
         )
     write_audit(
         conn, actor_user_id=user["id"], action="approval.refine",
