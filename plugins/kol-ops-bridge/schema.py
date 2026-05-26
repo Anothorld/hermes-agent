@@ -80,6 +80,7 @@ TABLES: dict[str, str] = {
         CREATE TABLE IF NOT EXISTS campaign_config (
             campaign_id                       TEXT PRIMARY KEY,
             label                             TEXT,
+            product_display_name              TEXT,
             product_unit_price                REAL,
             barter_policy                     TEXT,
             paid_ceiling                      REAL,

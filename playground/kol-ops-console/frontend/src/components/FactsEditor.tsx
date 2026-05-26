@@ -1,33 +1,28 @@
 import { FormEvent, useMemo, useState } from 'react';
 import { api } from '../api';
+import { FactInput } from './inputs/FactInput';
+import { FactKeyChip } from './inputs/FactKeyChip';
+import { ErrorAlert } from './feedback/ErrorAlert';
+import { toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
 
-/**
- * Namespace-aware facts editor (v2.4).
- *
- * Renders 4 tabs (Identity / Offer / Fulfillment / Approval). Each tab
- * shows only fact keys with the matching ``<namespace>.`` prefix. On
- * submit the editor groups entered values by namespace and posts a
- * single ``POST /facts/{identity_id}/multi`` so the bridge can validate
- * + write all namespaces atomically.
- *
- * Identity facts (``identity.*``) are auto-synced by the bridge into the
- * ``kol_identity`` row (see ``cal.write_facts``), so writing e.g.
- * ``identity.primary_email`` here also updates the identity record.
- */
+// Namespace-aware facts editor. Renders 4 tabs (Identity / Offer /
+// Fulfillment / Approval); each tab shows only fact keys with the
+// matching ``<namespace>.`` prefix and uses FactInput for the
+// type-aware input control (toggle / select / number / etc). Submits
+// via the multi-namespace endpoint atomically.
 
 type Namespace = 'identity' | 'offer' | 'fulfillment' | 'approval';
 
 const NS_ORDER: Namespace[] = ['identity', 'offer', 'fulfillment', 'approval'];
 
 const NS_LABEL: Record<Namespace, string> = {
-  identity: 'Identity',
-  offer: 'Offer',
-  fulfillment: 'Fulfillment',
-  approval: 'Approval',
+  identity: '身份',
+  offer: '合作',
+  fulfillment: '物流',
+  approval: '审批',
 };
 
-// Tab badge palette mirrors the rest of the console (Kanban chips,
-// ApprovalsPage namespace headers) so the visual contract is uniform.
 const NS_TAB_COLOR: Record<Namespace, string> = {
   identity: 'border-sky-400 text-sky-800 bg-sky-50',
   offer: 'border-emerald-400 text-emerald-800 bg-emerald-50',
@@ -44,18 +39,16 @@ interface Props {
   identityId: number;
   campaignId?: string;
   env?: 'TEST' | 'LIVE';
-  /** Dotted, namespace-prefixed fact keys to render. Missing-facts list
-   *  from goal state is the typical caller. */
+  /** Dotted, namespace-prefixed fact keys to render. */
   factKeys: string[];
   onSubmitted?: (resp: unknown) => void;
 }
 
 export function FactsEditor({ identityId, campaignId, env, factKeys, onSubmitted }: Props) {
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [values, setValues] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
 
-  // Group requested keys by namespace once per prop change.
   const groups = useMemo(() => {
     const out: Record<Namespace | 'other', string[]> = {
       identity: [], offer: [], fulfillment: [], approval: [], other: [],
@@ -64,14 +57,13 @@ export function FactsEditor({ identityId, campaignId, env, factKeys, onSubmitted
     return out;
   }, [factKeys]);
 
-  // Default active tab = first namespace with any keys to collect.
   const [active, setActive] = useState<Namespace>(() => {
     for (const ns of NS_ORDER) if (groups[ns].length > 0) return ns;
     return 'identity';
   });
 
   if (!factKeys.length) {
-    return <div className="text-xs text-slate-500">No facts to collect.</div>;
+    return <div className="text-xs text-slate-500">没有待补全的字段。</div>;
   }
 
   async function submit(ev: FormEvent) {
@@ -82,18 +74,16 @@ export function FactsEditor({ identityId, campaignId, env, factKeys, onSubmitted
       const namespaces: Record<string, Record<string, unknown>> = {};
       for (const k of factKeys) {
         const v = values[k];
-        if (v === undefined || v === '') continue;
+        if (v === undefined || v === '' || v === null) continue;
         const ns = nsOf(k);
-        // 'other' is a UI bucket only; the bridge rejects unknown namespaces
-        // so we surface those to the user instead of silently dropping.
         if (ns === 'other') {
-          throw new Error(`fact key '${k}' has no recognised namespace prefix`);
+          throw new Error(`字段 '${k}' 没有合法的命名空间前缀`);
         }
         namespaces[ns] = namespaces[ns] || {};
-        namespaces[ns][k] = coerce(v);
+        namespaces[ns][k] = v;
       }
       if (Object.keys(namespaces).length === 0) {
-        setErr('Fill in at least one value.');
+        setErr(new Error('请至少填一项'));
         setBusy(false);
         return;
       }
@@ -106,8 +96,10 @@ export function FactsEditor({ identityId, campaignId, env, factKeys, onSubmitted
       const out = await api.post<unknown>(`/facts/${identityId}/multi`, body);
       onSubmitted?.(out);
       setValues({});
+      toast.success('字段已保存', `${Object.keys(namespaces).length} 个 namespace 更新`);
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('保存失败', errorSummary(ex));
     } finally {
       setBusy(false);
     }
@@ -116,7 +108,11 @@ export function FactsEditor({ identityId, campaignId, env, factKeys, onSubmitted
   const currentKeys = groups[active] || [];
 
   return (
-    <form onSubmit={submit} className="space-y-2 rounded border border-slate-200 bg-white p-3">
+    <form
+      onSubmit={submit}
+      data-editing
+      className="space-y-2 rounded border border-slate-200 bg-white p-3"
+    >
       <div className="flex items-center gap-1">
         {NS_ORDER.map((ns) => {
           const count = groups[ns].length;
@@ -130,65 +126,54 @@ export function FactsEditor({ identityId, campaignId, env, factKeys, onSubmitted
               type="button"
               onClick={() => setActive(ns)}
               className={`px-2 py-1 text-xs font-medium ${base}`}
-              title={`${count} field(s)`}
+              title={`${count} 个字段`}
             >
-              {NS_LABEL[ns]}{count > 0 && <span className="ml-1 text-[10px]">({count})</span>}
+              {NS_LABEL[ns]}
+              {count > 0 && <span className="ml-1 text-[10px]">({count})</span>}
             </button>
           );
         })}
         {groups.other.length > 0 && (
-          <span className="ml-2 text-[10px] text-rose-600" title={groups.other.join(', ')}>
-            ⚠ {groups.other.length} unrecognised
+          <span
+            className="ml-2 text-[10px] text-rose-600"
+            title={groups.other.join(', ')}
+          >
+            ⚠ {groups.other.length} 个字段名不识别
           </span>
         )}
       </div>
 
       {currentKeys.length === 0 ? (
         <div className="px-1 py-2 text-xs text-slate-400">
-          No {NS_LABEL[active]} facts requested.
+          {NS_LABEL[active]}下没有待补全字段。
         </div>
       ) : (
         currentKeys.map((k) => (
-          <label key={k} className="flex items-center gap-2 text-sm">
-            <span className="w-56 shrink-0 font-mono text-xs text-slate-700">{k}</span>
-            <input
-              value={values[k] ?? ''}
-              onChange={(e) => setValues((v) => ({ ...v, [k]: e.target.value }))}
-              className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
-              placeholder="value (string / number / true|false / [a,b])"
-            />
-          </label>
+          <div key={k} className="flex items-start gap-2">
+            <FactKeyChip factKey={k} variant="filled" className="mt-1 w-40 shrink-0 truncate" />
+            <div className="flex-1">
+              <FactInput
+                factKey={k}
+                value={values[k] ?? ''}
+                onChange={(v) => setValues((m) => ({ ...m, [k]: v }))}
+                bare
+              />
+            </div>
+          </div>
         ))
       )}
 
-      {err && <div className="text-xs text-red-600">{err}</div>}
+      {!!err && <ErrorAlert error={err} compact />}
       <button
         type="submit"
         disabled={busy}
         className="rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
       >
-        {busy ? 'Saving…' : 'Save facts'}
+        {busy ? '保存中…' : '保存字段'}
       </button>
       <div className="text-[10px] text-slate-400">
-        Identity facts are auto-mirrored to <code>kol_identity</code> by the bridge.
+        身份类字段会自动同步到 KOL 档案。
       </div>
     </form>
   );
-}
-
-/** Coerce string input into JSON-friendly value: bool, int, float, list, str. */
-function coerce(s: string): unknown {
-  const t = s.trim();
-  if (t === 'true') return true;
-  if (t === 'false') return false;
-  if (/^-?\d+$/.test(t)) return parseInt(t, 10);
-  if (/^-?\d+\.\d+$/.test(t)) return parseFloat(t);
-  if (t.startsWith('[') && t.endsWith(']')) {
-    return t
-      .slice(1, -1)
-      .split(',')
-      .map((x) => x.trim())
-      .filter((x) => x.length > 0);
-  }
-  return s;
 }

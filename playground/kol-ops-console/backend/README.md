@@ -21,6 +21,12 @@ export KOC_DB_PATH=$HOME/.hermes/kol-ops-console/app.db
 uvicorn app.main:app --reload --port 8765
 ```
 
+When the console launches a Gateway run, it mirrors the resolved bridge key
+into `HERMES_KOL_OPS_BRIDGE_KEY` in the Hermes `.env` files that Gateway
+hot-loads. If `KOC_BRIDGE_KEY` / `HERMES_KOL_OPS_BRIDGE_KEY` is missing or
+still set to the example placeholder, launch and approval-resume endpoints fail
+with `missing_bridge_key` instead of starting an agent run that cannot read CAL.
+
 First boot auto-creates an `owner@console.app` user with a random password printed
 to stdout. Rotate immediately.
 

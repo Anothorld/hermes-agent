@@ -1649,6 +1649,96 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     }
 
 
+_DEFAULT_LOCAL_CDP_PROBE_URL = "http://127.0.0.1:9222"
+_AUTOLAUNCH_TIMEOUT_S = 25.0
+_autolaunch_lock = threading.Lock()
+
+
+def _probe_local_cdp(probe_url: str = _DEFAULT_LOCAL_CDP_PROBE_URL) -> Optional[str]:
+    """Return a concrete websocket CDP URL when a debug Chrome is reachable.
+
+    Unlike :func:`_resolve_cdp_override`, this returns ``None`` instead of
+    the raw URL when discovery fails, so callers can branch on liveness.
+    """
+    base = (probe_url or "").strip().rstrip("/")
+    if not base:
+        return None
+    try:
+        response = requests.get(f"{base}/json/version", timeout=2)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return None
+    ws_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
+    return ws_url or None
+
+
+def _locate_local_chrome_launcher() -> Optional[Path]:
+    """Resolve the start-debug-chrome.sh script path, or None if absent."""
+    override = os.environ.get("HERMES_LOCAL_CHROME_LAUNCHER", "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        return candidate if candidate.is_file() else None
+    candidate = (
+        Path(__file__).resolve().parent.parent
+        / "playground"
+        / "local-chrome-debug"
+        / "start-debug-chrome.sh"
+    )
+    return candidate if candidate.is_file() else None
+
+
+def _try_autolaunch_local_chrome(
+    probe_url: str = _DEFAULT_LOCAL_CDP_PROBE_URL,
+) -> Optional[str]:
+    """Run the debug-Chrome launcher and return its CDP URL on success.
+
+    Serialized with a module-wide lock so concurrent workers don't race
+    on the same port (the launcher itself is idempotent but we still want
+    to avoid redundant subprocess invocations). After acquiring the lock
+    we re-probe — another worker may have launched the browser while we
+    were waiting.
+    """
+    with _autolaunch_lock:
+        existing = _probe_local_cdp(probe_url)
+        if existing:
+            return existing
+
+        script = _locate_local_chrome_launcher()
+        if script is None:
+            logger.warning(
+                "Cannot autolaunch local Chrome: start-debug-chrome.sh not found "
+                "(set HERMES_LOCAL_CHROME_LAUNCHER to override path)"
+            )
+            return None
+
+        logger.info("Auto-starting local debug Chrome via %s", script)
+        try:
+            result = subprocess.run(
+                ["bash", str(script), "start"],
+                timeout=_AUTOLAUNCH_TIMEOUT_S,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Local Chrome autolaunch timed out after %.0fs", _AUTOLAUNCH_TIMEOUT_S)
+            return None
+        except Exception as exc:
+            logger.warning("Local Chrome autolaunch failed to spawn: %s", exc)
+            return None
+
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip().splitlines()
+            tail = stderr[-1] if stderr else "(no stderr)"
+            logger.warning(
+                "Local Chrome autolaunch exited with code %d: %s",
+                result.returncode, tail,
+            )
+            return None
+
+        return _probe_local_cdp(probe_url)
+
+
 def _get_session_info(
     task_id: Optional[str] = None,
     *,
@@ -1717,24 +1807,48 @@ def _get_session_info(
             except Exception as e:
                 provider_name = type(provider).__name__
                 logger.warning(
-                    "Cloud provider %s failed (%s); attempting fallback to local "
-                    "Chromium for task %s",
+                    "Cloud provider %s failed (%s); attempting CDP local-Chrome "
+                    "fallback for task %s",
                     provider_name, e, task_id,
                     exc_info=True,
                 )
-                try:
-                    session_info = _create_local_session(task_id)
-                except Exception as local_error:
+
+                # Fallback chain: pre-set CDP override → probe 127.0.0.1:9222 →
+                # auto-launch debug Chrome → hard-fail with actionable message.
+                # The headless agent-browser Chromium is intentionally NOT in
+                # this chain — sites with bot detection (Instagram, etc.) need
+                # the real-Chrome path.
+                cdp_url = _get_cdp_override() or _probe_local_cdp()
+                fallback_mode = "cdp" if cdp_url else None
+                if not cdp_url:
+                    cdp_url = _try_autolaunch_local_chrome()
+                    if cdp_url:
+                        fallback_mode = "cdp_autostart"
+                        # Persist the URL so subsequent tasks in this worker
+                        # skip the cloud round-trip and connect directly.
+                        os.environ["BROWSER_CDP_URL"] = cdp_url
+
+                if not cdp_url:
                     raise RuntimeError(
                         f"Cloud provider {provider_name} failed ({e}) and local "
-                        f"fallback also failed ({local_error})"
+                        f"debug Chrome could not be reached or auto-started. "
+                        f"Run playground/local-chrome-debug/start-debug-chrome.sh "
+                        f"manually, log into Instagram once, then retry."
                     ) from e
-                # Mark session as degraded for observability
-                if isinstance(session_info, dict):
-                    session_info = dict(session_info)
-                    session_info["fallback_from_cloud"] = True
-                    session_info["fallback_reason"] = str(e)
-                    session_info["fallback_provider"] = provider_name
+
+                try:
+                    session_info = _create_cdp_session(task_id, cdp_url)
+                except Exception as cdp_error:
+                    raise RuntimeError(
+                        f"Cloud provider {provider_name} failed ({e}) and CDP "
+                        f"fallback to {cdp_url!r} also failed ({cdp_error})"
+                    ) from e
+
+                session_info = dict(session_info)
+                session_info["fallback_from_cloud"] = True
+                session_info["fallback_reason"] = str(e)
+                session_info["fallback_provider"] = provider_name
+                session_info["fallback_mode"] = fallback_mode
 
     with _cleanup_lock:
         # Double-check: another thread may have created a session while we

@@ -5,11 +5,16 @@ All knobs are env-driven with the ``KOC_`` prefix.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_bridge_key() -> str:
+    return os.environ.get("HERMES_KOL_OPS_BRIDGE_KEY", "")
 
 
 class Settings(BaseSettings):
@@ -28,7 +33,7 @@ class Settings(BaseSettings):
 
     # --- Hermes bridge plugin ---
     bridge_base: str = "http://127.0.0.1:8080/api/plugins/kol-ops-bridge"
-    bridge_key: str = ""
+    bridge_key: str = Field(default_factory=_default_bridge_key)
     bridge_timeout_sec: float = 10.0
 
     # --- Hermes gateway ---

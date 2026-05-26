@@ -3,13 +3,20 @@ import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, EscalationRow } from '../api';
 import { parseConflictBody, startedAtMs, useInflightLock } from '../useInflightLock';
 import InboundEmailCard, { type InboundEmail } from '../components/InboundEmailCard';
+import { FactInput } from '../components/inputs/FactInput';
+import { FactKeyChip } from '../components/inputs/FactKeyChip';
+import { TimeAgo } from '../components/inputs/TimeAgo';
+import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { useEnvStore, toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
+import { dialog } from '../components/dialogs/useDialog';
+import { usePollingFallback } from '../hooks/usePollingFallback';
+import { useDataChannel } from '../hooks/useDataChannel';
 
-/**
- * Escalation operator console.
- * - List view (no :id) shows open escalations with parent-id chain.
- * - Detail view (with :id) lets the operator answer + provide facts +
- *   choose resume (default state) or terminate (with final_state).
- */
+// Escalation operator console.
+// - List view (no :id) shows open escalations with parent-id chain.
+// - Detail view (with :id) lets the operator answer + provide facts +
+//   choose resume (default state) or terminate.
 export function EscalationConsolePage() {
   const { id } = useParams();
   if (id) return <EscalationDetail id={Number(id)} />;
@@ -17,17 +24,13 @@ export function EscalationConsolePage() {
 }
 
 function EscalationList() {
+  const env = useEnvStore((s) => s.env);
   const [rows, setRows] = useState<EscalationRow[]>([]);
-  const [env, setEnv] = useState<'TEST' | 'LIVE'>(() => {
-    const saved = localStorage.getItem('escalationEnv') || localStorage.getItem('kolEnv');
-    return saved === 'LIVE' ? 'LIVE' : 'TEST';
-  });
-  // Bridge-side states: awaiting_answer | answered | resolved | re_escalated | aborted.
-  // Default to awaiting_answer so operators see the actionable queue first.
   const [state, setState] = useState<
     'awaiting_answer' | 'answered' | 'resolved' | 're_escalated' | 'aborted' | 'all'
   >('awaiting_answer');
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -37,53 +40,84 @@ function EscalationList() {
       setRows(await api.get<EscalationRow[]>(`/escalations${qs}`));
       setErr(null);
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
     }
   }, [env, state]);
 
+  const terminate = useCallback(
+    async (rowId: number) => {
+      const ok = await dialog.confirm({
+        title: `终止 escalation #${rowId}？`,
+        description: '此操作会把该目标标记为 aborted，AI 将不再尝试推进。不可撤销。',
+        confirmLabel: '终止',
+        cancelLabel: '保留',
+        variant: 'danger',
+        liveWarning: env === 'LIVE',
+      });
+      if (!ok) return;
+      setBusyId(rowId);
+      try {
+        await api.patch(`/escalations/${rowId}`, {
+          decision: 'terminate',
+          final_state: 'aborted',
+          operator_answer: '',
+          operator_facts: {},
+          env,
+        });
+        toast.success(`escalation #${rowId} 已终止`);
+        await refresh();
+      } catch (ex) {
+        toast.error('终止失败', errorSummary(ex));
+        setErr(ex);
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [env, refresh],
+  );
+
   useEffect(() => {
-    localStorage.setItem('escalationEnv', env);
     refresh();
-    const t = setInterval(refresh, 10_000);
-    return () => clearInterval(t);
-  }, [env, refresh]);
+  }, [refresh]);
+
+  useDataChannel({ onMatch: refresh });
+  usePollingFallback(refresh, 20_000);
+
+  const STATE_LABELS: Record<typeof state, string> = {
+    awaiting_answer: '等待答复',
+    answered: '已答复',
+    resolved: '已解决',
+    re_escalated: '已再升级',
+    aborted: '已终止',
+    all: '全部',
+  };
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h1 className="text-lg font-semibold">Escalations</h1>
-        <select
-          value={env}
-          onChange={(e) => setEnv(e.target.value as typeof env)}
-          className="rounded border border-slate-300 px-2 py-1 text-sm"
-        >
-          <option value="TEST">TEST</option>
-          <option value="LIVE">LIVE</option>
-        </select>
+        <h1 className="text-lg font-semibold">升级队列</h1>
         <select
           value={state}
           onChange={(e) => setState(e.target.value as typeof state)}
           className="rounded border border-slate-300 px-2 py-1 text-sm"
         >
-          <option value="awaiting_answer">awaiting_answer</option>
-          <option value="answered">answered</option>
-          <option value="resolved">resolved</option>
-          <option value="re_escalated">re_escalated</option>
-          <option value="aborted">aborted</option>
-          <option value="all">all</option>
+          {(Object.keys(STATE_LABELS) as Array<typeof state>).map((s) => (
+            <option key={s} value={s}>{STATE_LABELS[s]}</option>
+          ))}
         </select>
       </div>
-      {err && <div className="text-red-600">{err}</div>}
+      {!!err && <ErrorAlert error={err} onRetry={refresh} />}
       <table className="w-full text-sm">
         <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="p-2">id</th>
-            <th className="p-2">identity</th>
+            <th className="p-2">KOL</th>
             <th className="p-2">campaign</th>
-            <th className="p-2">rule</th>
-            <th className="p-2">reason</th>
-            <th className="p-2">parent</th>
-            <th className="p-2">created</th>
+            <th className="p-2">规则</th>
+            <th className="p-2">原因</th>
+            <th className="p-2">父级</th>
+            <th className="p-2">创建</th>
+            <th className="p-2">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -92,7 +126,7 @@ function EscalationList() {
             return (
               <tr key={r.id} className="border-t border-slate-100 align-top hover:bg-slate-50">
                 <td className="p-2">
-                    <Link to={`/escalations/${r.id}?env=${env}`} className="text-sky-700 hover:underline">
+                  <Link to={`/escalations/${r.id}?env=${env}`} className="text-sky-700 hover:underline">
                     #{r.id}
                   </Link>
                 </td>
@@ -104,17 +138,11 @@ function EscalationList() {
                 <td className="p-2">{r.campaign_id}</td>
                 <td className="p-2">{r.rule_id ?? '—'}</td>
                 <td className="p-2">
-                  <div className="font-mono text-xs text-slate-800">{r.reason}</div>
+                  <div className="text-xs text-slate-800">{r.reason}</div>
                   {missing.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {missing.map((f) => (
-                        <span
-                          key={f}
-                          className="rounded bg-rose-100 px-1.5 py-0.5 font-mono text-[10px] text-rose-800"
-                          title="Field reported as missing by the agent"
-                        >
-                          {f}
-                        </span>
+                        <FactKeyChip key={f} factKey={f} variant="missing" />
                       ))}
                     </div>
                   )}
@@ -125,20 +153,43 @@ function EscalationList() {
                   )}
                 </td>
                 <td className="p-2">{r.parent_id ?? '—'}</td>
-                <td className="p-2 text-xs text-slate-500">{r.created_at}</td>
+                <td className="p-2 text-xs text-slate-500">
+                  <TimeAgo iso={r.created_at} />
+                </td>
+                <td className="p-2">
+                  {r.state === 'awaiting_answer' ? (
+                    <button
+                      type="button"
+                      disabled={busyId === r.id}
+                      onClick={() => terminate(r.id)}
+                      className="rounded border border-red-300 px-2 py-0.5 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50"
+                      title="放弃此目标，将 escalation 标为 aborted"
+                    >
+                      {busyId === r.id ? '终止中…' : '终止'}
+                    </button>
+                  ) : (
+                    <span className="text-xs text-slate-400">—</span>
+                  )}
+                </td>
               </tr>
             );
           })}
+          {rows.length === 0 && (
+            <tr>
+              <td colSpan={8} className="p-6 text-center text-sm text-slate-500">
+                没有 {STATE_LABELS[state]} 的升级。
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
   );
 }
 
-// Pull "what's missing" out of an escalation's resume_context (structured
-// list set by the skill) or, as a fallback, scrape obvious snake_case
-// identifiers out of suggested_question. The latter is best-effort; once
-// all skills emit ``missing_config_fields`` we can drop the regex path.
+// Pull "what's missing" out of an escalation's resume_context or, as a
+// fallback, scrape obvious snake_case identifiers out of
+// suggested_question.
 function extractMissingFields(r: EscalationRow): string[] {
   const ctx = (r.resume_context ?? {}) as Record<string, unknown>;
   for (const key of ['missing_config_fields', 'missing_facts', 'missing']) {
@@ -180,18 +231,12 @@ function reasonDetails(r: EscalationRow): string[] {
   return [...new Set(details)];
 }
 
-// Common words / snake_case tokens in escalation prose that aren't
-// config fields; suppress them so the chip row stays signal-only.
 const CONFIG_FIELD_BLOCKLIST = new Set<string>([
   'campaign_config', 'campaign_id', 'identity_id', 'test_mode',
   'deliverables_scope', 'fact_path', 'goal_state', 'kol_bridge_tool',
   'human_takeover_hint', 'required_facts_to_resume',
 ]);
 
-// Operator-facing explanation for the 4 fact namespaces. Operators
-// rarely need to add custom keys — the resumer pre-populates required
-// ones — but when they do, the Advanced section needs to explain what
-// a legal key looks like in plain language, not "namespace prefix".
 const NAMESPACE_HELP: ReadonlyArray<{ prefix: string; label: string; hint: string }> = [
   { prefix: 'approval.', label: '审批 / 操作员决定', hint: '例：approval.paid_ceiling_override（提价上限）' },
   { prefix: 'offer.', label: '报价 / 合作条款', hint: '例：offer.compensation_amount, offer.agreed_terms' },
@@ -201,10 +246,6 @@ const NAMESPACE_HELP: ReadonlyArray<{ prefix: string; label: string; hint: strin
 
 const NAMESPACE_PREFIXES: ReadonlyArray<string> = NAMESPACE_HELP.map((n) => n.prefix);
 
-// Curated subset of fact keys that operators are most likely to add
-// manually — sourced from the keys actually written by the negotiation /
-// contract / logistics skills. Surface as a <datalist> autocomplete so
-// the operator doesn't have to memorise snake_case names.
 const COMMON_FACT_KEYS: ReadonlyArray<string> = [
   'approval.paid_ceiling_override',
   'approval.over_budget_request',
@@ -230,14 +271,17 @@ function isValidFactKey(k: string): boolean {
 
 function EscalationDetail({ id }: { id: number }) {
   const [searchParams] = useSearchParams();
-  const env = searchParams.get('env') === 'LIVE' ? 'LIVE' : 'TEST';
+  // URL ?env= wins on first load (deep-link); otherwise use the store.
+  const storeEnv = useEnvStore((s) => s.env);
+  const env = (searchParams.get('env') === 'LIVE' ? 'LIVE'
+    : searchParams.get('env') === 'TEST' ? 'TEST'
+    : storeEnv) as 'TEST' | 'LIVE';
   const [row, setRow] = useState<EscalationRow | null>(null);
   const [answer, setAnswer] = useState('');
   const [factKeysText, setFactKeysText] = useState('');
-  const [factsRecord, setFactsRecord] = useState<Record<string, string>>({});
-  const [finalState] = useState<'aborted'>('aborted');
+  const [factsRecord, setFactsRecord] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
   const [done, setDone] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -250,7 +294,7 @@ function EscalationDetail({ id }: { id: number }) {
       setRow(all.find((r) => r.id === id) ?? null);
       setErr(null);
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
     }
   }, [env, id]);
 
@@ -258,9 +302,6 @@ function EscalationDetail({ id }: { id: number }) {
     refresh();
   }, [refresh]);
 
-  // Look up the inbound email tied to this escalation. We only fetch once
-  // per (id, env) — the underlying CAL events are append-only and won't
-  // change while the operator is reading.
   useEffect(() => {
     let alive = true;
     setInboundLoaded(false);
@@ -274,8 +315,7 @@ function EscalationDetail({ id }: { id: number }) {
         setInbound(r.inbound ?? null);
       })
       .catch(() => {
-        // 404 / 502 is non-fatal — the card renders the "no inbound on file"
-        // fallback when inbound stays null.
+        // Non-fatal — InboundEmailCard renders fallback.
       })
       .finally(() => alive && setInboundLoaded(true));
     return () => {
@@ -283,10 +323,6 @@ function EscalationDetail({ id }: { id: number }) {
     };
   }, [id, env]);
 
-  // When the triggering skill embeds ``required_facts_to_resume`` in
-  // ``resume_context``, prefill the structured-facts form with those
-  // keys so the operator sees exactly which facts the resumer needs.
-  // The free-text input remains for ad-hoc extras.
   const requiredFacts = useMemo<string[]>(() => {
     const ctx = (row?.resume_context ?? null) as Record<string, unknown> | null;
     const raw = ctx?.required_facts_to_resume;
@@ -309,7 +345,6 @@ function EscalationDetail({ id }: { id: number }) {
         .map((s) => s.trim())
         .filter(Boolean)
         .filter(isValidFactKey);
-      // De-dup while preserving order (required first).
       const seen = new Set<string>();
       return [...requiredFacts, ...fromText].filter((k) => {
         if (seen.has(k)) return false;
@@ -346,12 +381,23 @@ function EscalationDetail({ id }: { id: number }) {
     const facts: Record<string, unknown> = {};
     for (const k of factKeys) {
       const v = factsRecord[k];
-      if (v !== undefined && v !== '') facts[k] = coerce(v);
+      if (v !== undefined && v !== '' && v !== null) facts[k] = v;
     }
     return facts;
   }
 
   async function submit(decision: 'resume' | 'terminate') {
+    if (decision === 'terminate') {
+      const ok = await dialog.confirm({
+        title: '终止此目标？',
+        description: '将 escalation 标为 aborted，AI 不再尝试推进。',
+        confirmLabel: '终止',
+        cancelLabel: '取消',
+        variant: 'danger',
+        liveWarning: env === 'LIVE',
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     setErr(null);
     try {
@@ -361,12 +407,15 @@ function EscalationDetail({ id }: { id: number }) {
         operator_facts: collectFacts(),
         env,
       };
-      if (decision === 'terminate') body.final_state = finalState;
+      if (decision === 'terminate') body.final_state = 'aborted';
       await api.patch(`/escalations/${id}`, body);
-      setDone(`Submitted: ${decision}`);
+      const msg = decision === 'resume' ? '已提交并恢复' : '已终止';
+      setDone(msg);
+      toast.success(msg);
       refresh();
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('提交失败', errorSummary(ex));
     } finally {
       setBusy(false);
     }
@@ -383,41 +432,39 @@ function EscalationDetail({ id }: { id: number }) {
         { operator_answer: answer, operator_facts: collectFacts(), env },
       );
       draftLock.acquire(resp.run_id ?? null);
-      setDone(
-        `Draft requested (run ${resp.run_id?.slice(0, 8) ?? '?'}…). ` +
-        `Check the Approvals page in 30–60s for an approval.reply_draft.`,
+      toast.progress(
+        '草稿生成中…',
+        `约 30–60s 后在待审批页面可见 (run ${resp.run_id?.slice(0, 8) ?? '?'}…)`,
+        { groupKey: `escalation-preview-${id}` },
       );
+      setDone('草稿生成请求已发出，30–60s 后查看待审批页面。');
     } catch (ex) {
-      // If the backend says "already in flight", reflect that run in the
-      // local lock so the button stays disabled even though THIS tab
-      // didn't start the run (another tab or the resume path did).
       const conflict = parseConflictBody(ex);
       if (conflict?.error === 'draft_already_in_flight') {
         draftLock.acquire(
           conflict.run_id ?? null,
           startedAtMs(conflict.started_at),
         );
-        setDone(
-          conflict.message
-            ?? 'A draft for this escalation is already being generated.',
-        );
+        toast.info('已有草稿在生成', conflict.message ?? undefined);
+        setDone(conflict.message ?? 'A draft for this escalation is already being generated.');
       } else {
-        setErr(String(ex));
+        setErr(ex);
+        toast.error('请求失败', errorSummary(ex));
       }
     } finally {
       setBusy(false);
     }
   }
 
-  if (err) return <div className="text-red-600">{err}</div>;
-  if (!row) return <div className="text-sm text-slate-500">Loading…</div>;
+  if (err && !row) return <ErrorAlert error={err} onRetry={refresh} />;
+  if (!row) return <div className="text-sm text-slate-500">加载中…</div>;
 
   return (
     <div className="space-y-3">
       <Link to="/escalations" className="text-xs text-sky-700 hover:underline">
-        ← back
+        ← 返回升级队列
       </Link>
-      <h1 className="text-lg font-semibold">Escalation #{row.id}</h1>
+      <h1 className="text-lg font-semibold">升级 #{row.id}</h1>
       {takeoverHint && (
         <div className="rounded border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900">
           ⚠️ 已达 max_escalation_depth（attempts_count={row.attempts_count ?? '?'}）。
@@ -425,15 +472,25 @@ function EscalationDetail({ id }: { id: number }) {
         </div>
       )}
       <div className="rounded border border-slate-200 bg-white p-3 text-sm">
-        <div>identity: <Link to={`/kols/${row.identity_id}?campaign_id=${encodeURIComponent(row.campaign_id)}`} className="text-sky-700 hover:underline">{row.identity_id}</Link></div>
-        <div>campaign: {row.campaign_id}</div>
-        <div>rule: {row.rule_id ?? '—'} · state: {row.state}</div>
+        <div>
+          KOL：
+          <Link
+            to={`/kols/${row.identity_id}?campaign_id=${encodeURIComponent(row.campaign_id)}`}
+            className="text-sky-700 hover:underline"
+          >
+            {row.identity_id}
+          </Link>
+        </div>
+        <div>Campaign：{row.campaign_id}</div>
+        <div>
+          规则：{row.rule_id ?? '—'} · 状态：{row.state} · 创建于 <TimeAgo iso={row.created_at} />
+        </div>
         <div className="mt-2 rounded bg-slate-50 p-2">
-          <div className="text-xs uppercase tracking-wide text-slate-500">Reason code</div>
+          <div className="text-xs uppercase tracking-wide text-slate-500">原因代码</div>
           <div className="mt-0.5 font-mono text-xs text-slate-800">{row.reason}</div>
           {detailedReasons.length > 0 && (
             <div className="mt-2 space-y-1">
-              <div className="text-xs uppercase tracking-wide text-slate-500">Why this exists</div>
+              <div className="text-xs uppercase tracking-wide text-slate-500">为什么会出现这个升级</div>
               {detailedReasons.map((detail) => (
                 <div key={detail} className="text-sm text-slate-700">{detail}</div>
               ))}
@@ -443,7 +500,7 @@ function EscalationDetail({ id }: { id: number }) {
         {row.suggested_question && (
           <div className="mt-2 rounded border border-sky-200 bg-sky-50 p-2 text-sky-950">
             <div className="text-xs font-semibold uppercase tracking-wide text-sky-700">
-              Action required
+              请求操作员答复
             </div>
             <div className="mt-1 whitespace-pre-wrap text-sm leading-relaxed">
               {row.suggested_question}
@@ -452,20 +509,15 @@ function EscalationDetail({ id }: { id: number }) {
         )}
         {extractMissingFields(row).length > 0 && (
           <div className="mt-1 flex flex-wrap items-center gap-1">
-            <span className="text-xs text-slate-500">missing:</span>
+            <span className="text-xs text-slate-500">缺：</span>
             {extractMissingFields(row).map((f) => (
-              <span
-                key={f}
-                className="rounded bg-rose-100 px-1.5 py-0.5 font-mono text-[11px] text-rose-800"
-              >
-                {f}
-              </span>
+              <FactKeyChip key={f} factKey={f} variant="missing" />
             ))}
           </div>
         )}
         {row.parent_id && (
           <div className="text-xs text-slate-500">
-            parent escalation:{' '}
+            父级升级：{' '}
             <Link to={`/escalations/${row.parent_id}`} className="hover:underline">
               #{row.parent_id}
             </Link>
@@ -476,27 +528,27 @@ function EscalationDetail({ id }: { id: number }) {
       {inboundLoaded && (
         <InboundEmailCard
           inbound={inbound}
-          title="触发此 escalation 的 KOL 回信"
+          title="触发此升级的 KOL 回信"
           variant="rose"
         />
       )}
 
       {row.state !== 'awaiting_answer' ? (
         <div className="rounded border border-slate-200 bg-white p-3 text-sm text-slate-600">
-          Already {row.state}. Operator answer was:{' '}
-          <em>{row.operator_answer || '(empty)'}</em>
+          已 {row.state}。操作员答复：{' '}
+          <em>{row.operator_answer || '(空)'}</em>
         </div>
       ) : (
-        <div className="space-y-2 rounded border border-slate-200 bg-white p-3">
+        <div data-editing className="space-y-2 rounded border border-slate-200 bg-white p-3">
           {rejectedDrafts.length > 0 && (
             <div className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">
               <div className="font-medium">
-                之前生成的草稿被驳回 {rejectedDrafts.length} 次，未关闭此 escalation。请补充答复或终止此目标。
+                之前生成的草稿被驳回 {rejectedDrafts.length} 次，未关闭此升级。请补充答复或终止此目标。
               </div>
               <ul className="mt-1 space-y-0.5">
                 {rejectedDrafts.slice(-3).map((d, idx) => (
-                  <li key={`${d.decided_at}-${idx}`} className="font-mono text-[11px]">
-                    · {d.decided_at?.slice(0, 19) || '?'} {d.decided_by ? `(${d.decided_by})` : ''}
+                  <li key={`${d.decided_at}-${idx}`} className="text-[11px]">
+                    · <TimeAgo iso={d.decided_at} /> {d.decided_by ? `(${d.decided_by})` : ''}
                     {d.note ? ` — ${d.note}` : ' — 无理由'}
                   </li>
                 ))}
@@ -505,37 +557,42 @@ function EscalationDetail({ id }: { id: number }) {
           )}
           <label className="block text-sm">
             <span className="text-xs uppercase tracking-wide text-slate-500">
-              Operator answer
+              操作员答复
             </span>
             <textarea
               value={answer}
               onChange={(e) => setAnswer(e.target.value)}
               className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm"
               rows={3}
+              placeholder="给 AI 看的自然语言答复 — 比如：把上限调到 5000；接受对方方案；要 KOL 提供地址 ..."
             />
           </label>
           {requiredFacts.length > 0 && (
             <div className="rounded bg-sky-50 px-2 py-1 text-xs text-sky-900">
-              Resumer needs these facts to continue: {requiredFacts.map((k) => (
-                <code key={k} className="mx-1 rounded bg-white px-1 py-0.5 font-mono">{k}</code>
+              恢复执行需要补充以下字段：{requiredFacts.map((k) => (
+                <FactKeyChip key={k} factKey={k} variant="neutral" className="mx-1" />
               ))}
             </div>
           )}
           {factKeys.map((k) => {
             const isRequired = requiredFacts.includes(k);
             return (
-              <label key={k} className="flex items-center gap-2 text-sm">
-                <span className={`w-56 shrink-0 font-mono text-xs ${isRequired ? 'text-sky-700' : 'text-slate-700'}`}>
-                  {k}{isRequired && <span className="ml-0.5 text-red-500">*</span>}
-                </span>
-                <input
-                  value={factsRecord[k] ?? ''}
-                  onChange={(e) =>
-                    setFactsRecord((v) => ({ ...v, [k]: e.target.value }))
-                  }
-                  className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
+              <div key={k} className="flex items-start gap-2">
+                <FactKeyChip
+                  factKey={k}
+                  variant="filled"
+                  className={`mt-1 w-44 shrink-0 truncate ${isRequired ? 'border-sky-300 text-sky-800' : ''}`}
+                  prefix={isRequired ? '★ ' : ''}
                 />
-              </label>
+                <div className="flex-1">
+                  <FactInput
+                    factKey={k}
+                    value={factsRecord[k] ?? ''}
+                    onChange={(v) => setFactsRecord((m) => ({ ...m, [k]: v }))}
+                    bare
+                  />
+                </div>
+              </div>
             );
           })}
           <div className="border-t border-slate-100 pt-2">
@@ -556,7 +613,7 @@ function EscalationDetail({ id }: { id: number }) {
                     比如新的报价上限、物流单号、签约条款等。
                   </div>
                   <div className="mt-0.5 text-slate-500">
-                    AI 已经需要的字段会在上方<span className="font-mono">*</span>号行自动出现。
+                    AI 已经需要的字段会在上方★号行自动出现。
                     只有当你想<strong>主动补充</strong> AI 没问到、但后续会用到的事实时才需要在这里加字段。
                   </div>
                 </div>
@@ -572,7 +629,7 @@ function EscalationDetail({ id }: { id: number }) {
                     ))}
                   </ul>
                   <div className="mt-1 text-slate-500">
-                    多个字段用逗号分隔。下方输入框支持自动补全常用字段（点击或下拉选择）。
+                    多个字段用逗号分隔。下方输入框支持自动补全常用字段。
                   </div>
                 </div>
                 <label className="block text-sm">
@@ -606,72 +663,55 @@ function EscalationDetail({ id }: { id: number }) {
               </div>
             )}
           </div>
-          <div className="grid grid-cols-1 gap-2 pt-1 md:grid-cols-3">
-            <div className="rounded border border-sky-200 bg-sky-50/50 p-2">
+
+          {!!err && <ErrorAlert error={err} compact />}
+
+          {/* Restructured action zone: explicit hierarchy — primary
+              (提交并恢复) on the right, secondary (生成草稿) inline link
+              above, danger (终止) small + low-contrast on the left. */}
+          <div className="border-t border-slate-100 pt-3">
+            <div className="mb-2 flex items-center gap-2 text-xs">
               <button
+                type="button"
                 disabled={busy || draftLock.locked}
                 onClick={previewDraft}
-                className="w-full rounded border border-sky-600 px-3 py-1 text-sm text-sky-700 hover:bg-sky-100 disabled:opacity-50"
+                className="rounded border border-sky-300 px-2 py-1 text-sky-700 hover:bg-sky-50 disabled:opacity-50"
               >
                 {draftLock.locked
                   ? `草稿生成中… (${draftLock.remainingSeconds}s)`
-                  : '生成邮件草稿'}
+                  : '让 AI 先试写一封草稿'}
               </button>
-              <p className="mt-1 text-[11px] leading-snug text-slate-600">
-                让 AI 根据你的答复先<strong>试起草</strong>一封回信，结果出现在 <strong>Approvals</strong> 页面供审核。
-                <span className="text-slate-500"> 本 escalation 保持打开；每个 escalation 同一时间只会保留一份待审草稿。</span>
-                {draftLock.locked && (
-                  <span className="mt-1 block text-amber-700">
-                    上次请求已发出，约 30–60s 后在 Approvals 页面可见；
-                    刷新页面或换 tab 也不会重复触发。
-                  </span>
-                )}
-              </p>
+              <span className="text-[11px] text-slate-500">
+                结果出现在<Link to="/approvals" className="ml-0.5 text-sky-700 hover:underline">待审批</Link>页面供审核；不会关闭本升级。
+              </span>
             </div>
-            <div className="rounded border border-emerald-200 bg-emerald-50/50 p-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <button
-                disabled={busy}
-                onClick={() => submit('resume')}
-                className="w-full rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-              >
-                提交并恢复
-              </button>
-              <p className="mt-1 text-[11px] leading-snug text-slate-600">
-                把答复交给 AI 继续推进，并把此 escalation 标记为<strong>已处理</strong>。
-                <span className="block text-slate-500">
-                  若此 escalation 来自入站 KOL 回信且<strong>尚未</strong>有待审草稿，会自动顺带起草一份；若已点过"生成邮件草稿"产出待审草稿，则不会重复起草。
-                </span>
-              </p>
-            </div>
-            <div className="rounded border border-red-200 bg-red-50/50 p-2">
-              <button
+                type="button"
                 disabled={busy}
                 onClick={() => submit('terminate')}
-                className="w-full rounded bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                className="rounded border border-red-300 bg-white px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50"
+                title="放弃此目标，标为 aborted"
               >
                 直接终止
               </button>
-              <p className="mt-1 text-[11px] leading-snug text-slate-600">
-                放弃此目标，把 escalation 标为 <code className="font-mono">{finalState}</code>。
-                <span className="text-slate-500"> 不再继续处理。</span>
-              </p>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => submit('resume')}
+                className="rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                title="把答复交给 AI 继续推进，并把此升级标为已处理"
+              >
+                提交并恢复 →
+              </button>
             </div>
+            <p className="mt-1 text-[11px] text-slate-500">
+              "提交并恢复"会把答复交给 AI 继续推进；若此升级来自入站 KOL 回信且尚未有待审草稿，会自动顺带起草一份。
+            </p>
           </div>
           {done && <div className="text-sm text-emerald-700">{done}</div>}
         </div>
       )}
     </div>
   );
-}
-
-function coerce(s: string): unknown {
-  const t = s.trim();
-  if (t === 'true') return true;
-  if (t === 'false') return false;
-  if (/^-?\d+$/.test(t)) return parseInt(t, 10);
-  if (/^-?\d+\.\d+$/.test(t)) return parseFloat(t);
-  if (t.startsWith('[') && t.endsWith(']')) {
-    return t.slice(1, -1).split(',').map((x) => x.trim()).filter((x) => x);
-  }
-  return s;
 }

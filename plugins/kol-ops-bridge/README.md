@@ -91,10 +91,10 @@ gets pinged when a deal hasn't moved in a long time. Sample crontab:
 ```cron
 # Every hour at :17, scan stuck goals in both envs (TEST first so
 # fixtures don't drown out real LIVE pings).
-17 * * * * cd /home/pc/agent_prj/hermes-agent && \
+17 * * * * cd /path/to/hermes-agent && \
   ./.venv/bin/python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
     check-stuck-goals --env TEST >/dev/null 2>&1
-23 * * * * cd /home/pc/agent_prj/hermes-agent && \
+23 * * * * cd /path/to/hermes-agent && \
   ./.venv/bin/python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
     check-stuck-goals --env LIVE >/dev/null 2>&1
 ```

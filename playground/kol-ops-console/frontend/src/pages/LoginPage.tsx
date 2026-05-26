@@ -1,13 +1,16 @@
 import { FormEvent, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api, setToken } from '../api';
+import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
 
 export function LoginPage() {
   const nav = useNavigate();
   const loc = useLocation() as { state?: { from?: { pathname?: string } } };
   const [email, setEmail] = useState('owner@console.app');
   const [password, setPassword] = useState('');
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
   const submit = async (e: FormEvent) => {
@@ -19,7 +22,8 @@ export function LoginPage() {
       setToken(r.access_token);
       nav(loc.state?.from?.pathname || '/', { replace: true });
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('登录失败', errorSummary(ex));
     } finally {
       setBusy(false);
     }
@@ -35,7 +39,7 @@ export function LoginPage() {
           autoComplete="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          placeholder="email"
+          placeholder="邮箱"
         />
         <input
           className="w-full rounded border px-3 py-2"
@@ -43,14 +47,14 @@ export function LoginPage() {
           autoComplete="current-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="password"
+          placeholder="密码"
         />
-        {err && <div className="text-sm text-red-600">{err}</div>}
+        {!!err && <ErrorAlert error={err} compact />}
         <button
           className="w-full rounded bg-emerald-600 px-3 py-2 text-white disabled:opacity-50"
           disabled={busy || !password}
         >
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? '登录中…' : '登录'}
         </button>
       </form>
     </div>

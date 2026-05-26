@@ -32,6 +32,15 @@ class SelectCandidatesBody(BaseModel):
     env: Optional[str] = None
 
 
+class SetCandidateStatusBody(BaseModel):
+    identity_ids: list[int] = Field(min_length=1)
+    candidate_status: str = Field(
+        pattern="^(discovered|shortlisted|selected_for_outreach|needs_review|rejected|archived)$"
+    )
+    review_reason: Optional[str] = Field(default=None, max_length=500)
+    env: Optional[str] = None
+
+
 @router.get("")
 async def list_candidates(
     campaign_id: str,
@@ -104,5 +113,31 @@ async def select_candidates(
         conn, actor_user_id=user["id"], action="candidate.select",
         target=campaign_id,
         payload={"identity_ids": body.identity_ids},
+    )
+    return out
+
+
+@router.post("/status")
+async def set_candidate_status(
+    campaign_id: str,
+    body: SetCandidateStatusBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    conn=Depends(get_conn),
+) -> dict[str, Any]:
+    payload = body.model_dump(exclude_none=True)
+    payload["env"] = _env(payload.get("env"))
+    try:
+        out = await bridge.set_candidate_status(campaign_id, payload)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    write_audit(
+        conn, actor_user_id=user["id"], action="candidate.set_status",
+        target=campaign_id,
+        payload={
+            "identity_ids": body.identity_ids,
+            "candidate_status": body.candidate_status,
+            "review_reason": body.review_reason,
+        },
     )
     return out

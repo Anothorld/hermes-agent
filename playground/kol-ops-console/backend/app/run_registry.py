@@ -115,6 +115,37 @@ def list_run_ids_for_campaign(
     )]
 
 
+def list_open_runs_for_campaign(
+    conn: sqlite3.Connection,
+    *,
+    campaign_id: str,
+    env: str,
+    max_age_hours: int = 24,
+) -> list[dict]:
+    """Return registered runs with ``ended_at IS NULL`` started within
+    ``max_age_hours``. Used by ``_sync_run_states`` to poll terminal state
+    and write ``ended_at`` for every live run on the campaign, not just the
+    one referenced by ``product_campaigns.run_id``.
+
+    The age guard keeps the poll cost bounded; runs that never received a
+    terminal signal and predate the cutoff are abandoned (the gateway
+    evicted them long ago anyway).
+    """
+    cutoff = (
+        _dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(hours=max_age_hours)
+    ).isoformat(timespec="seconds")
+    rows = conn.execute(
+        """SELECT run_id, kind, session_id, dedup_key, started_at, ended_at
+             FROM product_campaign_runs
+            WHERE campaign_id=? AND env=? AND ended_at IS NULL
+              AND started_at>=?
+            ORDER BY started_at DESC""",
+        (campaign_id, env, cutoff),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def merge_legacy_run_id(
     conn: sqlite3.Connection,
     *,

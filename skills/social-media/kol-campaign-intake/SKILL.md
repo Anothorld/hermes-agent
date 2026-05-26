@@ -1,6 +1,6 @@
 ---
 name: kol-campaign-intake
-description: Parses operator-supplied free-text campaign briefs (web form, dispatch chat, email forward) into a structured `campaign_config` blob and persists it via the bridge. Required field guard: `sku_whitelist`, `color_variant_policy`, `compensation`, `deliverable_platforms`, `deliverable_count_per_platform`, `brief_template_id`, `audit_standards_md`. Optional: `boost_required`, `boost_meta_partner_code`, `no_watermark_required`, `required_mentions`, `required_hashtags`, `followup_intervals`, `extra_notes`. Refuses to create the campaign with placeholder values; asks the operator for any missing required field.
+description: Parses operator-supplied free-text campaign briefs (web form, dispatch chat, email forward) into a structured `campaign_config` blob and persists it via the bridge. Required field guard: `product_display_name`, `sku_whitelist`, `color_variant_policy`, `compensation`, `deliverable_platforms`, `deliverable_count_per_platform`, `brief_template_id`, `audit_standards_md`. Optional: `boost_required`, `boost_meta_partner_code`, `no_watermark_required`, `required_mentions`, `required_hashtags`, `followup_intervals`, `extra_notes`. Refuses to create the campaign with placeholder values; asks the operator for any missing required field.
 trigger: Invoked from the web "new campaign" page or by `kol-reply-dispatcher` when the operator routes a brief to it via a dispatch thread (deferred). Not on the KOL-facing reply path.
 tags: ["kol", "campaign", "config", "intake", "meta-lane"]
 ---
@@ -14,11 +14,15 @@ audit standards, etc.).
 ## Runtime Contract
 - Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
 - **No silent defaults for safety-critical fields.** Missing
-  `sku_whitelist`, `color_variant_policy`, `audit_standards_md`,
-  or `compensation` MUST short-circuit with a specific list of
-  missing fields. Do not default `sku_whitelist=[]` (that effectively
-  blocks every product) or `color_variant_policy="any"` (that
-  defeats the whole policy).
+  `product_display_name`, `sku_whitelist`, `color_variant_policy`,
+  `audit_standards_md`, or `compensation` MUST short-circuit with a
+  specific list of missing fields. Do not default `sku_whitelist=[]`
+  (that effectively blocks every product), `color_variant_policy="any"`
+  (that defeats the whole policy), or `product_display_name=<sku>` /
+  `product_display_name=<campaign_id>` (that defeats the cold-outreach
+  SKU-leak guard — the whole point of this field is to give downstream
+  email skills a human-friendly product reference that is **not** a
+  catalog code).
 - **Idempotent on `campaign_id`.** If `campaign_config` already
   exists for that id, abort `{"error":"campaign_exists","campaign_id":"..."}`.
 - **No KOL identity writes.** This skill only touches `campaigns` /
@@ -51,6 +55,12 @@ For each REQUIRED field, attempt extraction in this order:
 3. If still empty/None → append to `missing[]`.
 
 **Validators:**
+- `product_display_name`: non-empty string, 2–80 chars, **must not**
+  match the SKU regex `^[A-Z]{2,5}[\- ]?\d{3,5}[A-Z0-9]*$` and **must
+  not** equal `campaign_id` (case-insensitive) or any entry in
+  `sku_whitelist`. Examples of good values: `"the new media console"`,
+  `"POVISON Atlas sofa"`, `"our 2026 spring rug"`. Examples that fail:
+  `"SEB800"`, `"TS8319"`, `"POV-RUG-04"`.
 - `sku_whitelist`: non-empty list of strings, each matching the
   POVISON SKU regex (or whatever brand-specific regex is configured).
   Empty list → missing.
@@ -123,6 +133,11 @@ prompts operator: "are you sure?". Re-run with
 `extracted_overrides.confirmed_high_budget=true`.
 
 ## Pitfalls
+- Defaulting `product_display_name` to the SKU or campaign code. The
+  whole reason this field exists is so cold-outreach has a human name
+  to put in the email; auto-filling it with `SEB800` re-introduces the
+  exact leak this guard prevents. If the operator only typed a SKU,
+  reject and ask for a friendly name.
 - Defaulting `sku_whitelist=[]` (silently blocks all products
   downstream) or `color_variant_policy="any"` (silently disables the
   product-selector's safety net). Always require explicit values.

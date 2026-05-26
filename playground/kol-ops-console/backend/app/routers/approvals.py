@@ -14,13 +14,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+_REPO_ROOT = str(Path(__file__).resolve().parents[5])
+
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
+from ..bridge_runtime import ensure_gateway_bridge_key
+from ..campaign_config_sync import assert_campaign_config_complete
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
@@ -97,7 +102,7 @@ class RefineBody(BaseModel):
 _REFINE_DRAFT_INSTRUCTIONS = (
     "You are REFINING an existing pending approval.reply_draft based on an "
     "operator's natural-language guidance. Hard rules:\n"
-    "- Repo root for file tools is /home/pc/agent_prj/hermes-agent.\n"
+    f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- Read the current fact value via\n"
     "  `kol_bridge_tool.py get-facts --identity-id <id> --campaign-id <cid> "
     "  --env <env>` and pull out the `approval.reply_draft` entry.\n"
@@ -366,6 +371,7 @@ async def _start_approval_resume_run(
         # has already persisted the decision; this just skips the gateway
         # run path, which requires campaign_id for session/registry keys.
         return None
+    ensure_gateway_bridge_key()
     brief = _compose_approval_resume_brief(
         fact_path=fact_path,
         decision=decision,
@@ -415,6 +421,8 @@ async def approve(
     payload = body.model_dump(exclude_none=True)
     env = _env(payload.get("env"))
     payload["env"] = env
+    if body.campaign_id and fact_path not in _TERMINAL_APPROVAL_FACT_PATHS:
+        ensure_gateway_bridge_key()
     try:
         out = await bridge.approve(fact_path, payload)
     except BridgeError as exc:
@@ -497,6 +505,7 @@ async def refine(
             "refine is only supported for approval.reply_draft",
         )
     env = _env(body.env)
+    ensure_gateway_bridge_key()
     # In-flight dedup: a previous refine for the same (identity, campaign)
     # may still be writing back the fact. Block the duplicate at this
     # layer so the frontend can keep the button disabled across page
@@ -517,6 +526,12 @@ async def refine(
                 "started_at": inflight.get("started_at"),
             },
         )
+    # Refine uses a fresh session_id (no transcript replay from launch),
+    # so the child skill must read product_display_name from CAL. Block
+    # upfront if it's missing — every refine path (cold/reengagement/
+    # contract/followup) writes operator-facing copy that references the
+    # product and is constrained by the SKU-leak guard.
+    await assert_campaign_config_complete(bridge, body.campaign_id)
     try:
         raw = await bridge.list_approvals(status="pending", env=env)
     except BridgeError as exc:

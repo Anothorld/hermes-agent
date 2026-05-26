@@ -1,6 +1,11 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import { TimeAgo } from '../components/inputs/TimeAgo';
+import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
+import { usePollingFallback } from '../hooks/usePollingFallback';
 
 type ProductVariant = {
   id: string;
@@ -54,7 +59,7 @@ function StatusBadges({ p }: { p: ProductSummary }) {
         </span>
       )}
       {p.last_event_ts && (
-        <span className="text-slate-400">last: {p.last_event_ts.replace('T', ' ').slice(0, 19)}</span>
+        <TimeAgo iso={p.last_event_ts} prefix="上次" className="text-slate-400" />
       )}
     </span>
   );
@@ -91,36 +96,33 @@ export function ProductListPage() {
   const [draft, setDraft] = useState<DraftForm>(EMPTY_DRAFT);
   const [variants, setVariants] = useState<ProductVariant[]>([]);
   const [variantBusy, setVariantBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
 
   const refresh = () =>
     api
       .get<ProductSummary[]>('/products/summary')
       .then(setItems)
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(e));
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 15_000);
-    return () => clearInterval(t);
   }, []);
+
+  usePollingFallback(refresh, 30_000);
 
   const onDetectVariants = async () => {
     const u = draft.url.trim();
     if (!u) {
-      setErr('请先填写商品链接，再点 Detect variants');
+      toast.error('请先填写商品链接');
       return;
     }
     setVariantBusy(true);
     setErr(null);
-    setMsg(null);
     try {
       const r = await api.post<{ variants: ProductVariant[] }>('/products/parse-variants', { url: u });
       if (!r.variants || r.variants.length === 0) {
-        setMsg('链接里没有识别出 variant 参数，请手动添加 variant。');
+        toast.info('链接里没有识别出 variant 参数', '请手动添加 variant。');
       } else {
-        // Merge: dedup by id; new variants append.
         setVariants((prev) => {
           const ids = new Set(prev.map((v) => v.id));
           const merged = [...prev];
@@ -129,10 +131,11 @@ export function ProductListPage() {
           }
           return merged;
         });
-        setMsg(`已从链接解析出 ${r.variants.length} 个 variant`);
+        toast.success(`已解析出 ${r.variants.length} 个 variant`);
       }
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('解析失败', errorSummary(ex));
     } finally {
       setVariantBusy(false);
     }
@@ -153,7 +156,6 @@ export function ProductListPage() {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setErr(null);
-    setMsg(null);
     const cleanVariants = variants
       .map((v) => ({
         id: v.id.trim(),
@@ -165,7 +167,7 @@ export function ProductListPage() {
     const seen = new Set<string>();
     for (const v of cleanVariants) {
       if (seen.has(v.id)) {
-        setErr(`variant id "${v.id}" 重复，请去重`);
+        toast.error('variant id 重复', `"${v.id}" 出现多次，请去重`);
         return;
       }
       seen.add(v.id);
@@ -190,19 +192,20 @@ export function ProductListPage() {
         default_budget_total: parseNum(draft.default_budget_total),
         default_absolute_floor: parseNum(draft.default_absolute_floor),
       });
+      toast.success(`已保存 ${draft.sku}`);
       setDraft(EMPTY_DRAFT);
       setVariants([]);
-      setMsg(`Saved product ${draft.sku}`);
       refresh();
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('保存失败', errorSummary(ex));
     }
   };
 
   return (
     <div className="space-y-4">
-      <h1 className="text-lg font-semibold">Products (SKU catalog)</h1>
-      <form onSubmit={submit} className="space-y-3 rounded border bg-white p-3 text-sm">
+      <h1 className="text-lg font-semibold">产品（SKU 目录）</h1>
+      <form onSubmit={submit} data-editing className="space-y-3 rounded border bg-white p-3 text-sm">
         <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
           <label className="flex flex-col text-xs">
             <span className="text-slate-500">SKU *</span>
@@ -385,11 +388,10 @@ export function ProductListPage() {
         </label>
 
         <div className="flex justify-end">
-          <button className="rounded bg-emerald-600 px-3 py-1 text-white">Save product</button>
+          <button className="rounded bg-emerald-600 px-3 py-1 text-white">保存产品</button>
         </div>
       </form>
-      {err && <div className="text-sm text-red-600">{err}</div>}
-      {msg && <div className="text-sm text-emerald-700">{msg}</div>}
+      {!!err && <ErrorAlert error={err} onRetry={refresh} />}
       <ul className="divide-y rounded border bg-white">
         {items.map((p) => (
           <li key={p.sku} className="px-3 py-2">
@@ -418,7 +420,7 @@ export function ProductListPage() {
           </li>
         ))}
         {items.length === 0 && (
-          <li className="px-3 py-4 text-sm text-slate-500">No products yet.</li>
+          <li className="px-3 py-4 text-sm text-slate-500">还没有产品。</li>
         )}
       </ul>
     </div>
