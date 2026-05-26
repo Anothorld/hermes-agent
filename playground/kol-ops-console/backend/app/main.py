@@ -75,11 +75,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="KOL Ops Console", lifespan=_lifespan)
     app.add_middleware(
         CORSMiddleware,
-        # Dev console runs on loopback only; accept any localhost/127.0.0.1
-        # port so users that hit the UI through either hostname (or a
-        # forwarded port) don't trip CORS preflight failures.
+        # Dev console may be opened through loopback or a private LAN IP
+        # while the backend stays on 8765. Accept those local dev origins
+        # so phone/laptop testing does not trip CORS preflight failures.
         allow_origins=s.cors_origins,
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_origin_regex=(
+            r"^https?://(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
+            r"192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$"
+        ),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

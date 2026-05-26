@@ -9,10 +9,12 @@ the corresponding routers + UI were deleted.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 import httpx
 
+from .bridge_runtime import resolve_bridge_key
 from .config import get_settings
 
 
@@ -27,7 +29,8 @@ class BridgeClient:
     def __init__(self) -> None:
         s = get_settings()
         self._base = s.bridge_base.rstrip("/")
-        self._headers = {"X-Bridge-Key": s.bridge_key} if s.bridge_key else {}
+        bridge_key = resolve_bridge_key(s)
+        self._headers = {"X-Bridge-Key": bridge_key} if bridge_key else {}
         self._client = httpx.AsyncClient(timeout=s.bridge_timeout_sec)
 
     async def aclose(self) -> None:
@@ -38,14 +41,26 @@ class BridgeClient:
         *,
         params: Optional[dict[str, Any]] = None,
         json: Optional[dict[str, Any]] = None,
+        retry: int = 0,
     ) -> Any:
+        # ``retry`` retries ONLY on transient transport errors (httpx.HTTPError:
+        # connect, timeout, read failures). HTTP 4xx/5xx response codes are
+        # deterministic server-side decisions — retrying them is wasted work
+        # and risks side effects on non-idempotent POSTs. Opt-in per-call so
+        # only known-idempotent writes (PUT) and reads can ask for it.
         url = f"{self._base}{path}"
-        try:
-            r = await self._client.request(
-                method, url, params=params, json=json, headers=self._headers
-            )
-        except httpx.HTTPError as exc:
-            raise BridgeError(502, f"bridge unreachable: {exc}") from exc
+        attempts = retry + 1
+        for i in range(attempts):
+            try:
+                r = await self._client.request(
+                    method, url, params=params, json=json, headers=self._headers
+                )
+                break
+            except httpx.HTTPError as exc:
+                if i + 1 < attempts:
+                    await asyncio.sleep(0.5)
+                    continue
+                raise BridgeError(502, f"bridge unreachable: {exc}") from exc
         if r.status_code >= 400:
             raise BridgeError(r.status_code, r.text)
         if r.headers.get("content-type", "").startswith("application/json"):
@@ -65,6 +80,30 @@ class BridgeClient:
 
     async def get_relationship(self, identity_id: int) -> dict[str, Any]:
         return await self._req("GET", f"/identities/{identity_id}/relationship")
+
+    async def get_collab_history(self, identity_id: int) -> dict[str, Any]:
+        return await self._req(
+            "GET", f"/identities/{identity_id}/collab-history"
+        )
+
+    async def list_archived_kols(
+        self,
+        *,
+        env: str = "LIVE",
+        q: str | None = None,
+        last_outcome: str | None = None,
+        platform: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"env": env, "limit": limit, "offset": offset}
+        if q:
+            params["q"] = q
+        if last_outcome:
+            params["last_outcome"] = last_outcome
+        if platform:
+            params["platform"] = platform
+        return await self._req("GET", "/relationships", params=params)
 
     async def get_reusable_facts(self, identity_id: int) -> dict[str, Any]:
         return await self._req(
@@ -90,7 +129,13 @@ class BridgeClient:
     async def upsert_campaign(
         self, campaign_id: str, body: dict[str, Any]
     ) -> dict[str, Any]:
-        return await self._req("PUT", f"/campaigns/{campaign_id}", json=body)
+        # Idempotent PUT — single retry covers brief network blips during
+        # campaign launch so a transient outage at that exact moment doesn't
+        # leave the campaign half-created (console row written, CAL row
+        # empty). See campaigns.py launch flow.
+        return await self._req(
+            "PUT", f"/campaigns/{campaign_id}", json=body, retry=1,
+        )
 
     async def get_campaign(self, campaign_id: str) -> dict[str, Any]:
         return await self._req("GET", f"/campaigns/{campaign_id}")
@@ -142,12 +187,27 @@ class BridgeClient:
             "POST", f"/campaigns/{campaign_id}/candidates/select", json=body
         )
 
+    async def set_candidate_status(
+        self, campaign_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/campaigns/{campaign_id}/candidates/status", json=body
+        )
+
     async def get_lanes(
         self, campaign_id: str, env: str = "LIVE"
     ) -> dict[str, Any]:
         return await self._req(
             "GET", f"/campaigns/{campaign_id}/lanes", params={"env": env}
         )
+
+    async def list_campaigns(
+        self, env: Optional[str] = None
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if env is not None:
+            params["env"] = env
+        return await self._req("GET", "/campaigns", params=params)
 
     # --------------------------------------------------------------- Facts
     async def write_facts(

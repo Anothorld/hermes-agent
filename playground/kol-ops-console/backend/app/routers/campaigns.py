@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import json
+import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
@@ -18,14 +20,27 @@ from typing import Annotated, Any, AsyncIterator
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
+from ..bridge_runtime import ensure_gateway_bridge_key
+from ..campaign_config_sync import (
+    assert_campaign_config_complete,
+    build_campaign_config_upsert_body,
+)
+from ..campaign_locks import campaign_lock
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
-from ..gateway_client import GatewayClient, GatewayError
+from ..discovery_gate import (
+    REDISCOVERY_INSTRUCTIONS,
+    _count_uncontacted_candidates,
+    _trigger_rediscover_internal,
+)
+from ..gateway_client import RUNNING_STATES, TERMINAL_STATES, GatewayClient, GatewayError
 from ..run_registry import (
+    INFLIGHT_TTL_SECONDS,
+    get_inflight_run,
     list_runs_for_campaign,
     merge_legacy_run_id,
     register_run,
@@ -33,6 +48,7 @@ from ..run_registry import (
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
+_REPO_ROOT = str(Path(__file__).resolve().parents[5])
 _KOL_ORCHESTRATOR_SESSIONS = Path.home() / ".hermes/profiles/kol-orchestrator/sessions"
 _MAX_TRANSCRIPT_CHARS = 4000
 
@@ -47,15 +63,15 @@ _LAUNCH_INSTRUCTIONS = (
     "  (override with HERMES_KOL_OPS_BRIDGE_BASE if needed)\n"
     "- Bridge auth header: X-Bridge-Key: $HERMES_KOL_OPS_BRIDGE_KEY\n"
     "  (already in your environment; never echo the value)\n"
-    "- Repo root for file tools is /home/pc/agent_prj/hermes-agent.\n"
+    f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- For search_files/read_file/write_file/patch, use repo-relative\n"
     "  paths like `plugins/kol-ops-bridge` or absolute paths under\n"
-    "  `/home/pc/agent_prj/hermes-agent/`.\n"
+    f"  `{_REPO_ROOT}/`.\n"
     "- Do NOT prefix file-tool paths with `./agent_prj/hermes-agent/`.\n"
     "- For terminal/Python execution, use absolute script paths.\n"
     "- ALL CAL writes/reads go through the deterministic CLI; never\n"
     "  hand-craft curl/PUT/POST. Single entry point:\n"
-    "    python /home/pc/agent_prj/hermes-agent/plugins/kol-ops-bridge/\n"
+    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/\n"
     "      scripts/kol_bridge_tool.py <cmd> --env <env> [--campaign-id <id>] ...\n"
     "  Run with `--help` once to enumerate subcommands. Key ones:\n"
     "    upsert-campaign, get-campaign, add-candidate, list-candidates,\n"
@@ -84,6 +100,31 @@ _LAUNCH_INSTRUCTIONS = (
     "   raw candidates (which is set to 2-4x `headcount_target`).\n"
     "   Do NOT use the `mcp_chrome_devtools_*` family — those are flaky\n"
     "   here; stick to `browser_*`.\n"
+    "\n"
+    "   ITERATION CONTRACT — HARD QUANTITY FLOOR (read carefully):\n"
+    "   - `discovery_target_count` is a HARD FLOOR on persisted candidates,\n"
+    "     not a soft target. Only `add-candidate` rows present in\n"
+    "     `list-candidates` count toward the floor; disqualifying a profile\n"
+    "     (off-niche, audience too small, no contact) does NOT count.\n"
+    "   - Budget yourself up to MAX(50, discovery_target_count * 4) profile\n"
+    "     visits per pass. Try at least 3 distinct keyword angles before\n"
+    "     considering yourself blocked.\n"
+    "   - Stopping short is a FAILURE STATE. The console runs a post-\n"
+    "     terminal quantity gate: if persisted candidates < target floor\n"
+    "     AND auto-retry budget remains, the backend AUTO-FIRES another\n"
+    "     /rediscover for this campaign_id (up to 3 auto-retries total =\n"
+    "     4 runs max). After that, the operator gets a\n"
+    "     `discovery_floor_unmet` escalation. Therefore: finishing partial\n"
+    "     is acceptable ONLY when truly blocked (rate limits, niche\n"
+    "     exhausted, bridge/gateway down).\n"
+    "   - When you stop short you MUST include in the final answer the\n"
+    "     following two structured lines so the backend can decide between\n"
+    "     auto-retry and early escalation:\n"
+    "       floor_unmet_reason: <one-sentence why>\n"
+    "       attempted_angles:\n"
+    "         - <keyword/angle 1>\n"
+    "         - <keyword/angle 2>\n"
+    "         - <keyword/angle 3>\n"
     "4. Persist candidates IMMEDIATELY as you qualify them. Do not keep a\n"
     "   private in-memory candidate list and do not wait until the end of\n"
     "   discovery to write CAL. For every qualified profile, perform this\n"
@@ -130,15 +171,15 @@ _APPROVAL_INSTRUCTIONS = (
     "  (override with HERMES_KOL_OPS_BRIDGE_BASE if needed)\n"
     "- Bridge auth header: X-Bridge-Key: $HERMES_KOL_OPS_BRIDGE_KEY\n"
     "  (already in your environment; never echo the value)\n"
-    "- Repo root for file tools is /home/pc/agent_prj/hermes-agent.\n"
+    f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- For search_files/read_file/write_file/patch, use repo-relative\n"
     "  paths like `plugins/kol-ops-bridge` or absolute paths under\n"
-    "  `/home/pc/agent_prj/hermes-agent/`.\n"
+    f"  `{_REPO_ROOT}/`.\n"
     "- Do NOT prefix file-tool paths with `./agent_prj/hermes-agent/`.\n"
     "- For terminal/Python execution, use absolute script paths.\n"
     "- ALL CAL writes/reads go through the deterministic CLI; never\n"
     "  hand-craft curl/PUT/POST. Single entry point:\n"
-    "    python /home/pc/agent_prj/hermes-agent/plugins/kol-ops-bridge/\n"
+    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/\n"
     "      scripts/kol_bridge_tool.py <cmd> --env <env> [--campaign-id <id>] ...\n"
     "\n"
     "## Pipeline (run in order, do NOT skip)\n"
@@ -151,35 +192,66 @@ _APPROVAL_INSTRUCTIONS = (
     "   absent, use relationship.total_collabs (0 => cold, >0 =>\n"
     "   reengagement). If last_outcome is disputed/content_failed/aborted,\n"
     "   open an escalation and do not draft for that KOL.\n"
-    "4. For each approved cold prospect, invoke `kol-cold-outreach` with\n"
-    "   identity_id, campaign_id, env. For each approved safe repeat KOL,\n"
-    "   invoke `kol-reengagement-outreach`. Each child skill must return a\n"
-    "   draft envelope. Do NOT write `offer.outreach_sent=true` unless an\n"
-    "   email was actually sent; draft-only work writes draft-ready facts\n"
-    "   and pending approval records instead.\n"
-    "5. Persist every returned initial outreach draft back to CAL before\n"
+    "4. ENRICHMENT (before any draft skill). For each approved identity\n"
+    "   whose `primary_email` (from get-identity) is empty or null:\n"
+    "   a) invoke `kol-email-discovery` with identity_id, env, campaign_id.\n"
+    "      The skill returns `{found: true, email, source, tier, ...}` on\n"
+    "      hit (and has already persisted `primary_email` + provenance\n"
+    "      facts) or `{found: false, tried: [...]}` on miss.\n"
+    "   b) On hit: continue to step 5 for this identity.\n"
+    "   c) On miss: do NOT call `kol-cold-outreach` /\n"
+    "      `kol-reengagement-outreach` for this identity. Open an\n"
+    "      escalation via the bridge CLI with\n"
+    "      reason=`contact_email_not_found`, identity_id, campaign_id,\n"
+    "      and `question_to_operator` containing the `tried` list verbatim\n"
+    "      so the operator can see what was checked. Continue to the next\n"
+    "      approved identity — never invent an address, never invoke a\n"
+    "      draft skill without a verified email.\n"
+    "   Identities that already had a non-empty `primary_email` skip\n"
+    "   enrichment and proceed directly to step 5.\n"
+    "5. For each approved cold prospect WITH a verified email, invoke\n"
+    "   `kol-cold-outreach` with identity_id, campaign_id, env. For each\n"
+    "   approved safe repeat KOL WITH a verified email, invoke\n"
+    "   `kol-reengagement-outreach`. Each child skill must return a draft\n"
+    "   envelope. Do NOT write `offer.outreach_sent=true` unless an email\n"
+    "   was actually sent; draft-only work writes draft-ready facts and\n"
+    "   pending approval records instead.\n"
+    "6. Persist every returned initial outreach draft back to CAL before\n"
     "   reporting success. Write both:\n"
     "   a) `write-event --event-type kol_initial_outreach_draft_ready` with\n"
     "      payload containing child_skill, identity_id, and draft envelope;\n"
     "   b) `write-facts-multi` with `approval.reply_draft={decision:\n"
     "      \"pending\", kind:\"initial_outreach\", child_skill, draft}`.\n"
     "   This is the durable Web approval queue.\n"
-    "6. In TEST mode, any Gmail draft/test target must be test_mode_to from\n"
+    "7. In TEST mode, any Gmail draft/test target must be test_mode_to from\n"
     "   campaign_config. Never send mail without another explicit operator\n"
     "   action. If Gmail draft creation is unavailable, the CAL\n"
     "   `approval.reply_draft` record is still required.\n"
-    "7. Stop after draft records or escalations are persisted and summarize\n"
-    "   draft/escalation status per approved KOL.\n"
+    "8. Stop after draft records or escalations are persisted and summarize\n"
+    "   per approved KOL: enrichment outcome (hit/miss/skipped),\n"
+    "   draft/escalation status, and (for misses) the `tried` list.\n"
     "\n"
     "## Failure handling\n"
     "- If bridge auth fails, stop and report the missing\n"
     "  HERMES_KOL_OPS_BRIDGE_KEY; do not bypass CAL.\n"
-    "- If required contact or product facts are missing, open an escalation\n"
-    "  through the bridge CLI instead of inventing values.\n"
+    "- If required product facts are missing, open an escalation through\n"
+    "  the bridge CLI instead of inventing values.\n"
+    "- Missing `primary_email` is NOT a hard failure: it is the trigger\n"
+    "  for step 4 (kol-email-discovery). Only if step 4 returns\n"
+    "  `found: false` do you open a `contact_email_not_found` escalation\n"
+    "  and skip the draft skill for that identity.\n"
+    "- Never invent an email address. Never invoke a draft skill for an\n"
+    "  identity that does not have a verified `primary_email` after\n"
+    "  step 4.\n"
     "- If a child skill returns no draft envelope and did not open an\n"
     "  escalation, treat that as a failed invariant: open an escalation\n"
     "  with reason `initial_outreach_draft_missing`.\n"
 )
+
+
+# ``REDISCOVERY_INSTRUCTIONS`` lives in ``app/discovery_gate.py`` so the
+# post-terminal quantity-gate hook can reuse it without importing this
+# routers module.
 
 
 def _selected_variants(product: sqlite3.Row, variant_ids: list[str] | None) -> list[dict[str, Any]]:
@@ -201,6 +273,28 @@ def _selected_variants(product: sqlite3.Row, variant_ids: list[str] | None) -> l
     return [v for v in all_variants if str(v.get("id")) in wanted]
 
 
+_VALID_BROWSER_MODES = {"cloud", "local-chrome"}
+
+
+def _resolve_browser_mode() -> str:
+    """Read the operator-set browser backend mode from env.
+
+    Distinct from the campaign ``mode:`` field (which carries LIVE/TEST env).
+    Controls whether the kol-discovery skill applies cloud or local-chrome
+    safety rules (pacing, forbidden actions, per-run caps).
+
+    Defaults to ``local-chrome`` because Browser Use cloud Browser-Use cloud
+    profiles routinely lose IG login state and Browser Use 5xx outages have
+    been observed in prod; the user's debug-Chrome profile is the reliable
+    path for IG-heavy work. Set ``KOL_BROWSER_MODE=cloud`` to opt back into
+    the cloud backend for an individual campaign run.
+    """
+    raw = (os.environ.get("KOL_BROWSER_MODE") or "").strip().lower()
+    if raw in _VALID_BROWSER_MODES:
+        return raw
+    return "local-chrome"
+
+
 def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignBody") -> str:
     tags = json.loads(product["tags_json"] or "[]")
     sku_ref = product["url"] or product["sku"]
@@ -214,6 +308,7 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         f"product_sku: {product['sku']}",
         f"product_name: {product['name']}",
         f"mode: {body.env}",
+        f"browser_mode: {_resolve_browser_mode()}",
         "sku_whitelist:",
         f"  - {sku_ref}",
         f"budget_total: {body.budget_total:g}",
@@ -272,10 +367,55 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
     return "\n".join(lines)
 
 
+# NOTE: ``_compose_rediscover_brief`` has moved to ``app/discovery_gate.py``
+# so the post-terminal auto-retry hook can use it without importing this
+# routers module. The /rediscover HTTP endpoint below now uses the
+# ``_trigger_rediscover_internal`` helper from the same module.
+
+
 # Cap operator-supplied free-text fields to keep upstream token cost
 # predictable.  16k chars ~ 4k tokens; 64k chars ~ 16k tokens.
 _MAX_BRIEF_EXTRA = 16_000
 _MAX_PRODUCT_PITCH = 64_000
+
+# Matches SKU / model codes like "SEB800", "SEB-8008", "TS8319",
+# "POV-RUG-04". Cold-outreach refuses to put these in the email body;
+# the matching guard lives in kol-cold-outreach/SKILL.md Step 2b. We
+# enforce the same shape here so a friendly `product_display_name` can
+# never silently default to a SKU.
+_SKU_CODE_RE = re.compile(r"^[A-Z]{2,5}[\- ]?\d{3,5}[A-Z0-9]*$")
+
+
+def _validate_product_display_name(
+    value: str, *, sku: str | None = None, campaign_id: str | None = None,
+) -> str:
+    """Reject SKU-shaped strings, the bound SKU, or the campaign id.
+
+    The whole reason this field exists is to give the cold-outreach skill
+    a human-friendly product reference. Letting it default to a SKU
+    re-introduces the exact leak the field was added to prevent.
+    """
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("product_display_name must be non-empty")
+    if len(stripped) < 2 or len(stripped) > 80:
+        raise ValueError("product_display_name must be 2-80 characters")
+    if _SKU_CODE_RE.match(stripped):
+        raise ValueError(
+            f"product_display_name '{stripped}' looks like a SKU/model code; "
+            "use a human-friendly name (e.g. 'the new media console')"
+        )
+    if sku and stripped.casefold() == sku.casefold():
+        raise ValueError(
+            "product_display_name must not equal the SKU; "
+            "use a human-friendly name instead"
+        )
+    if campaign_id and stripped.casefold() == campaign_id.casefold():
+        raise ValueError(
+            "product_display_name must not equal the campaign_id; "
+            "use a human-friendly name instead"
+        )
+    return stripped
 
 
 class ParseCampaignBody(BaseModel):
@@ -331,11 +471,21 @@ async def append_facts_from_text(
 
 class StartCampaignBody(BaseModel):
     product_sku: str
+    product_display_name: str = Field(
+        min_length=2,
+        max_length=80,
+        description=(
+            "Operator-friendly product name used in cold-outreach emails "
+            "(e.g. 'the new media console'). Required to prevent SKU codes "
+            "from leaking into KOL-facing copy. Must not be a SKU-shaped "
+            "string and must not equal product_sku or the campaign_id."
+        ),
+    )
     budget_per_kol: float = Field(gt=0)
     absolute_floor: float = Field(gt=0)
     budget_total: float = Field(gt=0)
     headcount_target: int = Field(ge=1, le=200)
-    test_mode_to: str
+    test_mode_to: str | None = None
     env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
     product_pitch_md: str | None = Field(
         default=None,
@@ -384,6 +534,21 @@ class StartCampaignBody(BaseModel):
         default=None, max_length=8_000,
         description="Brand/legal compliance standards the content review skill enforces.",
     )
+
+    @model_validator(mode="after")
+    def _require_test_mode_to_for_test_env(self) -> "StartCampaignBody":
+        if self.env == "TEST" and not (self.test_mode_to and self.test_mode_to.strip()):
+            raise ValueError(
+                "test_mode_to is required when env=TEST (recipient for test-mode emails)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_product_display_name(self) -> "StartCampaignBody":
+        self.product_display_name = _validate_product_display_name(
+            self.product_display_name, sku=self.product_sku,
+        )
+        return self
 
 
 @router.post("/{campaign_id}/start")
@@ -454,53 +619,65 @@ async def start(
     payload["brief"] = brief_text
     payload["triggered_by"] = "web"
     payload["actor"] = f"web:{user['email']}"
+    ensure_gateway_bridge_key()
 
     # Seed campaign metadata in the bridge first so downstream skills can
     # find the campaign row before discovery starts writing candidates.
     selected_variants = _selected_variants(product, body.product_variant_ids)
-    color_variant_policy: str | None = None
-    if selected_variants:
-        labels = [v.get("label") or v.get("id") for v in selected_variants]
-        color_variant_policy = "operator_selected: " + " | ".join(str(x) for x in labels)
-    extra_notes_chunks: list[str] = []
-    if product["selling_points"]:
-        extra_notes_chunks.append(f"# selling_points\n{product['selling_points']}")
-    if selected_variants:
-        extra_notes_chunks.append(
-            "# product_variants\n"
-            + json.dumps(selected_variants, ensure_ascii=False)
-        )
-    extra_notes = "\n\n".join(extra_notes_chunks) or None
+    upsert_body = build_campaign_config_upsert_body(
+        product=product,
+        body=body,
+        selected_variants=selected_variants,
+        sku_ref=sku_ref,
+    )
     try:
-        upsert_body: dict[str, Any] = {
-            "label": product["name"],
-            "sku_whitelist": [sku_ref],
-            "paid_ceiling": body.budget_per_kol,
-            "contract_required": True,
-            "test_mode_to": body.test_mode_to,
-            "env": body.env,
-        }
-        if color_variant_policy:
-            upsert_body["color_variant_policy"] = color_variant_policy
-        if extra_notes:
-            upsert_body["extra_notes"] = extra_notes
-        if body.deliverable_platforms:
-            upsert_body["deliverable_platforms"] = body.deliverable_platforms
-        if body.deliverable_count_per_platform is not None:
-            upsert_body["deliverable_count_per_platform"] = body.deliverable_count_per_platform
-        if body.audit_standards_md and body.audit_standards_md.strip():
-            upsert_body["audit_standards_md"] = body.audit_standards_md.strip()
         await bridge.upsert_campaign(campaign_id, upsert_body)
     except BridgeError as exc:
-        # Non-fatal: the agent's intake step will retry the upsert.  We
-        # log it on the campaign row via audit only.
+        # Abort the launch. CAL is the canonical product-config store
+        # the downstream skills read from; a campaign created with the
+        # console row present but CAL row empty looks "running" but
+        # every downstream draft attempt will escalate. Better to
+        # refuse the launch and let the operator retry once CAL is
+        # back. The bridge_client already retried once for transient
+        # transport errors, so reaching here means a deterministic
+        # failure (auth/schema) or sustained outage.
         write_audit(
             conn,
             actor_user_id=user["id"],
-            action="campaign.upsert_warning",
+            action="campaign.upsert_failed",
             target=campaign_id,
             payload={"error": str(exc)},
         )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            {
+                "code": "cal_upsert_failed",
+                "message": (
+                    "cannot write campaign_config to CAL — campaign "
+                    "launch aborted. Check the bridge is reachable, "
+                    "then retry."
+                ),
+                "retry_after_seconds": 10,
+                "bridge_error": str(exc),
+            },
+        ) from exc
+
+    # Snapshot baseline candidate count BEFORE starting the gateway run so
+    # the post-terminal quantity gate has authoritative values to compare
+    # against. ``baseline`` and ``target_floor`` use the uncontacted-pool
+    # metric (excludes rejected/archived AND selected_for_outreach) so the
+    # gate measures fresh, contactable leads — not KOLs already dispatched
+    # to outreach. Re-runs (force=true) of a campaign with prior pool must
+    # measure those rows as baseline, not as part of this run's yield.
+    discovery_target = body.discovery_target_count or max(
+        body.headcount_target * 3, body.headcount_target + 5
+    )
+    try:
+        pre_candidates = await bridge.list_candidates(campaign_id, env=body.env)
+    except BridgeError:
+        pre_candidates = []
+    baseline_count = _count_uncontacted_candidates(pre_candidates)
+    target_floor = baseline_count + discovery_target
 
     try:
         out = await gateway.start_run(
@@ -513,17 +690,29 @@ async def start(
 
     run_id = out.get("run_id") if isinstance(out, dict) else None
     now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    # gate_run_id = run_id so the post-terminal gate watches THIS launch
+    # run specifically; later approve-driven outreach runs (which overwrite
+    # ``run_id``) won't accidentally trigger the discovery gate.
     conn.execute(
         """INSERT INTO product_campaigns
-                         (sku, campaign_id, env, run_id, test_mode_to, started_at, started_by_user_id, status)
-                     VALUES (?,?,?,?,?,?,?, 'running')
+                         (sku, campaign_id, env, run_id, test_mode_to, started_at,
+                          started_by_user_id, status, target_floor,
+                          baseline_candidate_count, retry_count, floor_unmet_reason,
+                          gate_run_id)
+                     VALUES (?,?,?,?,?,?,?, 'running', ?, ?, 0, NULL, ?)
            ON CONFLICT(campaign_id, env) DO UPDATE SET
              run_id=excluded.run_id,
                          test_mode_to=excluded.test_mode_to,
              started_at=excluded.started_at,
              started_by_user_id=excluded.started_by_user_id,
-             status='running'""",
-                (product["sku"], campaign_id, body.env, run_id, body.test_mode_to, now, user["id"]),
+             status='running',
+             target_floor=excluded.target_floor,
+             baseline_candidate_count=excluded.baseline_candidate_count,
+             retry_count=0,
+             floor_unmet_reason=NULL,
+             gate_run_id=excluded.gate_run_id""",
+                (product["sku"], campaign_id, body.env, run_id, body.test_mode_to, now,
+                 user["id"], target_floor, baseline_count, run_id),
     )
     if isinstance(run_id, str) and run_id:
         register_run(
@@ -537,6 +726,193 @@ async def start(
     write_audit(conn, actor_user_id=user["id"], action="campaign.start",
                 target=campaign_id, payload=payload)
     return out
+
+
+class RediscoverBody(BaseModel):
+    """Body for the operator's "discover N more KOLs" click."""
+
+    additional_count: int = Field(
+        ge=1,
+        le=200,
+        description="How many NEW candidates to add to the pool on top of "
+        "whatever is already persisted in CAL.",
+    )
+    env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
+
+
+async def _campaign_run_in_flight(
+    conn: sqlite3.Connection,
+    gateway: GatewayClient,
+    *,
+    campaign_id: str,
+    env: str,
+) -> tuple[bool, str | None, str | None]:
+    """Return ``(in_flight, run_id, run_state)`` for the campaign's latest run.
+
+    "In flight" means EITHER the latest tracked run (``run_id``) is in a
+    non-terminal gateway state OR the campaign has an open discovery
+    gate (``gate_run_id`` is set, regardless of the gate run's gateway
+    state — see ``products._sync_run_states`` for why we treat the
+    whole gate cycle as in-flight). Both signals matter because:
+
+    * approve-driven outreach uses ``run_id`` (so a fresh approve sees
+      the previous approve's outreach run as in-flight);
+    * a rediscover that just reached terminal but whose auto-retry has
+      not yet started is still semantically "discovery in progress" —
+      approve must block until ``evaluate_gate_after_terminal`` clears
+      the gate pointer.
+
+    Gateway-terminal runs are NOT auto-flipped here (that is
+    ``_sync_run_states``' job); we just treat them as not-in-flight for
+    the ``run_id`` half of the check so a new operator action can
+    proceed against a stale ``status='running'`` row.
+    """
+    row = conn.execute(
+        "SELECT run_id, status, gate_run_id FROM product_campaigns "
+        "WHERE campaign_id=? AND env=?",
+        (campaign_id, env),
+    ).fetchone()
+    if row is None:
+        return False, None, None
+
+    gate_run_id = row["gate_run_id"] if "gate_run_id" in row.keys() else None
+    if gate_run_id:
+        return True, row["run_id"], "gate_active"
+
+    if row["status"] != "running" or not row["run_id"]:
+        return False, row["run_id"], None
+    try:
+        info = await gateway.get_run(row["run_id"])
+    except GatewayError:
+        # Unreachable gateway — be conservative and treat as in-flight.
+        return True, row["run_id"], "unknown"
+    if info is None:
+        # Gateway evicted the run -> definitely not in flight anymore.
+        return False, row["run_id"], None
+    state = str(info.get("status") or "").lower()
+    return state in RUNNING_STATES, row["run_id"], state or None
+
+
+@router.post("/{campaign_id}/rediscover")
+async def rediscover(
+    campaign_id: str,
+    body: RediscoverBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    gateway: Annotated[GatewayClient, Depends(get_gateway)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """Spawn a discovery-only agent run for an existing campaign.
+
+    Reuses the campaign_config already persisted in CAL — does NOT call
+    upsert-campaign. Tells the agent to find ``additional_count`` candidates
+    that are NOT in the current candidate pool. Conflict semantics:
+
+    * If a campaign run is already in flight (status='running' on the
+      console row AND gateway reports a non-terminal state), return 409
+      ``campaign_run_in_flight``. We never auto-stop the running agent —
+      the operator must Stop+close it first.
+    * If another rediscover was fired in the last ``INFLIGHT_TTL_SECONDS``,
+      return 409 ``rediscover_inflight``. Cheap defense against rapid
+      double-clicks given the agent's slow startup.
+    """
+    row = conn.execute(
+        "SELECT sku, test_mode_to FROM product_campaigns "
+        "WHERE campaign_id=? AND env=?",
+        (campaign_id, body.env),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not tracked")
+
+    # Serialize against the discovery gate's auto-retry hook and any
+    # concurrent operator action (approve, second rediscover click) so
+    # the "check → start_run → register_run → UPDATE" sequence is
+    # atomic per (env, campaign_id).
+    lock = await campaign_lock(body.env, campaign_id)
+    async with lock:
+        in_flight, current_run_id, current_state = await _campaign_run_in_flight(
+            conn, gateway, campaign_id=campaign_id, env=body.env,
+        )
+        if in_flight:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "campaign_run_in_flight",
+                    "message": (
+                        "another agent run is still active for this campaign — "
+                        "Stop + close it (or wait for terminal state) before "
+                        "re-discovering"
+                    ),
+                    "run_id": current_run_id,
+                    "run_state": current_state,
+                },
+            )
+
+        product = conn.execute(
+            "SELECT sku, name, url, tags_json, notes, pitch_md, selling_points, "
+            "variants_json FROM products WHERE sku=?",
+            (row["sku"],),
+        ).fetchone()
+        if product is None:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "campaign's product no longer exists in the catalog",
+            )
+
+        try:
+            helper_out = await _trigger_rediscover_internal(
+                bridge=bridge,
+                gateway=gateway,
+                conn=conn,
+                product=product,
+                campaign_id=campaign_id,
+                env=body.env,
+                additional_count=body.additional_count,
+                test_mode_to_override=None,
+                current_test_mode_to=row["test_mode_to"],
+                rediscovery_instructions=REDISCOVERY_INSTRUCTIONS,
+                actor=user,
+                is_auto_retry=False,
+            )
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        except GatewayError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    if not helper_out.get("ok"):
+        skipped = helper_out.get("skipped")
+        if skipped == "rediscover_inflight":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "rediscover_inflight",
+                    "message": (
+                        f"a rediscover was started in the last "
+                        f"{INFLIGHT_TTL_SECONDS}s — wait before retriggering"
+                    ),
+                    "run_id": helper_out.get("run_id"),
+                    "started_at": helper_out.get("started_at"),
+                },
+            )
+        if skipped == "test_mode_to_missing":
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "test_mode_to missing for TEST campaign; restart the campaign or "
+                "fix product_campaigns.test_mode_to",
+            )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"rediscover failed: {skipped or 'unknown'}",
+        )
+
+    return {
+        "ok": True,
+        "campaign_id": campaign_id,
+        "env": body.env,
+        "run_id": helper_out.get("run_id"),
+        "additional_count": body.additional_count,
+        "excluded_handle_count": helper_out.get("excluded_handle_count", 0),
+    }
 
 
 class CloseCampaignBody(BaseModel):
@@ -583,8 +959,11 @@ async def close(
                 "error": str(exc),
             }
 
+    # Clear ``gate_run_id`` on close so the discovery-gate watchdog does
+    # not fire an auto-retry against a run the operator just stopped.
     conn.execute(
-        "UPDATE product_campaigns SET status=? WHERE campaign_id=? AND env=?",
+        "UPDATE product_campaigns SET status=?, gate_run_id=NULL "
+        "WHERE campaign_id=? AND env=?",
         (body.status, campaign_id, env),
     )
     write_audit(conn, actor_user_id=user["id"], action="campaign.close",
@@ -909,6 +1288,75 @@ async def _resume_transcript_items(
     return items
 
 
+def _ts_from_unix(value: Any) -> str:
+    if isinstance(value, (int, float)) and value > 0:
+        return _dt.datetime.fromtimestamp(value, _dt.timezone.utc).isoformat(timespec="seconds")
+    return ""
+
+
+async def _gateway_completed_snapshot(
+    *,
+    campaign_id: str,
+    env: str,
+    conn: sqlite3.Connection,
+    gateway: GatewayClient,
+) -> list[dict[str, Any]] | None:
+    """Synthesize a transcript from completed gateway runs.
+
+    Called when the session-file snapshot is empty. Gateway evicts the
+    per-run SSE ring buffer after a run completes, but ``GET /v1/runs/{id}``
+    still returns the run object (status + ``output``) for ~1h. For each
+    registered run in terminal state we emit a done/error marker + an
+    assistant row holding the run's final output text. Skips runs the
+    gateway has already evicted (None response).
+    """
+    legacy_run_id = _latest_campaign_run_id(conn, campaign_id, env)
+    merge_legacy_run_id(
+        conn,
+        campaign_id=campaign_id,
+        env=env,
+        legacy_run_id=legacy_run_id,
+        legacy_kind="outreach",
+    )
+    runs = list_runs_for_campaign(conn, campaign_id=campaign_id, env=env, limit=20)
+    if not runs:
+        return None
+    items: list[dict[str, Any]] = []
+    for r in reversed(runs):
+        try:
+            run = await gateway.get_run(r["run_id"])
+        except GatewayError:
+            run = None
+        if not isinstance(run, dict):
+            continue
+        status_val = run.get("status")
+        if status_val not in TERMINAL_STATES:
+            continue
+        ts = _ts_from_unix(run.get("updated_at")) or r.get("started_at") or ""
+        kind_label = r.get("kind", "run")
+        items.append({
+            "ts": ts,
+            "kind": "done" if status_val == "completed" else "error",
+            "label": f"{kind_label} · {status_val}",
+            "message": f"run {r['run_id'][:12]} · {status_val}",
+        })
+        output_raw = run.get("output")
+        if isinstance(output_raw, str) and output_raw.strip():
+            message = output_raw
+        elif isinstance(output_raw, (dict, list)):
+            message = json.dumps(output_raw, ensure_ascii=False)
+        else:
+            message = ""
+        if message:
+            items.append({
+                "ts": ts,
+                "kind": "assistant",
+                "label": kind_label,
+                "message": _clip_text(message, 4000),
+            })
+    return items or None
+
+
 @router.get("/{campaign_id}/agent-log")
 async def agent_log(
     campaign_id: str,
@@ -939,12 +1387,22 @@ async def agent_log(
             "items": resume_items[-limit:],
         }
     transcript = _transcript_items(campaign_id, env, limit)
-    if transcript is not None:
+    if transcript:
         return {
             "campaign_id": campaign_id,
             "env": env,
             "source": "session",
             "items": transcript[-limit:],
+        }
+    completed = await _gateway_completed_snapshot(
+        campaign_id=campaign_id, env=env, conn=conn, gateway=gateway,
+    )
+    if completed:
+        return {
+            "campaign_id": campaign_id,
+            "env": env,
+            "source": "gateway-completed",
+            "items": completed[-limit:],
         }
     return {"campaign_id": campaign_id, "env": env, "source": "session", "items": []}
 
@@ -962,6 +1420,56 @@ def _sse_frame(event: str, data: Any) -> bytes:
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
 
 
+_GATEWAY_TERMINAL_TO_FRAME = {
+    "completed": "run.completed",
+    "failed": "run.failed",
+    "cancelled": "run.cancelled",
+}
+
+
+async def _emit_synthetic_terminal(
+    *,
+    run_id: str,
+    kind: str,
+    run_obj: dict[str, Any],
+    out_queue: asyncio.Queue,
+) -> None:
+    """Project a terminal gateway run record into transcript-shaped frames.
+
+    Gateway evicts the per-run SSE event ring buffer the instant a run
+    reaches terminal state, but ``GET /v1/runs/{id}`` still returns the
+    run object (incl. ``output`` text) for ~1h. We use that to emit one
+    wrapped ``run.completed/failed/cancelled`` frame so the FE
+    transcript at least shows that the run finished + the final
+    assistant output, even when the FE subscribes after the run ended.
+    Without this synthesis, late subscribers get an empty stream and a
+    silent ``run.evicted`` — operators read this as "the run was lost".
+    """
+    status_val = str(run_obj.get("status") or "").lower()
+    inner_event = _GATEWAY_TERMINAL_TO_FRAME.get(status_val) or "run.completed"
+    output = run_obj.get("output")
+    if isinstance(output, (dict, list)):
+        try:
+            output_text = json.dumps(output, ensure_ascii=False)
+        except (TypeError, ValueError):
+            output_text = ""
+    else:
+        output_text = str(output or "")
+    ts_val = run_obj.get("updated_at") or run_obj.get("started_at")
+    payload = {
+        "status": status_val or "completed",
+        "output": output_text[:_MAX_TRANSCRIPT_CHARS] if output_text else "",
+        "timestamp": ts_val,
+        "synthesized": True,
+        "error": run_obj.get("error"),
+    }
+    await out_queue.put(_sse_frame(
+        inner_event,
+        {"run_id": run_id, "kind": kind, "event": inner_event,
+         "payload": payload},
+    ))
+
+
 async def _proxy_run_events(
     *,
     run_id: str,
@@ -969,25 +1477,88 @@ async def _proxy_run_events(
     out_queue: asyncio.Queue,
     settings,
     stop_event: asyncio.Event,
+    gateway: GatewayClient | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     """Subscribe to one gateway run's SSE feed and push frames into out_queue.
 
     Each gateway frame is rewrapped with ``run_id`` + ``kind`` so the
-    frontend can label which run a line came from. Quietly terminates on
-    gateway 404 (run already evicted) or connection failure — the
-    aggregator continues serving the remaining runs.
+    frontend can label which run a line came from.
+
+    Three behavioral details that the FE depends on:
+
+    1. **Late-subscriber replay** — before opening the SSE stream we
+       check whether the gateway run is already terminal. If yes,
+       synthesize a ``run.completed/failed/cancelled`` frame from the
+       run's ``output`` text and return. This rescues the common case
+       where the operator opens the campaign page after a fast
+       rediscover already finished (SSE ring buffer evicted → would
+       otherwise show as an empty transcript).
+    2. **ended_at write** — when the gateway run reaches terminal we
+       call ``mark_run_ended`` so the registry's ``ended_at`` matches
+       reality. Without this, the FE shows runs as "live" indefinitely
+       because nothing else writes ``ended_at``.
+    3. **Graceful exit** — quietly returns on gateway 404 (run already
+       evicted) or connection failure; the aggregator keeps serving
+       the remaining runs.
     """
+    from ..run_registry import mark_run_ended
+
+    # ── (1) Late-subscriber replay path ────────────────────────────────
+    if gateway is not None:
+        try:
+            existing = await gateway.get_run(run_id)
+        except GatewayError:
+            existing = None
+        if isinstance(existing, dict):
+            existing_status = str(existing.get("status") or "").lower()
+            if existing_status in TERMINAL_STATES:
+                await _emit_synthetic_terminal(
+                    run_id=run_id, kind=kind,
+                    run_obj=existing, out_queue=out_queue,
+                )
+                if conn is not None:
+                    try:
+                        mark_run_ended(conn, run_id=run_id)
+                    except sqlite3.Error:
+                        pass
+                await out_queue.put(_sse_frame(
+                    "run.closed", {"run_id": run_id, "kind": kind}
+                ))
+                return
+
+    # ── (2) Live SSE proxy ─────────────────────────────────────────────
     url = f"{settings.gateway_base.rstrip('/')}/v1/runs/{run_id}/events"
     headers: dict[str, str] = {"Accept": "text/event-stream"}
     if settings.gateway_key:
         headers["Authorization"] = f"Bearer {settings.gateway_key}"
+    saw_terminal_inner_event = False
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("GET", url, headers=headers) as resp:
                 if resp.status_code == 404:
-                    await out_queue.put(_sse_frame(
-                        "run.evicted", {"run_id": run_id, "kind": kind}
-                    ))
+                    # Race: run completed between the get_run() probe
+                    # above and our SSE subscribe. Try once more to
+                    # synthesize from a fresh get_run.
+                    late: dict[str, Any] | None = None
+                    if gateway is not None:
+                        try:
+                            late = await gateway.get_run(run_id)
+                        except GatewayError:
+                            late = None
+                    if isinstance(late, dict) and str(
+                        late.get("status") or ""
+                    ).lower() in TERMINAL_STATES:
+                        await _emit_synthetic_terminal(
+                            run_id=run_id, kind=kind,
+                            run_obj=late, out_queue=out_queue,
+                        )
+                        saw_terminal_inner_event = True
+                    else:
+                        await out_queue.put(_sse_frame(
+                            "run.evicted",
+                            {"run_id": run_id, "kind": kind},
+                        ))
                     return
                 if resp.status_code >= 400:
                     await out_queue.put(_sse_frame(
@@ -1012,12 +1583,28 @@ async def _proxy_run_events(
                                 payload_obj: Any = json.loads(data_str)
                             except json.JSONDecodeError:
                                 payload_obj = {"raw": data_str}
+                            # Fallback: if the upstream SSE source did not
+                            # emit an `event:` header (older gateway builds
+                            # before the header was added, or any
+                            # non-conforming producer), recover the event
+                            # name from the payload body's "event" field.
+                            # Without this fallback, every frame would be
+                            # tagged "message" and the FE — which routes
+                            # by event name — would silently drop it.
+                            if event_name == "message" and isinstance(payload_obj, dict):
+                                inner = payload_obj.get("event")
+                                if isinstance(inner, str) and inner:
+                                    event_name = inner
                             await out_queue.put(_sse_frame(
                                 event_name if event_name != "message" else "run.event",
                                 {"run_id": run_id, "kind": kind,
                                  "event": event_name,
                                  "payload": payload_obj},
                             ))
+                            if event_name in {
+                                "run.completed", "run.failed", "run.cancelled",
+                            }:
+                                saw_terminal_inner_event = True
                         event_name = "message"
                         data_lines = []
                         continue
@@ -1030,6 +1617,25 @@ async def _proxy_run_events(
     except (httpx.HTTPError, asyncio.CancelledError):
         pass
     finally:
+        # Write ended_at if the gateway has reported a terminal state
+        # (either via SSE event or via a probe get_run after the stream
+        # closed silently). Without this, the registry's ended_at
+        # stays NULL and the FE renders the run as live forever.
+        if conn is not None:
+            try:
+                if saw_terminal_inner_event:
+                    mark_run_ended(conn, run_id=run_id)
+                elif gateway is not None:
+                    try:
+                        last = await gateway.get_run(run_id)
+                    except GatewayError:
+                        last = None
+                    if isinstance(last, dict) and str(
+                        last.get("status") or ""
+                    ).lower() in TERMINAL_STATES:
+                        mark_run_ended(conn, run_id=run_id)
+            except sqlite3.Error:
+                pass
         await out_queue.put(_sse_frame(
             "run.closed", {"run_id": run_id, "kind": kind}
         ))
@@ -1077,8 +1683,14 @@ async def agent_stream(
         snapshot_items = resume_items[-limit:]
     else:
         transcript = _transcript_items(campaign_id, env, limit)
-        if transcript is not None:
+        if transcript:
             snapshot_items = transcript[-limit:]
+        else:
+            completed = await _gateway_completed_snapshot(
+                campaign_id=campaign_id, env=env, conn=conn, gateway=gateway,
+            )
+            if completed:
+                snapshot_items = completed[-limit:]
 
     async def producer() -> AsyncIterator[bytes]:
         out_queue: asyncio.Queue[bytes] = asyncio.Queue()
@@ -1095,14 +1707,21 @@ async def agent_stream(
         for r in initial_runs:
             tasks[r["run_id"]] = asyncio.create_task(_proxy_run_events(
                 run_id=r["run_id"], kind=r["kind"],
-                out_queue=out_queue, settings=settings, stop_event=stop_event,
+                out_queue=out_queue, settings=settings,
+                stop_event=stop_event,
+                gateway=gateway, conn=conn,
             ))
         try:
+            # New-run discovery poll cadence: 1.5s. Approve-driven
+            # outreach runs that follow a rediscover should show up in
+            # the transcript within a couple of seconds, not 5+. The
+            # poll is cheap (SELECT against a small indexed table).
+            NEW_RUN_POLL_INTERVAL = 1.5
             keepalive_at = asyncio.get_event_loop().time() + 25.0
-            poll_at = asyncio.get_event_loop().time() + 5.0
+            poll_at = asyncio.get_event_loop().time() + NEW_RUN_POLL_INTERVAL
             while True:
                 timeout = max(
-                    0.5,
+                    0.25,
                     min(
                         keepalive_at - asyncio.get_event_loop().time(),
                         poll_at - asyncio.get_event_loop().time(),
@@ -1130,12 +1749,13 @@ async def agent_stream(
                                 run_id=r["run_id"], kind=r["kind"],
                                 out_queue=out_queue, settings=settings,
                                 stop_event=stop_event,
+                                gateway=gateway, conn=conn,
                             ))
                             yield _sse_frame("run.added", {
                                 "run_id": r["run_id"], "kind": r["kind"],
                                 "started_at": r["started_at"],
                             })
-                    poll_at = now + 5.0
+                    poll_at = now + NEW_RUN_POLL_INTERVAL
         except asyncio.CancelledError:
             raise
         finally:
@@ -1204,6 +1824,7 @@ async def get_shortlist(
             "engagement_quality": payload.get("engagement_quality") or payload.get("showcase_score"),
             "niche_match": payload.get("niche_match") or payload.get("match_score"),
             "reason": row.get("review_reason") or payload.get("reason") or row.get("source"),
+            "candidate_status": row.get("candidate_status"),
         })
     return {"campaign_id": campaign_id, "candidates": candidates}
 
@@ -1239,7 +1860,7 @@ def _compose_approval_brief(
         "identity IDs above.",
         "",
         "## Runtime contract",
-        "- Use /home/pc/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
+        f"- Use {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
         "- Every CLI call MUST pass --env matching `mode` above.",
         "- If bridge auth fails, stop and report the missing HERMES_KOL_OPS_BRIDGE_KEY; do not bypass CAL.",
         "- In TEST mode, route any draft/test outbound email to test_mode_to above.",
@@ -1299,114 +1920,496 @@ async def approve_shortlist(
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict:
-    """Approve candidates in CAL, then launch the post-approval agent run."""
-    selected = {h.strip().lstrip("@").lower() for h in body.selected_handles if h.strip()}
-    identity_ids: list[int] = []
-    selected_rows: list[dict[str, Any]] = []
-    try:
-        candidates = await bridge.list_candidates(campaign_id, env=body.env)
-        for row in candidates:
-            identity_id = row.get("identity_id")
-            if not isinstance(identity_id, int):
-                continue
-            try:
-                ident = await bridge.get_identity(identity_id)
-            except BridgeError:
-                ident = {}
-            handle = str(ident.get("primary_handle") or row.get("primary_handle") or "").lstrip("@").lower()
-            if handle in selected:
-                identity_ids.append(identity_id)
-                selected_rows.append({"identity_id": identity_id, "handle": handle})
-    except BridgeError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    if selected and not identity_ids:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "selected handles did not match any candidates")
-    campaign_row = conn.execute(
-        "SELECT sku, test_mode_to FROM product_campaigns WHERE campaign_id=? AND env=?",
-        (campaign_id, body.env),
-    ).fetchone()
-    test_mode_to = _recover_test_mode_to(
-        conn,
-        campaign_id=campaign_id,
-        env=body.env,
-        current=campaign_row["test_mode_to"] if campaign_row else None,
-        override=body.test_mode_to,
-    )
-    if body.env == "TEST" and not test_mode_to:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "test_mode_to missing for TEST campaign; restart the campaign or pass test_mode_to",
+    """Approve candidates in CAL, then launch the post-approval agent run.
+
+    Concurrency contract:
+
+    * 409 ``campaign_run_in_flight`` if a rediscover, auto-retry, or
+      previous approve outreach run is still working. Prevents truncating
+      the candidate pool while the discovery quantity-gate is mid-cycle.
+    * 409 ``approve_inflight`` if another approve fired within the last
+      ``INFLIGHT_TTL_SECONDS``. Bare-minimum double-click defense.
+    * Holds the per-campaign asyncio lock for the entire critical path
+      so the discovery-gate auto-retry hook can't race against the
+      approve-driven outreach run start.
+
+    Does NOT touch ``gate_run_id`` — the discovery gate's pointer is
+    invariant under approve; the row's ``run_id`` is overwritten to
+    point at the post-approval outreach run for status/display purposes.
+    """
+    # Lock first; everything else (bridge calls, gateway call, row
+    # update, audit) runs under the lock. Approve is rare enough that
+    # holding the lock through a few bridge round-trips is fine.
+    lock = await campaign_lock(body.env, campaign_id)
+    async with lock:
+        # ── (1) Block while another run is in flight ─────────────────
+        in_flight, current_run_id, current_state = await _campaign_run_in_flight(
+            conn, gateway, campaign_id=campaign_id, env=body.env,
         )
-    campaign_update: dict[str, Any] = {"env": body.env}
-    if campaign_row and campaign_row["sku"]:
-        campaign_update["sku_whitelist"] = [campaign_row["sku"]]
-    if test_mode_to:
-        campaign_update["test_mode_to"] = test_mode_to
-    try:
-        await bridge.upsert_campaign(campaign_id, campaign_update)
-    except BridgeError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    payload = {
-        "identity_ids": identity_ids,
-        "selected_by": f"web:{user['email']}",
-        "env": body.env,
-    }
-    try:
-        out = await bridge.approve_shortlist(campaign_id, payload)
-    except BridgeError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    event_ids: list[int] = []
-    for row in selected_rows:
-        event = await bridge.write_event({
-            "identity_id": row["identity_id"],
-            "campaign_id": campaign_id,
-            "event_type": "approved",
-            "goal": "outreach",
-            "lane": "commerce",
-            "actor": f"web:{user['email']}",
-            "payload": {
-                "product_sku": campaign_row["sku"] if campaign_row else None,
-                "selected_handles": body.selected_handles,
-                "selected_identity_ids": identity_ids,
-            },
-            "env": body.env,
-        })
-        event_id = event.get("event_id")
-        if isinstance(event_id, int):
-            event_ids.append(event_id)
-    approval_brief = _compose_approval_brief(
-        campaign_id=campaign_id,
-        env=body.env,
-        selected_rows=selected_rows,
-        actor_email=user["email"],
-        test_mode_to=test_mode_to,
-    )
-    try:
-        run = await gateway.start_run(
-            input=approval_brief,
-            instructions=_APPROVAL_INSTRUCTIONS,
-            session_id=f"kol-campaign:{body.env}:{campaign_id}",
-        )
-    except GatewayError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    new_run_id = run.get("run_id")
-    conn.execute(
-        "UPDATE product_campaigns SET run_id=?, status='running' "
-        "WHERE campaign_id=? AND env=?",
-        (new_run_id, campaign_id, body.env),
-    )
-    if isinstance(new_run_id, str) and new_run_id:
-        register_run(
+        if in_flight:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "campaign_run_in_flight",
+                    "message": (
+                        "another agent run is still active for this "
+                        "campaign — wait for it to terminate (or Stop "
+                        "+ close it) before approving"
+                    ),
+                    "run_id": current_run_id,
+                    "run_state": current_state,
+                },
+            )
+
+        # ── (2) TTL dedup on approve itself ──────────────────────────
+        dedup_key = f"approve:{body.env}:{campaign_id}"
+        inflight_approve = get_inflight_run(conn, dedup_key=dedup_key)
+        if inflight_approve is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "approve_inflight",
+                    "message": (
+                        f"an approve was fired in the last "
+                        f"{INFLIGHT_TTL_SECONDS}s — wait before retriggering"
+                    ),
+                    "run_id": inflight_approve["run_id"],
+                    "started_at": inflight_approve["started_at"],
+                },
+            )
+
+        selected = {
+            h.strip().lstrip("@").lower()
+            for h in body.selected_handles if h.strip()
+        }
+        identity_ids: list[int] = []
+        selected_rows: list[dict[str, Any]] = []
+        try:
+            candidates = await bridge.list_candidates(campaign_id, env=body.env)
+            for row in candidates:
+                identity_id = row.get("identity_id")
+                if not isinstance(identity_id, int):
+                    continue
+                try:
+                    ident = await bridge.get_identity(identity_id)
+                except BridgeError:
+                    ident = {}
+                handle = str(
+                    ident.get("primary_handle") or row.get("primary_handle") or ""
+                ).lstrip("@").lower()
+                if handle in selected:
+                    identity_ids.append(identity_id)
+                    selected_rows.append({"identity_id": identity_id, "handle": handle})
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        if selected and not identity_ids:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "selected handles did not match any candidates",
+            )
+        campaign_row = conn.execute(
+            "SELECT sku, test_mode_to FROM product_campaigns "
+            "WHERE campaign_id=? AND env=?",
+            (campaign_id, body.env),
+        ).fetchone()
+        test_mode_to = _recover_test_mode_to(
             conn,
             campaign_id=campaign_id,
             env=body.env,
-            run_id=new_run_id,
-            kind="outreach",
-            session_id=f"kol-campaign:{body.env}:{campaign_id}",
+            current=campaign_row["test_mode_to"] if campaign_row else None,
+            override=body.test_mode_to,
         )
-    write_audit(conn, actor_user_id=user["id"], action="campaign.approve_shortlist",
-                target=campaign_id, payload={**payload, "selected_handles": body.selected_handles, "run_id": new_run_id, "event_ids": event_ids})
-    return {**out, "run_id": new_run_id, "approved_count": len(identity_ids), "event_ids": event_ids}
+        if body.env == "TEST" and not test_mode_to:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "test_mode_to missing for TEST campaign; restart the campaign or pass test_mode_to",
+            )
+        ensure_gateway_bridge_key()
+        campaign_update: dict[str, Any] = {"env": body.env}
+        if campaign_row and campaign_row["sku"]:
+            campaign_update["sku_whitelist"] = [campaign_row["sku"]]
+        if test_mode_to:
+            campaign_update["test_mode_to"] = test_mode_to
+        try:
+            await bridge.upsert_campaign(campaign_id, campaign_update)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        # Idempotently run discovery → outreach routing before selecting.
+        # The router is a no-op for candidates already past
+        # candidate_status='discovered' (reported as skipped_already_routed),
+        # but for any candidate still in 'discovered' it writes
+        # identity.outreach_path facts → triggers recompute_goals →
+        # creates the kol_goal_state.outreach row. Without this, an
+        # operator who clicks approve before explicitly invoking the
+        # router leaves the candidate with no goal_state row, and
+        # get_goal_state defaults outreach to "inactive", which blocks
+        # every downstream draft skill that gates on
+        # goals.outreach.status == "active".
+        try:
+            await bridge.route_discovery(
+                campaign_id,
+                {"env": body.env, "selected_by": f"web:{user['email']}"},
+            )
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        payload = {
+            "identity_ids": identity_ids,
+            "selected_by": f"web:{user['email']}",
+            "env": body.env,
+        }
+        try:
+            out = await bridge.approve_shortlist(campaign_id, payload)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        event_ids: list[int] = []
+        for row in selected_rows:
+            event = await bridge.write_event({
+                "identity_id": row["identity_id"],
+                "campaign_id": campaign_id,
+                "event_type": "approved",
+                "goal": "outreach",
+                "lane": "commerce",
+                "actor": f"web:{user['email']}",
+                "payload": {
+                    "product_sku": campaign_row["sku"] if campaign_row else None,
+                    "selected_handles": body.selected_handles,
+                    "selected_identity_ids": identity_ids,
+                },
+                "env": body.env,
+            })
+            event_id = event.get("event_id")
+            if isinstance(event_id, int):
+                event_ids.append(event_id)
+        approval_brief = _compose_approval_brief(
+            campaign_id=campaign_id,
+            env=body.env,
+            selected_rows=selected_rows,
+            actor_email=user["email"],
+            test_mode_to=test_mode_to,
+        )
+        try:
+            run = await gateway.start_run(
+                input=approval_brief,
+                instructions=_APPROVAL_INSTRUCTIONS,
+                session_id=f"kol-campaign:{body.env}:{campaign_id}",
+            )
+        except GatewayError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        new_run_id = run.get("run_id")
+        # Approve overwrites ``run_id`` for status/display but MUST NOT
+        # touch ``gate_run_id``; the discovery gate's pointer is owned
+        # exclusively by ``_trigger_rediscover_internal`` /
+        # ``evaluate_gate_after_terminal``.
+        conn.execute(
+            "UPDATE product_campaigns SET run_id=?, status='running' "
+            "WHERE campaign_id=? AND env=?",
+            (new_run_id, campaign_id, body.env),
+        )
+        if isinstance(new_run_id, str) and new_run_id:
+            register_run(
+                conn,
+                campaign_id=campaign_id,
+                env=body.env,
+                run_id=new_run_id,
+                kind="outreach",
+                session_id=f"kol-campaign:{body.env}:{campaign_id}",
+                dedup_key=dedup_key,
+            )
+        write_audit(
+            conn, actor_user_id=user["id"],
+            action="campaign.approve_shortlist",
+            target=campaign_id,
+            payload={**payload, "selected_handles": body.selected_handles,
+                     "run_id": new_run_id, "event_ids": event_ids},
+        )
+        return {**out, "run_id": new_run_id,
+                "approved_count": len(identity_ids), "event_ids": event_ids}
+
+
+class RedraftOutreachBody(BaseModel):
+    """Body for ``POST /campaigns/{cid}/identities/{iid}/redraft-outreach``.
+
+    ``discard_existing_approved_draft`` is the explicit operator ack that
+    they understand a re-draft will orphan whatever Gmail draft is
+    sitting in their inbox from the prior approval. Without it, the
+    endpoint refuses if a prior draft was approved-but-not-sent; this
+    keeps a misclick from silently doubling drafts in Gmail.
+    """
+
+    env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    discard_existing_approved_draft: bool = False
+
+
+def _compose_redraft_brief(
+    *,
+    campaign_id: str,
+    env: str,
+    identity_id: int,
+    handle: str | None,
+    actor_email: str,
+    test_mode_to: str | None,
+) -> str:
+    lines = [
+        "# campaign_redraft_outreach",
+        f"campaign_id: {campaign_id}",
+        f"mode: {env}",
+        f"requested_by: {actor_email}",
+        f"test_mode_to: {test_mode_to or ''}",
+        "",
+        "# scope",
+        f"- identity_id: {identity_id}",
+    ]
+    if handle:
+        lines.append(f"  handle: {handle}")
+    lines.extend([
+        "",
+        "# required_next_step",
+        (
+            "Regenerate the initial outreach draft for the single identity "
+            "above. Do NOT process any other identity in this campaign. "
+            "Treat this as a re-trigger of the post-approval flow for one "
+            "KOL — same skill, same fact-write contract, just scoped to "
+            "one identity_id."
+        ),
+        "",
+        "## Pipeline",
+        (
+            "1. Read campaign_config + dispatch-context for this single "
+            "identity_id only. If the identity is not in this campaign's "
+            "selected pool, stop and report the mismatch."
+        ),
+        (
+            "2. If `primary_email` is missing, run `kol-email-discovery` "
+            "first; on miss, open a `contact_email_not_found` escalation "
+            "and stop. Never invent an email."
+        ),
+        (
+            "3. Determine outreach path from CAL (relationship.total_collabs "
+            "/ identity.outreach_path). Invoke `kol-cold-outreach` (cold) "
+            "or `kol-reengagement-outreach` (repeat) for this identity."
+        ),
+        (
+            "4. Persist results to CAL: emit `kol_initial_outreach_draft_ready` "
+            "event AND write the `approval.reply_draft` fact with "
+            "`decision=\"pending\", kind=\"initial_outreach\"`. If a "
+            "prior approval.reply_draft exists for this (identity, "
+            "campaign), overwrite it — the operator explicitly asked "
+            "for a fresh draft."
+        ),
+        (
+            "5. Do NOT send email. Do NOT write `offer.outreach_sent=true`. "
+            "The console operator approves the new draft separately."
+        ),
+        "",
+        "## Runtime contract",
+        f"- Use {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
+        "- Every CLI call MUST pass --env matching `mode` above.",
+        "- In TEST mode, route any draft target to test_mode_to above.",
+    ])
+    return "\n".join(lines)
+
+
+@router.post("/{campaign_id}/identities/{identity_id}/redraft-outreach")
+async def redraft_outreach(
+    campaign_id: str,
+    identity_id: int,
+    body: RedraftOutreachBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    gateway: Annotated[GatewayClient, Depends(get_gateway)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict:
+    """Regenerate the initial-outreach Gmail draft for a single KOL.
+
+    Used from KolDetailPage when the operator sees a KOL stuck in
+    "approved but no Gmail draft" or "Gmail draft pending send" and
+    wants to (re-)build the draft. Internally launches a focused agent
+    run that re-invokes kol-cold-outreach / kol-reengagement-outreach
+    for one identity, mirroring approve-shortlist but at single-KOL
+    scope.
+
+    Concurrency:
+    * 409 ``campaign_run_in_flight`` — a campaign-scoped run is active
+      (approve, rediscover, gate retry). Blocking here mirrors the
+      approve-shortlist contract so two concurrent drafts can't race on
+      the same fact row.
+    * 409 ``redraft_inflight`` — another redraft for this exact
+      (identity, env, campaign) fired within ``INFLIGHT_TTL_SECONDS``.
+      Double-click defense across page reloads (the in-flight key is
+      durable in product_campaign_runs, not just local React state).
+    * 409 ``approved_draft_exists`` — the previous draft was already
+      approved by the operator (a Gmail draft exists in their inbox).
+      Re-drafting would orphan that Gmail draft, so we require the
+      caller to pass ``discard_existing_approved_draft: true``.
+    * 409 ``already_sent`` — ``offer.outreach_sent`` is true; the email
+      has been delivered, redrafting is meaningless. Use a follow-up
+      flow instead.
+    """
+    env = body.env
+    lock = await campaign_lock(env, campaign_id)
+    async with lock:
+        in_flight, current_run_id, current_state = await _campaign_run_in_flight(
+            conn, gateway, campaign_id=campaign_id, env=env,
+        )
+        if in_flight:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "campaign_run_in_flight",
+                    "message": (
+                        "another agent run is still active for this "
+                        "campaign — wait for it to finish before "
+                        "re-drafting"
+                    ),
+                    "run_id": current_run_id,
+                    "run_state": current_state,
+                },
+            )
+
+        dedup_key = f"redraft:{env}:{campaign_id}:{identity_id}"
+        inflight_self = get_inflight_run(conn, dedup_key=dedup_key)
+        if inflight_self is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "redraft_inflight",
+                    "message": (
+                        f"a redraft for this KOL was triggered in the "
+                        f"last {INFLIGHT_TTL_SECONDS}s — wait for the "
+                        f"new draft to appear (typically 30–60s) before "
+                        f"re-triggering"
+                    ),
+                    "run_id": inflight_self.get("run_id"),
+                    "started_at": inflight_self.get("started_at"),
+                },
+            )
+
+        # Pre-flight gate. The redraft uses a fresh session_id
+        # (``kol-campaign-draft:...``) so the agent does NOT inherit
+        # the launch brief's product context; it relies entirely on
+        # CAL's campaign_config for product_display_name. Validate
+        # upfront so the operator gets a clear 400 instead of waiting
+        # 30-60s for the agent to open a
+        # campaign_config_missing_required_product_facts escalation.
+        await assert_campaign_config_complete(bridge, campaign_id)
+
+        try:
+            ident = await bridge.get_identity(identity_id)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        if not ident:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "identity not found")
+
+        try:
+            facts_resp = await bridge.read_facts(
+                identity_id, campaign_id=campaign_id, env=env,
+            )
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        facts = facts_resp.get("facts") if isinstance(facts_resp, dict) else {}
+        facts = facts if isinstance(facts, dict) else {}
+
+        if facts.get("offer.outreach_sent"):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "already_sent",
+                    "message": (
+                        "outreach has already been sent for this KOL "
+                        "(offer.outreach_sent=true). Use a follow-up "
+                        "flow instead of redrafting the initial email."
+                    ),
+                    "outreach_sent_at": facts.get("offer.outreach_sent_at"),
+                },
+            )
+
+        prior_reply_draft = facts.get("approval.reply_draft")
+        prior_decision = None
+        if isinstance(prior_reply_draft, dict):
+            prior_decision = prior_reply_draft.get("decision")
+        if prior_decision == "approved" and not body.discard_existing_approved_draft:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "approved_draft_exists",
+                    "message": (
+                        "a previously approved Gmail draft exists for "
+                        "this KOL and has not been sent. Re-drafting "
+                        "will orphan that Gmail draft in your inbox. "
+                        "Confirm by re-submitting with "
+                        "discard_existing_approved_draft=true."
+                    ),
+                    "gmail_draft_id": facts.get("offer.gmail_draft_id"),
+                    "gmail_thread_id": facts.get("offer.gmail_thread_id"),
+                },
+            )
+
+        campaign_row = conn.execute(
+            "SELECT sku, test_mode_to FROM product_campaigns "
+            "WHERE campaign_id=? AND env=?",
+            (campaign_id, env),
+        ).fetchone()
+        test_mode_to = campaign_row["test_mode_to"] if campaign_row else None
+        if env == "TEST" and not test_mode_to:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "test_mode_to missing for TEST campaign; restart the "
+                "campaign or set test_mode_to before re-drafting",
+            )
+
+        ensure_gateway_bridge_key()
+        handle = ident.get("primary_handle") if isinstance(ident, dict) else None
+        brief = _compose_redraft_brief(
+            campaign_id=campaign_id,
+            env=env,
+            identity_id=identity_id,
+            handle=handle if isinstance(handle, str) else None,
+            actor_email=user["email"],
+            test_mode_to=test_mode_to,
+        )
+        try:
+            run = await gateway.start_run(
+                input=brief,
+                instructions=_APPROVAL_INSTRUCTIONS,
+                # Share the draft session namespace with refine/preview
+                # so transcript replay treats this as a draft run, not a
+                # campaign-wide resume that would clutter the campaign
+                # transcript view.
+                session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+            )
+        except GatewayError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        new_run_id = run.get("run_id") if isinstance(run, dict) else None
+        if isinstance(new_run_id, str) and new_run_id:
+            register_run(
+                conn,
+                campaign_id=campaign_id,
+                env=env,
+                run_id=new_run_id,
+                kind="draft",
+                session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+                dedup_key=dedup_key,
+            )
+        write_audit(
+            conn,
+            actor_user_id=user["id"],
+            action="campaign.redraft_outreach",
+            target=campaign_id,
+            payload={
+                "identity_id": identity_id,
+                "env": env,
+                "run_id": new_run_id,
+                "prior_decision": prior_decision,
+                "discard_existing_approved_draft": body.discard_existing_approved_draft,
+            },
+        )
+        return {
+            "run_id": new_run_id,
+            "identity_id": identity_id,
+            "campaign_id": campaign_id,
+            "env": env,
+            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        }
 
 
 # Goal status values the bridge writes (cal.update_goal_state_for):
@@ -1455,6 +2458,7 @@ class PatchCampaignConfigBody(BaseModel):
     launch. Used to clear readiness blockers (deliverables / audit standards
     / variant policy) without re-running the gateway agent."""
 
+    product_display_name: str | None = Field(default=None, min_length=2, max_length=80)
     deliverable_platforms: list[str] | None = None
     deliverable_count_per_platform: int | None = Field(default=None, ge=1, le=20)
     audit_standards_md: str | None = Field(default=None, max_length=8_000)
@@ -1463,6 +2467,14 @@ class PatchCampaignConfigBody(BaseModel):
     paid_ceiling: float | None = Field(default=None, gt=0)
     contract_required: bool | None = None
     env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
+
+    @model_validator(mode="after")
+    def _validate_display_name(self) -> "PatchCampaignConfigBody":
+        if self.product_display_name is not None:
+            self.product_display_name = _validate_product_display_name(
+                self.product_display_name,
+            )
+        return self
 
 
 @router.patch("/{campaign_id}/config")
@@ -1941,6 +2953,22 @@ async def fill_contract_blockers(
     }
 
 
+@router.get("")
+async def list_campaigns(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+    env: str | None = Query(default=None, pattern="^(LIVE|TEST)$"),
+) -> dict:
+    """Campaign picker feed: distinct campaigns the bridge has candidates
+    for, sorted newest-first. Returns ``{items: [{campaign_id, env,
+    candidate_count, last_touched_at, label, status}, ...]}``."""
+    try:
+        raw = await bridge.list_campaigns(env=env)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {"items": raw.get("items", [])}
+
+
 @router.get("/{campaign_id}/lanes")
 async def lanes(
     campaign_id: str,
@@ -1968,6 +2996,11 @@ async def lanes(
             "last_outcome": it.get("last_outcome"),
             "archived": bool(it.get("archived")),
             "goals": _pick_active_per_lane(it.get("lanes") or {}),
+            "outreach_sent_at": it.get("outreach_sent_at"),
+            "interest_signal": it.get("interest_signal"),
+            "outreach_draft_created": bool(it.get("outreach_draft_created")),
+            "gmail_draft_id": it.get("gmail_draft_id"),
+            "gmail_thread_id": it.get("gmail_thread_id"),
         })
     return {
         "campaign_id": campaign_id,

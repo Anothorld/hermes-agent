@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api';
+import { KolSearchBox } from '../components/inputs/KolSearchBox';
+import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { dialog } from '../components/dialogs/useDialog';
+import { toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
 
-/**
- * Candidate triage for a campaign.
- * - Lists candidates with relationship_status (new_prospect / lapsed_collaborator /
- *   active_collaborator / repeat_kol_needs_review) + discovery_score.
- * - Batch select for outreach (POST /candidates/select).
- * - Mark rejected (POST /candidates with status='rejected').
- * - Open escalation for repeat_kol_needs_review.
- */
+// Candidate triage for a campaign. Batch select for outreach, mark
+// rejected, open escalation for repeat KOLs.
 type Candidate = {
   identity_id: number;
   handle: string | null;
@@ -27,11 +26,11 @@ type Candidate = {
   notes: string | null;
 };
 
-const REL_BADGE: Record<string, string> = {
-  new_prospect: 'bg-sky-100 text-sky-700',
-  lapsed_collaborator: 'bg-amber-100 text-amber-800',
-  active_collaborator: 'bg-emerald-100 text-emerald-700',
-  repeat_kol_needs_review: 'bg-rose-100 text-rose-700',
+const REL_BADGE: Record<string, { cls: string; label: string }> = {
+  new_prospect: { cls: 'bg-sky-100 text-sky-700', label: '新候选' },
+  lapsed_collaborator: { cls: 'bg-amber-100 text-amber-800', label: '老朋友(冷)' },
+  active_collaborator: { cls: 'bg-emerald-100 text-emerald-700', label: '在合作' },
+  repeat_kol_needs_review: { cls: 'bg-rose-100 text-rose-700', label: '需复核' },
 };
 
 export function CampaignCandidatesPage() {
@@ -39,15 +38,16 @@ export function CampaignCandidatesPage() {
   const [rows, setRows] = useState<Candidate[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
   const [filter, setFilter] = useState<'all' | Candidate['relationship_status'] | 'pending'>('pending');
+  const [query, setQuery] = useState('');
 
   const refresh = useCallback(async () => {
     try {
       setRows(await api.get<Candidate[]>(`/campaigns/${encodeURIComponent(campaignId)}/candidates`));
       setErr(null);
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
     }
   }, [campaignId]);
 
@@ -56,10 +56,17 @@ export function CampaignCandidatesPage() {
   }, [refresh]);
 
   const filtered = useMemo(() => {
-    if (filter === 'all') return rows;
-    if (filter === 'pending') return rows.filter((r) => r.status === 'pending');
-    return rows.filter((r) => r.relationship_status === filter);
-  }, [rows, filter]);
+    const q = query.trim().toLowerCase();
+    let base = rows;
+    if (filter !== 'all') {
+      if (filter === 'pending') base = base.filter((r) => r.status === 'pending');
+      else base = base.filter((r) => r.relationship_status === filter);
+    }
+    if (q) {
+      base = base.filter((r) => `${r.handle ?? r.identity_id}`.toLowerCase().includes(q));
+    }
+    return base;
+  }, [rows, filter, query]);
 
   const toggle = (id: number) => {
     setSelected((prev) => {
@@ -74,9 +81,11 @@ export function CampaignCandidatesPage() {
     setBusy(true);
     try {
       await api.post(`/campaigns/${encodeURIComponent(campaignId)}/candidates/resolve-relationships`);
+      toast.success('已解析关系');
       await refresh();
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('解析失败', errorSummary(ex));
     } finally {
       setBusy(false);
     }
@@ -84,15 +93,25 @@ export function CampaignCandidatesPage() {
 
   const selectForOutreach = useCallback(async () => {
     if (selected.size === 0) return;
+    const ok = await dialog.confirm({
+      title: `把 ${selected.size} 个候选发起 outreach？`,
+      description: 'AI 会为这些 KOL 起草初邀。',
+      confirmLabel: '选定',
+      cancelLabel: '取消',
+      variant: 'info',
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       await api.post(`/campaigns/${encodeURIComponent(campaignId)}/candidates/select`, {
         identity_ids: Array.from(selected),
       });
+      toast.success(`已选定 ${selected.size} 个候选`);
       setSelected(new Set());
       await refresh();
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('选定失败', errorSummary(ex));
     } finally {
       setBusy(false);
     }
@@ -100,16 +119,24 @@ export function CampaignCandidatesPage() {
 
   const markRejected = useCallback(
     async (c: Candidate) => {
+      const ok = await dialog.confirm({
+        title: `把 @${c.handle ?? c.identity_id} 标为已拒绝？`,
+        confirmLabel: '拒绝',
+        cancelLabel: '取消',
+        variant: 'danger',
+      });
+      if (!ok) return;
       setBusy(true);
       try {
         await api.post(`/campaigns/${encodeURIComponent(campaignId)}/candidates`, {
           identity_id: c.identity_id,
           notes: 'rejected via console',
         });
-        // bridge POST is upsert; status field handled server-side
+        toast.success('已拒绝');
         await refresh();
       } catch (ex) {
-        setErr(String(ex));
+        setErr(ex);
+        toast.error('操作失败', errorSummary(ex));
       } finally {
         setBusy(false);
       }
@@ -119,10 +146,14 @@ export function CampaignCandidatesPage() {
 
   const openEscalation = useCallback(
     async (c: Candidate) => {
-      const question = window.prompt(
-        `Open escalation for @${c.handle ?? c.identity_id}?\n\nQuestion to operator:`,
-        'Repeat KOL detected — confirm whether to include in outreach.',
-      );
+      const question = await dialog.prompt({
+        title: `为 @${c.handle ?? c.identity_id} 开启升级`,
+        description: '请输入需要操作员回答的问题。',
+        defaultValue: 'Repeat KOL detected — confirm whether to include in outreach.',
+        required: true,
+        multiline: true,
+        confirmLabel: '开启升级',
+      });
       if (!question) return;
       setBusy(true);
       try {
@@ -133,9 +164,11 @@ export function CampaignCandidatesPage() {
           reason: 'Repeat KOL flagged on candidate triage',
           suggested_question: question,
         });
+        toast.success('升级已开启');
         await refresh();
       } catch (ex) {
-        setErr(String(ex));
+        setErr(ex);
+        toast.error('开启失败', errorSummary(ex));
       } finally {
         setBusy(false);
       }
@@ -147,60 +180,61 @@ export function CampaignCandidatesPage() {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-lg font-semibold">
-          Candidates — <span className="font-mono">{campaignId}</span>
+          候选列表 — <span className="font-mono">{campaignId}</span>
         </h1>
         <Link
           to={`/kols?campaign_id=${encodeURIComponent(campaignId)}`}
           className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"
         >
-          → Kanban
+          → 看板
         </Link>
+        <KolSearchBox value={query} onChange={setQuery} />
         <select
           value={filter ?? 'all'}
           onChange={(e) => setFilter(e.target.value as typeof filter)}
           className="rounded border border-slate-300 px-2 py-1 text-sm"
         >
-          <option value="pending">pending</option>
-          <option value="all">all</option>
-          <option value="new_prospect">new_prospect</option>
-          <option value="lapsed_collaborator">lapsed_collaborator</option>
-          <option value="active_collaborator">active_collaborator</option>
-          <option value="repeat_kol_needs_review">repeat_kol_needs_review</option>
+          <option value="pending">待处理</option>
+          <option value="all">全部</option>
+          <option value="new_prospect">新候选</option>
+          <option value="lapsed_collaborator">老朋友(冷)</option>
+          <option value="active_collaborator">在合作</option>
+          <option value="repeat_kol_needs_review">需复核</option>
         </select>
         <button
           disabled={busy}
           onClick={resolveRelationships}
           className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-50 disabled:opacity-40"
         >
-          Resolve relationships
+          解析关系
         </button>
         <button
           disabled={busy || selected.size === 0}
           onClick={selectForOutreach}
           className="rounded bg-sky-600 px-3 py-1 text-sm text-white hover:bg-sky-700 disabled:opacity-40"
         >
-          Select {selected.size} for outreach
+          选定 {selected.size} 个发起 outreach
         </button>
         <button
           onClick={refresh}
           className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-50"
         >
-          Refresh
+          刷新
         </button>
       </div>
-      {err && <div className="text-sm text-red-600">{err}</div>}
+      {!!err && <ErrorAlert error={err} onRetry={refresh} />}
       <table className="w-full text-sm">
         <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="p-2"></th>
             <th className="p-2">handle</th>
-            <th className="p-2">relationship</th>
-            <th className="p-2">total_collabs</th>
-            <th className="p-2">last_outcome</th>
-            <th className="p-2">score</th>
-            <th className="p-2">source</th>
-            <th className="p-2">status</th>
-            <th className="p-2">actions</th>
+            <th className="p-2">关系</th>
+            <th className="p-2">合作次数</th>
+            <th className="p-2">上次结果</th>
+            <th className="p-2">评分</th>
+            <th className="p-2">来源</th>
+            <th className="p-2">状态</th>
+            <th className="p-2">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -226,13 +260,13 @@ export function CampaignCandidatesPage() {
                 {c.relationship_status ? (
                   <span
                     className={`rounded px-2 py-0.5 text-xs ${
-                      REL_BADGE[c.relationship_status] ?? 'bg-slate-100 text-slate-600'
+                      REL_BADGE[c.relationship_status]?.cls ?? 'bg-slate-100 text-slate-600'
                     }`}
                   >
-                    {c.relationship_status}
+                    {REL_BADGE[c.relationship_status]?.label ?? c.relationship_status}
                   </span>
                 ) : (
-                  <span className="text-xs text-slate-400">(unresolved)</span>
+                  <span className="text-xs text-slate-400">(未解析)</span>
                 )}
               </td>
               <td className="p-2 text-xs">{c.total_collabs ?? 0}</td>
@@ -248,7 +282,7 @@ export function CampaignCandidatesPage() {
                       onClick={() => openEscalation(c)}
                       className="rounded bg-rose-600 px-2 py-0.5 text-white hover:bg-rose-700 disabled:opacity-40"
                     >
-                      Escalate
+                      升级
                     </button>
                   )}
                   {c.status === 'pending' && (
@@ -257,7 +291,7 @@ export function CampaignCandidatesPage() {
                       onClick={() => markRejected(c)}
                       className="rounded border border-slate-300 px-2 py-0.5 hover:bg-slate-50 disabled:opacity-40"
                     >
-                      Reject
+                      拒绝
                     </button>
                   )}
                 </div>
@@ -267,7 +301,7 @@ export function CampaignCandidatesPage() {
           {filtered.length === 0 && (
             <tr>
               <td colSpan={9} className="p-6 text-center text-sm text-slate-500">
-                No candidates match this filter.
+                当前筛选下没有候选。
               </td>
             </tr>
           )}

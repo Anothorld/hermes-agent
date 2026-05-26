@@ -2,20 +2,26 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import ApprovalContextCard from '../components/ApprovalContextCard';
+import { DraftDiffView } from '../components/diff/DraftDiffView';
+import { FactKeyChip } from '../components/inputs/FactKeyChip';
+import { TimeAgo } from '../components/inputs/TimeAgo';
+import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { useEnvStore, toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
+import { dialog } from '../components/dialogs/useDialog';
 import {
   parseConflictBody,
   startedAtMs,
   useInflightLock,
 } from '../useInflightLock';
+import { usePollingFallback } from '../hooks/usePollingFallback';
+import { useDataChannel } from '../hooks/useDataChannel';
 
-/**
- * Cross-cutting approvals page.
- * Lists all pending approval.* facts surfaced by the bridge
- * (e.g. compensation_cap_breach, identity_drift_review) with
- * KOL + campaign + namespace path + context, and 批准 / 驳回 buttons.
- * A linked-escalation badge appears when the approval was opened by
- * an escalation rule.
- */
+// Cross-cutting approvals page. Renders all pending approval.* facts
+// surfaced by the bridge (e.g. compensation_cap_breach, reply_draft)
+// with KOL + campaign + namespace path + context, plus 批准 / 驳回 / 优化
+// actions. Reply-draft rows additionally show a side-by-side diff
+// against the previous version.
 export type ApprovalRow = {
   identity_id: number;
   campaign_id: string;
@@ -30,11 +36,11 @@ export type ApprovalRow = {
 
 type StatusFilter = 'pending' | 'approved' | 'rejected' | 'all';
 
-const NS_COLOR: Record<string, string> = {
-  identity: 'bg-sky-50 text-sky-700 border-sky-200',
-  offer: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  fulfillment: 'bg-amber-50 text-amber-800 border-amber-200',
-  approval: 'bg-rose-50 text-rose-700 border-rose-200',
+const STATUS_LABEL: Record<StatusFilter, string> = {
+  pending: '待审批',
+  approved: '已通过',
+  rejected: '已驳回',
+  all: '全部',
 };
 
 const rowKey = (r: ApprovalRow) =>
@@ -54,13 +60,10 @@ type RefinementHistoryEntry = {
 };
 
 export function ApprovalsPage() {
+  const env = useEnvStore((s) => s.env);
   const [rows, setRows] = useState<ApprovalRow[]>([]);
-  const [env, setEnv] = useState<'TEST' | 'LIVE'>(() => {
-    const saved = localStorage.getItem('approvalsEnv') || localStorage.getItem('kolEnv');
-    return saved === 'LIVE' ? 'LIVE' : 'TEST';
-  });
   const [status, setStatus] = useState<StatusFilter>('pending');
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [refining, setRefining] = useState<string | null>(null);
   const [refinementText, setRefinementText] = useState('');
@@ -73,22 +76,50 @@ export function ApprovalsPage() {
       setRows(await api.get<ApprovalRow[]>(`/approvals${qs}`));
       setErr(null);
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
     }
   }, [env, status]);
 
   useEffect(() => {
-    localStorage.setItem('approvalsEnv', env);
     refresh();
-    const t = setInterval(refresh, 15_000);
-    return () => clearInterval(t);
-  }, [env, refresh]);
+  }, [refresh]);
+
+  // Live channel + slower polling fallback (gated on editor focus).
+  useDataChannel({ onMatch: refresh });
+  usePollingFallback(refresh, 20_000);
 
   const decide = useCallback(
     async (row: ApprovalRow, decision: 'approve' | 'reject') => {
-      const note = decision === 'reject'
-        ? window.prompt('Rejection reason (optional)') ?? ''
-        : '';
+      const isReplyDraft = row.fact_path === 'approval.reply_draft';
+      let note = '';
+      if (decision === 'reject') {
+        const reason = await dialog.prompt({
+          title: '驳回理由',
+          description: '请简要说明驳回原因（AI 会基于此理由调整下一版草稿）。',
+          placeholder: '例：语气太正式 / 漏掉了优惠条款 / 收件人称呼错误 ...',
+          required: true,
+          multiline: true,
+          confirmLabel: '提交驳回',
+          variant: 'danger',
+          liveWarning: env === 'LIVE',
+        });
+        if (reason === null) return;
+        note = reason;
+      } else {
+        // Approve confirms (especially in LIVE) since reply-draft
+        // approve immediately creates a Gmail draft.
+        const ok = await dialog.confirm({
+          title: isReplyDraft ? '批准并创建 Gmail 草稿？' : '批准此审批？',
+          description: isReplyDraft
+            ? '批准后 AI 会在你 Gmail 草稿箱里创建一份草稿，需要你手动去 Gmail 点 Send。'
+            : '批准此项后，AI 会沿着审批通过的路径继续推进。',
+          confirmLabel: '批准',
+          cancelLabel: '取消',
+          variant: 'info',
+          liveWarning: env === 'LIVE',
+        });
+        if (!ok) return;
+      }
       setBusy(row.fact_path);
       try {
         await api.post(`/approvals/${row.fact_path}/${decision}`, {
@@ -98,14 +129,16 @@ export function ApprovalsPage() {
           env,
           note: note || undefined,
         });
+        toast.success(decision === 'approve' ? '已批准' : '已驳回');
         await refresh();
       } catch (ex) {
-        setErr(String(ex));
+        setErr(ex);
+        toast.error('提交失败', errorSummary(ex));
       } finally {
         setBusy(null);
       }
     },
-    [refresh, env],
+    [env, refresh],
   );
 
   const submitRefine = useCallback(
@@ -125,18 +158,15 @@ export function ApprovalsPage() {
             campaign_id: row.campaign_id,
             refinement_prompt: prompt,
             env,
-            // Optimistic lock — refuse the refine if the row was
-            // approved/rejected/refined since we opened it.
             if_captured_at: row.opened_at,
           },
         );
         acquireLock(out?.run_id ?? null);
         setRefining(null);
         setRefinementText('');
-        setRefineHint((m) => ({
-          ...m,
-          [key]: out?.hint ?? 'agent is regenerating… refresh in 30–60s.',
-        }));
+        const hint = out?.hint ?? 'AI 正在重新生成 … 30–60s 后自动刷新。';
+        setRefineHint((m) => ({ ...m, [key]: hint }));
+        toast.progress('草稿生成中…', hint, { groupKey: `refine-${key}` });
         await refresh();
       } catch (ex) {
         const conflict = parseConflictBody(ex);
@@ -145,20 +175,19 @@ export function ApprovalsPage() {
             conflict.run_id ?? null,
             startedAtMs(conflict.started_at),
           );
-          setRefineHint((m) => ({
-            ...m,
-            [key]: conflict.message ?? 'A refine is already in progress.',
-          }));
+          const m = conflict.message ?? '已有一次优化在进行中。';
+          setRefineHint((mm) => ({ ...mm, [key]: m }));
+          toast.info('优化已在进行', m);
           setRefining(null);
           setRefinementText('');
         } else if (conflict?.error === 'stale_draft') {
-          setRefineHint((m) => ({
-            ...m,
-            [key]: conflict.message ?? 'Draft changed — refresh and retry.',
-          }));
+          const m = conflict.message ?? '草稿已变化，请刷新后重试。';
+          setRefineHint((mm) => ({ ...mm, [key]: m }));
+          toast.error('草稿已过期', m);
           await refresh();
         } else {
-          setErr(String(ex));
+          setErr(ex);
+          toast.error('请求失败', errorSummary(ex));
         }
       } finally {
         setBusy(null);
@@ -179,36 +208,27 @@ export function ApprovalsPage() {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h1 className="text-lg font-semibold">Approvals</h1>
-        <select
-          value={env}
-          onChange={(e) => setEnv(e.target.value as typeof env)}
-          className="rounded border border-slate-300 px-2 py-1 text-sm"
-        >
-          <option value="TEST">TEST</option>
-          <option value="LIVE">LIVE</option>
-        </select>
+        <h1 className="text-lg font-semibold">待审批</h1>
         <select
           value={status}
           onChange={(e) => setStatus(e.target.value as StatusFilter)}
           className="rounded border border-slate-300 px-2 py-1 text-sm"
         >
-          <option value="pending">pending</option>
-          <option value="approved">approved</option>
-          <option value="rejected">rejected</option>
-          <option value="all">all</option>
+          {(Object.keys(STATUS_LABEL) as StatusFilter[]).map((s) => (
+            <option key={s} value={s}>{STATUS_LABEL[s]}</option>
+          ))}
         </select>
         <button
           onClick={refresh}
           className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-50"
         >
-          Refresh
+          刷新
         </button>
       </div>
-      {err && <div className="text-sm text-red-600">{err}</div>}
+      {!!err && <ErrorAlert error={err} onRetry={refresh} />}
       {Object.keys(grouped).length === 0 && (
         <div className="rounded border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
-          No {status} approvals.
+          没有 {STATUS_LABEL[status]} 的审批。
         </div>
       )}
       {Object.entries(grouped).map(([key, items]) => {
@@ -222,11 +242,11 @@ export function ApprovalsPage() {
                   to={`/kols/${identityId}?campaign_id=${encodeURIComponent(campaignId)}`}
                   className="font-medium text-sky-700 hover:underline"
                 >
-                  {handle ? `@${handle}` : `identity #${identityId}`}
+                  {handle ? `@${handle}` : `KOL #${identityId}`}
                 </Link>
                 <span className="ml-2 text-slate-500">campaign {campaignId}</span>
               </div>
-              <span className="text-xs text-slate-500">{items.length} pending</span>
+              <span className="text-xs text-slate-500">{items.length} 项待处理</span>
             </header>
             <ul className="divide-y divide-slate-100">
               {items.map((r) => (
@@ -300,31 +320,42 @@ function ApprovalRowItem({
   const refinementHistory = Array.isArray(ctx.refinement_history)
     ? (ctx.refinement_history as RefinementHistoryEntry[])
     : [];
-  // Per-row in-flight lock for the refine button. Mirrors the backend's
-  // refine dedup_key (refine:{identity_id}:{campaign_id}) so the disabled
-  // state survives page refresh and cross-tab clicks land on the same
-  // lock surface.
   const refineLock = useInflightLock(
     `draft.lock.refine:${row.identity_id}:${row.campaign_id}`,
   );
+
+  // For reply_draft rows: current draft lives at the top level of ctx
+  // (subject, body, to); previous_drafts[0] is the immediately
+  // preceding version (most recent first).
+  const currentDraft = isReplyDraft
+    ? {
+        subject: typeof ctx.subject === 'string' ? (ctx.subject as string) : null,
+        body: typeof ctx.body === 'string' ? (ctx.body as string) : null,
+      }
+    : null;
+  const priorDraft = previousDrafts.length > 0 ? previousDrafts[0] : null;
+
   return (
     <li className="flex flex-wrap items-start gap-3 p-3 text-sm">
-      <span
-        className={`rounded border px-2 py-0.5 text-xs font-mono ${
-          NS_COLOR[row.namespace] ?? 'bg-slate-50 text-slate-600 border-slate-200'
-        }`}
-      >
-        {row.fact_path}
-      </span>
+      <FactKeyChip factKey={row.fact_path} variant="filled" />
+      <TimeAgo iso={row.opened_at} prefix="提交于" className="text-[11px] text-slate-500" />
       {row.linked_escalation_id != null && (
         <Link
           to={`/escalations/${row.linked_escalation_id}`}
           className="rounded bg-rose-100 px-2 py-0.5 text-xs text-rose-700 hover:bg-rose-200"
         >
-          escalation #{row.linked_escalation_id}
+          升级 #{row.linked_escalation_id}
         </Link>
       )}
       <div className="flex w-full flex-col gap-2">
+        {isReplyDraft && currentDraft && (
+          <DraftDiffView
+            previous={priorDraft}
+            current={currentDraft}
+            previousLabel={priorDraft ? `上一版 (共 ${previousDrafts.length} 版历史)` : ''}
+            currentLabel="当前待审版本"
+          />
+        )}
         <ApprovalContextCard
           factPath={row.fact_path}
           context={row.context}
@@ -339,7 +370,7 @@ function ApprovalRowItem({
         )}
         {refineLock.locked && (
           <div className="rounded bg-sky-50 px-2 py-1 text-xs text-sky-800">
-            Refine 进行中… 约 {refineLock.remainingSeconds}s 后可再次操作；
+            优化生成中… 约 {refineLock.remainingSeconds}s 后可再次操作；
             刷新或换 tab 也不会重复触发。
           </div>
         )}
@@ -363,17 +394,17 @@ function ApprovalRowItem({
                     >
                       <div className="font-mono text-[11px] text-slate-500">
                         v-{previousDrafts.length - i}
-                        {refEntry?.at ? ` · ${refEntry.at}` : ''}
+                        {refEntry?.at && <> · <TimeAgo iso={refEntry.at} /></>}
                         {refEntry?.by ? ` · ${refEntry.by}` : ''}
                       </div>
                       {refEntry?.prompt && (
                         <div className="mt-1 text-[11px] italic text-slate-600">
-                          prompt: {refEntry.prompt}
+                          优化指令：{refEntry.prompt}
                         </div>
                       )}
                       {d.subject != null && (
                         <div className="mt-1">
-                          <span className="text-slate-500">subject:</span>{' '}
+                          <span className="text-slate-500">主题：</span>{' '}
                           {String(d.subject)}
                         </div>
                       )}
@@ -392,12 +423,12 @@ function ApprovalRowItem({
           </div>
         )}
         {refining === k && (
-          <div className="rounded border border-sky-300 bg-sky-50 p-2">
+          <div data-editing className="rounded border border-sky-300 bg-sky-50 p-2">
             <textarea
               rows={4}
               value={refinementText}
               onChange={(e) => onChangeRefinementText(e.target.value)}
-              placeholder="Tell the agent what to change: tone, additions, removals, mention specific facts, etc."
+              placeholder="告诉 AI 改什么：语气、加什么、删什么、强调哪个事实，等等。"
               className="w-full rounded border border-sky-300 bg-white p-2 text-xs"
             />
             <div className="mt-1 flex gap-2">
@@ -445,7 +476,7 @@ function ApprovalRowItem({
           >
             {refineLock.locked
               ? `生成中… (${refineLock.remainingSeconds}s)`
-              : '优化/重新生成'}
+              : '优化 / 重写'}
           </button>
         )}
         <button

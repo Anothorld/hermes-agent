@@ -1,5 +1,11 @@
+function defaultApiBase(): string {
+  if (typeof window === 'undefined') return 'http://localhost:8765';
+  const { protocol, hostname } = window.location;
+  return `${protocol}//${hostname}:8765`;
+}
+
 export const API_BASE: string =
-  (import.meta.env.VITE_API_BASE as string) || 'http://localhost:8765';
+  (import.meta.env.VITE_API_BASE as string) || defaultApiBase();
 
 const TOKEN_KEY = 'koc.token';
 
@@ -57,51 +63,151 @@ export const api = {
 
 export type SseEvent = { event: string; data: string };
 
+export type SseConnState = 'connecting' | 'open' | 'reconnecting' | 'closed';
+
 export type SseHandle = {
   cancel: () => void;
+};
+
+export type StreamLinesOpts = {
+  // Called whenever the connection state transitions. Use this to render
+  // a "reconnecting (n)…" badge so the operator knows the panel will
+  // recover automatically — without it, the silent reconnect loop is
+  // indistinguishable from a dead session.
+  onState?: (state: SseConnState, attempt: number) => void;
+  // Auto-reconnect knobs. Defaults: indefinite retries with exponential
+  // backoff capped at 15s, with ±20% jitter so a thundering herd of
+  // tabs reconnects spread out. Pass ``maxRetries`` to bound the loop.
+  maxRetries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
 };
 
 // Subscribe to an SSE endpoint that requires Bearer auth. EventSource
 // can't set custom headers, so we use fetch + ReadableStream and parse
 // the wire format ourselves (event: / data: / blank-line frame).
-export function streamLines(path: string, onEvent: (ev: SseEvent) => void, onError?: (e: unknown) => void): SseHandle {
+//
+// Reconnect behavior: on transport error (network drop, server-side
+// proxy timeout, gateway crash) we wait baseDelayMs * 2^attempt with
+// jitter, then reconnect transparently. ``onEvent`` is invoked on the
+// reopened stream as if the connection had never dropped — the caller
+// is responsible for de-duping or ignoring frames it already processed
+// before the drop. For the transcript panel, the snapshot frame on
+// every reconnect already handles state recovery. Authentication
+// failures (401) abort the retry loop.
+export function streamLines(
+  path: string,
+  onEvent: (ev: SseEvent) => void,
+  onError?: (e: unknown) => void,
+  opts: StreamLinesOpts = {},
+): SseHandle {
   const ctrl = new AbortController();
-  const token = getToken();
-  const headers: Record<string, string> = { Accept: 'text/event-stream' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  (async () => {
+  const baseDelay = opts.baseDelayMs ?? 1000;
+  const maxDelay = opts.maxDelayMs ?? 15000;
+  const maxRetries = opts.maxRetries; // undefined = retry forever
+  const setState = (s: SseConnState, attempt: number) => {
     try {
-      const res = await fetch(`${API_BASE}${path}`, { headers, signal: ctrl.signal });
-      if (!res.ok || !res.body) {
-        onError?.(new ApiError(res.status, await res.text().catch(() => '')));
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let buf = '';
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        // Split on blank lines = end of one SSE frame.
-        let idx = buf.indexOf('\n\n');
-        while (idx >= 0) {
-          const raw = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          idx = buf.indexOf('\n\n');
-          let evt = 'message';
-          const dataLines: string[] = [];
-          for (const line of raw.split('\n')) {
-            if (line.startsWith(':')) continue;
-            if (line.startsWith('event:')) evt = line.slice(6).trim();
-            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
-          }
-          if (dataLines.length) onEvent({ event: evt, data: dataLines.join('\n') });
-        }
-      }
-    } catch (e) {
-      if ((e as { name?: string })?.name !== 'AbortError') onError?.(e);
+      opts.onState?.(s, attempt);
+    } catch {
+      // Don't let an onState callback exception kill the loop.
     }
+  };
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => resolve(), ms);
+      ctrl.signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(t);
+          reject(new DOMException('aborted', 'AbortError'));
+        },
+        { once: true },
+      );
+    });
+
+  (async () => {
+    let attempt = 0;
+    setState('connecting', attempt);
+    while (!ctrl.signal.aborted) {
+      const token = getToken();
+      const headers: Record<string, string> = { Accept: 'text/event-stream' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      let unrecoverable = false;
+      try {
+        const res = await fetch(`${API_BASE}${path}`, {
+          headers,
+          signal: ctrl.signal,
+        });
+        if (res.status === 401) {
+          // Token expired — match the unary request() behavior so the
+          // user lands on /login. Caller's onError still fires so the
+          // panel renders the error state until the redirect lands.
+          setToken(null);
+          if (
+            typeof window !== 'undefined'
+            && window.location.pathname !== '/login'
+          ) {
+            window.location.href = '/login';
+          }
+          onError?.(new ApiError(401, await res.text().catch(() => '')));
+          unrecoverable = true;
+          break;
+        }
+        if (!res.ok || !res.body) {
+          // Other HTTP errors are surfaced but still retried — the
+          // server may be temporarily 502'ing during a redeploy.
+          onError?.(new ApiError(res.status, await res.text().catch(() => '')));
+        } else {
+          attempt = 0;
+          setState('open', attempt);
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let buf = '';
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            let idx = buf.indexOf('\n\n');
+            while (idx >= 0) {
+              const raw = buf.slice(0, idx);
+              buf = buf.slice(idx + 2);
+              idx = buf.indexOf('\n\n');
+              let evt = 'message';
+              const dataLines: string[] = [];
+              for (const line of raw.split('\n')) {
+                if (line.startsWith(':')) continue;
+                if (line.startsWith('event:')) evt = line.slice(6).trim();
+                else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+              }
+              if (dataLines.length) onEvent({ event: evt, data: dataLines.join('\n') });
+            }
+          }
+        }
+      } catch (e) {
+        if ((e as { name?: string })?.name === 'AbortError') break;
+        // Network-level failure (DNS, TCP reset, fetch abort by browser
+        // when laptop sleeps) — surface to caller AND reconnect.
+        onError?.(e);
+      }
+      if (ctrl.signal.aborted || unrecoverable) break;
+      if (maxRetries !== undefined && attempt >= maxRetries) {
+        setState('closed', attempt);
+        break;
+      }
+      attempt += 1;
+      const expBackoff = Math.min(maxDelay, baseDelay * 2 ** (attempt - 1));
+      const jitter = 0.8 + Math.random() * 0.4; // 0.8x – 1.2x
+      const delay = Math.round(expBackoff * jitter);
+      setState('reconnecting', attempt);
+      try {
+        await sleep(delay);
+      } catch {
+        break; // aborted
+      }
+      setState('connecting', attempt);
+    }
+    setState('closed', attempt);
   })();
   return { cancel: () => ctrl.abort() };
 }
@@ -123,6 +229,29 @@ export type LaneSnapshot = {
   goals: Record<Lane, GoalState | null>;
   repeat_count?: number;
   last_outcome?: string | null;
+  // Card-level shortcuts pulled from the latest facts so the FE can
+  // render the "sent 12h ago" line and the interest-signal badge
+  // without a per-card /facts fan-out.
+  outreach_sent_at?: string | null;
+  interest_signal?: string | null;
+  // Tri-state for "where is the initial outreach email":
+  //   false / undefined          → no Gmail draft yet (operator may
+  //                                need to re-trigger the skill)
+  //   outreach_draft_created     → draft sitting in Gmail, waiting on
+  //                                operator to click Send
+  //   + outreach_sent_at         → SENT-reconcile confirmed delivery
+  outreach_draft_created?: boolean;
+  gmail_draft_id?: string | null;
+  gmail_thread_id?: string | null;
+};
+
+export type CampaignListItem = {
+  campaign_id: string;
+  env: 'TEST' | 'LIVE';
+  candidate_count: number;
+  last_touched_at?: string | null;
+  label?: string | null;
+  status?: string | null;
 };
 
 export type EscalationRow = {

@@ -1,9 +1,15 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api } from '../api';
+import { api, ApiError } from '../api';
 import AgentTranscriptPanel from '../components/AgentTranscriptPanel';
 import ContractReadinessPanel from '../components/ContractReadinessPanel';
 import EditCampaignConfigPanel from '../components/EditCampaignConfigPanel';
+import { TimeAgo } from '../components/inputs/TimeAgo';
+import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { dialog } from '../components/dialogs/useDialog';
+import { useEnvStore, toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
+import { usePollingFallback } from '../hooks/usePollingFallback';
 
 type ProductVariant = {
   id: string;
@@ -40,11 +46,20 @@ type CampaignRow = {
   kol_identity_ids: number[];
   contacted_kol_ids: number[];
   candidate_count: number;
+  pending_candidate_count: number;
   shortlist_ready: boolean;
   shortlist_approved: boolean;
   event_count: number;
   run_state: string | null;
   run_error: string | null;
+  // Discovery-quantity-gate state. `gate_active=true` means the backend
+  // is still tracking a live rediscover / auto-retry for this campaign;
+  // the UI uses this to disable Approve and to gate the Rediscover
+  // button (so a second rediscover can't fire while the gate cycle is
+  // mid-flight). Both fields are null on legacy / pre-migration rows.
+  gate_run_id: string | null;
+  gate_state: string | null;
+  gate_active: boolean;
 };
 
 type KolIdent = {
@@ -85,6 +100,16 @@ type CloseCampaignResponse = {
     error?: string;
   } | null;
 };
+
+// Mirror of backend gateway_client.RUNNING_STATES — used to gate the
+// rediscover button so we don't fire a second agent while one is still
+// working on the same campaign.
+const RUN_STATE_RUNNING = new Set([
+  'queued',
+  'running',
+  'waiting_for_approval',
+  'stopping',
+]);
 
 function StatusPill({ s }: { s: CampaignRow['status'] }) {
   const cls =
@@ -258,6 +283,7 @@ type ShortlistCandidate = {
   engagement_quality: number | null;
   niche_match: number | null;
   reason: string | null;
+  candidate_status: string | null;
 };
 
 function ScoreBar({ label, value }: { label: string; value: number | null }) {
@@ -281,10 +307,15 @@ function ShortlistReviewPanel({
   campaignId,
   env,
   onSubmit,
+  approveBlockedReason,
 }: {
   campaignId: string;
   env: string;
   onSubmit: (selectedHandles: string[]) => Promise<void>;
+  // When non-null, Approve is disabled and the reason is shown as a
+  // banner + button tooltip. Used to lock approvals out while the
+  // discovery quantity-gate is mid-cycle.
+  approveBlockedReason?: string | null;
 }) {
   const [candidates, setCandidates] = useState<ShortlistCandidate[] | null>(null);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
@@ -300,11 +331,18 @@ function ShortlistReviewPanel({
       .then((r) => {
         if (!alive) return;
         setCandidates(r.candidates);
+        // Default-check only candidates that have NOT been approved yet.
+        // Re-approving an already-selected_for_outreach candidate would
+        // re-trigger draft generation for them, which is rarely what the
+        // operator wants — they're here to approve the freshly discovered
+        // rows.
         const init: Record<string, boolean> = {};
-        for (const c of r.candidates) init[c.handle] = true;
+        for (const c of r.candidates) {
+          init[c.handle] = c.candidate_status !== 'selected_for_outreach';
+        }
         setPicked(init);
       })
-      .catch((ex) => alive && setErr(String(ex)));
+      .catch((ex) => alive && setErr(errorSummary(ex)));
     return () => {
       alive = false;
     };
@@ -379,6 +417,21 @@ function ShortlistReviewPanel({
                       {c.platform}
                     </span>
                   )}
+                  {c.candidate_status === 'selected_for_outreach' ? (
+                    <span
+                      className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-800"
+                      title="此 KOL 已在更早一轮被批准 — 重新勾选会再次触发 draft 生成，通常不需要"
+                    >
+                      already approved
+                    </span>
+                  ) : (
+                    <span
+                      className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800"
+                      title="尚未审批的新候选"
+                    >
+                      pending
+                    </span>
+                  )}
                   {c.display_name && c.display_name !== c.handle && (
                     <span className="text-slate-500">{c.display_name}</span>
                   )}
@@ -404,17 +457,27 @@ function ShortlistReviewPanel({
           </li>
         ))}
       </ul>
+      {approveBlockedReason && (
+        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+          {approveBlockedReason}
+        </div>
+      )}
       <div className="mt-2 flex items-center justify-end gap-2">
         <span className="text-xs text-slate-500">{selectedHandles.length} selected</span>
         <button
-          disabled={busy || selectedHandles.length === 0}
+          disabled={
+            busy
+            || selectedHandles.length === 0
+            || !!approveBlockedReason
+          }
+          title={approveBlockedReason ?? undefined}
           onClick={async () => {
             setBusy(true);
             setErr(null);
             try {
               await onSubmit(selectedHandles);
             } catch (ex) {
-              setErr(String(ex));
+              setErr(errorSummary(ex));
             } finally {
               setBusy(false);
             }
@@ -428,16 +491,75 @@ function ShortlistReviewPanel({
   );
 }
 
+function RediscoverControl({
+  campaignId,
+  alreadyDiscovered,
+  blocked,
+  onSubmit,
+}: {
+  campaignId: string;
+  alreadyDiscovered: number;
+  blocked: boolean;
+  onSubmit: (additionalCount: number) => Promise<void>;
+}) {
+  const [n, setN] = useState<number>(5);
+  const [busy, setBusy] = useState(false);
+  const disabled = blocked || busy;
+  const tooltip = blocked
+    ? '当前 agent run 仍在进行 — 等待终态或先 Stop + close 再发现'
+    : `再发现 ${n} 个新增 KOL（已发现 ${alreadyDiscovered} 个，不会被改动）`;
+  return (
+    <div className="inline-flex items-center gap-1" title={tooltip}>
+      <input
+        type="number"
+        min={1}
+        max={50}
+        value={n}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          if (Number.isFinite(v)) setN(Math.max(1, Math.min(50, Math.floor(v))));
+        }}
+        className="w-14 rounded border px-1 py-0.5 text-xs"
+        disabled={disabled}
+      />
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={async () => {
+          const ok = await dialog.confirm({
+            title: `再发现 ${n} 个 KOL？`,
+            description: `${campaignId} · 已发现的 ${alreadyDiscovered} 个候选会被排除，不会被修改。`,
+            confirmLabel: '开始',
+            cancelLabel: '取消',
+          });
+          if (!ok) return;
+          setBusy(true);
+          try {
+            await onSubmit(n);
+          } finally {
+            setBusy(false);
+          }
+        }}
+        className="rounded border border-indigo-300 bg-indigo-50 px-2 py-0.5 text-xs text-indigo-800 hover:bg-indigo-100 disabled:opacity-50"
+      >
+        {busy ? 'Starting…' : `+ Discover ${n} more`}
+      </button>
+    </div>
+  );
+}
+
 function CampaignCard({
   c,
   kols,
   onClose,
   onApprove,
+  onRediscover,
 }: {
   c: CampaignRow;
   kols: Record<string, KolIdent>;
   onClose: (id: string, env: string) => void;
   onApprove: (id: string, env: string, selectedHandles: string[]) => Promise<void>;
+  onRediscover: (id: string, env: string, additionalCount: number) => Promise<void>;
 }) {
   const [showReview, setShowReview] = useState(false);
   const [retryingDrafts, setRetryingDrafts] = useState(false);
@@ -454,9 +576,7 @@ function CampaignCard({
         {c.run_id && (
           <span className="font-mono text-xs text-slate-500">run: {c.run_id}</span>
         )}
-        <span className="ml-auto text-xs text-slate-400">
-          started {c.started_at.replace('T', ' ').slice(0, 19)}
-        </span>
+        <TimeAgo iso={c.started_at} prefix="启动于" className="ml-auto text-xs text-slate-400" />
         {c.status === 'running' && (
           <button
             onClick={() => onClose(c.campaign_id, c.env)}
@@ -466,13 +586,17 @@ function CampaignCard({
             Stop + close
           </button>
         )}
-        {(c.shortlist_ready || c.candidate_count > 0) && !c.shortlist_approved && (
+        {(c.shortlist_ready || c.candidate_count > 0) && c.pending_candidate_count > 0 && (
           <button
             onClick={() => setShowReview((v) => !v)}
             className="rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800 hover:bg-emerald-100"
             title="Review discovered candidates with scores + reasons, then approve a subset"
           >
-            {showReview ? '× Close review' : `✓ Review candidates (${c.candidate_count})`}
+            {showReview
+              ? '× Close review'
+              : c.shortlist_approved
+              ? `✓ Review new candidates (${c.pending_candidate_count})`
+              : `✓ Review candidates (${c.candidate_count})`}
           </button>
         )}
         {c.shortlist_ready && c.shortlist_approved && (
@@ -483,6 +607,17 @@ function CampaignCard({
             shortlist approved
           </span>
         )}
+        <RediscoverControl
+          campaignId={c.campaign_id}
+          alreadyDiscovered={c.kol_identity_ids.length}
+          blocked={
+            c.gate_active
+            || (c.status === 'running'
+                && !!c.run_state
+                && RUN_STATE_RUNNING.has(c.run_state))
+          }
+          onSubmit={(n) => onRediscover(c.campaign_id, c.env, n)}
+        />
         {c.shortlist_approved && c.contacted_kol_ids.length === 0 && approvedHandles.length > 0 && (
           <button
             onClick={async () => {
@@ -505,6 +640,15 @@ function CampaignCard({
         <ShortlistReviewPanel
           campaignId={c.campaign_id}
           env={c.env}
+          approveBlockedReason={
+            c.gate_active
+              ? '当前正在执行 rediscover / 自动补量，请等待发现流程完成后再审批 KOL（避免触发 floor 误判）'
+              : c.status === 'running'
+              && !!c.run_state
+              && RUN_STATE_RUNNING.has(c.run_state)
+              ? '当前 agent run 仍在进行 — 等待终态或先 Stop + close 再审批'
+              : null
+          }
           onSubmit={async (handles) => {
             await onApprove(c.campaign_id, c.env, handles);
             setShowReview(false);
@@ -533,11 +677,7 @@ function CampaignCard({
           <div className="font-medium text-slate-500">last event</div>
           <div>
             {c.last_event_type ?? '—'}
-            {c.last_event_ts && (
-              <span className="ml-1 text-slate-400">
-                @ {c.last_event_ts.replace('T', ' ').slice(0, 19)}
-              </span>
-            )}
+            {c.last_event_ts && <TimeAgo iso={c.last_event_ts} prefix="@" className="ml-1 text-slate-400" />}
           </div>
         </div>
         <div>
@@ -625,6 +765,13 @@ function LaunchCampaignForm({
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const defaultCampaignId = `${sku}-${today}`;
   const [campaignId, setCampaignId] = useState(defaultCampaignId);
+  // SKU-shaped catalog names (e.g. "SEB800") get rejected by the backend
+  // validator — leave the input blank in that case so the operator is
+  // forced to type a human-friendly name.
+  const _skuShape = /^[A-Z]{2,5}[\- ]?\d{3,5}[A-Z0-9]*$/;
+  const _defaultDisplayName =
+    product.name && !_skuShape.test(product.name.trim()) ? product.name : '';
+  const [productDisplayName, setProductDisplayName] = useState<string>(_defaultDisplayName);
   const [budgetPerKol, setBudgetPerKol] = useState<number>(product.default_budget_per_kol ?? 500);
   const [absoluteFloor, setAbsoluteFloor] = useState<number>(product.default_absolute_floor ?? 1000);
   const [budgetTotal, setBudgetTotal] = useState<number>(product.default_budget_total ?? 12000);
@@ -687,6 +834,22 @@ function LaunchCampaignForm({
       onError('product_pitch_md 必填：请粘贴产品的卖点 / 类别 / 受众 / 送样策略，供 KOL discovery 使用');
       return;
     }
+    const trimmedDisplayName = productDisplayName.trim();
+    if (!trimmedDisplayName) {
+      onError('product_display_name 必填：写一个 cold-outreach 邮件里能直接用的产品名（例如 "the new media console"），避免 SKU 漏到 KOL 视野');
+      return;
+    }
+    if (_skuShape.test(trimmedDisplayName)) {
+      onError(`product_display_name "${trimmedDisplayName}" 看起来是 SKU/型号代码，请换成 KOL 能看懂的名字`);
+      return;
+    }
+    if (
+      trimmedDisplayName.toLowerCase() === sku.toLowerCase() ||
+      trimmedDisplayName.toLowerCase() === campaignId.toLowerCase()
+    ) {
+      onError('product_display_name 不能与 SKU 或 campaign_id 相同 — 这正是该字段要避免的泄漏路径');
+      return;
+    }
     if (product.variants.length > 0 && pickedVariantIds.length === 0) {
       onError('请至少勾选一个 variant — KOL 选品 / 合同模板需要它');
       return;
@@ -702,14 +865,11 @@ function LaunchCampaignForm({
       onError('deliverable_count_per_platform 至少 1');
       return;
     }
-    if (!auditStandardsMd.trim() || auditStandardsMd.trim().length < 30) {
-      onError('audit_standards_md 必填（≥30 字符）— 内容审核 / 合同模板必须的依据');
-      return;
-    }
     setBusy(true);
     try {
       const body: Record<string, unknown> = {
         product_sku: sku,
+        product_display_name: trimmedDisplayName,
         env,
         budget_per_kol: budgetPerKol,
         absolute_floor: absoluteFloor,
@@ -727,7 +887,7 @@ function LaunchCampaignForm({
       }
       body.deliverable_platforms = platforms;
       body.deliverable_count_per_platform = deliverableCount;
-      body.audit_standards_md = auditStandardsMd.trim();
+      if (auditStandardsMd.trim()) body.audit_standards_md = auditStandardsMd.trim();
       const r = await api.post<{ run_id?: string }>(
         `/campaigns/${encodeURIComponent(campaignId)}/start`,
         body,
@@ -749,6 +909,21 @@ function LaunchCampaignForm({
             value={campaignId}
             onChange={(e) => setCampaignId(e.target.value)}
             className="rounded border px-2 py-1 font-mono"
+            required
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-slate-500">
+            product_display_name <span className="text-amber-600">*</span>
+            <span className="ml-1 font-normal text-slate-400">
+              (cold-outreach 邮件里给 KOL 看的产品名，必须是人话；不能写成 SKU / campaign_id)
+            </span>
+          </span>
+          <input
+            value={productDisplayName}
+            onChange={(e) => setProductDisplayName(e.target.value)}
+            placeholder='例如 "the new media console" / "POVISON Atlas sofa"'
+            className="w-80 rounded border px-2 py-1"
             required
           />
         </label>
@@ -927,9 +1102,9 @@ function LaunchCampaignForm({
         </div>
         <label className="mt-2 flex flex-col text-xs">
           <span className="text-slate-500">
-            audit_standards_md <span className="text-amber-600">*</span>
+            audit_standards_md
             <span className="ml-1 text-slate-400">
-              (≥30 字符；合规 / 品牌口径 / 必备 hashtag / 避雷)
+              (可选；合规 / 品牌口径 / 必备 hashtag / 避雷)
             </span>
           </span>
           <textarea
@@ -975,10 +1150,9 @@ function LaunchCampaignForm({
 export function ProductDetailPage() {
   const { sku } = useParams<{ sku: string }>();
   const [p, setP] = useState<Product | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
   const [campaigns, setCampaigns] = useState<CampaignsPayload>({ campaigns: [], kols: {} });
-  const [envFilter, setEnvFilter] = useState<'TEST' | 'LIVE'>('TEST');
-  const [msg, setMsg] = useState<string | null>(null);
+  const envFilter = useEnvStore((s) => s.env);
   const [watcherStatus, setWatcherStatus] = useState<ReplyWatcherStatus | null>(null);
   const [watcherEnv, setWatcherEnv] = useState<'TEST' | 'LIVE'>('TEST');
   const [watcherInterval, setWatcherInterval] = useState(60);
@@ -989,7 +1163,7 @@ export function ProductDetailPage() {
     api
       .get<CampaignsPayload>(`/products/${encodeURIComponent(sku)}/campaigns?env=${envFilter}`)
       .then(setCampaigns)
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(e));
   };
 
   const refreshWatcher = () => {
@@ -1000,7 +1174,7 @@ export function ProductDetailPage() {
         if (status.running && status.env) setWatcherEnv(status.env);
         if (status.interval) setWatcherInterval(status.interval);
       })
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(e));
   };
 
   useEffect(() => {
@@ -1008,25 +1182,23 @@ export function ProductDetailPage() {
     api
       .get<Product>(`/products/${encodeURIComponent(sku)}`)
       .then(setP)
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(e));
   }, [sku]);
 
   useEffect(() => {
     refreshCampaigns();
-    const t = setInterval(refreshCampaigns, 10_000);
-    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sku, envFilter]);
 
   useEffect(() => {
     refreshWatcher();
-    const t = setInterval(refreshWatcher, 5_000);
-    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  usePollingFallback(refreshCampaigns, 20_000);
+  usePollingFallback(refreshWatcher, 30_000);
+
   const mutateWatcher = async (action: 'start' | 'stop' | 'restart') => {
-    setMsg(null);
     setErr(null);
     setWatcherBusy(true);
     try {
@@ -1038,20 +1210,20 @@ export function ProductDetailPage() {
       };
       const status = await api.post<ReplyWatcherStatus>(`/reply-watcher/${action}`, body);
       setWatcherStatus(status);
-      setMsg(
+      toast.success(
         status.running
-          ? `Reply watcher running in ${status.env} · pid ${status.pid}`
-          : 'Reply watcher stopped.',
+          ? `Reply watcher 已在 ${status.env} 运行 · pid ${status.pid}`
+          : 'Reply watcher 已停止',
       );
     } catch (ex) {
-      setErr(`Reply watcher ${action} failed: ${String(ex)}`);
+      setErr(ex);
+      toast.error(`Reply watcher ${action} 失败`, errorSummary(ex));
     } finally {
       setWatcherBusy(false);
     }
   };
 
   const syncSent = async () => {
-    setMsg(null);
     setErr(null);
     setWatcherBusy(true);
     try {
@@ -1059,19 +1231,29 @@ export function ProductDetailPage() {
         '/reply-watcher/reconcile-sent',
         { env: watcherEnv, lookback_days: 7, max_results: 100 },
       );
-      setMsg(
-        `Sent sync complete · ${out.reconciled_count ?? 0} reconciled · ${out.sent_threads_seen ?? 0} sent threads seen`,
+      toast.success(
+        'SENT 同步完成',
+        `已对账 ${out.reconciled_count ?? 0} 条 · 共扫描 ${out.sent_threads_seen ?? 0} 个 SENT 线程`,
       );
       refreshCampaigns();
     } catch (ex) {
-      setErr(`Sent sync failed: ${String(ex)}`);
+      setErr(ex);
+      toast.error('SENT 同步失败', errorSummary(ex));
     } finally {
       setWatcherBusy(false);
     }
   };
 
   const close = async (cid: string, env: string) => {
-    setMsg(null);
+    const ok = await dialog.confirm({
+      title: `关闭 campaign ${cid}？`,
+      description: '会尽力 stop 掉 gateway 上的 run，然后把 campaign 标为 closed。',
+      confirmLabel: '关闭',
+      cancelLabel: '取消',
+      variant: 'danger',
+      liveWarning: env === 'LIVE',
+    });
+    if (!ok) return;
     setErr(null);
     try {
       const out = await api.post<CloseCampaignResponse>(
@@ -1079,43 +1261,85 @@ export function ProductDetailPage() {
         { status: 'closed' },
       );
       const stop = out.stop_result;
-      if (!out.run_id) {
-        setMsg(`Campaign ${cid} closed in console.`);
-      } else if (stop?.gateway_status === 'stopping') {
-        setMsg(`Stop requested for ${out.run_id} and campaign ${cid} was closed.`);
-      } else if (stop?.gateway_status === 'not_found') {
-        setMsg(`Campaign ${cid} closed. Gateway no longer tracks run ${out.run_id}.`);
-      } else if (stop?.error) {
-        setMsg(`Campaign ${cid} closed, but stop request failed: ${stop.error}`);
-      } else {
-        setMsg(`Campaign ${cid} closed in console.`);
-      }
+      let msg = `Campaign ${cid} 已关闭`;
+      if (stop?.gateway_status === 'stopping') msg = `已请求停止 ${out.run_id}，campaign ${cid} 已关闭`;
+      else if (stop?.gateway_status === 'not_found') msg = `Campaign ${cid} 已关闭，run ${out.run_id} 已不可见`;
+      else if (stop?.error) msg = `Campaign ${cid} 已关闭，但 stop 请求失败：${stop.error}`;
+      toast.success(msg);
       refreshCampaigns();
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('关闭失败', errorSummary(ex));
+    }
+  };
+
+  const rediscover = async (cid: string, env: string, additionalCount: number) => {
+    setErr(null);
+    try {
+      const r = await api.post<{
+        run_id?: string | null;
+        additional_count?: number;
+        excluded_handle_count?: number;
+      }>(`/campaigns/${encodeURIComponent(cid)}/rediscover`, {
+        env,
+        additional_count: additionalCount,
+      });
+      toast.success(
+        '已开始再发现',
+        `run ${r.run_id ?? '(none)'} · 目标 +${r.additional_count ?? additionalCount} · 排除 ${r.excluded_handle_count ?? 0} 个已知 handle`,
+      );
+      refreshCampaigns();
+    } catch (ex) {
+      if (ex instanceof ApiError) {
+        type RediscoverErr = {
+          detail?: { code?: string; message?: string } | string;
+        };
+        let parsed: RediscoverErr | null = null;
+        try {
+          parsed = JSON.parse(ex.body) as RediscoverErr;
+        } catch {
+          parsed = null;
+        }
+        const detail = parsed?.detail;
+        let msg = '';
+        if (detail && typeof detail === 'object' && 'message' in detail) {
+          const code = detail.code;
+          msg = `(${ex.status}${code ? ` · ${code}` : ''}) ${detail.message ?? ex.body}`;
+        } else if (typeof detail === 'string') {
+          msg = `(${ex.status}) ${detail}`;
+        } else {
+          msg = `(${ex.status}) ${ex.body}`;
+        }
+        toast.error('再发现被拒绝', msg);
+      } else {
+        toast.error('再发现失败', errorSummary(ex));
+      }
+      setErr(ex);
+      throw ex;
     }
   };
 
   const approveShortlist = async (cid: string, env: string, selected: string[]) => {
-    setMsg(null);
     setErr(null);
     try {
       const r = await api.post<{ run_id?: string; approved_count?: number }>(
         `/campaigns/${encodeURIComponent(cid)}/approve-shortlist`,
         { env, selected_handles: selected },
       );
-      setMsg(
-        `Approved ${r.approved_count ?? selected.length} KOLs · drafting run ${r.run_id ?? '(none)'}`,
+      toast.success(
+        `已批准 ${r.approved_count ?? selected.length} 个 KOL`,
+        `起草 run ${r.run_id ?? '(none)'}`,
       );
       refreshCampaigns();
     } catch (ex) {
-      setErr(`Approve shortlist failed: ${String(ex)}`);
+      setErr(ex);
+      toast.error('批准 shortlist 失败', errorSummary(ex));
       throw ex;
     }
   };
 
-  if (err && !p) return <div className="text-red-600">{err}</div>;
-  if (!p) return <div>Loading…</div>;
+  if (err && !p) return <ErrorAlert error={err} onRetry={() => sku && api.get<Product>(`/products/${encodeURIComponent(sku)}`).then(setP).catch((e) => setErr(e))} />;
+  if (!p) return <div className="text-sm text-slate-500">加载中…</div>;
 
   return (
     <div className="space-y-4">
@@ -1183,35 +1407,31 @@ export function ProductDetailPage() {
 
       <section className="space-y-2">
         <div className="flex items-center gap-2">
-          <h2 className="font-medium">Campaigns</h2>
-          <select
-            value={envFilter}
-            onChange={(e) => setEnvFilter(e.target.value as 'TEST' | 'LIVE')}
-            className="rounded border px-2 py-0.5 text-xs"
-          >
-            <option value="TEST">TEST</option>
-            <option value="LIVE">LIVE</option>
-          </select>
+          <h2 className="font-medium">Campaigns（env={envFilter}，可在顶部切换）</h2>
           <button
             onClick={refreshCampaigns}
             className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-50"
           >
-            Refresh
+            刷新
           </button>
         </div>
 
-        <div className="rounded border border-slate-200 bg-white p-3">
+        <div data-editing className="rounded border border-slate-200 bg-white p-3">
           <LaunchCampaignForm
             sku={p.sku}
             env={envFilter}
             product={p}
             onLaunched={(runId, campaignId) => {
-              setMsg(
-                `Campaign ${campaignId} launched in ${envFilter} · gateway run ${runId ?? '(none)'}`,
+              toast.success(
+                `Campaign ${campaignId} 已在 ${envFilter} 启动`,
+                `gateway run ${runId ?? '(none)'}`,
               );
               refreshCampaigns();
             }}
-            onError={(e) => setErr(e)}
+            onError={(e) => {
+              setErr(new Error(e));
+              toast.error('启动失败', e);
+            }}
           />
         </div>
 
@@ -1231,7 +1451,7 @@ export function ProductDetailPage() {
 
         {campaigns.campaigns.length === 0 ? (
           <div className="rounded border bg-white p-4 text-sm text-slate-500">
-            No campaigns triggered for this SKU in {envFilter} yet.
+            {envFilter} 环境下还没有这个 SKU 的 campaign。
           </div>
         ) : (
           <ul className="space-y-2">
@@ -1242,14 +1462,14 @@ export function ProductDetailPage() {
                 kols={campaigns.kols}
                 onClose={close}
                 onApprove={approveShortlist}
+                onRediscover={rediscover}
               />
             ))}
           </ul>
         )}
       </section>
 
-      {msg && <div className="text-sm text-emerald-700">{msg}</div>}
-      {err && <div className="text-sm text-red-600">{err}</div>}
+      {!!err && <ErrorAlert error={err} onRetry={refreshCampaigns} />}
     </div>
   );
 }

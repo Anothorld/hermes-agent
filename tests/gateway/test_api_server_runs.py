@@ -305,6 +305,14 @@ class TestRunEvents:
                 # Should contain run.completed
                 assert "run.completed" in body
                 assert "Hello!" in body
+                # Standards-compliant SSE: each frame must carry an
+                # `event:` header line. The console proxy
+                # (campaigns.py::_proxy_run_events) routes by SSE event
+                # name; without this header, downstream consumers see
+                # every frame as the default "message" and silently
+                # drop them. Regression guard for issue:
+                # "Agent transcript not updating in real time".
+                assert "event: run.completed" in body
 
 
 

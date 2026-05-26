@@ -100,6 +100,23 @@ class _NullGateway:
         return None
 
 
+class _TerminalGateway:
+    """Gateway whose ``get_run`` returns a terminal run object — used to
+    exercise ``_proxy_run_events``' late-subscriber replay path.
+    """
+
+    def __init__(self, *, status: str = "completed",
+                 output: str = "agent finished") -> None:
+        self._payload = {
+            "status": status,
+            "output": output,
+            "updated_at": 1700000000,
+        }
+
+    async def get_run(self, *_a, **_kw) -> dict[str, Any]:
+        return dict(self._payload)
+
+
 class _FakeStreamResponse:
     def __init__(self, chunks: list[bytes], status_code: int = 200) -> None:
         self._chunks = chunks
@@ -191,7 +208,12 @@ class _LiveServer:
         return f"http://127.0.0.1:{self.port}"
 
 
-def _build_app(fake_factory: Callable[..., _FakeClient], *, run_id: str | None) -> FastAPI:
+def _build_app(
+    fake_factory: Callable[..., _FakeClient],
+    *,
+    run_id: str | None,
+    gateway: Any | None = None,
+) -> FastAPI:
     app = FastAPI()
     app.include_router(campaigns_router.router)
     # New _seed_conn per request — the producer's polling loop reads from
@@ -200,7 +222,7 @@ def _build_app(fake_factory: Callable[..., _FakeClient], *, run_id: str | None) 
     conn = _seed_conn(run_id=run_id)
     app.dependency_overrides[get_conn] = lambda: conn
     app.dependency_overrides[get_bridge] = lambda: _NullBridge()
-    app.dependency_overrides[get_gateway] = lambda: _NullGateway()
+    app.dependency_overrides[get_gateway] = lambda: gateway or _NullGateway()
     app.dependency_overrides[current_user] = lambda: {
         "id": 1, "email": "owner@console.app", "role": "owner", "is_active": 1,
     }
@@ -309,6 +331,45 @@ def test_agent_stream_emits_snapshot_then_forwards_gateway_chunks() -> None:
         assert d["kind"] == "outreach"
 
 
+def test_proxy_falls_back_to_payload_event_when_sse_header_missing() -> None:
+    """Defence in depth: a non-conforming upstream that ships only
+    ``data:`` lines (no ``event:`` header) must still be routable by the
+    FE. The proxy recovers the event name from the JSON body's ``event``
+    field.
+
+    This guards the original "Agent transcript not updating" bug — older
+    gateway builds emitted frames as data-only, which collapsed every
+    event into the SSE default ``message`` and the FE silently dropped
+    them. The fallback in ``_proxy_run_events`` keeps the system working
+    when frontend, proxy, and gateway are deployed out of sync.
+    """
+    # Stub gateway: no `event:` header lines, event name only in JSON body.
+    chunks = [
+        b'data: {"event":"tool.started","tool":"y"}\n\n',
+        b'data: {"event":"message.delta","delta":"hi"}\n\n',
+        b'data: {"event":"run.completed","output":"done"}\n\n',
+    ]
+    app = _build_app(lambda *a, **kw: _FakeClient(chunks, **kw), run_id="run-xyz")
+
+    with _LiveServer(app) as srv:
+        body = _run_async(_read_until(
+            srv.base_url, marker_events={"run.closed"},
+        ))
+
+    frames = _parse_sse(body)
+    names = [n for n, _ in frames]
+    # Outer SSE event names must be recovered from the payload, not
+    # collapsed to "run.event".
+    assert "tool.started" in names, f"missing tool.started in {names}"
+    assert "message.delta" in names, f"missing message.delta in {names}"
+    assert "run.completed" in names, f"missing run.completed in {names}"
+    # Inner `event` field in each wrapper must match the outer name.
+    for n, d in frames:
+        if n in {"tool.started", "message.delta", "run.completed"}:
+            assert isinstance(d, dict)
+            assert d["event"] == n, f"inner event mismatch for {n}: {d}"
+
+
 def test_agent_stream_404_from_gateway_emits_run_evicted() -> None:
     app = _build_app(
         lambda *a, **kw: _FakeClient([b""], status_code=404, **kw),
@@ -339,3 +400,49 @@ def test_agent_stream_empty_registry_still_emits_snapshot() -> None:
     snap = next((d for n, d in frames if n == "snapshot"), None)
     assert isinstance(snap, dict), f"no snapshot frame; got {[n for n, _ in frames]}"
     assert snap.get("runs") == []
+
+
+def test_agent_stream_replays_terminal_run_for_late_subscriber() -> None:
+    """Regression: when the operator opens the campaign page AFTER the
+    gateway already evicted the SSE ring buffer for a finished run, the
+    transcript used to show an empty stream and a silent ``run.evicted``.
+
+    The fix: ``_proxy_run_events`` first probes ``gateway.get_run``;
+    if the run is already terminal, it synthesizes a wrapped
+    ``run.completed/failed/cancelled`` frame from the run's persisted
+    ``output`` text. The FE renders that as an assistant line so the
+    operator at least sees what the agent said before disconnecting.
+    """
+    # The fake SSE upstream is irrelevant here: the replay path returns
+    # before opening it. Use a 404 fallback so any code path that DID
+    # open the SSE would also be observable in the output.
+    gateway = _TerminalGateway(status="completed", output="rediscover ok")
+    app = _build_app(
+        lambda *a, **kw: _FakeClient([b""], status_code=404, **kw),
+        run_id="run-abc",
+        gateway=gateway,
+    )
+    with _LiveServer(app) as srv:
+        body = _run_async(_read_until(
+            srv.base_url, marker_events={"run.closed"},
+        ))
+
+    frames = _parse_sse(body)
+    names = [n for n, _ in frames]
+    assert "snapshot" in names
+
+    # The synthesized wrapped frame uses the inner event name as the
+    # outer SSE event name (see ``_proxy_run_events``).
+    completed = [
+        d for n, d in frames
+        if n == "run.completed" and isinstance(d, dict)
+    ]
+    assert completed, (
+        f"expected synthesized run.completed frame, got events={names}"
+    )
+    assert completed[0]["run_id"] == "run-abc"
+    payload = completed[0]["payload"]
+    assert payload["synthesized"] is True
+    assert payload["output"] == "rediscover ok"
+    # And ``run.closed`` follows so the FE drops the active-run badge.
+    assert "run.closed" in names

@@ -1,5 +1,7 @@
 import { FormEvent, useState } from 'react';
 import { api } from '../api';
+import { errorSummary } from '../lib/errors';
+import { toast } from '../lib/store';
 
 type Props = {
   campaignId: string;
@@ -8,6 +10,7 @@ type Props = {
 };
 
 const PLATFORM_CHOICES = ['instagram', 'tiktok', 'youtube', 'twitter', 'blog'] as const;
+const SKU_SHAPE_RE = /^[A-Z]{2,5}[\- ]?\d{3,5}[A-Z0-9]*$/;
 
 // Lightweight inline form for patching the bits of campaign_config that
 // matter for contract readiness. Doesn't fetch the existing config — the
@@ -20,6 +23,7 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
   const [audit, setAudit] = useState('');
   const [variantPolicy, setVariantPolicy] = useState('');
   const [paidCeiling, setPaidCeiling] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -52,6 +56,25 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
       }
       payload.paid_ceiling = n;
     }
+    const trimmedDisplay = displayName.trim();
+    if (trimmedDisplay) {
+      if (trimmedDisplay.length < 2 || trimmedDisplay.length > 80) {
+        setErr('product_display_name 必须是 2-80 字符');
+        setBusy(false);
+        return;
+      }
+      if (SKU_SHAPE_RE.test(trimmedDisplay)) {
+        setErr(`product_display_name "${trimmedDisplay}" 看起来是 SKU/型号，请换成人能看懂的名字`);
+        setBusy(false);
+        return;
+      }
+      if (trimmedDisplay.toLowerCase() === campaignId.toLowerCase()) {
+        setErr('product_display_name 不能与 campaign_id 相同');
+        setBusy(false);
+        return;
+      }
+      payload.product_display_name = trimmedDisplay;
+    }
     if (Object.keys(payload).length <= 1) {
       setErr('请至少修改一个字段');
       setBusy(false);
@@ -63,9 +86,12 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
         payload,
       );
       setMsg(`已保存：${(r.patched ?? []).join(', ') || '(no fields)'}`);
+      toast.success('campaign_config 已保存');
       onSaved?.();
     } catch (ex) {
-      setErr(String(ex));
+      const m = errorSummary(ex);
+      setErr(m);
+      toast.error('保存失败', m);
     } finally {
       setBusy(false);
     }
@@ -83,6 +109,20 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
       </button>
       {open && (
         <form onSubmit={submit} className="space-y-2 border-t border-slate-200 p-2 text-xs">
+          <label className="flex flex-col">
+            <span className="text-slate-500">
+              product_display_name
+              <span className="ml-1 font-normal text-slate-400">
+                (cold-outreach 邮件里给 KOL 看的产品名；留空 = 不修改。不能是 SKU 形状)
+              </span>
+            </span>
+            <input
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder='例如 "the new media console"'
+              className="rounded border px-2 py-1"
+            />
+          </label>
           <div>
             <div className="text-[11px] text-slate-500">Deliverable platforms (留空 = 不修改)</div>
             <div className="flex flex-wrap gap-2">

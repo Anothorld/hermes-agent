@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
-import { useLiveEvents } from '../useLiveEvents';
+import { TimeAgo } from '../components/inputs/TimeAgo';
+import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { useEnvStore, toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
+import { usePollingFallback } from '../hooks/usePollingFallback';
+import { useDataChannel } from '../hooks/useDataChannel';
 
 type EventRow = {
   id: number;
@@ -32,28 +37,22 @@ type NextReplyType =
   | 'close_no_reply';
 
 const NEXT_REPLY_OPTIONS: { value: NextReplyType; label: string }[] = [
-  { value: 'brief_clarification', label: 'Brief / budget clarification' },
-  { value: 'negotiation', label: 'Negotiation' },
-  { value: 'product_pitch', label: 'Product pitch' },
-  { value: 'content_followup', label: 'Content follow-up' },
-  { value: 'close_no_reply', label: 'Close / no reply' },
+  { value: 'brief_clarification', label: '澄清 brief / 预算' },
+  { value: 'negotiation', label: '价格 / 条款谈判' },
+  { value: 'product_pitch', label: '产品介绍' },
+  { value: 'content_followup', label: '内容跟进' },
+  { value: 'close_no_reply', label: '终止 / 不再跟进' },
 ];
 
-const POLL_MS = 10_000;
-
 export function ReplyMonitorPage() {
+  const envFilter = useEnvStore((s) => s.env);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [escs, setEscs] = useState<Escalation[]>([]);
-  const [envFilter, setEnvFilter] = useState<'TEST' | 'LIVE'>(
-    (localStorage.getItem('replyEnv') as 'TEST' | 'LIVE') ||
-      (localStorage.getItem('kolEnv') as 'TEST' | 'LIVE') ||
-      'TEST',
-  );
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [nextTypes, setNextTypes] = useState<Record<number, NextReplyType>>({});
   const [notes, setNotes] = useState<Record<number, string>>({});
   const [busyEscalation, setBusyEscalation] = useState<number | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<unknown>(null);
 
   const refresh = useCallback(() => {
     api
@@ -70,23 +69,15 @@ export function ReplyMonitorPage() {
   }, [envFilter]);
 
   useEffect(() => {
-    localStorage.setItem('replyEnv', envFilter);
     refresh();
-    const id = setInterval(refresh, POLL_MS);
-    return () => clearInterval(id);
-  }, [refresh, envFilter]);
+  }, [refresh]);
 
-  useLiveEvents((evt) => {
-    if (evt.type !== 'events') return;
-    setEvents((prev) =>
-      [
-        ...evt.items
-          .map((e) => e as EventRow)
-          .filter((e) => !e.env || e.env === envFilter),
-        ...prev,
-      ].slice(0, 200),
-    );
+  useDataChannel({
+    onMatch: () => {
+      refresh();
+    },
   });
+  usePollingFallback(refresh, 20_000);
 
   const submitNextAction = async (escalation: Escalation) => {
     const nextReplyType = nextTypes[escalation.id] || 'brief_clarification';
@@ -103,9 +94,11 @@ export function ReplyMonitorPage() {
         delete next[escalation.id];
         return next;
       });
+      toast.success('已记录下一步');
       refresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed to record action');
+    } catch (ex) {
+      setActionError(ex);
+      toast.error('记录失败', errorSummary(ex));
     } finally {
       setBusyEscalation(null);
     }
@@ -115,61 +108,48 @@ export function ReplyMonitorPage() {
     <div className="grid grid-cols-3 gap-4">
       <section className="col-span-2 rounded border bg-white p-3">
         <div className="mb-2 flex items-center gap-3">
-          <h2 className="font-medium">Live event feed ({events.length})</h2>
-          <span className="text-xs text-slate-500">env:</span>
-          <select
-            value={envFilter}
-            onChange={(e) => setEnvFilter(e.target.value as 'TEST' | 'LIVE')}
-            className="rounded border px-2 py-0.5 text-xs"
-          >
-            <option value="TEST">TEST</option>
-            <option value="LIVE">LIVE</option>
-          </select>
+          <h2 className="font-medium">实时事件流 ({events.length})</h2>
           <button
             type="button"
             onClick={refresh}
             className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-50"
-            title="Refresh now (auto-refreshes every 10s)"
+            title="手动刷新（自动每 20 秒）"
           >
             ↻
           </button>
           {lastRefresh && (
-            <span className="text-xs text-slate-400">
-              last refresh {lastRefresh.toLocaleTimeString()}
-            </span>
+            <TimeAgo
+              iso={lastRefresh.toISOString()}
+              prefix="刷新于"
+              className="text-xs text-slate-400"
+            />
           )}
         </div>
         <ul className="space-y-1 text-sm">
           {events.map((e) => (
             <li key={e.id} className="flex gap-2 border-b border-slate-100 py-1">
-              <span className="text-slate-400">{e.ts.slice(0, 19).replace('T', ' ')}</span>
+              <TimeAgo iso={e.ts} className="text-slate-400" />
               <span className="font-medium">{e.event_type}</span>
               <span className="text-emerald-700">
                 {e.stage}/{e.sub_status}
               </span>
               <span className="ml-auto text-xs text-slate-500">
-                kol #{e.kol_identity_id} · {e.actor}
+                KOL #{e.kol_identity_id} · {e.actor}
               </span>
             </li>
           ))}
         </ul>
       </section>
-      <aside className="rounded border bg-white p-3">
-        <h2 className="mb-2 font-medium">Open escalations ({escs.length})</h2>
-        {actionError && (
-          <div className="mb-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">
-            {actionError}
-          </div>
-        )}
+      <aside data-editing className="rounded border bg-white p-3">
+        <h2 className="mb-2 font-medium">未解决升级 ({escs.length})</h2>
+        {!!actionError && <ErrorAlert error={actionError} compact />}
         <ul className="space-y-3 text-sm">
           {escs.map((e) => (
             <li key={e.id} className="border-b border-slate-100 pb-3">
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <div className="font-medium">{e.reason}</div>
-                  <div className="text-xs text-slate-400">
-                    {e.ts.slice(0, 19).replace('T', ' ')}
-                  </div>
+                  <TimeAgo iso={e.ts} className="text-xs text-slate-400" />
                 </div>
                 {e.kol_identity_id && (
                   <a
@@ -183,7 +163,7 @@ export function ReplyMonitorPage() {
               <div className="mt-1 space-y-1 text-xs text-slate-500">
                 {e.campaign_id && <div>campaign: {e.campaign_id}</div>}
                 {typeof e.classifier_confidence === 'number' && (
-                  <div>confidence: {(e.classifier_confidence * 100).toFixed(0)}%</div>
+                  <div>置信度: {(e.classifier_confidence * 100).toFixed(0)}%</div>
                 )}
                 {e.ai_recommendation && <div className="text-slate-700">{e.ai_recommendation}</div>}
               </div>
@@ -210,7 +190,7 @@ export function ReplyMonitorPage() {
                     setNotes((prev) => ({ ...prev, [e.id]: evt.target.value }))
                   }
                   className="rounded border px-2 py-1 text-xs"
-                  placeholder="Operator note"
+                  placeholder="操作员备注"
                 />
                 <button
                   type="button"
@@ -218,12 +198,12 @@ export function ReplyMonitorPage() {
                   disabled={busyEscalation === e.id}
                   className="rounded bg-slate-900 px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
                 >
-                  {busyEscalation === e.id ? 'Recording...' : 'Record next action'}
+                  {busyEscalation === e.id ? '记录中…' : '记录下一步'}
                 </button>
               </div>
             </li>
           ))}
-          {!escs.length && <li className="text-xs text-slate-400">No open escalations.</li>}
+          {!escs.length && <li className="text-xs text-slate-400">没有未解决的升级。</li>}
         </ul>
       </aside>
     </div>

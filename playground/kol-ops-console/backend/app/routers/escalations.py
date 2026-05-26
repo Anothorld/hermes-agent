@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+_REPO_ROOT = str(Path(__file__).resolve().parents[5])
+
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
+from ..bridge_runtime import ensure_gateway_bridge_key
+from ..campaign_config_sync import assert_campaign_config_complete
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
@@ -28,10 +33,10 @@ router = APIRouter(prefix="/escalations", tags=["escalations"])
 _RESUME_INSTRUCTIONS = (
     "You are resuming a KOL outreach campaign after a web-console escalation "
     "was answered by the operator.\n"
-    "Repo root for file tools is /home/pc/agent_prj/hermes-agent. "
+    f"Repo root for file tools is {_REPO_ROOT}. "
     "For search_files/read_file/write_file/patch, use repo-relative paths "
     "like `plugins/kol-ops-bridge` or absolute paths under "
-    "`/home/pc/agent_prj/hermes-agent/`; do NOT prefix file-tool paths with "
+    f"`{_REPO_ROOT}/`; do NOT prefix file-tool paths with "
     "`./agent_prj/hermes-agent/`. For terminal/Python execution, use "
     "absolute script paths. "
     "Read the campaign, candidate, identity, goal and event state from CAL via "
@@ -46,10 +51,10 @@ _RESUME_INSTRUCTIONS = (
 _DRAFT_PREVIEW_INSTRUCTIONS = (
     "You are generating a PREVIEW email draft for an open KOL escalation. "
     "Hard rules:\n"
-    "- Repo root for file tools is /home/pc/agent_prj/hermes-agent.\n"
+    f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- For search_files/read_file/write_file/patch, use repo-relative\n"
     "  paths like `plugins/kol-ops-bridge` or absolute paths under\n"
-    "  `/home/pc/agent_prj/hermes-agent/`.\n"
+    f"  `{_REPO_ROOT}/`.\n"
     "- Do NOT prefix file-tool paths with `./agent_prj/hermes-agent/`.\n"
     "- For terminal/Python execution, use absolute script paths.\n"
     "- Do NOT call resolve-escalation, write-event, or any state-changing "
@@ -437,6 +442,11 @@ async def resolve_escalation(
         escalation = await _find_escalation(bridge, escalation_id, body.env)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    will_resume = bool(
+        body.decision == "resume" and escalation and escalation.get("campaign_id")
+    )
+    if will_resume:
+        ensure_gateway_bridge_key()
     payload = body.model_dump(exclude_none=True)
     payload["decided_by"] = f"web:{user['email']}"
     try:
@@ -573,12 +583,20 @@ async def preview_draft(
                 "started_at": inflight.get("started_at"),
             },
         )
+    # preview-draft uses a fresh draft-namespace session_id (see below),
+    # so the agent does NOT inherit any prior campaign transcript. The
+    # child skill that writes approval.reply_draft must therefore read
+    # product_display_name from CAL. Fail fast on incomplete config so
+    # the operator gets an actionable 400 instead of a fresh
+    # campaign_config_missing_required_product_facts escalation.
+    await assert_campaign_config_complete(bridge, campaign_id)
     brief = _compose_draft_preview_brief(
         escalation=escalation,
         operator_answer=body.operator_answer,
         operator_facts=body.operator_facts,
         actor_email=user["email"],
     )
+    ensure_gateway_bridge_key()
     try:
         run = await gateway.start_run(
             input=brief,

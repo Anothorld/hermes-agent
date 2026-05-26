@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api } from '../api';
+import { errorSummary } from '../lib/errors';
+import { toast } from '../lib/store';
 
 type Check = {
   ok: boolean;
@@ -163,7 +165,8 @@ function FillBlockersForm({
       setMsg(`已写入：${(r.touched ?? []).join(', ') || '(none)'}`);
       onSaved();
     } catch (ex) {
-      setErr(String(ex));
+      setErr(errorSummary(ex));
+      toast.error('写入失败', errorSummary(ex));
     } finally {
       setBusy(false);
     }
@@ -314,7 +317,7 @@ export default function ContractReadinessPanel({
         `/campaigns/${encodeURIComponent(campaignId)}/contract-readiness?identity_id=${identityId}&env=${env}`,
       )
       .then(setData)
-      .catch((e) => setErr(String(e)))
+      .catch((e) => setErr(errorSummary(e)))
       .finally(() => setBusy(false));
   };
 

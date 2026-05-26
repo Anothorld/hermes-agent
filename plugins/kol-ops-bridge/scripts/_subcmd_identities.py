@@ -1,8 +1,9 @@
 """Identity + event + timeline subcommands for ``kol_bridge_tool``.
 
 Covers ``upsert-identity``, ``get-identity``, ``get-relationship``,
-``get-reusable-facts``, ``get-goals``, ``get-dispatch-context``,
-``get-timeline``, ``archive-identity``, ``list-events``, ``write-event``.
+``list-relationships``, ``get-reusable-facts``, ``get-goals``,
+``get-dispatch-context``, ``get-timeline``, ``archive-identity``,
+``list-events``, ``write-event``.
 """
 
 from __future__ import annotations
@@ -50,6 +51,23 @@ def cmd_get_identity(args: argparse.Namespace) -> None:
 def cmd_get_relationship(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "GET", f"/identities/{args.identity_id}/relationship",
+    ))
+
+
+def cmd_list_relationships(args: argparse.Namespace) -> None:
+    params: dict[str, object] = {
+        "env": args.env,
+        "limit": args.limit,
+        "offset": args.offset,
+    }
+    if args.last_outcome:
+        params["last_outcome"] = args.last_outcome
+    if args.platform:
+        params["platform"] = args.platform
+    if args.q:
+        params["q"] = args.q
+    print_json(client_from_args(args).request(
+        "GET", "/relationships", params=params,
     ))
 
 
@@ -156,6 +174,22 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p, required=False)
     p.add_argument("--identity-id", type=int, required=True)
     p.set_defaults(func=cmd_get_relationship)
+
+    p = sub.add_parser(
+        "list-relationships",
+        help=("GET /relationships — list KOL relationship rows (archived KOLs + "
+              "outcome filters). Used by the discovery skills to fetch the "
+              "operator-maintained do-not-contact set (e.g. --last-outcome competitor)."),
+    )
+    add_common_args(p)
+    add_env_arg(p, required=False)
+    p.add_argument("--last-outcome", default=None,
+                   help="Filter by exact last_outcome value (e.g. 'competitor').")
+    p.add_argument("--platform", default=None)
+    p.add_argument("--q", default=None, help="Fuzzy match on handle/display_name/email.")
+    p.add_argument("--limit", type=int, default=1000)
+    p.add_argument("--offset", type=int, default=0)
+    p.set_defaults(func=cmd_list_relationships)
 
     p = sub.add_parser("get-reusable-facts",
                        help="GET .../relationship/reusable-facts — facts reusable across campaigns.")

@@ -94,6 +94,7 @@ class IdentityUpsertBody(BaseModel):
 
 class CampaignConfigUpsertBody(BaseModel):
     label: Optional[str] = None
+    product_display_name: Optional[str] = None
     product_unit_price: Optional[float] = None
     barter_policy: Optional[str] = None
     paid_ceiling: Optional[float] = None
@@ -295,14 +296,58 @@ def get_identity(identity_id: int) -> dict[str, Any]:
 def get_relationship(identity_id: int) -> dict[str, Any]:
     if not cal.get_identity(identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
-    return cal.get_relationship(identity_id) or {"identity_id": identity_id, "total_collabs": 0}
+    rel = cal.get_relationship(identity_id)
+    if rel is None:
+        return {
+            "identity_id": identity_id,
+            "total_collabs": 0,
+            "collab_history": [],
+            "preferred_skus": [],
+        }
+    return rel
+
+
+@router.get("/identities/{identity_id}/collab-history")
+def get_collab_history(identity_id: int) -> dict[str, Any]:
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    return {"identity_id": identity_id, "items": cal.list_collab_history(identity_id)}
+
+
+@router.get("/relationships")
+def list_archived_kols(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    q: Optional[str] = Query(default=None, max_length=200),
+    last_outcome: Optional[str] = Query(default=None, max_length=60),
+    platform: Optional[str] = Query(default=None, max_length=40),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """List KOL identities with ``total_collabs > 0``, joined with the
+    relationship summary. Used by the console's KOL archive view to
+    browse past collaborations across the entire pool.
+    """
+    return cal.list_archived_kols(
+        env=env, q=q, last_outcome=last_outcome, platform=platform,
+        limit=limit, offset=offset,
+    )
 
 
 @router.get("/identities/{identity_id}/relationship/reusable-facts")
 def get_reusable_facts(identity_id: int) -> dict[str, Any]:
+    """Reusable identity-level facts wrapped in a stable envelope.
+
+    Shape: ``{"identity_id": int, "facts": {...}}``. The inner ``facts``
+    dict is whatever ``cal.get_reusable_facts`` chooses to expose
+    (currently a curated subset of identity + relationship rows).
+    Consumers must NOT assume top-level keys other than these two.
+    """
     if not cal.get_identity(identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
-    return cal.get_reusable_facts(identity_id)
+    return {
+        "identity_id": identity_id,
+        "facts": cal.get_reusable_facts(identity_id),
+    }
 
 
 @router.get("/identities/{identity_id}/goals")
@@ -566,6 +611,15 @@ def _parse_campaign_text(text: str) -> dict[str, Any]:
     return {"parsed": out, "unparsed_lines": unparsed, "raw": raw}
 
 
+@router.get("/campaigns")
+def list_campaigns(
+    env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Distinct (campaign_id, env) pairs known to the bridge with candidate
+    counts. Powers the Web kanban's campaign picker."""
+    return {"items": cal.list_campaigns(env=env)}
+
+
 @router.get("/campaigns/{campaign_id}")
 def get_campaign_config(
     campaign_id: str,
@@ -703,6 +757,13 @@ def get_lanes(
             continue
         ident = cal.get_identity(c["identity_id"]) or {}
         rel = cal.get_relationship(c["identity_id"]) or {}
+        # Pull a handful of fact values the Web kanban renders on the
+        # card itself (sent-time chip, interest-signal badge) so the FE
+        # doesn't have to fan out N extra /facts requests.
+        facts = cal.latest_facts_for(
+            identity_id=c["identity_id"],
+            campaign_id=campaign_id, env=env,
+        )
         items.append({
             "identity_id": c["identity_id"],
             "handle": ident.get("primary_handle") or f"id{c['identity_id']}",
@@ -715,6 +776,18 @@ def get_lanes(
                 identity_id=c["identity_id"],
                 campaign_id=campaign_id, env=env,
             ),
+            "outreach_sent_at": facts.get("offer.outreach_sent_at"),
+            "interest_signal": facts.get("offer.interest_signal"),
+            # Tri-state we expose so the FE can distinguish "approved
+            # but skill hasn't built a Gmail draft" from "draft sitting
+            # in Gmail waiting on the operator to click Send":
+            #   None / False      → no draft yet (operator may need to
+            #                       re-trigger kol-cold-outreach)
+            #   True              → Gmail draft created
+            #   + outreach_sent_at → SENT reconcile confirmed delivery
+            "outreach_draft_created": bool(facts.get("offer.outreach_draft_created")),
+            "gmail_draft_id": facts.get("offer.gmail_draft_id"),
+            "gmail_thread_id": facts.get("offer.gmail_thread_id"),
         })
     counts = {
         "pending_approvals": sum(
@@ -852,7 +925,12 @@ def get_dispatch_context(
             identity_id=identity_id, campaign_id=campaign_id, env=env,
         ),
         "relationship": cal.get_relationship(identity_id),
-        "reusable_facts": cal.get_reusable_facts(identity_id),
+        # Same shape as GET /relationship/reusable-facts:
+        # ``{"identity_id":..., "facts":{...}}``.
+        "reusable_facts": {
+            "identity_id": identity_id,
+            "facts": cal.get_reusable_facts(identity_id),
+        },
         "campaign_config": cal.get_campaign_config(campaign_id),
     }
 

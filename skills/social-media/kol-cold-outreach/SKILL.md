@@ -1,15 +1,16 @@
 ---
 name: kol-cold-outreach
-description: Generates the FIRST outreach email draft to a brand-new KOL ("new_prospect" path). Reads campaign config + identity facts via the Bridge dispatch-context, composes a concise barter-first opening (no price, no contract talk), writes draft-ready facts (`offer.outreach_draft_ready=true`, `offer.outreach_path=cold`) via the Bridge, and returns the draft envelope as JSON for the caller to persist. Never sends mail directly. Does not handle replies — the next inbound flows back through `kol-reply-dispatcher`.
+description: Generates the FIRST outreach email draft to a brand-new KOL ("new_prospect" path). Reads campaign config + identity facts via the Bridge dispatch-context, composes a concise open-ended collab introduction (no compensation mechanism, no price, no contract talk), writes draft-ready facts (`offer.outreach_draft_ready=true`, `offer.outreach_path=cold`) via the Bridge, and returns the draft envelope as JSON for the caller to persist. Never sends mail directly. Does not handle replies — the next inbound flows back through `kol-reply-dispatcher`.
 trigger: Invoked by `kol-discovery-to-outreach-router` for candidates assigned `identity.outreach_path=cold` (i.e. `relationship_status=new_prospect` who were just selected for outreach), or on demand when the user says "draft a cold outreach to <handle>". Never auto-runs from a cron — only chained.
 tags: ["kol", "outreach", "cold", "first-contact", "draft-generator", "commerce-lane"]
 ---
 
 ## Goal
-Produce one well-targeted opening email to a new KOL — barter-first,
-brand-introduction tone, no quotes, no contract terms — and atomically
-record on the Bridge that an operator-reviewable draft is ready. No
-reply handling, no threading state, no Gmail send.
+Produce one well-targeted opening email to a new KOL — open-ended
+brand-introduction tone, no compensation mechanism, no quotes, no
+contract terms — and atomically record on the Bridge that an
+operator-reviewable draft is ready. No reply handling, no threading
+state, no Gmail send.
 
 ## Runtime Contract
 - Profile: `outreach-operator`.
@@ -24,9 +25,11 @@ reply handling, no threading state, no Gmail send.
   `offer.outreach_sent` is already true, abort and return
   `{"skipped": "already_sent"}`. If `offer.outreach_draft_ready` is
   already true, abort and return `{"skipped": "draft_already_ready"}`.
-- **No price talk:** never mention compensation, paid rate, commission
-  percentage, or contract terms. The opening offers product collab
-  (gifted-first); price is owned by `kol-compensation-negotiator`.
+- **No compensation mechanism talk:** never mention paid collaboration,
+   barter/exchange, gifted/free product, compensation, paid rate,
+   commission percentage, or contract terms. The opening keeps the
+   cooperation model open so later negotiation has room; compensation is
+   owned by `kol-compensation-negotiator`.
 - **No deliverable counts:** never commit deliverable counts or
   platforms in this email; deliverables are framed only as "we'd love
   to discuss together". `kol-deliverables-clarifier` owns that
@@ -71,6 +74,12 @@ Use:
   do NOT silently switch tone.
 - `reusable_facts['identity.primary_handle']`, `identity.region`,
   `identity.language` — to localize the salutation.
+- `campaign.product_display_name` — the **operator-friendly product
+  name** (e.g. "the new media console", "POVISON Atlas sofa"). This is
+  the **only** acceptable product reference in the email body. If this
+  field is empty/null, fall back to a generic category phrase
+  (`"our new piece"`, `"a new release"`); **never** substitute the
+  `campaign_id`, `sku_whitelist[*]`, or any internal model code.
 
 ### Step 2 — Compose the email
 Constraints:
@@ -79,14 +88,47 @@ Constraints:
 - Body: 3–5 short paragraphs.
   1. One-line greeting + why-them (cite one specific recent post if
      classifier or operator supplied it; otherwise generic).
-  2. Brand one-liner + product hook (gifted product first; never
-     mention paid).
+  2. Brand one-liner + product hook. Refer to the product **only** via
+     `campaign.product_display_name` (loaded in Step 1). If that field
+     is missing, use a generic category phrase (`"our new piece"`,
+     `"a new release"`). Never include SKU codes, model numbers,
+     variant IDs, internal catalog identifiers, or the `campaign_id`
+     itself — regardless of whether they appear in `sku_whitelist`,
+     campaign label, or anywhere else in the dispatch context. Do not
+     state whether the collaboration is paid, barter/exchange, gifted,
+     free-product, or commission-based.
   3. Soft ask: "Would you be open to chatting about a collab?"
      **Do not** ask for shipping, deliverables, or rates yet.
   4. Sign-off (style-loader handles signature in a future phase; for
      now use "Best, <operator-name or brand>").
 - No emoji, no excessive exclamation marks.
 - No "press release" boilerplate.
+
+### Step 2b — SKU leak post-check (mandatory)
+
+After composing the draft and **before** Step 3, scan `subject` and
+`body` against the SKU-leak regex:
+
+```
+[A-Z]{2,5}[\- ]?\d{3,5}[A-Z0-9]*
+```
+
+This catches `SEB800`, `SEB-8008`, `TS8319`, `POV-RUG-04`, etc. Also
+substring-check for every entry in `sku_whitelist` and for the
+`campaign_id`.
+
+If any match is found:
+- Do NOT call `write-facts-multi`.
+- Do NOT return a draft envelope.
+- Abort with:
+  ```json
+  {"error":"sku_leak_detected",
+   "matches":["SEB800", ...],
+   "field":"body|subject"}
+  ```
+The router will surface the failure to the operator (typically a sign
+the campaign is missing `product_display_name` or the LLM ignored the
+Step 2 constraint — escalate rather than auto-retry).
 
 ### Step 3 — Write outbound facts (single call)
 ```
@@ -131,7 +173,7 @@ draft to Gmail.
 ### Success
 Brand-new KOL `@alice` selected for outreach. Step 1 confirms
 `outreach.status=active`, `total_collabs=0`. Step 2 composes a 4-para
-barter-first email. Step 3 writes 2 draft-ready offer facts + 1
+open-ended collab email. Step 3 writes 2 draft-ready offer facts + 1
 identity fact in one call. Step 4 returns
 `{subject, body, to, thread_id: null, ...}`.
 
@@ -144,6 +186,11 @@ Step 1 reveals `outreach.status=satisfied`. Skill aborts with
 `{"skipped":"already_sent"}`. The router will not re-trigger.
 
 ## Pitfalls
+- Never paste a SKU / model code / `campaign_id` into the email body
+  or subject — even if that's the only product identifier the campaign
+  context carries. Use `campaign.product_display_name`; if absent,
+  fall back to a generic category phrase. The Step 2b regex guard is
+  a backstop, not a license to skip the constraint.
 - Never insert price / commission / deliverable count language in the
   cold email — those goals are downstream and the dispatcher will pick
   them up after the reply.

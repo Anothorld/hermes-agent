@@ -14,6 +14,10 @@ from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
+from ..discovery_gate import (
+    REDISCOVERY_INSTRUCTIONS,
+    evaluate_gate_after_terminal,
+)
 from ..gateway_client import (
     GatewayClient,
     GatewayError,
@@ -150,45 +154,215 @@ async def _sync_run_states(
     conn: sqlite3.Connection,
     gateway: GatewayClient,
     rows: list[sqlite3.Row],
+    *,
+    bridge: BridgeClient | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """For each ``product_campaigns`` row with status='running' + a run_id,
-    poll the gateway and auto-flip to 'closed'/'cancelled' on terminal states.
+    """Reconcile gateway run state for every campaign passed in.
+
+    Three things happen here on every GET-driven invocation:
+
+    1. **Row status flip** — for each campaign with ``status='running'``
+       and a ``run_id``, poll the gateway and flip the row to
+       ``closed`` / ``cancelled`` when the run reports terminal.
+
+    2. **Multi-run ended_at sync** — poll every other registered run for
+       the campaign in ``product_campaign_runs`` that has not yet had
+       ``ended_at`` written, and write it when the gateway reports
+       terminal. Without this, runs whose ``run_id`` was overwritten on
+       the row (e.g. approve-driven outreach overwriting a rediscover
+       run_id) never get their ``ended_at`` set, and the transcript
+       panel shows them as live forever.
+
+    3. **Discovery gate dispatch** — when the row's ``gate_run_id``
+       reaches terminal, dispatch the quantity-gate evaluator. The gate
+       fires only on the **discovery-purpose** run; approve-driven
+       outreach runs share the row but do NOT trigger the gate (their
+       ``run_id`` is separate from ``gate_run_id``). ``cancelled``
+       discovery runs are not gated — they clear ``gate_run_id``
+       directly. The evaluator either auto-fires a rediscover
+       (retry_count < 3) or opens a ``discovery_floor_unmet`` escalation.
 
     Returns a dict ``{campaign_id: {run_state, run_error}}`` so the caller
     can surface live state in the response without doing another lookup.
     """
+    from ..run_registry import list_open_runs_for_campaign, mark_run_ended
+
     updates: dict[str, dict[str, Any]] = {}
+    gate_work: list[dict[str, Any]] = []
     dirty = False
+
     for r in rows:
-        if r["status"] != "running" or not r["run_id"]:
-            continue
-        try:
-            info = await gateway.get_run(r["run_id"])
-        except GatewayError:
-            updates[r["campaign_id"]] = {"run_state": "unknown", "run_error": None}
-            continue
-        if info is None:
-            updates[r["campaign_id"]] = {"run_state": "unknown", "run_error": None}
-            continue
-        else:
-            state = str(info.get("status") or "").lower()
-            updates[r["campaign_id"]] = {
-                "run_state": state or None,
-                "run_error": info.get("error"),
-            }
-            if state in TERMINAL_STATES:
-                new_status = "cancelled" if state == "cancelled" else "closed"
-            elif state in RUNNING_STATES:
-                continue
-            else:
-                continue
-        conn.execute(
-            "UPDATE product_campaigns SET status=? WHERE campaign_id=? AND env=?",
-            (new_status, r["campaign_id"], r["env"]),
+        campaign_id = r["campaign_id"]
+        env = r["env"]
+
+        # Pull all column values we might consult into locals so the
+        # ``in r.keys()`` guard for legacy rows is centralised.
+        row_keys = r.keys() if hasattr(r, "keys") else []
+        gate_run_id = r["gate_run_id"] if "gate_run_id" in row_keys else None
+        target_floor = (
+            r["target_floor"] if "target_floor" in row_keys else None
         )
-        dirty = True
+
+        # ---- (1) Row status flip based on the latest run_id -----------
+        if r["status"] == "running" and r["run_id"]:
+            try:
+                info = await gateway.get_run(r["run_id"])
+            except GatewayError:
+                info = None
+            if info is None:
+                # Gateway evicted the run from its in-memory TTL cache
+                # (~1h after terminal). Per ``GatewayClient.get_run`` this
+                # only happens once a run is long-terminal, so treat as
+                # closed — otherwise the row stays ``running`` forever,
+                # which blocks /start and confuses the UI.
+                updates[campaign_id] = {
+                    "run_state": "evicted", "run_error": None
+                }
+                conn.execute(
+                    "UPDATE product_campaigns SET status='closed' "
+                    "WHERE campaign_id=? AND env=?",
+                    (campaign_id, env),
+                )
+                dirty = True
+            else:
+                state = str(info.get("status") or "").lower()
+                updates[campaign_id] = {
+                    "run_state": state or None,
+                    "run_error": info.get("error"),
+                }
+                if state in TERMINAL_STATES:
+                    new_status = "cancelled" if state == "cancelled" else "closed"
+                    conn.execute(
+                        "UPDATE product_campaigns SET status=? "
+                        "WHERE campaign_id=? AND env=?",
+                        (new_status, campaign_id, env),
+                    )
+                    dirty = True
+
+        # ---- (2) Discovery gate run terminal handling -----------------
+        # gate_run_id may equal r["run_id"] (no approve yet) or differ
+        # (approve overwrote run_id). Poll it independently so the gate
+        # fires off the discovery run's terminal state regardless of
+        # which run owns the row's ``run_id`` field right now.
+        gate_state_str: str | None = None
+        if gate_run_id and bridge is not None and target_floor is not None:
+            try:
+                gate_info = await gateway.get_run(gate_run_id)
+            except GatewayError:
+                gate_info = None
+            if gate_info is None:
+                # Gateway evicted the discovery run from its in-memory TTL
+                # cache before we observed it reach terminal. Per the
+                # gateway contract this only happens for terminal runs, so
+                # dispatch the gate evaluator with no run_info — it will
+                # re-read the candidate count and decide
+                # (floor-met / auto-retry / escalate). Without this branch
+                # ``gate_run_id`` would stay set forever and lock the
+                # operator out (Approve disabled + Rediscover button
+                # gated on ``gate_active=false``).
+                gate_state_str = "evicted"
+                gate_work.append({
+                    "campaign_id": campaign_id,
+                    "env": env,
+                    "target_floor": int(target_floor),
+                    "retry_count": int(r["retry_count"] or 0)
+                        if "retry_count" in row_keys else 0,
+                    "run_info": None,
+                    "gate_run_id": gate_run_id,
+                })
+                mark_run_ended(conn, run_id=gate_run_id)
+                dirty = True
+            else:
+                gate_state = str(gate_info.get("status") or "").lower()
+                gate_state_str = gate_state or None
+                if gate_state == "cancelled":
+                    # Operator stopped the discovery run intentionally —
+                    # do not auto-retry, just release the gate pointer.
+                    conn.execute(
+                        "UPDATE product_campaigns SET gate_run_id=NULL "
+                        "WHERE campaign_id=? AND env=?",
+                        (campaign_id, env),
+                    )
+                    dirty = True
+                elif gate_state in TERMINAL_STATES:
+                    gate_work.append({
+                        "campaign_id": campaign_id,
+                        "env": env,
+                        "target_floor": int(target_floor),
+                        "retry_count": int(r["retry_count"] or 0)
+                            if "retry_count" in row_keys else 0,
+                        "run_info": gate_info,
+                        "gate_run_id": gate_run_id,
+                    })
+        # Surface gate state on the per-campaign update map so the
+        # response can render an "approve disabled while gate active"
+        # affordance without an extra DB round-trip. ``gate_active`` is
+        # true whenever ``gate_run_id`` is set, regardless of the run's
+        # current gateway state — the gate is "active" from the moment
+        # a discovery run starts until ``evaluate_gate_after_terminal``
+        # decides (floor met / escalated) and clears the pointer. This
+        # eliminates the otherwise-fragile window where the discovery
+        # run reached terminal but the auto-retry has not yet started.
+        entry = updates.setdefault(
+            campaign_id, {"run_state": None, "run_error": None}
+        )
+        entry["gate_run_id"] = gate_run_id
+        entry["gate_state"] = gate_state_str
+        entry["gate_active"] = bool(gate_run_id)
+
+        # ---- (3) Multi-run ended_at sync ------------------------------
+        # Walk every open run on this campaign (including the one we
+        # just polled — mark_run_ended is idempotent) and write
+        # ended_at on any that report terminal. Bounded by 24h age.
+        open_runs = list_open_runs_for_campaign(
+            conn, campaign_id=campaign_id, env=env
+        )
+        for open_run in open_runs:
+            run_id_to_poll = open_run["run_id"]
+            try:
+                rinfo = await gateway.get_run(run_id_to_poll)
+            except GatewayError:
+                continue
+            if rinfo is None:
+                # Gateway eviction = long-terminal (see step 1 / 2 above).
+                # Write ended_at with now() — we missed the real moment,
+                # but anything is better than the transcript panel showing
+                # the run as live forever.
+                mark_run_ended(conn, run_id=run_id_to_poll)
+                dirty = True
+                continue
+            rstate = str(rinfo.get("status") or "").lower()
+            if rstate in TERMINAL_STATES:
+                mark_run_ended(conn, run_id=run_id_to_poll)
+                dirty = True
+
     if dirty:
         conn.commit()
+
+    # Dispatch gate work AFTER the status-flip commit so the auto-retry's
+    # in-flight 409 check sees fresh state and so concurrent GETs
+    # observing the same flip can dedup via the registry + the per-
+    # campaign asyncio lock inside ``evaluate_gate_after_terminal``.
+    import logging as _logging
+    for work in gate_work:
+        try:
+            await evaluate_gate_after_terminal(
+                bridge=bridge,  # type: ignore[arg-type]
+                gateway=gateway,
+                conn=conn,
+                campaign_id=work["campaign_id"],
+                env=work["env"],
+                target_floor=work["target_floor"],
+                retry_count=work["retry_count"],
+                run_info=work["run_info"],
+                rediscovery_instructions=REDISCOVERY_INSTRUCTIONS,
+                gate_run_id=work["gate_run_id"],
+            )
+        except Exception:  # noqa: BLE001 — gate side-effects must never break GETs
+            _logging.getLogger(__name__).exception(
+                "discovery gate crashed for %s/%s",
+                work["campaign_id"], work["env"],
+            )
     return updates
 
 
@@ -282,14 +456,18 @@ async def list_products_summary(
         "FROM products ORDER BY created_at DESC"
     ).fetchall()
     pc_rows = conn.execute(
-        "SELECT sku, campaign_id, env, run_id, status, started_at "
+        "SELECT sku, campaign_id, env, run_id, status, started_at, "
+        "target_floor, baseline_candidate_count, retry_count, "
+        "floor_unmet_reason, gate_run_id "
         "FROM product_campaigns WHERE env=?",
         (e,),
     ).fetchall()
     # Reconcile with gateway BEFORE re-reading, so the rollup reflects fresh state.
-    await _sync_run_states(conn, gateway, pc_rows)
+    await _sync_run_states(conn, gateway, pc_rows, bridge=bridge)
     pc_rows = conn.execute(
-        "SELECT sku, campaign_id, env, run_id, status, started_at "
+        "SELECT sku, campaign_id, env, run_id, status, started_at, "
+        "target_floor, baseline_candidate_count, retry_count, "
+        "floor_unmet_reason, gate_run_id "
         "FROM product_campaigns WHERE env=?",
         (e,),
     ).fetchall()
@@ -307,6 +485,10 @@ async def list_products_summary(
         sku = p["sku"]
         cs = by_sku.get(sku, [])
         active = [c for c in cs if c["status"] == "running"]
+        # Surface gate state from the running campaign if any, else the
+        # most-recently-started row, so the UI can render a discovery-
+        # progress badge without per-campaign drilldown.
+        gate_row = active[0] if active else (cs[0] if cs else None)
         latest = _summarize_events(events, product_sku=sku) if cs else {
             "stage": None,
             "sub_status": None,
@@ -338,6 +520,13 @@ async def list_products_summary(
             "last_event_type": latest["last_event_type"],
             "last_event_ts": latest["last_event_ts"],
             "kols_contacted": len(latest.get("contacted_kol_ids", [])),
+            "discovery_floor": gate_row["target_floor"] if gate_row else None,
+            "discovery_retry_count": (
+                gate_row["retry_count"] if gate_row else 0
+            ),
+            "discovery_floor_unmet_reason": (
+                gate_row["floor_unmet_reason"] if gate_row else None
+            ),
         })
     return out
 
@@ -412,13 +601,17 @@ async def list_product_campaigns(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "sku not found")
 
     rows = conn.execute(
-        "SELECT campaign_id, env, run_id, status, started_at, started_by_user_id "
+        "SELECT sku, campaign_id, env, run_id, status, started_at, "
+        "started_by_user_id, target_floor, baseline_candidate_count, "
+        "retry_count, floor_unmet_reason, gate_run_id "
         "FROM product_campaigns WHERE sku=? AND env=? ORDER BY started_at DESC",
         (sku, e),
     ).fetchall()
-    run_state_map = await _sync_run_states(conn, gateway, rows)
+    run_state_map = await _sync_run_states(conn, gateway, rows, bridge=bridge)
     rows = conn.execute(
-        "SELECT campaign_id, env, run_id, status, started_at, started_by_user_id "
+        "SELECT sku, campaign_id, env, run_id, status, started_at, "
+        "started_by_user_id, target_floor, baseline_candidate_count, "
+        "retry_count, floor_unmet_reason, gate_run_id "
         "FROM product_campaigns WHERE sku=? AND env=? ORDER BY started_at DESC",
         (sku, e),
     ).fetchall()
@@ -449,6 +642,15 @@ async def list_product_campaigns(
         kol_identity_ids = list(dict.fromkeys([*summary["kol_identity_ids"], *candidate_ids]))
         needed_ids.update(kol_identity_ids)
         gw = run_state_map.get(r["campaign_id"], {})
+        # ``pending`` = visible candidates the operator has NOT yet approved
+        # (anything except selected_for_outreach). Used by the UI so a
+        # rediscover-added candidate still triggers the "Review candidates"
+        # button after an earlier round was already approved.
+        pending_count = sum(
+            1 for c in visible_candidates
+            if c.get("candidate_status") != "selected_for_outreach"
+        )
+        target_floor = r["target_floor"]
         campaigns.append({
             "campaign_id": r["campaign_id"],
             "env": r["env"],
@@ -458,11 +660,28 @@ async def list_product_campaigns(
             "started_by_user_id": r["started_by_user_id"],
             "run_state": gw.get("run_state"),
             "run_error": gw.get("run_error"),
+            # Discovery-purpose run state. ``gate_active=true`` means the
+            # quantity gate is still tracking a live rediscover/auto-retry
+            # run; the UI uses this to disable Approve so an operator
+            # can't truncate the pool mid-discovery.
+            "gate_run_id": gw.get("gate_run_id"),
+            "gate_state": gw.get("gate_state"),
+            "gate_active": bool(gw.get("gate_active")),
             **summary,
             "kol_identity_ids": kol_identity_ids,
             "candidate_count": len(visible_candidates),
+            "pending_candidate_count": pending_count,
             "shortlist_ready": summary["shortlist_ready"] or bool(visible_candidates),
             "shortlist_approved": summary["shortlist_approved"] or selected_count > 0,
+            "target_floor": target_floor,
+            "baseline_candidate_count": r["baseline_candidate_count"],
+            "retry_count": r["retry_count"],
+            "floor_unmet_reason": r["floor_unmet_reason"],
+            "current_candidate_count": len(visible_candidates),
+            "floor_progress": (
+                None if target_floor is None
+                else f"{len(visible_candidates)}/{target_floor}"
+            ),
         })
 
     kols = await _get_identity_map(bridge, needed_ids) if needed_ids else {}

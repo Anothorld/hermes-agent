@@ -24,6 +24,7 @@ profiling shows otherwise.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
 import logging
@@ -31,7 +32,7 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Callable, Final, Iterable, Mapping, Optional
+from typing import Any, Callable, Final, Iterable, Iterator, Mapping, Optional
 
 from .goals import GOALS, Context, all_goals
 from .schema import FACT_NAMESPACES, GOAL_NAMES, recreate_all
@@ -68,7 +69,13 @@ def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
-def _connect() -> sqlite3.Connection:
+@contextlib.contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
+    # sqlite3.Connection's built-in context manager only commits/rolls back;
+    # it does NOT close the connection. Without this wrapper, every caller's
+    # ``with _connect() as conn:`` leaks two file descriptors (.db, .db-wal),
+    # which eventually trips SQLITE_CANTOPEN ("unable to open database file")
+    # under sustained load.
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     key = str(path)
@@ -79,9 +86,12 @@ def _connect() -> sqlite3.Connection:
                 _INIT_DONE.add(key)
     conn = sqlite3.connect(str(path), timeout=10.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        yield conn
+    finally:
+        conn.close()
 
 
 def _bootstrap(path: Path) -> None:
@@ -94,6 +104,7 @@ def _bootstrap(path: Path) -> None:
         for ddl in TABLES.values():
             conn.execute(ddl)
         _ensure_column(conn, "campaign_config", "test_mode_to", "TEXT")
+        _ensure_column(conn, "campaign_config", "product_display_name", "TEXT")
         for ddl in VIEWS.values():
             conn.execute(ddl)
         for idx in INDEXES:
@@ -125,8 +136,8 @@ def hard_reset() -> None:
 def _safe(label: str, fn, *a, **kw):
     try:
         return fn(*a, **kw)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[CAL] %s failed: %s", label, exc)
+    except Exception:  # noqa: BLE001
+        log.exception("[CAL] %s failed", label)
         return None
 
 
@@ -297,7 +308,139 @@ def get_relationship(identity_id: int) -> Optional[dict[str, Any]]:
         return None
     out = dict(row)
     out["preferred_skus"] = _jl(out.pop("preferred_skus_json", "[]"), [])
+    out["collab_history"] = list_collab_history(identity_id)
     return out
+
+
+def list_collab_history(identity_id: int) -> list[dict[str, Any]]:
+    """Per-campaign archival trail for one KOL, sourced from two paths:
+
+    * ``approval.archival_outcome`` facts (modern archive_collab flow).
+    * ``legacy.collab_imported`` events (one-shot legacy import).
+
+    Modern entries take precedence on overlap; the result is sorted
+    most-recent-first by archived_at.
+    """
+    with _connect() as conn:
+        modern_rows = conn.execute(
+            """SELECT campaign_id, fact_value, captured_at, env
+                 FROM kol_facts_latest
+                WHERE identity_id=? AND fact_key='approval.archival_outcome'""",
+            (identity_id,),
+        ).fetchall()
+        legacy_rows = conn.execute(
+            """SELECT campaign_id, ts, payload_json, env
+                 FROM kol_conversation_events
+                WHERE identity_id=? AND event_type='legacy.collab_imported'""",
+            (identity_id,),
+        ).fetchall()
+
+    by_campaign: dict[str, dict[str, Any]] = {}
+    for r in modern_rows:
+        cid = r["campaign_id"]
+        if not cid:
+            continue
+        outcome = _jl(r["fact_value"], None)
+        by_campaign[cid] = {
+            "campaign_id": cid,
+            "outcome": outcome if isinstance(outcome, str) else "",
+            "archived_at": r["captured_at"],
+            "notes": None,
+            "source": "archive",
+            "env": r["env"],
+        }
+    for r in legacy_rows:
+        cid = r["campaign_id"]
+        if not cid or cid in by_campaign:
+            continue
+        payload = _jl(r["payload_json"], {}) or {}
+        notes_parts: list[str] = []
+        for field in ("notes", "product", "source_section"):
+            v = payload.get(field)
+            if v:
+                notes_parts.append(f"{field}={v}")
+        by_campaign[cid] = {
+            "campaign_id": cid,
+            "outcome": payload.get("outcome") or "",
+            "archived_at": r["ts"],
+            "notes": " · ".join(notes_parts) or None,
+            "source": "legacy_import",
+            "env": r["env"],
+            "handle": payload.get("handle"),
+            "skus": payload.get("skus") or [],
+        }
+    items = list(by_campaign.values())
+    items.sort(key=lambda x: x.get("archived_at") or "", reverse=True)
+    return items
+
+
+def list_archived_kols(
+    *,
+    env: str = "LIVE",
+    q: Optional[str] = None,
+    last_outcome: Optional[str] = None,
+    platform: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List KOL identities with at least one archived collab, joined with
+    relationship summary. Supports handle/email substring (``q``), last
+    outcome filter, and platform filter. ``env`` scopes the relationship
+    rows (env is stored on kol_facts/events, not on relationship; we
+    return all KOLs whose relationship has been archived at least once).
+    """
+    where: list[str] = ["r.total_collabs > 0"]
+    args: list[Any] = []
+    if q:
+        like = f"%{q.strip()}%"
+        where.append("(i.primary_handle LIKE ? OR i.display_name LIKE ? OR i.primary_email LIKE ?)")
+        args += [like, like, like]
+    if last_outcome:
+        where.append("r.last_outcome = ?")
+        args.append(last_outcome)
+    if platform:
+        where.append("i.platform = ?")
+        args.append(platform)
+    where_sql = " WHERE " + " AND ".join(where)
+    with _connect() as conn:
+        total_row = conn.execute(
+            f"""SELECT COUNT(*) AS n
+                  FROM kol_identity i
+                  JOIN kol_relationship r ON r.identity_id = i.id
+                  {where_sql}""",
+            args,
+        ).fetchone()
+        rows = conn.execute(
+            f"""SELECT i.id              AS identity_id,
+                       i.primary_handle  AS primary_handle,
+                       i.display_name    AS display_name,
+                       i.platform        AS platform,
+                       i.primary_email   AS primary_email,
+                       r.total_collabs   AS total_collabs,
+                       r.last_outcome    AS last_outcome,
+                       r.last_campaign_id AS last_campaign_id,
+                       r.last_archived_at AS last_archived_at,
+                       r.preferred_mode  AS preferred_mode,
+                       r.preferred_skus_json AS preferred_skus_json
+                  FROM kol_identity i
+                  JOIN kol_relationship r ON r.identity_id = i.id
+                  {where_sql}
+              ORDER BY r.last_archived_at DESC NULLS LAST, r.total_collabs DESC, i.id DESC
+                 LIMIT ? OFFSET ?""",
+            args + [int(limit), int(offset)],
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        d["preferred_skus"] = _jl(d.pop("preferred_skus_json", "[]"), [])
+        items.append(d)
+    return {
+        "total": int(total_row["n"]) if total_row else 0,
+        "limit": int(limit),
+        "offset": int(offset),
+        "items": items,
+        "env": env,
+    }
 
 
 def get_reusable_facts(identity_id: int) -> dict[str, Any]:
@@ -330,10 +473,10 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
         "followup_intervals": "followup_intervals_json",
     }
     scalar_allowed = {
-        "label", "product_unit_price", "barter_policy", "paid_ceiling",
-        "deliverable_count_per_platform", "extra_notes", "brief_template_id",
-        "color_variant_policy", "audit_standards_md", "test_mode_to",
-        "contract_required", "status",
+        "label", "product_display_name", "product_unit_price", "barter_policy",
+        "paid_ceiling", "deliverable_count_per_platform", "extra_notes",
+        "brief_template_id", "color_variant_policy", "audit_standards_md",
+        "test_mode_to", "contract_required", "status",
     }
 
     def _do() -> str:
@@ -382,6 +525,38 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
             return campaign_id
 
     return _safe("upsert_campaign_config", _do)
+
+
+def list_campaigns(*, env: Optional[str] = None) -> list[dict[str, Any]]:
+    """Distinct (campaign_id, env) pairs known to the bridge, with
+    candidate counts. Pulls from ``campaign_candidates`` (the source of
+    truth for what shows up on the kanban) and left-joins
+    ``campaign_config`` for label/status. Sorted newest-first by the
+    candidate row's max ``updated_at`` so the most-recently touched
+    campaign floats to the top of the picker.
+    """
+    where = ""
+    args: list[Any] = []
+    if env is not None:
+        where = " WHERE c.env = ?"
+        args.append(env)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT c.campaign_id      AS campaign_id,
+                       c.env              AS env,
+                       COUNT(*)           AS candidate_count,
+                       MAX(c.updated_at)  AS last_touched_at,
+                       cf.label           AS label,
+                       cf.status          AS status
+                  FROM campaign_candidates c
+             LEFT JOIN campaign_config cf
+                    ON cf.campaign_id = c.campaign_id
+                {where}
+              GROUP BY c.campaign_id, c.env
+              ORDER BY MAX(c.updated_at) DESC, c.campaign_id ASC""",
+            args,
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_campaign_config(campaign_id: str, *, env: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -515,6 +690,17 @@ def select_candidates_for_outreach(
                      WHERE campaign_id=? AND env=? AND identity_id IN ({qmarks})""",
                 [selected_by, now, now, campaign_id, env, *ids],
             )
+            # Ensure every selected identity has a kol_goal_state row for
+            # this (campaign, env). Without this, an approve that bypasses
+            # discovery_router never triggers write_facts → no recompute →
+            # get_goal_state returns the default "inactive" for outreach,
+            # which blocks every downstream draft skill that gates on
+            # goals.outreach.status == "active".
+            for ident in ids:
+                _recompute_goals_inner(
+                    conn, identity_id=int(ident),
+                    campaign_id=campaign_id, env=env,
+                )
             return cur.rowcount or 0
 
     return _safe("select_candidates_for_outreach", _do) or 0
@@ -1530,6 +1716,7 @@ __all__ = [
     "get_reusable_facts",
     "hard_reset",
     "latest_facts_for",
+    "list_campaigns",
     "list_candidates",
     "list_escalations",
     "list_events",

@@ -132,6 +132,23 @@ def init_db() -> None:
         }
         if "test_mode_to" not in cols:
             conn.execute("ALTER TABLE product_campaigns ADD COLUMN test_mode_to TEXT")
+        for col, ddl in (
+            ("target_floor", "INTEGER"),
+            ("baseline_candidate_count", "INTEGER"),
+            ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("floor_unmet_reason", "TEXT"),
+            # Discovery-purpose run pointer for the quantity gate. Set when
+            # /start, /rediscover, or the auto-retry hook launches a run;
+            # cleared after the gate evaluates that run's terminal state.
+            # Decoupled from ``run_id`` (which tracks the "latest" run for
+            # display) so that approve-driven outreach runs do not trigger
+            # the gate when they terminate.
+            ("gate_run_id", "TEXT"),
+        ):
+            if col not in cols:
+                conn.execute(
+                    f"ALTER TABLE product_campaigns ADD COLUMN {col} {ddl}"
+                )
         product_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(products)")
         }

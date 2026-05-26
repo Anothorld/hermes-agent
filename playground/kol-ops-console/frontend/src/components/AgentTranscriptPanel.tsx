@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, streamLines } from '../api';
+import { errorSummary } from '../lib/errors';
 
 export type TranscriptItem = {
   index?: number;
@@ -130,7 +131,8 @@ function relativeAgo(ts?: string | null): string {
 export default function AgentTranscriptPanel({ campaignId, env, live, variant = 'inline' }: Props) {
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [err, setErr] = useState<string | null>(null);
-  const [conn, setConn] = useState<'idle' | 'connecting' | 'live' | 'closed'>('idle');
+  const [conn, setConn] = useState<'idle' | 'connecting' | 'live' | 'reconnecting' | 'closed'>('idle');
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [runs, setRuns] = useState<RunRow[]>([]);
   // openRuns must drive UI (the "currently running" banner), so keep it in
   // both a ref (for stable mutation inside the SSE callback) and state (for
@@ -165,7 +167,7 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
         setItems(r.items);
         setErr(null);
       })
-      .catch((ex) => alive && setErr(String(ex)));
+      .catch((ex) => alive && setErr(errorSummary(ex)));
 
     if (!live) {
       setConn('idle');
@@ -175,6 +177,7 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
     }
 
     setConn('connecting');
+    setRetryAttempt(0);
     const handle = streamLines(
       `/campaigns/${encodeURIComponent(campaignId)}/agent-stream?env=${env}&limit=160`,
       (ev) => {
@@ -256,6 +259,37 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
           ]);
           return;
         }
+        if (innerEvent === 'message.delta') {
+          // Streaming assistant text — gateway fires one event per token.
+          // Coalesce consecutive deltas into the last `assistant` row for
+          // this run; otherwise long streams would create hundreds of
+          // single-token rows and tank scroll performance.
+          const delta = String(inner.delta ?? '');
+          if (!delta) return;
+          setItems((prev) => {
+            if (prev.length > 0) {
+              const last = prev[prev.length - 1];
+              if (last.kind === 'assistant' && last.runId === runId) {
+                const next = [...prev];
+                next[next.length - 1] = {
+                  ...last,
+                  message: clip(last.message + delta, 8000),
+                };
+                return next;
+              }
+            }
+            return [
+              ...prev,
+              decorate({
+                ts: String(inner.timestamp ?? ''),
+                kind: 'assistant',
+                label: 'assistant',
+                message: clip(delta, 8000),
+              }),
+            ];
+          });
+          return;
+        }
         if (innerEvent === 'tool.completed') {
           const tool = String(inner.tool ?? 'tool');
           const duration = Number(inner.duration ?? 0);
@@ -329,8 +363,27 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
       },
       (e) => {
         if (!alive) return;
-        setErr(String(e));
-        setConn('closed');
+        // Surface but do not stick the error — the SSE helper will
+        // keep reconnecting in the background. We display the most
+        // recent error so transient hiccups stay visible without
+        // collapsing the panel.
+        setErr(errorSummary(e));
+      },
+      {
+        onState: (state, attempt) => {
+          if (!alive) return;
+          setRetryAttempt(attempt);
+          if (state === 'open') {
+            setConn('live');
+            setErr(null);
+          } else if (state === 'connecting') {
+            setConn('connecting');
+          } else if (state === 'reconnecting') {
+            setConn('reconnecting');
+          } else {
+            setConn('closed');
+          }
+        },
       },
     );
     return () => {
@@ -349,9 +402,14 @@ export default function AgentTranscriptPanel({ campaignId, env, live, variant = 
   const indicator = useMemo(() => {
     if (conn === 'live') return { dot: 'bg-emerald-400 animate-pulse', text: 'LIVE', tone: 'text-emerald-300' };
     if (conn === 'connecting') return { dot: 'bg-amber-400 animate-pulse', text: 'connecting', tone: 'text-amber-300' };
+    if (conn === 'reconnecting') return {
+      dot: 'bg-amber-400 animate-pulse',
+      text: `reconnecting (${retryAttempt})`,
+      tone: 'text-amber-300',
+    };
     if (conn === 'closed') return { dot: 'bg-slate-500', text: 'closed', tone: 'text-slate-400' };
     return { dot: 'bg-slate-500', text: 'idle', tone: 'text-slate-400' };
-  }, [conn]);
+  }, [conn, retryAttempt]);
 
   const bodyHeight = variant === 'fullscreen' ? 'h-[calc(100vh-10rem)]' : 'h-72';
 

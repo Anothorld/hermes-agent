@@ -1,6 +1,10 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { dialog } from '../components/dialogs/useDialog';
+import { useEnvStore, toast } from '../lib/store';
+import { errorSummary } from '../lib/errors';
 
 type CampaignBody = {
   campaign_id: string;
@@ -20,17 +24,12 @@ type ParsedDraft = {
   raw: string;
 };
 
-/**
- * Campaign creation wizard with two entry modes:
- *   - "Paste NL": operator drops a free-text brief (DingTalk-style) →
- *     `POST /campaigns/parse` returns a draft `campaign_config`
- *     suggestion, which the operator reviews and edits before submit.
- *   - "Structured": fill the form fields directly.
- *
- * Both paths terminate in `PUT /campaigns/{id}`.
- */
+// Campaign creation wizard with two entry modes (NL paste / structured).
+// Currently orphaned — entry point in nav redirects to /products which
+// runs the per-product creation flow. Kept here for resurrection.
 export function CampaignWizardPage() {
   const nav = useNavigate();
+  const env = useEnvStore((s) => s.env);
   const [campaignId, setCampaignId] = useState('');
   const [title, setTitle] = useState('');
   const [paidCeiling, setPaidCeiling] = useState<string>('');
@@ -39,9 +38,8 @@ export function CampaignWizardPage() {
   const [testModeTo, setTestModeTo] = useState('');
   const [extraJson, setExtraJson] = useState('{}');
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<unknown>(null);
 
-  // --- NL parse panel state -----------------------------------------------
   const [nlText, setNlText] = useState('');
   const [draft, setDraft] = useState<ParsedDraft | null>(null);
   const [parseBusy, setParseBusy] = useState(false);
@@ -56,7 +54,8 @@ export function CampaignWizardPage() {
       });
       setDraft(r);
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('解析失败', errorSummary(ex));
     } finally {
       setParseBusy(false);
     }
@@ -71,7 +70,6 @@ export function CampaignWizardPage() {
     if (p.sku_whitelist?.length) setSkuWhitelist(p.sku_whitelist.join(', '));
     if (p.contract_required != null) setContractRequired(p.contract_required);
     if (p.test_mode_to) setTestModeTo(p.test_mode_to);
-    // Bag the unmapped fields into the JSON area so they get persisted.
     const remainder: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(p)) {
       if (
@@ -86,6 +84,17 @@ export function CampaignWizardPage() {
   }
 
   async function submit() {
+    if (env === 'LIVE') {
+      const ok = await dialog.confirm({
+        title: '在 LIVE 环境创建 campaign？',
+        description: '正式 campaign 将启动 outreach 流程，建议先在 TEST 演练。',
+        confirmLabel: '创建',
+        cancelLabel: '取消',
+        variant: 'danger',
+        liveWarning: true,
+      });
+      if (!ok) return;
+    }
     setBusy(true);
     setErr(null);
     try {
@@ -93,7 +102,7 @@ export function CampaignWizardPage() {
       try {
         extra = JSON.parse(extraJson || '{}');
       } catch {
-        throw new Error('Extra JSON is not valid');
+        throw new Error('Extra JSON 不是合法的 JSON');
       }
       const body: CampaignBody = {
         campaign_id: campaignId,
@@ -107,30 +116,31 @@ export function CampaignWizardPage() {
         ...(extra as Partial<CampaignBody>),
       };
       await api.put(`/campaigns/${encodeURIComponent(campaignId)}`, body);
+      toast.success(`已创建 campaign ${campaignId}`);
       nav(`/campaigns/${encodeURIComponent(campaignId)}/candidates`);
     } catch (ex) {
-      setErr(String(ex));
+      setErr(ex);
+      toast.error('创建失败', errorSummary(ex));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="space-y-3">
-      <h1 className="text-lg font-semibold">New Campaign</h1>
-      {err && <div className="text-red-600">{err}</div>}
+    <div data-editing className="space-y-3">
+      <h1 className="text-lg font-semibold">新建 Campaign</h1>
+      {!!err && <ErrorAlert error={err} />}
 
-      {/* NL paste panel */}
       <div className="rounded border border-slate-200 bg-white p-3 text-sm">
         <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Quick start: paste a free-text brief
+          快速开始：粘贴自然语言简报
         </h2>
         <textarea
           value={nlText}
           onChange={(e) => setNlText(e.target.value)}
           rows={3}
           className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-          placeholder='跑 TS8319，预算 1500，IG 5 / TT 5，commission 12%，测试收件 johnny@povison-collab.com'
+          placeholder='例：跑 TS8319，预算 1500，IG 5 / TT 5，commission 12%，测试收件 johnny@povison-collab.com'
         />
         <div className="mt-2 flex gap-2">
           <button
@@ -138,20 +148,20 @@ export function CampaignWizardPage() {
             disabled={parseBusy || !nlText.trim()}
             className="rounded border border-sky-600 px-3 py-1 text-sm text-sky-700 hover:bg-sky-50 disabled:opacity-50"
           >
-            {parseBusy ? 'Parsing…' : 'Parse → draft'}
+            {parseBusy ? '解析中…' : '解析 → 草稿'}
           </button>
           {draft && (
             <button
               onClick={applyDraft}
               className="rounded bg-sky-600 px-3 py-1 text-sm font-medium text-white hover:bg-sky-700"
             >
-              Apply draft to form ↓
+              应用到表单 ↓
             </button>
           )}
         </div>
         {draft && (
           <div className="mt-2 space-y-1 rounded bg-slate-50 p-2 text-xs">
-            <div className="font-semibold text-slate-700">Parsed fields:</div>
+            <div className="font-semibold text-slate-700">解析结果：</div>
             <pre className="overflow-x-auto whitespace-pre-wrap text-slate-700">
               {JSON.stringify(draft.parsed, null, 2)}
             </pre>
@@ -170,10 +180,10 @@ export function CampaignWizardPage() {
             value={campaignId}
             onChange={(e) => setCampaignId(e.target.value)}
             className="rounded border border-slate-300 px-2 py-1"
-            placeholder="e.g. ts8319"
+            placeholder="例：ts8319"
           />
         </Field>
-        <Field label="title">
+        <Field label="标题">
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -189,7 +199,7 @@ export function CampaignWizardPage() {
             placeholder="1500"
           />
         </Field>
-        <Field label="sku_whitelist (comma)">
+        <Field label="SKU 白名单（逗号分隔）">
           <input
             value={skuWhitelist}
             onChange={(e) => setSkuWhitelist(e.target.value)}
@@ -197,7 +207,7 @@ export function CampaignWizardPage() {
             placeholder="POVI-A1, POVI-B2"
           />
         </Field>
-        <Field label="test_mode_to">
+        <Field label="测试收件邮箱">
           <input
             value={testModeTo}
             onChange={(e) => setTestModeTo(e.target.value)}
@@ -205,14 +215,14 @@ export function CampaignWizardPage() {
             placeholder="johnny@povison-collab.com"
           />
         </Field>
-        <Field label="contract_required">
+        <Field label="需要合同">
           <input
             type="checkbox"
             checked={contractRequired}
             onChange={(e) => setContractRequired(e.target.checked)}
           />
         </Field>
-        <Field label="Extra (JSON)">
+        <Field label="附加字段 (JSON)">
           <textarea
             value={extraJson}
             onChange={(e) => setExtraJson(e.target.value)}
@@ -226,7 +236,7 @@ export function CampaignWizardPage() {
           onClick={submit}
           className="self-start rounded bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
         >
-          {busy ? 'Creating…' : 'Create + open Kanban'}
+          {busy ? '创建中…' : '创建并打开看板'}
         </button>
       </div>
     </div>

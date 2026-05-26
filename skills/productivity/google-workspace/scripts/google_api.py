@@ -136,6 +136,65 @@ def _headers_dict(msg: dict) -> dict[str, str]:
     return {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
 
 
+def _resolve_threading_headers(
+    thread_id: str,
+    *,
+    service=None,
+) -> tuple[str | None, str | None]:
+    """Look up RFC threading headers for the latest message in ``thread_id``.
+
+    Returns ``(in_reply_to, references)`` suitable for the MIME headers of a new
+    message that should thread under ``thread_id``. Without these headers the
+    Gmail API's ``threadId`` param only groups messages on the sender's side —
+    the recipient's mail client has no way to thread the delivered SMTP message.
+
+    Failures (missing thread, network error, no Message-ID) degrade to
+    ``(None, None)``: callers should still send the message, just without
+    threading headers — better than failing the whole flow.
+    """
+    if not thread_id:
+        return None, None
+    try:
+        if service is not None:
+            thread = service.users().threads().get(
+                userId="me",
+                id=thread_id,
+                format="metadata",
+                metadataHeaders=["Message-ID", "References"],
+            ).execute()
+        elif _gws_binary():
+            thread = _run_gws(
+                ["gmail", "users", "threads", "get"],
+                params={
+                    "userId": "me",
+                    "id": thread_id,
+                    "format": "metadata",
+                    "metadataHeaders": ["Message-ID", "References"],
+                },
+            )
+        else:
+            svc = build_service("gmail", "v1")
+            thread = svc.users().threads().get(
+                userId="me",
+                id=thread_id,
+                format="metadata",
+                metadataHeaders=["Message-ID", "References"],
+            ).execute()
+    except Exception:
+        return None, None
+
+    messages = thread.get("messages") or []
+    if not messages:
+        return None, None
+    headers = _headers_dict(messages[-1])
+    parent_msg_id = headers.get("Message-ID") or headers.get("Message-Id")
+    if not parent_msg_id:
+        return None, None
+    parent_refs = (headers.get("References") or "").strip()
+    references = f"{parent_refs} {parent_msg_id}".strip() if parent_refs else parent_msg_id
+    return parent_msg_id, references
+
+
 def _extract_message_body(msg: dict) -> str:
     body = ""
     payload = msg.get("payload", {})
@@ -361,6 +420,11 @@ def _build_outbound_message(args):
 def gmail_draft(args):
     if _gws_binary():
         message = _build_outbound_message(args)
+        if args.thread_id:
+            irt, refs = _resolve_threading_headers(args.thread_id)
+            if irt:
+                message["In-Reply-To"] = irt
+                message["References"] = refs
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         draft_message = {"raw": raw}
@@ -381,6 +445,11 @@ def gmail_draft(args):
 
     service = build_service("gmail", "v1")
     message = _build_outbound_message(args)
+    if args.thread_id:
+        irt, refs = _resolve_threading_headers(args.thread_id, service=service)
+        if irt:
+            message["In-Reply-To"] = irt
+            message["References"] = refs
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     draft_message = {"raw": raw}
@@ -400,6 +469,11 @@ def gmail_draft(args):
 def gmail_send(args):
     if _gws_binary():
         message = _build_outbound_message(args)
+        if args.thread_id:
+            irt, refs = _resolve_threading_headers(args.thread_id)
+            if irt:
+                message["In-Reply-To"] = irt
+                message["References"] = refs
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         body = {"raw": raw}
@@ -416,6 +490,11 @@ def gmail_send(args):
 
     service = build_service("gmail", "v1")
     message = _build_outbound_message(args)
+    if args.thread_id:
+        irt, refs = _resolve_threading_headers(args.thread_id, service=service)
+        if irt:
+            message["In-Reply-To"] = irt
+            message["References"] = refs
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     body = {"raw": raw}

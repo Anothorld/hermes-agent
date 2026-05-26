@@ -3237,7 +3237,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     # Run finished — send final SSE comment and close
                     await response.write(b": stream closed\n\n")
                     break
-                payload = f"data: {json.dumps(event)}\n\n"
+                # Emit the SSE `event:` header line so standards-compliant
+                # clients (browser EventSource, httpx aiter_lines, the
+                # console proxy in campaigns.py) can route by event name
+                # without having to peek inside the JSON body. The event
+                # type is duplicated in the data body for tools that read
+                # only `data:` lines.
+                event_name = str(event.get("event") or "message")
+                payload = f"event: {event_name}\ndata: {json.dumps(event)}\n\n"
                 await response.write(payload.encode())
         except Exception as exc:
             logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
