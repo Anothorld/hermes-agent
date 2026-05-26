@@ -732,10 +732,18 @@ function CampaignCard({
       )}
       {c.run_id && (
         <div className="space-y-1">
-          <AgentTranscriptPanel campaignId={c.campaign_id} env={c.env} live={c.status === 'running'} />
+          {/*
+            `live=true` regardless of c.status: product_campaigns.status
+            lags the runs registry — auxiliary runs (reply-dispatcher,
+            escalation-resume) are tracked in product_campaign_runs but
+            may not flip c.status to 'running'. The transcript backend's
+            snapshot is the source of truth; if no run is open, the
+            panel just shows the static history and closes the stream.
+          */}
+          <AgentTranscriptPanel campaignId={c.campaign_id} env={c.env} live />
           <div className="flex justify-end text-[11px]">
             <Link
-              to={`/campaigns/${encodeURIComponent(c.campaign_id)}/transcript?env=${c.env}&live=${c.status === 'running' ? '1' : '0'}`}
+              to={`/campaigns/${encodeURIComponent(c.campaign_id)}/transcript?env=${c.env}`}
               className="text-sky-700 hover:underline"
             >
               open in full screen →
