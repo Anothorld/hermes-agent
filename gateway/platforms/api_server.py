@@ -683,10 +683,32 @@ class APIServerAdapter(BasePlatformAdapter):
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
         self._response_store = ResponseStore()
-        # Active run streams: run_id -> asyncio.Queue of SSE event dicts
+        # Active run streams: run_id -> asyncio.Queue of SSE event dicts.
+        # Kept for backward compatibility with single-shot internal sinks
+        # (the `q.put_nowait(None)` sentinel in _run_and_close still uses
+        # it). The canonical event log lives in _run_event_history below;
+        # _handle_run_events reads from history, not the queue.
         self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
+        # Per-run event history. The queue model (above) is single-consumer
+        # and pop-on-disconnect, which breaks page refresh / reconnect:
+        # any SSE close evicts events and downstream callers see a 404
+        # on resubscribe. We mirror every emitted event into a bounded
+        # list so reconnecting subscribers can replay from the beginning,
+        # and so multiple subscribers can fan out to the same run.
+        # Bounded to _MAX_RUN_EVENT_HISTORY entries — long runs that
+        # overflow this lose only the head of the log.
+        self._run_event_history: Dict[str, List[Dict[str, Any]]] = {}
+        # True once a terminal event (run.completed/failed/cancelled) has
+        # been recorded for this run. Subscribers that finish draining
+        # the history while done==True close the SSE response cleanly.
+        self._run_event_done: Dict[str, bool] = {}
+        # Per-run set of asyncio.Events used to wake subscribers when new
+        # events are recorded. Set-of-events instead of a single Event so
+        # multiple concurrent subscribers (e.g. console proxy + a curl
+        # debug session) can all be notified.
+        self._run_event_waiters: Dict[str, set] = {}
         # Active run agent/task references for stop support
         self._active_run_agents: Dict[str, Any] = {}
         self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
@@ -2825,6 +2847,11 @@ class APIServerAdapter(BasePlatformAdapter):
     _MAX_CONCURRENT_RUNS = 10  # Prevent unbounded resource allocation
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
     _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
+    # Bound per-run event history. 5000 frames comfortably covers an hour
+    # of typical agent activity; if a run overflows, the oldest frames are
+    # dropped (reconnecting clients lose the head of the log but still
+    # get all recent activity).
+    _MAX_RUN_EVENT_HISTORY = 5000
 
     def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, Any]:
         """Update pollable run status without exposing private agent objects."""
@@ -2841,21 +2868,103 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_statuses[run_id] = current
         return current
 
+    def _record_event(
+        self,
+        run_id: str,
+        event: Dict[str, Any],
+        loop: Optional["asyncio.AbstractEventLoop"] = None,
+    ) -> None:
+        """Append an event to the run's history and wake all subscribers.
+
+        Single canonical write path for every emitted SSE frame. Both the
+        in-process worker thread (tool_progress_callback, stream_delta_callback)
+        and the asyncio handlers (approval responder, run.completed sink)
+        funnel through here so the history stays consistent regardless of
+        which code path produced the event.
+
+        Thread-safety: ``call_soon_threadsafe`` is used to mutate history
+        and wake waiters on the event loop thread when called from a
+        worker thread. History list operations themselves are not
+        thread-locked because all writes are marshalled onto the loop.
+        """
+        def _commit() -> None:
+            history = self._run_event_history.get(run_id)
+            if history is None:
+                # Run was already swept or never registered — drop the
+                # event silently rather than resurrecting state.
+                return
+            if len(history) >= self._MAX_RUN_EVENT_HISTORY:
+                history.pop(0)
+            history.append(event)
+            waiters = self._run_event_waiters.get(run_id)
+            if waiters:
+                for w in list(waiters):
+                    try:
+                        w.set()
+                    except Exception:
+                        pass
+
+        # Marshal onto the loop. From within the loop thread (asyncio
+        # handlers) call_soon is equivalent; from a worker thread we
+        # need call_soon_threadsafe so the wake-up runs on the right
+        # thread.
+        target_loop = loop
+        if target_loop is None:
+            try:
+                target_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                target_loop = None
+        if target_loop is not None:
+            try:
+                target_loop.call_soon_threadsafe(_commit)
+                return
+            except Exception:
+                pass
+        # Fallback: synchronous append (no loop available — rare; happens
+        # only during teardown). Safe because history is a list.
+        _commit()
+
+    def _mark_run_done(
+        self,
+        run_id: str,
+        loop: Optional["asyncio.AbstractEventLoop"] = None,
+    ) -> None:
+        """Mark a run as terminal and wake every subscriber so they can
+        drain the final events and close. Idempotent."""
+        def _commit() -> None:
+            self._run_event_done[run_id] = True
+            waiters = self._run_event_waiters.get(run_id)
+            if waiters:
+                for w in list(waiters):
+                    try:
+                        w.set()
+                    except Exception:
+                        pass
+
+        target_loop = loop
+        if target_loop is None:
+            try:
+                target_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                target_loop = None
+        if target_loop is not None:
+            try:
+                target_loop.call_soon_threadsafe(_commit)
+                return
+            except Exception:
+                pass
+        _commit()
+
     def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
-        """Return a tool_progress_callback that pushes structured events to the run's SSE queue."""
+        """Return a tool_progress_callback that records structured events
+        into the run's event history (replayable on reconnect)."""
         def _push(event: Dict[str, Any]) -> None:
             self._set_run_status(
                 run_id,
                 self._run_statuses.get(run_id, {}).get("status", "running"),
                 last_event=event.get("event"),
             )
-            q = self._run_streams.get(run_id)
-            if q is None:
-                return
-            try:
-                loop.call_soon_threadsafe(q.put_nowait, event)
-            except Exception:
-                pass
+            self._record_event(run_id, event, loop=loop)
 
         def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
             ts = time.time()
@@ -2974,6 +3083,12 @@ class APIServerAdapter(BasePlatformAdapter):
         created_at = time.time()
         self._run_streams[run_id] = q
         self._run_streams_created[run_id] = created_at
+        # Initialize the replayable event log and the subscriber wake-up
+        # set so any reconnect path (page refresh, proxy retry) finds the
+        # run already registered and can replay from frame 0.
+        self._run_event_history[run_id] = []
+        self._run_event_done[run_id] = False
+        self._run_event_waiters[run_id] = set()
         self._run_approval_sessions[run_id] = approval_session_key
 
         event_cb = self._make_run_event_callback(run_id, loop)
@@ -2982,15 +3097,12 @@ class APIServerAdapter(BasePlatformAdapter):
         def _text_cb(delta: Optional[str]) -> None:
             if delta is None:
                 return
-            try:
-                loop.call_soon_threadsafe(q.put_nowait, {
-                    "event": "message.delta",
-                    "run_id": run_id,
-                    "timestamp": time.time(),
-                    "delta": delta,
-                })
-            except Exception:
-                pass
+            self._record_event(run_id, {
+                "event": "message.delta",
+                "run_id": run_id,
+                "timestamp": time.time(),
+                "delta": delta,
+            }, loop=loop)
 
         self._set_run_status(
             run_id,
@@ -3025,10 +3137,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         "waiting_for_approval",
                         last_event="approval.request",
                     )
-                    try:
-                        loop.call_soon_threadsafe(q.put_nowait, event)
-                    except Exception:
-                        pass
+                    self._record_event(run_id, event, loop=loop)
 
                 def _run_sync():
                     from gateway.session_context import clear_session_vars, set_session_vars
@@ -3084,12 +3193,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 # block below never fires — issue #15561).
                 if isinstance(result, dict) and result.get("failed"):
                     error_msg = result.get("error") or "agent run failed"
-                    q.put_nowait({
+                    self._record_event(run_id, {
                         "event": "run.failed",
                         "run_id": run_id,
                         "timestamp": time.time(),
                         "error": error_msg,
-                    })
+                    }, loop=loop)
                     self._set_run_status(
                         run_id,
                         "failed",
@@ -3098,13 +3207,13 @@ class APIServerAdapter(BasePlatformAdapter):
                     )
                 else:
                     final_response = result.get("final_response", "") if isinstance(result, dict) else ""
-                    q.put_nowait({
+                    self._record_event(run_id, {
                         "event": "run.completed",
                         "run_id": run_id,
                         "timestamp": time.time(),
                         "output": final_response,
                         "usage": usage,
-                    })
+                    }, loop=loop)
                     self._set_run_status(
                         run_id,
                         "completed",
@@ -3118,14 +3227,11 @@ class APIServerAdapter(BasePlatformAdapter):
                     "cancelled",
                     last_event="run.cancelled",
                 )
-                try:
-                    q.put_nowait({
-                        "event": "run.cancelled",
-                        "run_id": run_id,
-                        "timestamp": time.time(),
-                    })
-                except Exception:
-                    pass
+                self._record_event(run_id, {
+                    "event": "run.cancelled",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                }, loop=loop)
                 raise
             except Exception as exc:
                 logger.exception("[api_server] run %s failed", run_id)
@@ -3135,15 +3241,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     error=str(exc),
                     last_event="run.failed",
                 )
-                try:
-                    q.put_nowait({
-                        "event": "run.failed",
-                        "run_id": run_id,
-                        "timestamp": time.time(),
-                        "error": str(exc),
-                    })
-                except Exception:
-                    pass
+                self._record_event(run_id, {
+                    "event": "run.failed",
+                    "run_id": run_id,
+                    "timestamp": time.time(),
+                    "error": str(exc),
+                }, loop=loop)
             finally:
                 # If the asyncio wrapper is cancelled (for example via
                 # /stop), the executor thread can still be blocked waiting
@@ -3156,11 +3259,12 @@ class APIServerAdapter(BasePlatformAdapter):
                     unregister_gateway_notify(approval_session_key)
                 except Exception:
                     pass
-                # Sentinel: signal SSE stream to close
-                try:
-                    q.put_nowait(None)
-                except Exception:
-                    pass
+                # Mark the event log as done so all subscribers wake up
+                # one last time, drain the terminal frame, and close
+                # their SSE response cleanly. The history itself is
+                # retained for late subscribers (page refresh after
+                # completion) and reaped later by _sweep_orphaned_runs.
+                self._mark_run_done(run_id, loop=loop)
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
@@ -3199,22 +3303,34 @@ class APIServerAdapter(BasePlatformAdapter):
         return web.json_response(status)
 
     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
-        """GET /v1/runs/{run_id}/events — SSE stream of structured agent lifecycle events."""
+        """GET /v1/runs/{run_id}/events — SSE stream of structured agent lifecycle events.
+
+        Replays the run's full event history from frame 0 every time a
+        subscriber connects, then blocks for new events. This lets the
+        console proxy (and any other client) reconnect after a network
+        drop / page refresh without losing in-flight tool calls,
+        reasoning, or message deltas. Multiple concurrent subscribers
+        are supported via a per-run set of asyncio.Events.
+
+        Cleanup of the run state itself (history, done flag, waiters,
+        queue) is deferred to ``_run_and_close`` for terminal-state pop
+        and ``_sweep_orphaned_runs`` for TTL-based pop — never to this
+        handler, so a disconnect mid-stream never evicts the event log.
+        """
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
 
         run_id = request.match_info["run_id"]
 
-        # Allow subscribing slightly before the run is registered (race condition window)
+        # Allow subscribing slightly before the run is registered (race
+        # condition window). Use history dict as the source of truth.
         for _ in range(20):
-            if run_id in self._run_streams:
+            if run_id in self._run_event_history:
                 break
             await asyncio.sleep(0.05)
         else:
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
-
-        q = self._run_streams[run_id]
 
         response = web.StreamResponse(
             status=200,
@@ -3226,31 +3342,57 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         await response.prepare(request)
 
+        # Register this subscriber's wake-up Event. Removed in finally
+        # below so a long-lived run with many disconnect/reconnect cycles
+        # doesn't accumulate dead waiters.
+        waiter = asyncio.Event()
+        waiters_set = self._run_event_waiters.setdefault(run_id, set())
+        waiters_set.add(waiter)
+
+        # Local cursor into the history list. Starts at 0 so the FE
+        # always gets a full replay; the FE clears its items on mount,
+        # so the replay reconstructs the same ordered transcript that
+        # was visible at first connect.
+        idx = 0
         try:
             while True:
+                history = self._run_event_history.get(run_id)
+                if history is None:
+                    # Run was swept (TTL) while we were subscribed. Stop
+                    # gracefully — subsequent .get(run_id) returns None.
+                    break
+                # Drain everything new since the last loop iteration.
+                while idx < len(history):
+                    event = history[idx]
+                    idx += 1
+                    event_name = str(event.get("event") or "message")
+                    payload = f"event: {event_name}\ndata: {json.dumps(event)}\n\n"
+                    await response.write(payload.encode())
+                # If the run is done AND we've drained everything, close.
+                if self._run_event_done.get(run_id, False):
+                    # Re-check history length in case _push raced us
+                    # between the drain and the done check.
+                    history = self._run_event_history.get(run_id) or []
+                    if idx >= len(history):
+                        await response.write(b": stream closed\n\n")
+                        break
+                    continue
+                # Wait for a new event or send a keepalive.
                 try:
-                    event = await asyncio.wait_for(q.get(), timeout=30.0)
+                    await asyncio.wait_for(waiter.wait(), timeout=30.0)
+                    waiter.clear()
                 except asyncio.TimeoutError:
                     await response.write(b": keepalive\n\n")
-                    continue
-                if event is None:
-                    # Run finished — send final SSE comment and close
-                    await response.write(b": stream closed\n\n")
-                    break
-                # Emit the SSE `event:` header line so standards-compliant
-                # clients (browser EventSource, httpx aiter_lines, the
-                # console proxy in campaigns.py) can route by event name
-                # without having to peek inside the JSON body. The event
-                # type is duplicated in the data body for tools that read
-                # only `data:` lines.
-                event_name = str(event.get("event") or "message")
-                payload = f"event: {event_name}\ndata: {json.dumps(event)}\n\n"
-                await response.write(payload.encode())
+        except (asyncio.CancelledError, ConnectionResetError) as exc:
+            logger.debug("[api_server] SSE subscriber disconnected for run %s: %s", run_id, exc)
         except Exception as exc:
             logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
         finally:
-            self._run_streams.pop(run_id, None)
-            self._run_streams_created.pop(run_id, None)
+            # Remove only this subscriber's waiter; do NOT pop the run's
+            # event log — that lets the next reconnect replay history.
+            current_waiters = self._run_event_waiters.get(run_id)
+            if current_waiters is not None:
+                current_waiters.discard(waiter)
 
         return response
 
@@ -3323,18 +3465,14 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         self._set_run_status(run_id, "running", last_event="approval.responded")
-        q = self._run_streams.get(run_id)
-        if q is not None:
-            try:
-                q.put_nowait({
-                    "event": "approval.responded",
-                    "run_id": run_id,
-                    "timestamp": time.time(),
-                    "choice": choice,
-                    "resolved": resolved,
-                })
-            except Exception:
-                pass
+        if run_id in self._run_event_history:
+            self._record_event(run_id, {
+                "event": "approval.responded",
+                "run_id": run_id,
+                "timestamp": time.time(),
+                "choice": choice,
+                "resolved": resolved,
+            })
 
         return web.json_response({
             "object": "hermes.run.approval_response",
@@ -3392,6 +3530,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 run_id
                 for run_id, created_at in list(self._run_streams_created.items())
                 if now - created_at > self._RUN_STREAM_TTL
+                # Only reap runs that have reached terminal state. Long
+                # in-flight runs (>TTL) used to be evicted here, taking
+                # their event queue with them — that erased every event
+                # for any subscriber that reconnected later. With the
+                # history-based subscriber, the right rule is "drop only
+                # after the run is done AND past TTL".
+                and self._run_event_done.get(run_id, False)
             ]
             for run_id in stale:
                 logger.debug("[api_server] sweeping orphaned run %s", run_id)
@@ -3408,6 +3553,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
+                # Reap the replayable event log and its subscriber wake-up
+                # set. Subscribers still attached read the now-missing
+                # history dict and exit their loop cleanly (see the
+                # `if history is None` guard in _handle_run_events).
+                self._run_event_history.pop(run_id, None)
+                self._run_event_done.pop(run_id, None)
+                waiters = self._run_event_waiters.pop(run_id, None)
+                if waiters:
+                    for w in list(waiters):
+                        try:
+                            w.set()
+                        except Exception:
+                            pass
 
             stale_statuses = [
                 run_id

@@ -314,7 +314,89 @@ class TestRunEvents:
                 # "Agent transcript not updating in real time".
                 assert "event: run.completed" in body
 
+    @pytest.mark.asyncio
+    async def test_events_history_replays_after_run_completes(self, adapter):
+        """Late subscriber must receive the full event log from frame 0.
 
+        Regression guard for the "page refresh = run lost" bug. Before
+        the history buffer, ``_handle_run_events`` finally-block popped
+        the queue on any client disconnect, and ``_push`` dropped
+        subsequent events on the floor. Reconnecting clients got a 404
+        even though the agent was still producing events.
+
+        Here we let the run *finish* before subscribing, then assert
+        that the SSE response still carries ``run.completed`` — only
+        possible if the gateway keeps the event log after the producer
+        exits.
+        """
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "replayed"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": "hi"})
+                run_id = (await resp.json())["run_id"]
+
+                # Wait until the run task has actually finished, so we
+                # subscribe strictly after producer exit. The status
+                # poll endpoint is the cheapest "is done?" probe.
+                for _ in range(40):
+                    status_resp = await cli.get(f"/v1/runs/{run_id}")
+                    if status_resp.status == 200:
+                        st = (await status_resp.json()).get("status")
+                        if st in {"completed", "failed", "cancelled"}:
+                            break
+                    await asyncio.sleep(0.05)
+                assert adapter._run_event_done.get(run_id) is True, (
+                    "run should be marked done before late subscribe"
+                )
+
+                # Subscribe LATE — after the producer exited. Without
+                # the history buffer this returns 404 (or hangs).
+                events_resp = await cli.get(f"/v1/runs/{run_id}/events")
+                assert events_resp.status == 200
+                body = await events_resp.text()
+                assert "event: run.completed" in body, body
+                assert "replayed" in body, body
+
+    @pytest.mark.asyncio
+    async def test_events_history_fan_out_to_multiple_subscribers(self, adapter):
+        """Two concurrent subscribers must both see the full event log.
+
+        The history-based design replaces a single-consumer queue with
+        a list+waiters-set fan-out. Verifies the waiters set wakes up
+        every subscriber on each new event, not just one.
+        """
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "fan-out"}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                mock_create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": "hi"})
+                run_id = (await resp.json())["run_id"]
+
+                # Two concurrent subscribers. Both should drain the
+                # whole history (including run.completed) once the run
+                # finishes. asyncio.gather lets them race.
+                r1, r2 = await asyncio.gather(
+                    cli.get(f"/v1/runs/{run_id}/events"),
+                    cli.get(f"/v1/runs/{run_id}/events"),
+                )
+                assert r1.status == 200 and r2.status == 200
+                b1 = await r1.text()
+                b2 = await r2.text()
+                assert "event: run.completed" in b1, b1
+                assert "event: run.completed" in b2, b2
 
     @pytest.mark.asyncio
     async def test_approval_response_without_pending_returns_409(self, adapter):

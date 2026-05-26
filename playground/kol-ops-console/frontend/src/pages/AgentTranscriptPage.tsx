@@ -14,6 +14,12 @@ export function AgentTranscriptPage() {
   const urlEnv = params.get('env');
   const env: 'TEST' | 'LIVE' =
     urlEnv === 'LIVE' ? 'LIVE' : urlEnv === 'TEST' ? 'TEST' : storeEnv;
+  // Full-screen is the "watch the agent work" view — default to LIVE so
+  // any in-progress run (whether or not product_campaigns.status has
+  // caught up) is streamed. The runs registry on the backend is the
+  // source of truth: its snapshot tells the panel whether any run is
+  // currently open. Pass ?live=0 explicitly to override (e.g. opening a
+  // shareable URL of a finished transcript for static review).
   const live = params.get('live') !== '0';
   return (
     <div className="space-y-3 p-4">
