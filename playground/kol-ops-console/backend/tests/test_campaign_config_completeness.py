@@ -228,6 +228,7 @@ def _seed_conn() -> sqlite3.Connection:
             retry_count INTEGER NOT NULL DEFAULT 0,
             floor_unmet_reason TEXT,
             gate_run_id TEXT,
+            diagnostics_history TEXT,
             PRIMARY KEY (campaign_id, env)
         )"""
     )

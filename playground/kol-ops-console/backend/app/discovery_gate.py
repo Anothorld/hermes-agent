@@ -10,8 +10,8 @@ the shared logic here instead.
 Behavior summary:
 - After a discovery/rediscover agent run terminates, the console compares
   the persisted candidate count against ``product_campaigns.target_floor``.
-  If short and ``retry_count < 3``, fire another rediscover automatically
-  (counted toward retry_count). If still short after 3 auto-retries, open
+  If short and ``retry_count < 5``, fire another rediscover automatically
+  (counted toward retry_count). If still short after 5 auto-retries, open
   a ``discovery_floor_unmet`` escalation in CAL.
 """
 
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = str(Path(__file__).resolve().parents[4])
 
 
-MAX_AUTO_RETRIES = 3
+MAX_AUTO_RETRIES = 5
 """Hard cap on automatic post-terminal rediscover runs per campaign generation.
 
 Counts ONLY auto-retries; operator-initiated /start and /rediscover do not
@@ -106,7 +106,7 @@ REDISCOVERY_INSTRUCTIONS = (
     "     terminal quantity gate: if persisted NEW candidates <\n"
     "     additional_target_count AND auto-retry budget remains, the\n"
     "     backend AUTO-FIRES another /rediscover for the same campaign_id\n"
-    "     (up to 3 auto-retries total = 4 runs max). After that, the\n"
+    "     (up to 5 auto-retries total = 6 runs max). After that, the\n"
     "     operator gets a `discovery_floor_unmet` escalation. Therefore:\n"
     "     finishing partial is acceptable ONLY when truly blocked (rate\n"
     "     limits, niche exhausted, bridge/gateway down).\n"
@@ -180,12 +180,19 @@ def _compose_rediscover_brief(
     additional_count: int,
     excluded_handles: list[str],
     test_mode_to: str | None,
+    prior_diagnostics: list[dict[str, Any]] | None = None,
 ) -> str:
     """Brief for any rediscover run (operator-initiated or auto-retry).
 
     Campaign_config is already persisted in CAL and must NOT be re-upserted.
     The agent only needs the rediscover directive + enough product context
     to derive search keywords.
+
+    When ``prior_diagnostics`` is non-empty (i.e. earlier rounds of this
+    same campaign generation have already terminated), their structured
+    diagnostics are rendered as a ``# prior_runs`` block plus a
+    ``# this_round_guidance`` block so the agent does not re-trace
+    exhausted angles.
     """
     tags = json.loads(product["tags_json"] or "[]")
     lines = [
@@ -219,6 +226,58 @@ def _compose_rediscover_brief(
     ])
     for handle in excluded_handles:
         lines.append(f"  - {handle}")
+
+    if prior_diagnostics:
+        lines.extend([
+            "",
+            "# prior_runs (read-only — earlier rounds this campaign generation)",
+        ])
+        for entry in prior_diagnostics:
+            lines.append(
+                f"## Round {entry.get('round_index', '?')} "
+                f"(run_id={entry.get('run_id')}, "
+                f"persisted={entry.get('persisted_count_at_end')}/"
+                f"floor={entry.get('target_floor')}, "
+                f"auto_retry={entry.get('is_auto_retry', False)})"
+            )
+            # Render next_round_focus FIRST (above scalars/other lists) so
+            # the agent reading prior_runs immediately sees what the prior
+            # round flagged for follow-up. Hard-capped to avoid next-round
+            # brief bloat from a runaway agent.
+            focus_items = entry.get("next_round_focus") or []
+            if focus_items:
+                lines.append("next_round_focus:")
+                for item in focus_items[:_NEXT_ROUND_FOCUS_CAP]:
+                    lines.append(f"  - {item}")
+            for scalar_key in _DIAG_SCALAR_KEYS:
+                value = entry.get(scalar_key)
+                if value:
+                    lines.append(f"{scalar_key}: {value}")
+            for list_key in _DIAG_LIST_KEYS:
+                if list_key == "next_round_focus":
+                    continue  # already rendered at the top
+                items = entry.get(list_key) or []
+                if items:
+                    lines.append(f"{list_key}:")
+                    for item in items:
+                        lines.append(f"  - {item}")
+        lines.extend([
+            "",
+            "# this_round_guidance",
+            "Read prior_runs above FIRST.",
+            "1. Process the MOST RECENT round's next_round_focus list before",
+            "   generating any new seeds. Each item is a concrete handle / seed /",
+            "   reel the prior round flagged as worth digging into; treat them",
+            "   as the highest-priority queue for this run.",
+            "2. Do NOT repeat any seed / hashtag / public-web query listed in",
+            "   any prior round's attempted_angles or remediation_attempted",
+            "   UNLESS that round's floor_unmet_reason was infrastructural",
+            "   (rate_limit, cdp_lost, IG checkpoint, bridge/gateway down).",
+            "   Content exhaustion (\"niche exhausted\", \"no new candidates\")",
+            "   does NOT get retried with the same seeds.",
+            "3. After working through next_round_focus, prioritize new seeds",
+            "   that fill the most recent round's underserved_verticals.",
+        ])
 
     pitch = (product["pitch_md"] or "").strip()
     if pitch:
@@ -339,32 +398,79 @@ def _count_visible_candidates(candidates: list[dict[str, Any]]) -> int:
 _count_uncontacted_candidates = _count_visible_candidates
 
 
-_UNMET_RE = re.compile(
-    r"floor_unmet_reason\s*[:=]\s*(.+?)(?:\n|$)", re.IGNORECASE
+_DIAG_SCALAR_KEYS = (
+    "floor_unmet_reason",
+    "diversity_floor_unmet",
+    "active_range",
+    "active_range_source",
+)
+
+_DIAG_LIST_KEYS = (
+    "attempted_angles",
+    "underserved_verticals",
+    "remediation_attempted",
+    "vertical_coverage",
+    # Agent's concrete suggestions for what the next round should dig
+    # into FIRST — handles, hashtags, seeds, or reels to verify. Each item
+    # follows the format ``<handle/seed> — <why this is worth prioritizing>``
+    # per SKILL.md contract; capped at 10 items by the composer to avoid
+    # next-round brief bloat.
+    "next_round_focus",
+)
+
+_NEXT_ROUND_FOCUS_CAP = 10
+
+_DIAG_ALL_KEYS = _DIAG_SCALAR_KEYS + _DIAG_LIST_KEYS
+
+_DIAG_SCALAR_RE = re.compile(
+    r"^\s*(" + "|".join(_DIAG_SCALAR_KEYS) + r")\s*[:=]\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
-def _extract_unmet_reason(output: Any) -> str | None:
-    """Best-effort scan for a ``floor_unmet_reason:`` line in the agent's
-    final answer. The discovery and rediscover prompts contract requires
-    this line when stopping short.
-    """
+def _coerce_output_to_text(output: Any) -> str:
     if not output:
-        return None
+        return ""
     if isinstance(output, (dict, list)):
         try:
-            text = json.dumps(output, ensure_ascii=False)
+            return json.dumps(output, ensure_ascii=False)
         except (TypeError, ValueError):
-            return None
-    else:
-        text = str(output)
-    m = _UNMET_RE.search(text)
+            return ""
+    return str(output)
+
+
+def _parse_yaml_list(text: str, key: str) -> list[str] | None:
+    pat = re.compile(
+        rf"^{re.escape(key)}\s*:\s*\n((?:[ \t]+-[ \t]+.+(?:\n|$))+)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    m = pat.search(text)
     if not m:
         return None
-    # Trim wrapping quotes / JSON delimiters that survive when the agent's
-    # output is serialized as JSON instead of plain markdown.
-    reason = m.group(1).strip().strip("`\"',}] ")
-    return reason or None
+    items = re.findall(r"^[ \t]+-[ \t]+(.+?)\s*$", m.group(1), re.MULTILINE)
+    return items or None
+
+
+def _extract_run_diagnostics(output: Any) -> dict[str, Any]:
+    """Best-effort scan for SKILL-contract diagnostic fields in the agent's
+    final answer. Returns a dict with all known keys present; any field the
+    agent did not emit is ``None``.
+    """
+    diag: dict[str, Any] = {k: None for k in _DIAG_ALL_KEYS}
+    text = _coerce_output_to_text(output)
+    if not text:
+        return diag
+    for m in _DIAG_SCALAR_RE.finditer(text):
+        key = m.group(1).lower()
+        if diag.get(key):
+            continue  # first match wins
+        # Trim wrapping quotes / trailing commas that survive when the
+        # agent output is JSON-serialized. Preserve brackets so values like
+        # ``active_range: [0.30, 0.60]`` round-trip intact.
+        diag[key] = m.group(2).strip().strip("`\"', ") or None
+    for key in _DIAG_LIST_KEYS:
+        diag[key] = _parse_yaml_list(text, key)
+    return diag
 
 
 async def _trigger_rediscover_internal(
@@ -438,6 +544,10 @@ async def _trigger_rediscover_internal(
             "env": env,
         }
 
+    prior_diagnostics = _read_diagnostics_history(
+        conn, campaign_id=campaign_id, env=env
+    )
+
     brief_text = _compose_rediscover_brief(
         campaign_id=campaign_id,
         env=env,
@@ -445,6 +555,7 @@ async def _trigger_rediscover_internal(
         additional_count=additional_count,
         excluded_handles=excluded_handles,
         test_mode_to=test_mode_to,
+        prior_diagnostics=prior_diagnostics,
     )
 
     ensure_gateway_bridge_key()
@@ -540,6 +651,59 @@ def _clear_gate_run_id(
     )
 
 
+def _read_diagnostics_history(
+    conn: sqlite3.Connection, *, campaign_id: str, env: str
+) -> list[dict[str, Any]]:
+    row = conn.execute(
+        "SELECT diagnostics_history FROM product_campaigns "
+        "WHERE campaign_id=? AND env=?",
+        (campaign_id, env),
+    ).fetchone()
+    raw = (row[0] if row else None) or "[]"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _append_diagnostics_entry(
+    conn: sqlite3.Connection,
+    *,
+    campaign_id: str,
+    env: str,
+    gate_run_id: str | None,
+    target_floor: int,
+    persisted_count_at_end: int,
+    retry_count: int,
+    diagnostics: dict[str, Any],
+) -> None:
+    """Append one round's diagnostics snapshot to ``diagnostics_history``.
+
+    Called for every terminal discovery/rediscover run, whether the floor
+    was met or not, so future rounds (auto-retry or operator /rediscover)
+    see the full per-generation trail.
+    """
+    prior = _read_diagnostics_history(conn, campaign_id=campaign_id, env=env)
+    entry: dict[str, Any] = {
+        "round_index": len(prior) + 1,
+        "run_id": gate_run_id,
+        "ended_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "target_floor": target_floor,
+        "persisted_count_at_end": persisted_count_at_end,
+        "is_auto_retry": retry_count > 0,
+    }
+    for key, value in diagnostics.items():
+        if value is not None:
+            entry[key] = value
+    prior.append(entry)
+    conn.execute(
+        "UPDATE product_campaigns SET diagnostics_history=? "
+        "WHERE campaign_id=? AND env=?",
+        (json.dumps(prior, ensure_ascii=False), campaign_id, env),
+    )
+
+
 async def evaluate_gate_after_terminal(
     *,
     bridge: BridgeClient,
@@ -610,6 +774,27 @@ async def evaluate_gate_after_terminal(
             return {"ok": False, "skipped": "list_candidates_failed"}
 
         current = _count_visible_candidates(candidates)
+
+        # Parse structured diagnostics from the agent's final answer and
+        # append them to diagnostics_history regardless of floor outcome,
+        # so future rounds (auto-retry or operator /rediscover) inherit the
+        # full per-generation trail of attempted_angles / vertical_coverage /
+        # floor_unmet_reason / underserved_verticals / remediation_attempted.
+        diagnostics = _extract_run_diagnostics(
+            run_info.get("output") if isinstance(run_info, dict) else None
+        )
+        _append_diagnostics_entry(
+            conn,
+            campaign_id=campaign_id,
+            env=env,
+            gate_run_id=gate_run_id,
+            target_floor=target_floor,
+            persisted_count_at_end=current,
+            retry_count=retry_count,
+            diagnostics=diagnostics,
+        )
+        reason = diagnostics["floor_unmet_reason"]
+
         if current >= target_floor:
             _clear_gate_run_id(conn, campaign_id=campaign_id, env=env)
             return {"ok": True, "outcome": "floor_met", "current": current,
@@ -637,10 +822,6 @@ async def evaluate_gate_after_terminal(
             logger.warning("gate: product row missing for sku=%s", row["sku"])
             _clear_gate_run_id(conn, campaign_id=campaign_id, env=env)
             return {"ok": False, "skipped": "product_row_missing"}
-
-        reason = _extract_unmet_reason(
-            run_info.get("output") if isinstance(run_info, dict) else None
-        )
 
         if retry_count >= MAX_AUTO_RETRIES:
             final_reason = reason or "max_auto_retries_exceeded"
