@@ -41,6 +41,7 @@ from ..gateway_client import RUNNING_STATES, TERMINAL_STATES, GatewayClient, Gat
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
     get_inflight_run,
+    list_recent_runs,
     list_runs_for_campaign,
     merge_legacy_run_id,
     register_run,
@@ -1043,6 +1044,14 @@ def _session_file(campaign_id: str, env: str) -> Path:
     return _KOL_ORCHESTRATOR_SESSIONS / f"session_kol-campaign:{env}:{campaign_id}.json"
 
 
+def _session_file_by_sid(session_id: str) -> Path:
+    """Hermes writes one JSON file per session keyed by the full
+    session_id (including the namespace prefix and env). This resolver
+    lets us read the on-disk transcript for any session — outreach,
+    draft-refine, email-discover — given just its session_id."""
+    return _KOL_ORCHESTRATOR_SESSIONS / f"session_{session_id}.json"
+
+
 def _tool_call_label(call: dict[str, Any]) -> str:
     fn = call.get("function") if isinstance(call.get("function"), dict) else {}
     name = fn.get("name") or call.get("name") or "tool"
@@ -1050,8 +1059,13 @@ def _tool_call_label(call: dict[str, Any]) -> str:
     return f"{name}({ _clip_text(args, 1200) })"
 
 
-def _transcript_items(campaign_id: str, env: str, limit: int) -> list[dict[str, Any]] | None:
-    path = _session_file(campaign_id, env)
+def _parse_session_file(path: Path, limit: int) -> list[dict[str, Any]] | None:
+    """Read a hermes session JSON file and project it to transcript rows.
+
+    Returns ``None`` when the file does not exist (caller can decide to
+    surface "no history" vs fall back to another source). Returns ``[]``
+    when the file exists but contains no usable messages.
+    """
     if not path.exists():
         return None
     try:
@@ -1095,6 +1109,10 @@ def _transcript_items(campaign_id: str, env: str, limit: int) -> list[dict[str, 
                 "message": _clip_text(body),
             })
     return items[-limit:]
+
+
+def _transcript_items(campaign_id: str, env: str, limit: int) -> list[dict[str, Any]] | None:
+    return _parse_session_file(_session_file(campaign_id, env), limit)
 
 
 def _coerce_json_object(value: Any) -> dict[str, Any] | None:
@@ -1395,6 +1413,100 @@ async def _gateway_completed_snapshot(
                 "message": _clip_text(message, 4000),
             })
     return items or None
+
+
+@router.get("/agent-sessions")
+async def agent_sessions(
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    _: Annotated[dict, Depends(current_user)],
+    env: str = Query("TEST", pattern="^(LIVE|TEST)$"),
+    limit: int = Query(200, ge=1, le=500),
+) -> dict:
+    """Recent runs grouped by ``session_id`` — feeds the global Agent
+    Session Dock.
+
+    ``session_id`` clusters related workflows (one
+    ``kol-campaign:{env}:{cid}`` covers outreach + reply + refine for a
+    campaign; one ``kol-email-discover:{env}:{identity_id}`` covers all
+    discovery runs for an identity). Rows with NULL ``session_id`` are
+    surfaced as their own pseudo-session keyed ``run:{run_id}`` so each
+    appears as a separate row.
+    """
+    runs = list_recent_runs(conn, env=env, limit=limit)
+    groups: dict[str, dict] = {}
+    for r in runs:
+        sid = r.get("session_id") or f"run:{r['run_id']}"
+        g = groups.get(sid)
+        if g is None:
+            g = {
+                "session_id": sid,
+                "campaign_id": r["campaign_id"],
+                "kinds": [],
+                "runs": [],
+                "first_started_at": r["started_at"],
+                "last_activity_at": r["started_at"],
+                "open": False,
+            }
+            groups[sid] = g
+        else:
+            if r["started_at"] > g["last_activity_at"]:
+                g["last_activity_at"] = r["started_at"]
+                g["campaign_id"] = r["campaign_id"]
+            if r["started_at"] < g["first_started_at"]:
+                g["first_started_at"] = r["started_at"]
+        kind = r["kind"]
+        if kind not in g["kinds"]:
+            g["kinds"].append(kind)
+        g["runs"].append({
+            "run_id": r["run_id"],
+            "kind": kind,
+            "started_at": r["started_at"],
+            "ended_at": r.get("ended_at"),
+        })
+        if not r.get("ended_at"):
+            g["open"] = True
+    sessions = sorted(
+        groups.values(),
+        key=lambda g: g["last_activity_at"],
+        reverse=True,
+    )
+    return {"env": env, "sessions": sessions}
+
+
+@router.get("/agent-sessions/{session_id}/log")
+async def agent_session_log(
+    session_id: str,
+    _: Annotated[dict, Depends(current_user)],
+    env: str = Query("TEST", pattern="^(LIVE|TEST)$"),
+    limit: int = Query(160, ge=1, le=500),
+) -> dict:
+    """Session-scoped historical transcript.
+
+    Reads ``~/.hermes/profiles/kol-orchestrator/sessions/session_{sid}.json``
+    directly. Hermes keys these files by the full session_id (matching
+    what ``/campaigns/agent-sessions`` surfaces), so this works for
+    closed sessions even after the gateway has evicted its per-run
+    event ring buffers — the rich step-by-step history is what the dock
+    needs to show "this finished run, what did the agent do".
+
+    Items are returned without ``run_id`` attribution because the file
+    is a single time-ordered conversation, not a per-run feed. The
+    consuming UI knows they are session-scoped (came from this endpoint)
+    and renders them directly rather than filtering by run_id.
+
+    Returns ``items=[]`` when no file exists — pseudo-sessions
+    (``run:{run_id}``) and namespaces whose runtime doesn't persist a
+    session file land here.
+
+    The caller URL-encodes the session_id (it contains colons like
+    ``kol-campaign:LIVE:CID-42``); FastAPI decodes it before binding.
+    Containment guard: any embedded path separator is rejected so the
+    session_id can't traverse out of the sessions directory.
+    """
+    if "/" in session_id or "\\" in session_id or ".." in session_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid session_id")
+    items = _parse_session_file(_session_file_by_sid(session_id), limit) or []
+    return {"session_id": session_id, "env": env, "items": items}
 
 
 @router.get("/{campaign_id}/agent-log")
@@ -3041,9 +3153,23 @@ async def lanes(
             "outreach_draft_created": bool(it.get("outreach_draft_created")),
             "gmail_draft_id": it.get("gmail_draft_id"),
             "gmail_thread_id": it.get("gmail_thread_id"),
+            # Card-level unread inputs (Phase D fix-2). FE compares
+            # *_latest_at against a localStorage last-seen timestamp to
+            # decide whether to render a red dot.
+            "pending_approval_count": int(it.get("pending_approval_count") or 0),
+            "pending_approval_latest_at": it.get("pending_approval_latest_at"),
+            "open_escalation_count": int(it.get("open_escalation_count") or 0),
+            "open_escalation_latest_at": it.get("open_escalation_latest_at"),
+            "reply_draft_state": it.get("reply_draft_state"),
         })
+    counts_in = raw.get("counts") or {}
     return {
         "campaign_id": campaign_id,
         "lanes": items_out,
-        "counts": raw.get("counts") or {"pending_approvals": 0, "open_escalations": 0},
+        "counts": {
+            "pending_approvals": int(counts_in.get("pending_approvals") or 0),
+            "open_escalations": int(counts_in.get("open_escalations") or 0),
+            "pending_approvals_latest_at": counts_in.get("pending_approvals_latest_at"),
+            "open_escalations_latest_at": counts_in.get("open_escalations_latest_at"),
+        },
     }

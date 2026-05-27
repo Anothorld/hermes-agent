@@ -161,6 +161,161 @@ def test_lanes_view_partitions_goals(cal_db):
     assert {"outreach", "interest_qualification", "product_selection",
             "deliverables_scope", "compensation_negotiation",
             "contract_signing"} <= commerce_goals
-    assert {"logistics", "content_production"} <= {g["goal"] for g in lanes["fulfillment"]}
+    assert {"logistics", "payout_setup", "content_production"} <= {g["goal"] for g in lanes["fulfillment"]}
     assert {"content_review_and_golive"} <= {g["goal"] for g in lanes["publish"]}
     assert {"post_collab_archival"} <= {g["goal"] for g in lanes["meta"]}
+
+
+# ---------------------------------------------------------------------------
+# payout_setup goal (PayPal payout collection)
+# ---------------------------------------------------------------------------
+
+
+def _drive_through_contract(cal, iid, *, mode, agreed_terms=None):
+    """Seed enough facts to satisfy everything up to and including
+    contract_signing for compensation `mode`."""
+    cal.write_facts(identity_id=iid, campaign_id=CAMPAIGN, namespace="offer",
+                    facts={"offer.outreach_sent": True,
+                           "offer.interest_signal": "confirmed",
+                           "offer.sku_locked": "SKU-A",
+                           "offer.color_or_variant_locked": True,
+                           "offer.fit_confirmed": True,
+                           "offer.deliverable_platforms": ["instagram"],
+                           "offer.deliverable_count_per_platform": 1,
+                           "offer.usage_rights_discussed": True,
+                           "offer.compensation_mode": mode,
+                           "offer.agreed_terms": agreed_terms or {"mode": mode},
+                           "offer.contract_sent": True,
+                           "offer.contract_signed": True})
+
+
+def test_payout_setup_active_after_contract_signed_paid(cal_db):
+    cal = cal_db
+    _seed_campaign(cal)
+    iid = cal.upsert_identity(primary_handle="payout_paid")
+    _drive_through_contract(cal, iid, mode="paid",
+                            agreed_terms={"amount": 800, "currency": "USD"})
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["payout_setup"]["status"] == "active"
+    assert g["payout_setup"]["lane"] == "fulfillment"
+
+
+def test_payout_setup_active_for_commission_and_hybrid(cal_db):
+    cal = cal_db
+    for mode in ("commission", "hybrid"):
+        _seed_campaign(cal)
+        iid = cal.upsert_identity(primary_handle=f"payout_{mode}")
+        _drive_through_contract(cal, iid, mode=mode)
+        g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+        assert g["payout_setup"]["status"] == "active", f"mode={mode}"
+
+
+def test_payout_setup_skipped_for_gifted(cal_db):
+    cal = cal_db
+    _seed_campaign(cal)
+    iid = cal.upsert_identity(primary_handle="payout_gifted")
+    _drive_through_contract(cal, iid, mode="gifted")
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["payout_setup"]["status"] == "skipped"
+
+
+def test_payout_setup_skipped_for_gifted_no_product(cal_db):
+    cal = cal_db
+    _seed_campaign(cal)
+    iid = cal.upsert_identity(primary_handle="payout_giftedNoProd")
+    _drive_through_contract(cal, iid, mode="gifted_no_product")
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["payout_setup"]["status"] == "skipped"
+
+
+def test_payout_setup_inactive_before_contract_signed(cal_db):
+    cal = cal_db
+    _seed_campaign(cal)
+    iid = cal.upsert_identity(primary_handle="payout_nocontract")
+    cal.write_facts(identity_id=iid, campaign_id=CAMPAIGN, namespace="offer",
+                    facts={"offer.outreach_sent": True,
+                           "offer.interest_signal": "confirmed",
+                           "offer.compensation_mode": "paid",
+                           "offer.agreed_terms": {"amount": 500, "currency": "USD"}})
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["payout_setup"]["status"] == "inactive"
+
+
+def test_payout_setup_active_when_contract_not_required(cal_db):
+    """If campaign skips contracts, payout_setup still gates on
+    compensation being agreed — _contract_satisfied returns True
+    immediately when contract_required=False."""
+    cal = cal_db
+    _seed_campaign(cal, contract_required=False)
+    iid = cal.upsert_identity(primary_handle="payout_nocontractreq")
+    cal.write_facts(identity_id=iid, campaign_id=CAMPAIGN, namespace="offer",
+                    facts={"offer.outreach_sent": True,
+                           "offer.interest_signal": "confirmed",
+                           "offer.compensation_mode": "paid",
+                           "offer.agreed_terms": {"amount": 500, "currency": "USD"}})
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["payout_setup"]["status"] == "active"
+
+
+def test_payout_setup_satisfied_when_method_collected(cal_db):
+    cal = cal_db
+    _seed_campaign(cal)
+    iid = cal.upsert_identity(primary_handle="payout_collected")
+    _drive_through_contract(cal, iid, mode="paid",
+                            agreed_terms={"amount": 800, "currency": "USD"})
+    cal.write_facts(identity_id=iid, campaign_id=CAMPAIGN, namespace="payout",
+                    facts={"payout.method_collected": True,
+                           "payout.payment_method": {
+                               "method": "paypal",
+                               "paypal_email": "kol@example.com",
+                               "account_holder_name": "KOL Name",
+                           }})
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["payout_setup"]["status"] == "satisfied"
+
+
+def test_payout_setup_does_not_block_content_production(cal_db):
+    """content_production gates on fulfillment.delivered_confirmed, not
+    on payout_setup — the two run independently inside fulfillment."""
+    cal = cal_db
+    _seed_campaign(cal)
+    iid = cal.upsert_identity(primary_handle="payout_indep")
+    _drive_through_contract(cal, iid, mode="paid",
+                            agreed_terms={"amount": 800, "currency": "USD"})
+    cal.write_facts(identity_id=iid, campaign_id=CAMPAIGN, namespace="fulfillment",
+                    facts={"fulfillment.address_collected": True,
+                           "fulfillment.shipping_method": "fedex",
+                           "fulfillment.tracking_filled": "1Z999",
+                           "fulfillment.delivered_confirmed": True})
+    # payout_setup still active (not collected), but content_production
+    # should also be active in parallel.
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["payout_setup"]["status"] == "active"
+    assert g["content_production"]["status"] == "active"
+
+
+def test_payout_namespace_check_enforced(cal_db):
+    cal = cal_db
+    _seed_campaign(cal)
+    iid = cal.upsert_identity(primary_handle="payout_nsguard")
+    # Wrong-namespace prefix should be rejected like other namespaces.
+    with pytest.raises(cal.FactNamespaceError):
+        cal.write_facts(identity_id=iid, campaign_id=CAMPAIGN, namespace="payout",
+                        facts={"offer.foo": True})
+
+
+def test_default_payment_method_json_roundtrip(cal_db):
+    cal = cal_db
+    _seed_campaign(cal)
+    pm = {
+        "method": "paypal",
+        "paypal_email": "alice@example.com",
+        "account_holder_name": "Alice Chen",
+        "country": "US",
+    }
+    iid = cal.upsert_identity(primary_handle="payout_roundtrip",
+                              default_payment_method=pm)
+    ident = cal.get_identity(iid)
+    assert ident["default_payment_method"] == pm
+    reusable = cal.get_reusable_facts(iid)
+    assert reusable["default_payment_method"] == pm

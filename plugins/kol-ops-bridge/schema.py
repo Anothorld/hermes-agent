@@ -12,9 +12,9 @@ from __future__ import annotations
 import sqlite3
 from typing import Final
 
-SCHEMA_VERSION: Final[int] = 2
+SCHEMA_VERSION: Final[int] = 3
 
-FACT_NAMESPACES: Final[tuple[str, ...]] = ("identity", "offer", "fulfillment", "approval")
+FACT_NAMESPACES: Final[tuple[str, ...]] = ("identity", "offer", "fulfillment", "approval", "payout")
 
 GOAL_NAMES: Final[tuple[str, ...]] = (
     "outreach",
@@ -24,6 +24,7 @@ GOAL_NAMES: Final[tuple[str, ...]] = (
     "compensation_negotiation",
     "contract_signing",
     "logistics",
+    "payout_setup",
     "content_production",
     "content_review_and_golive",
     "post_collab_archival",
@@ -81,6 +82,7 @@ TABLES: dict[str, str] = {
             campaign_id                       TEXT PRIMARY KEY,
             label                             TEXT,
             product_display_name              TEXT,
+            product_url                       TEXT,
             product_unit_price                REAL,
             barter_policy                     TEXT,
             paid_ceiling                      REAL,
@@ -141,7 +143,7 @@ TABLES: dict[str, str] = {
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             identity_id     INTEGER NOT NULL REFERENCES kol_identity(id) ON DELETE CASCADE,
             campaign_id     TEXT,
-            fact_namespace  TEXT NOT NULL CHECK (fact_namespace IN ('identity','offer','fulfillment','approval')),
+            fact_namespace  TEXT NOT NULL CHECK (fact_namespace IN ('identity','offer','fulfillment','approval','payout')),
             fact_key        TEXT NOT NULL,
             fact_value      TEXT,                                   -- JSON-encoded scalar/object
             source          TEXT NOT NULL,                          -- email|skill|manual|seed

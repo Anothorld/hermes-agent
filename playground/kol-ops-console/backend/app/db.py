@@ -99,6 +99,7 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_product_campaigns_sku ON product_campaigns(sku, env)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_cid ON product_campaign_runs(campaign_id, env, started_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_dedup ON product_campaign_runs(dedup_key, started_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_env_started ON product_campaign_runs(env, started_at DESC)",
 ]
 
 

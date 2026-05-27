@@ -82,6 +82,9 @@ def build_campaign_config_upsert_body(
         "test_mode_to": body.test_mode_to,
         "env": body.env,
     }
+    product_url = product["url"] if "url" in product.keys() else None
+    if product_url:
+        upsert_body["product_url"] = product_url
     if color_variant_policy:
         upsert_body["color_variant_policy"] = color_variant_policy
     if extra_notes:
@@ -103,6 +106,18 @@ def build_campaign_config_upsert_body(
 # ``skills/social-media/kol-cold-outreach/SKILL.md`` will escalate
 # rather than fall back to the SKU code.
 DEFAULT_REQUIRED_FIELDS: tuple[str, ...] = ("product_display_name",)
+
+# Strings that look like a campaign id but actually carry no information.
+# Seen historically when a JS caller built a URL via
+# ``encodeURIComponent(null|undefined|NaN)`` and the resulting 4–9 char
+# sentinel string travelled all the way to a CAL write. The bridge
+# rejects these at its boundary (plugin_api._reject_null_sentinel_…),
+# but we also reject upfront here so the console returns a tight 400
+# with a frontend-routable error code instead of a misleading
+# downstream "campaign_config is missing in CAL" message.
+_NULL_SENTINEL_CAMPAIGN_IDS: frozenset[str] = frozenset({
+    "null", "undefined", "nan", "none",
+})
 
 
 async def assert_campaign_config_complete(
@@ -131,6 +146,27 @@ async def assert_campaign_config_complete(
     ``cal_unreachable``. We do NOT swallow — the alternative is letting
     the draft run start against a phantom config.
     """
+    # Fast-fail on caller bugs that interpolated a null/undefined into
+    # the campaign id (most often a console route that built the URL
+    # via ``encodeURIComponent(null)`` → ``"null"``). Without this guard
+    # the operator sees a confusing "campaign_config is missing in CAL"
+    # error and is told to use the campaign edit form, which they have
+    # no way to reach because the URL itself is broken.
+    cid_str = "" if campaign_id is None else str(campaign_id).strip()
+    if not cid_str or cid_str.lower() in _NULL_SENTINEL_CAMPAIGN_IDS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            {
+                "code": "invalid_campaign_id",
+                "message": (
+                    f"campaign_id is the sentinel value {campaign_id!r} — "
+                    "the console built this request from a missing or "
+                    "null campaign context. Reload the page from a "
+                    "campaign-scoped view (kanban / candidates) and "
+                    "retry."
+                ),
+            },
+        )
     try:
         config = await bridge.get_campaign(campaign_id)
     except BridgeError as exc:

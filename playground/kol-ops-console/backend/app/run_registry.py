@@ -146,6 +146,34 @@ def list_open_runs_for_campaign(
     return [dict(r) for r in rows]
 
 
+def list_recent_runs(
+    conn: sqlite3.Connection,
+    *,
+    env: str,
+    limit: int = 200,
+    since_hours: int = 720,
+) -> list[dict]:
+    """Cross-campaign run feed for the global Agent Session Dock.
+
+    Returns newest-first. ``since_hours`` defaults to 30 days so the
+    dock's polling cost stays bounded as the registry grows; runs older
+    than that are excluded.
+    """
+    cutoff = (
+        _dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(hours=since_hours)
+    ).isoformat(timespec="seconds")
+    rows = conn.execute(
+        """SELECT run_id, campaign_id, kind, session_id, started_at, ended_at
+             FROM product_campaign_runs
+            WHERE env=? AND started_at>=?
+            ORDER BY started_at DESC
+            LIMIT ?""",
+        (env, cutoff, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def merge_legacy_run_id(
     conn: sqlite3.Connection,
     *,

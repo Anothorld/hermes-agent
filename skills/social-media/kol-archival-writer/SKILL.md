@@ -1,6 +1,6 @@
 ---
 name: kol-archival-writer
-description: After a campaign engagement closes (status `done` or `aborted`), back-fills durable cross-campaign facts on the KOL's `kol_identity` and `kol_relationship` rows: total_collabs, last_outcome, default_shipping_address (if drift was approved), preferred_compensation_mode, response_time_avg_h, last_engaged_at, plus a one-line `relationship_notes` summary. Writes nothing to per-campaign `kol_facts` (that namespace is closed); writes only to identity/relationship via dedicated bridge endpoints. Idempotent on `approval.archival_done==true`.
+description: After a campaign engagement closes (status `done` or `aborted`), back-fills durable cross-campaign facts on the KOL's `kol_identity` and `kol_relationship` rows: total_collabs, last_outcome, default_shipping_address (if shipping drift was approved), default_payment_method (if payment drift was approved), preferred_compensation_mode, response_time_avg_h, last_engaged_at, plus a one-line `relationship_notes` summary. Writes nothing to per-campaign `kol_facts` (that namespace is closed); writes only to identity/relationship via dedicated bridge endpoints. Idempotent on `approval.archival_done==true`.
 trigger: Invoked by `kol-reply-dispatcher` (or a closing cron) when `goals.archival.status == "active"` AND `approval.archival_done != true`. Pre-condition: the campaign-level closing goal (`content_review_and_golive` done OR `engagement_aborted` done) must already be marked.
 tags: ["kol", "archival", "kol_identity", "kol_relationship", "meta-lane"]
 ---
@@ -14,7 +14,9 @@ decision and pre-populated defaults.
 - Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
 - **Identity writes are gated.** `default_shipping_address` is only
   promoted when `approval.identity_drift_review.decision == "approved"`
-  for the address change. Otherwise leave identity address untouched.
+  for the address change. `default_payment_method` is only promoted
+  when `approval.identity_drift_review_payment.decision == "approved"`
+  for the PayPal change. Otherwise leave identity values untouched.
 - **No fact-namespace writes.** Per-campaign `kol_facts` is frozen
   after archival; this skill writes only via identity/relationship
   endpoints.
@@ -39,8 +41,9 @@ Read:
 - `goals.archival.status`, `goals.content_review_and_golive.status`,
   `goals.engagement_aborted.status`.
 - `relationship.total_collabs` (current).
-- All `offer.*` keys (latest), `fulfillment.*` keys, `fulfillment.*` keys,
-  `approval.identity_drift_review` if present.
+- All `offer.*` keys (latest), `fulfillment.*` keys, `payout.*` keys,
+  `approval.identity_drift_review` (shipping) and
+  `approval.identity_drift_review_payment` (PayPal) if present.
 - Inbox metadata (response_time_avg_h is computed by the bridge or
   falls back to the existing relationship value).
 
@@ -68,6 +71,15 @@ Read:
   AND `fulfillment.shipping_address` was used this campaign:
   set `kol_identity.default_shipping_address` to that snapshot.
 - Else: do not touch identity address.
+
+**Default payment method (identity-level):**
+- ONLY if `approval.identity_drift_review_payment.decision == "approved"`
+  AND `payout.method_collected == true` AND `payout.payment_method`
+  was captured this campaign: set
+  `kol_identity.default_payment_method` to that snapshot.
+- Else: do not touch identity payment method. PayPal-only enforcement
+  lives in the intake skill; archival just promotes whatever was
+  approved.
 
 **Relationship notes:**
 - Compose a one-line summary like:
@@ -117,7 +129,7 @@ raw HTTP or SQL. Two atomic calls:
   "body": null,
   "branch_action": "archived",
   "last_outcome": "delivered",
-  "identity_updated": {"default_shipping_address": false},
+  "identity_updated": {"default_shipping_address": false, "default_payment_method": false},
   "relationship_updated": {"total_collabs": 4, "preferred_compensation_mode": "paid",
                             "relationship_notes_appended": true,
                             "last_engaged_at": "<iso8601>"},
@@ -147,6 +159,11 @@ This skill never drafts an email. `body: null` always.
 - Promoting a new shipping address WITHOUT operator approval — silently
   reshapes future campaigns. Always gate on
   `approval.identity_drift_review.decision == "approved"`.
+- Promoting a new PayPal email WITHOUT operator approval — same risk
+  for payouts. Always gate on
+  `approval.identity_drift_review_payment.decision == "approved"`.
+  Confusing this key with the shipping drift key (`identity_drift_review`)
+  will promote the wrong thing.
 - Overwriting `relationship_notes` instead of appending. The notes
   field is a running ledger, not a current-state field.
 - Forgetting to increment `total_collabs` (or wrongly counting an

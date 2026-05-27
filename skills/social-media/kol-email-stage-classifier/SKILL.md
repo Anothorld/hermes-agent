@@ -1,6 +1,6 @@
 ---
 name: kol-email-stage-classifier
-description: Side-effect-free classifier for incoming KOL emails. Reads the latest message + thread summary + current goal_state snapshot (per lane) and outputs a structured JSON describing which goals are active per lane, which facts can be extracted (4 namespaces), what signals were detected, and any ambiguity. Does NOT write CAL, does NOT call the Bridge, does NOT draft. Always invoked by `kol-reply-dispatcher`; never invoked by humans directly.
+description: Side-effect-free classifier for incoming KOL emails. Reads the latest message + thread summary + current goal_state snapshot (per lane) and outputs a structured JSON describing which goals are active per lane, which facts can be extracted (5 namespaces), what signals were detected, and any ambiguity. Does NOT write CAL, does NOT call the Bridge, does NOT draft. Always invoked by `kol-reply-dispatcher`; never invoked by humans directly.
 trigger: When `kol-reply-dispatcher` (or any router that has a fresh KOL email + goal_state snapshot) needs to know "what is this KOL replying about, and what does this email tell us?". Also when an operator pastes a single KOL email into chat and asks "classify this".
 tags: ["kol", "classifier", "email", "facts", "goals", "lanes"]
 ---
@@ -57,6 +57,7 @@ Exactly one JSON object, keys in this order, no markdown wrapping:
     "identity": { "<identity.dotted_key>": <value>, ... },
     "offer":    { "<offer.dotted_key>":    <value>, ... },
     "fulfillment": { "<fulfillment.dotted_key>": <value>, ... },
+    "payout":   { "<payout.dotted_key>":   <value>, ... },
     "approval": { "<approval.dotted_key>": <value>, ... }
   },
   "signals": [
@@ -78,14 +79,14 @@ Goal names allowed in `active_goals_by_lane`:
 - commerce: `cold_outreach`, `reengagement_outreach`, `interest_qualification`,
   `product_selection`, `deliverables_scope`, `compensation_negotiation`,
   `contract_signing`.
-- fulfillment: `logistics`, `content_production`.
+- fulfillment: `logistics`, `payout_setup`, `content_production`.
 - publish: `content_review_and_golive`.
 - meta: `post_collab_archival`.
 Use `null` for any lane with no active goal.
 
 ### Fact namespace rules (HARD)
 - Every key in `facts_extracted` MUST be dotted and prefixed by its namespace
-  (`identity.`, `offer.`, `fulfillment.`, `approval.`).
+  (`identity.`, `offer.`, `fulfillment.`, `payout.`, `approval.`).
 - **Never** emit a key without a prefix; the Bridge will reject it with
   `FactNamespaceError` and the dispatcher run will hard-fail.
 - Common keys (non-exhaustive):
@@ -102,9 +103,17 @@ Use `null` for any lane with no active goal.
     `fulfillment.shipping_method`, `fulfillment.tracking_no`,
     `fulfillment.delivered_confirmed`, `fulfillment.brief_sent`,
     `fulfillment.draft_submitted`.
+  - payout: `payout.payment_method_proposed` (object
+    `{method:"paypal", paypal_email, account_holder_name?, country?}`
+    when KOL volunteers PayPal details inline);
+    `payout.alternate_method_requested` (string verbatim when KOL
+    asks for wire / Stripe / Payoneer / crypto / bank instead of PayPal).
+    Do NOT emit `payout.method_collected` from the classifier — that
+    flag is owned by the intake skill.
   - approval: `approval.over_budget_request`,
     `approval.contract_change_request`, `approval.review_overflow`,
-    `approval.policy_overrides`, `approval.identity_drift_review`.
+    `approval.policy_overrides`, `approval.identity_drift_review`,
+    `approval.identity_drift_review_payment`.
 
 ### Signal vocabulary (orthogonal to goals)
 Common signals, append-only — emit only when evidence is in the email body:

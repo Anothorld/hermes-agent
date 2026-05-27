@@ -29,10 +29,26 @@ import datetime as _dt
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Callable, Final, Iterable, Iterator, Mapping, Optional
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def _normalize_primary_email(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if not _EMAIL_RE.match(s):
+        raise ValueError(
+            f"primary_email must look like 'x@y.tld'; got {value!r}"
+        )
+    return s.lower()
 
 from .goals import GOALS, Context, all_goals
 from .schema import FACT_NAMESPACES, GOAL_NAMES, recreate_all
@@ -105,6 +121,7 @@ def _bootstrap(path: Path) -> None:
             conn.execute(ddl)
         _ensure_column(conn, "campaign_config", "test_mode_to", "TEXT")
         _ensure_column(conn, "campaign_config", "product_display_name", "TEXT")
+        _ensure_column(conn, "campaign_config", "product_url", "TEXT")
         for ddl in VIEWS.values():
             conn.execute(ddl)
         for idx in INDEXES:
@@ -169,11 +186,13 @@ def upsert_identity(
     language: Optional[str] = None,
     contact_role: str = "kol",
     default_shipping_address: Optional[Mapping[str, Any]] = None,
-    default_payment_method: Optional[str] = None,
+    default_payment_method: Optional[Mapping[str, Any]] = None,
     notes: Optional[str] = None,
     env: str = "LIVE",
 ) -> Optional[int]:
     """Insert-or-update a KOL identity. Returns its id."""
+
+    primary_email = _normalize_primary_email(primary_email)
 
     def _do() -> int:
         with _connect() as conn:
@@ -183,6 +202,7 @@ def upsert_identity(
                 (platform, primary_handle, env),
             ).fetchone()
             addr_json = _j(default_shipping_address) if default_shipping_address is not None else None
+            pm_json = _j(default_payment_method) if default_payment_method is not None else None
             if row:
                 conn.execute(
                     """UPDATE kol_identity SET
@@ -197,7 +217,7 @@ def upsert_identity(
                           updated_at    = ?
                        WHERE id = ?""",
                     (primary_email, display_name, region, language, contact_role,
-                     addr_json, default_payment_method, notes, now, row["id"]),
+                     addr_json, pm_json, notes, now, row["id"]),
                 )
                 return int(row["id"])
             conn.execute(
@@ -207,7 +227,7 @@ def upsert_identity(
                     default_payment_method, notes, env, created_at, updated_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (primary_handle, platform, primary_email, display_name, region,
-                 language, contact_role, addr_json, default_payment_method,
+                 language, contact_role, addr_json, pm_json,
                  notes, env, now, now),
             )
             return int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
@@ -223,6 +243,7 @@ def get_identity(identity_id: int) -> Optional[dict[str, Any]]:
     out = dict(row)
     out["alt_handles"] = _jl(out.pop("alt_handles_json", "[]"), [])
     out["default_shipping_address"] = _jl(out.get("default_shipping_address"), None)
+    out["default_payment_method"] = _jl(out.get("default_payment_method"), None)
     return out
 
 
@@ -473,7 +494,8 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
         "followup_intervals": "followup_intervals_json",
     }
     scalar_allowed = {
-        "label", "product_display_name", "product_unit_price", "barter_policy",
+        "label", "product_display_name", "product_url",
+        "product_unit_price", "barter_policy",
         "paid_ceiling", "deliverable_count_per_platform", "extra_notes",
         "brief_template_id", "color_variant_policy", "audit_standards_md",
         "test_mode_to", "contract_required", "status",
@@ -642,6 +664,27 @@ def list_candidates(campaign_id: str, *, env: str = "LIVE") -> list[dict[str, An
     return out
 
 
+def get_candidate_for(
+    *, identity_id: int, campaign_id: str, env: str = "LIVE"
+) -> Optional[dict[str, Any]]:
+    """Return the single ``campaign_candidates`` row for an (identity, campaign,
+    env) triple, with ``payload_json`` decoded into ``payload``. Returns None
+    when the identity is not a candidate of this campaign — drafters need this
+    so they can tell "no per-campaign evidence" apart from "evidence is empty".
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT * FROM campaign_candidates
+                WHERE identity_id=? AND campaign_id=? AND env=?""",
+            (identity_id, campaign_id, env),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["payload"] = _jl(d.pop("payload_json", "{}"), {})
+    return d
+
+
 def set_candidate_status(
     *,
     campaign_id: str,
@@ -777,6 +820,7 @@ _FACT_EVENT_TYPE_MAP: Final[dict[str, tuple[str, str, str]]] = {
     "fulfillment.shipping_method":           ("logistics.shipping_method_set", "logistics",               "fulfillment"),
     "fulfillment.tracking_filled":           ("logistics.tracking_filled",     "logistics",               "fulfillment"),
     "fulfillment.delivered_confirmed":       ("logistics.delivered",           "logistics",               "fulfillment"),
+    "payout.method_collected":               ("payout.method_collected",       "payout_setup",            "fulfillment"),
     "offer.brief_sent":                      ("content.brief_sent",            "content_production",       "fulfillment"),
     "offer.draft_submitted":                 ("content.draft_submitted",       "content_production",       "fulfillment"),
     "offer.review_verdict":                  ("content.review_verdict",        "content_review_and_golive", "publish"),
@@ -1708,6 +1752,7 @@ __all__ = [
     "db_path",
     "find_identity_by_handle",
     "get_campaign_config",
+    "get_candidate_for",
     "get_escalation_campaign_id",
     "get_goal_state",
     "get_identity",

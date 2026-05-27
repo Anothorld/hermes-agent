@@ -10,7 +10,9 @@ import { FactInput } from '../components/inputs/FactInput';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { factKeyLabel } from '../components/factKeyLabel';
 import { KolArchiveDialog } from '../components/dialogs/KolArchiveDialog';
+import { UnreadDot } from '../components/UnreadDot';
 import { useCampaignStore, useEnvStore, toast } from '../lib/store';
+import { useUnreadStore, isUnread } from '../lib/unread';
 import { errorSummary } from '../lib/errors';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
@@ -18,7 +20,12 @@ import { useDataChannel } from '../hooks/useDataChannel';
 type LanesResponse = {
   campaign_id: string;
   lanes: LaneSnapshot[];
-  counts?: { pending_approvals: number; open_escalations: number };
+  counts?: {
+    pending_approvals: number;
+    open_escalations: number;
+    pending_approvals_latest_at?: string | null;
+    open_escalations_latest_at?: string | null;
+  };
 };
 
 type EnrichedSnapshot = LaneSnapshot & {
@@ -32,6 +39,8 @@ type CardStatusKey =
   | 'declined'
   | 'progressing'
   | 'blocked'
+  | 'draft_pending_approval'
+  | 'draft_pending_send'
   | 'idle';
 
 function cardStatus(row: EnrichedSnapshot): CardStatusKey {
@@ -44,6 +53,20 @@ function cardStatus(row: EnrichedSnapshot): CardStatusKey {
       return 'progressing';
     }
     return 'interested';
+  }
+  // Draft sub-states sit between idle and sent_waiting. reply_draft_state
+  // is server-derived and covers both reply drafts (approval queue) and
+  // cold-outreach drafts that route through the same queue. The fallback
+  // outreach_draft_created branch catches cold-outreach drafts that the
+  // skill writes directly to Gmail without an approval row.
+  if (!row.outreach_sent_at) {
+    if (row.reply_draft_state === 'pending') return 'draft_pending_approval';
+    if (
+      row.reply_draft_state === 'approved_unsent'
+      || row.outreach_draft_created
+    ) {
+      return 'draft_pending_send';
+    }
   }
   if (row.outreach_sent_at) return 'sent_waiting';
   return 'idle';
@@ -75,6 +98,16 @@ const STATUS_BADGE: Record<CardStatusKey, { label: string; cls: string; title: s
     cls: 'bg-amber-100 text-amber-800 ring-1 ring-amber-200',
     title: '存在未解决的升级，需要操作员介入',
   },
+  draft_pending_approval: {
+    label: 'Draft 待审批',
+    cls: 'bg-rose-50 text-rose-700 ring-1 ring-rose-200',
+    title: '草稿在 Approvals 队列里等通过',
+  },
+  draft_pending_send: {
+    label: 'Draft 待发送',
+    cls: 'bg-sky-50 text-sky-700 ring-1 ring-sky-200',
+    title: 'Gmail 草稿已就绪，需手动点 Send',
+  },
   idle: {
     label: '待发起',
     cls: 'bg-slate-100 text-slate-500 ring-1 ring-slate-200',
@@ -100,9 +133,17 @@ export function KolKanbanPage() {
   }, []);
 
   const [data, setData] = useState<EnrichedSnapshot[]>([]);
-  const [counts, setCounts] = useState<{ pending_approvals: number; open_escalations: number }>(
-    { pending_approvals: 0, open_escalations: 0 },
+  const [counts, setCounts] = useState<{
+    pending_approvals: number;
+    open_escalations: number;
+    pending_approvals_latest_at?: string | null;
+    open_escalations_latest_at?: string | null;
+  }>({ pending_approvals: 0, open_escalations: 0 });
+  const seenApprovalsGlobal = useUnreadStore((s) => s.seen['approvals.global']);
+  const seenEscalationsGlobal = useUnreadStore(
+    (s) => s.seen[`escalations.global.${campaignId}`],
   );
+  const seenByScope = useUnreadStore((s) => s.seen);
   const [err, setErr] = useState<unknown>(null);
   const [laneFilter, setLaneFilter] = useState<LaneFilter>('all');
   const [repeatOnly, setRepeatOnly] = useState(false);
@@ -122,7 +163,14 @@ export function KolKanbanPage() {
         `/campaigns/${encodeURIComponent(campaignId)}/lanes?env=${env}`,
       );
       setData(r.lanes as EnrichedSnapshot[]);
-      setCounts(r.counts ?? { pending_approvals: 0, open_escalations: 0 });
+      setCounts(
+        r.counts ?? {
+          pending_approvals: 0,
+          open_escalations: 0,
+          pending_approvals_latest_at: null,
+          open_escalations_latest_at: null,
+        },
+      );
       setErr(null);
       setLastRefreshedAt(Date.now());
     } catch (ex) {
@@ -195,6 +243,10 @@ export function KolKanbanPage() {
           title="全部 campaign 的待审批"
         >
           ◷ {counts.pending_approvals} 待审批
+          <UnreadDot
+            show={isUnread(counts.pending_approvals_latest_at, seenApprovalsGlobal)}
+            title="有新的待审批条目"
+          />
         </Link>
         <Link
           to="/escalations"
@@ -202,6 +254,10 @@ export function KolKanbanPage() {
           title="本 campaign 的未解决升级"
         >
           ! {counts.open_escalations} 升级
+          <UnreadDot
+            show={isUnread(counts.open_escalations_latest_at, seenEscalationsGlobal)}
+            title="有新的升级条目"
+          />
         </Link>
         <div className="ml-auto flex items-center gap-2 text-xs">
           {lastRefreshedAt > 0 && (
@@ -287,6 +343,8 @@ export function KolKanbanPage() {
                         )
                       }
                       onRefreshed={refresh}
+                      seenApproval={seenByScope[`approvals.kol.${k.identity_id}`]}
+                      seenEscalation={seenByScope[`escalations.kol.${k.identity_id}`]}
                     />
                   ))}
                 </ul>
@@ -333,6 +391,8 @@ function KanbanCard({
   open,
   onToggleMissing,
   onRefreshed,
+  seenApproval,
+  seenEscalation,
 }: {
   row: EnrichedSnapshot;
   campaignId: string;
@@ -340,6 +400,8 @@ function KanbanCard({
   open: boolean;
   onToggleMissing: () => void;
   onRefreshed: () => void;
+  seenApproval: number | undefined;
+  seenEscalation: number | undefined;
 }) {
   const lane = row.goals.commerce?.goal
     ? 'commerce'
@@ -353,6 +415,8 @@ function KanbanCard({
   const missing = goalState?.missing_facts ?? [];
   const status = cardStatus(row);
   const badge = STATUS_BADGE[status];
+  const approvalUnread = isUnread(row.pending_approval_latest_at, seenApproval);
+  const escalationUnread = isUnread(row.open_escalation_latest_at, seenEscalation);
   const [archiveOpen, setArchiveOpen] = useState(false);
   return (
     <li className="rounded border border-slate-100 bg-slate-50 p-2 text-sm">
@@ -366,6 +430,16 @@ function KanbanCard({
           }
         >
           @{row.handle}
+          <UnreadDot
+            show={approvalUnread || escalationUnread}
+            title={
+              approvalUnread && escalationUnread
+                ? '有新的待审批和升级'
+                : approvalUnread
+                ? '有新的待审批'
+                : '有新的升级'
+            }
+          />
           <RepeatKolBadge
             count={row.repeat_count || 0}
             lastOutcome={row.last_outcome ?? null}
@@ -397,6 +471,7 @@ function KanbanCard({
           className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-medium text-amber-800 hover:bg-amber-100"
         >
           升级
+          <UnreadDot show={escalationUnread} title="有新的升级" />
         </Link>
         <button
           type="button"

@@ -14,6 +14,7 @@ from pydantic import BaseModel, EmailStr, Field
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
 from ..bridge_runtime import ensure_gateway_bridge_key
+from ..campaign_id_norm import CampaignIdNormaliserMixin
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
@@ -127,7 +128,7 @@ def add_note(
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
-class SetEmailBody(BaseModel):
+class SetEmailBody(CampaignIdNormaliserMixin):
     """Body for ``POST /kols/{identity_id}/email``.
 
     ``email`` is the new primary_email value. ``campaign_id`` is
@@ -274,7 +275,7 @@ async def set_primary_email(
     return {"ok": True, "email": email, "previous_email": existing or None}
 
 
-class DiscoverEmailBody(BaseModel):
+class DiscoverEmailBody(CampaignIdNormaliserMixin):
     env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
     campaign_id: str | None = None
 
@@ -481,7 +482,7 @@ ALLOWED_SOCIAL_LINK_KEYS: tuple[str, ...] = (
 _URL_RE = re.compile(r"^https?://[^\s<>\"']+$", re.IGNORECASE)
 
 
-class SetSocialLinkBody(BaseModel):
+class SetSocialLinkBody(CampaignIdNormaliserMixin):
     """Body for ``POST /kols/{identity_id}/social-link``.
 
     ``fact_key`` must be one of ``ALLOWED_SOCIAL_LINK_KEYS`` — keeps the
@@ -593,7 +594,7 @@ async def set_social_link(
     return {"ok": True, "fact_key": body.fact_key, "url": url}
 
 
-class DiscoverSocialLinksBody(BaseModel):
+class DiscoverSocialLinksBody(CampaignIdNormaliserMixin):
     env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
     campaign_id: str | None = None
 

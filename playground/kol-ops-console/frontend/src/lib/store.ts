@@ -141,6 +141,38 @@ export const toast = {
   dismiss: (id: string) => useToastStore.getState().dismiss(id),
 };
 
+// ------------------- agent dock store -------------------
+// UI state for the global Agent Session Dock — a right-edge floating
+// panel mounted at the App root that lists every KOL agent session
+// (active + historical) across all campaigns. Two pieces are persisted:
+// whether the dock is expanded, and which session the operator last
+// drilled into. The dock self-clears `selectedSessionId` when the
+// session disappears from the list (env switch, registry purge).
+
+type AgentDockState = {
+  open: boolean;
+  selectedSessionId: string | null;
+  setOpen: (open: boolean) => void;
+  toggle: () => void;
+  selectSession: (id: string | null) => void;
+};
+
+export const useAgentDockStore = create<AgentDockState>()(
+  persist(
+    (set) => ({
+      open: false,
+      selectedSessionId: null,
+      setOpen: (open) => set({ open }),
+      toggle: () => set((s) => ({ open: !s.open })),
+      selectSession: (selectedSessionId) => set({ selectedSessionId }),
+    }),
+    {
+      name: 'koc.agentDock',
+      storage: createJSONStorage(() => localStorage),
+    },
+  ),
+);
+
 // ------------------- dev / preferences store -------------------
 // Operator preferences that change rendering but not data. Today only
 // `showRawFactKeys` (renders fact_path next to the friendly label —

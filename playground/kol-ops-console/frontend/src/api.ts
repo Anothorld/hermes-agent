@@ -243,6 +243,18 @@ export type LaneSnapshot = {
   outreach_draft_created?: boolean;
   gmail_draft_id?: string | null;
   gmail_thread_id?: string | null;
+  // Per-card unread + Draft sub-state inputs. *_latest_at is the
+  // newest captured_at / created_at among pending items for this KOL;
+  // the FE compares it against a localStorage last-seen timestamp to
+  // decide whether to render a red dot.
+  pending_approval_count?: number;
+  pending_approval_latest_at?: string | null;
+  open_escalation_count?: number;
+  open_escalation_latest_at?: string | null;
+  // Drives the "Draft 待审批" vs "Draft 待发送" badge on the kanban
+  // card. Computed server-side from approval.reply_draft.decision and
+  // offer.outreach_sent so the FE doesn't have to reach into facts.
+  reply_draft_state?: 'pending' | 'approved_unsent' | 'sent' | null;
 };
 
 export type CampaignListItem = {
@@ -257,7 +269,11 @@ export type CampaignListItem = {
 export type EscalationRow = {
   id: number;
   identity_id: number;
-  campaign_id: string;
+  // Bridge sends ``null`` for identity-scoped escalations (e.g.,
+  // ``contact_email_not_found`` — no campaign context yet). Treat this
+  // as ``string | null`` everywhere or risk shipping ``"null"`` into
+  // URLs / fact writes via ``encodeURIComponent``.
+  campaign_id: string | null;
   rule_id: string | null;
   reason: string;
   suggested_question: string | null;
