@@ -109,6 +109,16 @@ Extract `items[*].primary_handle` (lowercased) into a set. Repeat for any other 
 
 If the bridge call itself fails (network, auth), do NOT silently proceed with an empty list — that would defeat the operator gate. Report `do_not_contact_pull_failed: <reason>` and either retry once or stop the run; treat it like a pre-flight gate failure.
 
+## Prior runs handling
+If the brief contains a `# prior_runs` block, **read it BEFORE generating any seeds**. Each entry lists what an earlier round of this same campaign generation already tried (`attempted_angles`, `remediation_attempted`), where it fell short (`floor_unmet_reason`, `diversity_floor_unmet`, `underserved_verticals`), and — most important — what it flagged as worth investigating next (`next_round_focus`). Rules, in priority order:
+
+1. **Work the most recent round's `next_round_focus` FIRST.** This is a concrete, agent-curated queue of @handles / hashtags / seeds / reels the previous run identified as the highest-payoff next steps. Burn through it before doing any open-ended exploration. Each item carries its own one-sentence rationale; respect it. (If you disagree with the rationale, note it in your own `next_round_focus` rather than silently skipping.)
+2. **Do NOT re-issue any seed/hashtag/public-web query** that appears in any prior round's `attempted_angles` or `remediation_attempted`, UNLESS the prior `floor_unmet_reason` was infrastructural (`rate_limit`, `cdp_lost`, `checkpoint`, `bridge_down`, `gateway_down`). Content-exhaustion reasons (e.g. "niche exhausted", "no new candidates surfaced") do NOT warrant re-trying the same seeds.
+3. **After `next_round_focus` is exhausted**, prioritize NEW seeds that fill the most recent round's `underserved_verticals`.
+4. The `# this_round_guidance` block in the brief restates these rules; treat any conflict as the guidance winning.
+
+If no `# prior_runs` block is present, this is round 1 of the generation — proceed normally.
+
 ## Discovery
 Maintain a prioritized queue and cover at least **2 discovery surfaces** unless blocked.
 
@@ -129,17 +139,50 @@ Lateral expansion from seed results is capped at **3 hops**. One failed hashtag,
 ## Persistence And Run
 Do not stop at the first acceptable candidate. Continue until each priority product feature / selling-point group has a defensible creator set, or all relevant surfaces are exhausted.
 
-**Quantity floor (hard).** When the brief carries `discovery_target_count` or `additional_target_count`, treat it as a HARD FLOOR on PERSISTED candidates (visited via `browser_navigate`, then qualified, then `add-candidate`). The console's quantity gate compares your persisted count against the floor immediately after this run terminates. If you are short of the floor AND auto-retry budget remains, the backend AUTO-FIRES the rediscover skill again (up to 3 auto-retries total = 4 runs max); after that, the operator gets a `discovery_floor_unmet` escalation. Stopping short is therefore a failure mode — finishing partial is acceptable only when truly blocked (rate limits, niche exhausted, IG checkpoint). When stopping short, your final answer MUST contain:
+**Structured diagnostics (mandatory in EVERY final answer).** Every run — whether you hit the floor or not — MUST end with the following YAML block so the backend can persist it for future rounds. The console parser keys on these exact field names; do not rename them.
+
+```
+attempted_angles:
+  - <hashtag / seed / public-web query / surface 1>
+  - <hashtag / seed / public-web query / surface 2>
+  - ...
+vertical_coverage:
+  - designer: 0.XX
+  - family_practical: 0.XX
+  - tech_setup: 0.XX
+  - foodie: 0.XX
+  - comedy_lifestyle: 0.XX
+  - other: 0.XX
+next_round_focus:
+  - "<@handle | #hashtag | seed phrase | reel URL> — <one-sentence why this is worth prioritizing next>"
+  - ...
+```
+
+**`next_round_focus` rules** (read carefully — this is what makes auto-retries non-redundant):
+- Concrete items only: a specific @handle to verify reels for, an unattempted hashtag/seed, a specific reel URL to load, or a niche to expand into. Not generic advice ("try more").
+- Each item MUST end with ` — <why>`: the one-sentence rationale that tells the next round why this beats fresh exploration. A bare handle without rationale is useless context.
+- Max **10 items**. If you have more candidates than that, pick the 10 with the highest expected payoff. The composer hard-caps at 10 anyway; items 11+ are dropped silently.
+- Emit at least 1 item whenever you have ANY honest lead — even a single qualified-but-uncrawled handle is signal. Only emit an empty list when you genuinely have nothing actionable for the next round (rare; usually means you should report a hard blocker via `floor_unmet_reason`).
+
+When you stopped short of the quantity floor OR landed outside the active designer range, also include these fields in the same block (already specified in "Quantity floor" and "Vertical diversity floor" below):
 
 ```
 floor_unmet_reason: <one-sentence why>
-attempted_angles:
-  - <keyword/angle 1>
-  - <keyword/angle 2>
-  - <keyword/angle 3>
+diversity_floor_unmet: <e.g. 0.85>
+active_range: [<lo>, <hi>]
+active_range_source: <"brief_override" or "driver_default:A|B|C|D|E">
+underserved_verticals:
+  - <vertical 1>
+  - <vertical 2>
+remediation_attempted:
+  - <cross-vertical seeds you tried>
+  - <buyer-moment hashtags you mined>
+  - <public-web queries you ran>
 ```
 
-so the backend can decide between auto-retry and early escalation.
+These fields feed the rediscover brief composer; round N+1 reads them from a `# prior_runs` block (see **Prior runs handling**) and avoids re-tracing exhausted angles. Omitting them silently degrades subsequent auto-retries.
+
+**Quantity floor (hard).** When the brief carries `discovery_target_count` or `additional_target_count`, treat it as a HARD FLOOR on PERSISTED candidates (visited via `browser_navigate`, then qualified, then `add-candidate`). The console's quantity gate compares your persisted count against the floor immediately after this run terminates. If you are short of the floor AND auto-retry budget remains, the backend AUTO-FIRES the rediscover skill again (up to 5 auto-retries total = 6 runs max); after that, the operator gets a `discovery_floor_unmet` escalation. Stopping short is therefore a failure mode — finishing partial is acceptable only when truly blocked (rate limits, niche exhausted, IG checkpoint). When stopping short, you MUST set `floor_unmet_reason` (one-sentence why) in the structured diagnostics block above so the backend can decide between auto-retry and early escalation; `attempted_angles` is already mandatory regardless.
 
 **Vertical diversity floor (hard).** Across the persisted shortlist, the **designer / interior-stylist share** must fall inside the **active range** for this run. "Designer" = creators whose bio or last 15 Reels primarily anchor in interior design, home staging, design education, premium stylist content, or "design firm / studio principal" identity.
 
@@ -156,7 +199,7 @@ The active range is resolved in this priority order:
 | **D. Device / Specialized Use** | 10% – 35% |
 | **E. Design Authority** | 50% – 80% |
 
-Rationale: A/E lean toward visual taste so designers should be plural; B/C/D are bought for non-aesthetic reasons (family, organization, device fit) so designer share above ~40% almost always means filter-bubble drift rather than genuine fit. Designers are valuable — do NOT eliminate them — but exceeding the upper bound means the run has collapsed into IG's similar-accounts bubble; falling below the lower bound means design authority is underserved. Other verticals (moms, gaming, comedy, foodie, fashion, pet, book, fitness, tech-setup, etc.) are NOT individually capped — let them fill the remainder freely. When the persisted share lands outside the active range, your final answer MUST contain:
+Rationale: A/E lean toward visual taste so designers should be plural; B/C/D are bought for non-aesthetic reasons (family, organization, device fit) so designer share above ~40% almost always means filter-bubble drift rather than genuine fit. Designers are valuable — do NOT eliminate them — but exceeding the upper bound means the run has collapsed into IG's similar-accounts bubble; falling below the lower bound means design authority is underserved. Other verticals (moms, gaming, comedy, foodie, fashion, pet, book, fitness, tech-setup, etc.) are NOT individually capped — let them fill the remainder freely. When the persisted share lands outside the active range, populate these fields in the structured diagnostics block above:
 
 ```
 diversity_floor_unmet: <designer_share value, e.g. 0.85>
@@ -271,8 +314,8 @@ Required structure:
 - Product / key selling points:
 - Primary + secondary drivers:
 - Historical prior used:
-- Search coverage: (surfaces used, seed counts per bucket: product / buyer-moment / cross-vertical, public-web queries run)
-- Vertical coverage: designer X% | family/practical X% | tech-setup X% | foodie X% | comedy/lifestyle X% | other X% — record the active designer range (driver default or `designer_share_target` override) AND the actual share, and confirm the share lands inside that range
+- Search coverage: (surfaces used, seed counts per bucket: product / buyer-moment / cross-vertical, public-web queries run) — must match the `attempted_angles` YAML emitted at the end of the answer (see **Structured diagnostics** in Persistence And Run)
+- Vertical coverage: designer X% | family/practical X% | tech-setup X% | foodie X% | comedy/lifestyle X% | other X% — record the active designer range (driver default or `designer_share_target` override) AND the actual share, and confirm the share lands inside that range. This human-readable line is a view of the `vertical_coverage` YAML block (the parser keys on the YAML, not this line).
 
 ## Group 1: [Feature / Selling Point]
 Why this group matters: [buyer motive + content angle]

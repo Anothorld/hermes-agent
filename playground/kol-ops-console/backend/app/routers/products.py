@@ -180,7 +180,7 @@ async def _sync_run_states(
        ``run_id`` is separate from ``gate_run_id``). ``cancelled``
        discovery runs are not gated — they clear ``gate_run_id``
        directly. The evaluator either auto-fires a rediscover
-       (retry_count < 3) or opens a ``discovery_floor_unmet`` escalation.
+       (retry_count < 5) or opens a ``discovery_floor_unmet`` escalation.
 
     Returns a dict ``{campaign_id: {run_state, run_error}}`` so the caller
     can surface live state in the response without doing another lookup.

@@ -113,8 +113,8 @@ _LAUNCH_INSTRUCTIONS = (
     "   - Stopping short is a FAILURE STATE. The console runs a post-\n"
     "     terminal quantity gate: if persisted candidates < target floor\n"
     "     AND auto-retry budget remains, the backend AUTO-FIRES another\n"
-    "     /rediscover for this campaign_id (up to 3 auto-retries total =\n"
-    "     4 runs max). After that, the operator gets a\n"
+    "     /rediscover for this campaign_id (up to 5 auto-retries total =\n"
+    "     6 runs max). After that, the operator gets a\n"
     "     `discovery_floor_unmet` escalation. Therefore: finishing partial\n"
     "     is acceptable ONLY when truly blocked (rate limits, niche\n"
     "     exhausted, bridge/gateway down).\n"
@@ -739,8 +739,8 @@ async def start(
                          (sku, campaign_id, env, run_id, test_mode_to, started_at,
                           started_by_user_id, status, target_floor,
                           baseline_candidate_count, retry_count, floor_unmet_reason,
-                          gate_run_id)
-                     VALUES (?,?,?,?,?,?,?, 'running', ?, ?, 0, NULL, ?)
+                          gate_run_id, diagnostics_history)
+                     VALUES (?,?,?,?,?,?,?, 'running', ?, ?, 0, NULL, ?, '[]')
            ON CONFLICT(campaign_id, env) DO UPDATE SET
              run_id=excluded.run_id,
                          test_mode_to=excluded.test_mode_to,
@@ -751,7 +751,8 @@ async def start(
              baseline_candidate_count=excluded.baseline_candidate_count,
              retry_count=0,
              floor_unmet_reason=NULL,
-             gate_run_id=excluded.gate_run_id""",
+             gate_run_id=excluded.gate_run_id,
+             diagnostics_history='[]'""",
                 (product["sku"], campaign_id, body.env, run_id, body.test_mode_to, now,
                  user["id"], target_floor, baseline_count, run_id),
     )

@@ -145,6 +145,12 @@ def init_db() -> None:
             # display) so that approve-driven outreach runs do not trigger
             # the gate when they terminate.
             ("gate_run_id", "TEXT"),
+            # JSON list[dict] accumulating per-round diagnostics
+            # (attempted_angles, vertical_coverage, floor_unmet_reason, ...)
+            # for the current campaign generation. Reset on operator /start;
+            # appended on every terminal run; read by the rediscover brief
+            # composer so subsequent rounds inherit prior-round context.
+            ("diagnostics_history", "TEXT"),
         ):
             if col not in cols:
                 conn.execute(
