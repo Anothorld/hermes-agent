@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import ApprovalContextCard from '../components/ApprovalContextCard';
-import { DraftDiffView } from '../components/diff/DraftDiffView';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
 import { TimeAgo } from '../components/inputs/TimeAgo';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { useEnvStore, toast } from '../lib/store';
+import { useUnreadStore } from '../lib/unread';
 import { errorSummary } from '../lib/errors';
 import { dialog } from '../components/dialogs/useDialog';
 import {
@@ -20,8 +20,8 @@ import { useDataChannel } from '../hooks/useDataChannel';
 // Cross-cutting approvals page. Renders all pending approval.* facts
 // surfaced by the bridge (e.g. compensation_cap_breach, reply_draft)
 // with KOL + campaign + namespace path + context, plus 批准 / 驳回 / 优化
-// actions. Reply-draft rows additionally show a side-by-side diff
-// against the previous version.
+// actions. Reply-draft rows expose prior revisions through the
+// collapsible 历史版本 block.
 export type ApprovalRow = {
   identity_id: number;
   campaign_id: string;
@@ -53,6 +53,14 @@ type PreviousDraft = {
   [k: string]: unknown;
 };
 
+// Match the FastAPI captured_at format (ISO-8601 UTC). Returns null when
+// unparseable so callers can fall back instead of treating NaN as "fresh".
+function capturedAtMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : null;
+}
+
 type RefinementHistoryEntry = {
   prompt?: string;
   at?: string;
@@ -70,15 +78,30 @@ export function ApprovalsPage() {
   const [refineHint, setRefineHint] = useState<Record<string, string>>({});
   const [historyOpen, setHistoryOpen] = useState<Record<string, boolean>>({});
 
+  const markSeen = useUnreadStore((s) => s.markSeen);
   const refresh = useCallback(async () => {
     try {
       const qs = `?status=${status}&env=${env}`;
-      setRows(await api.get<ApprovalRow[]>(`/approvals${qs}`));
+      const fetched = await api.get<ApprovalRow[]>(`/approvals${qs}`);
+      setRows(fetched);
       setErr(null);
+      // The operator is looking at the approvals list, so anything in
+      // it now counts as "seen" — clear the global red dot. Use the
+      // max opened_at so a brand-new item that lands between this
+      // refresh and the next legitimately re-fires the dot.
+      if (status === 'pending') {
+        let latest: number = Date.now();
+        for (const r of fetched) {
+          if (!r.opened_at) continue;
+          const t = new Date(r.opened_at).getTime();
+          if (Number.isFinite(t) && t > latest) latest = t;
+        }
+        markSeen('approvals.global', latest);
+      }
     } catch (ex) {
       setErr(ex);
     }
-  }, [env, status]);
+  }, [env, status, markSeen]);
 
   useEffect(() => {
     refresh();
@@ -324,16 +347,21 @@ function ApprovalRowItem({
     `draft.lock.refine:${row.identity_id}:${row.campaign_id}`,
   );
 
-  // For reply_draft rows: current draft lives at the top level of ctx
-  // (subject, body, to); previous_drafts[0] is the immediately
-  // preceding version (most recent first).
-  const currentDraft = isReplyDraft
-    ? {
-        subject: typeof ctx.subject === 'string' ? (ctx.subject as string) : null,
-        body: typeof ctx.body === 'string' ? (ctx.body as string) : null,
-      }
-    : null;
-  const priorDraft = previousDrafts.length > 0 ? previousDrafts[0] : null;
+  // Release the refine lock as soon as a newer draft revision lands —
+  // otherwise the "优化生成中…" banner sticks for the full 5-min TTL
+  // even though the new draft is already visible above.
+  const rowCapturedAtMs = capturedAtMs(row.opened_at);
+  const { release: releaseRefineLock } = refineLock;
+  useEffect(() => {
+    if (!refineLock.locked || refineLock.startedAtMs == null) return;
+    if (rowCapturedAtMs == null) return;
+    if (rowCapturedAtMs > refineLock.startedAtMs) releaseRefineLock();
+  }, [
+    refineLock.locked,
+    refineLock.startedAtMs,
+    rowCapturedAtMs,
+    releaseRefineLock,
+  ]);
 
   return (
     <li className="flex flex-wrap items-start gap-3 p-3 text-sm">
@@ -348,14 +376,6 @@ function ApprovalRowItem({
         </Link>
       )}
       <div className="flex w-full flex-col gap-2">
-        {isReplyDraft && currentDraft && (
-          <DraftDiffView
-            previous={priorDraft}
-            current={currentDraft}
-            previousLabel={priorDraft ? `上一版 (共 ${previousDrafts.length} 版历史)` : ''}
-            currentLabel="当前待审版本"
-          />
-        )}
         <ApprovalContextCard
           factPath={row.fact_path}
           context={row.context}

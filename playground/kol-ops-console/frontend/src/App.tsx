@@ -19,6 +19,7 @@ import { EnvBanner } from './components/shell/EnvBanner';
 import { BreadcrumbBar } from './components/shell/BreadcrumbBar';
 import { DialogHost } from './components/dialogs/DialogHost';
 import { ToastHost } from './components/feedback/ToastHost';
+import { AgentSessionDock } from './components/agent-dock/AgentSessionDock';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
@@ -62,6 +63,7 @@ export function App() {
           }
         />
       </Routes>
+      <AgentSessionDock />
       <DialogHost />
       <ToastHost />
     </>

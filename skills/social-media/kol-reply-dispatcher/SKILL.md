@@ -148,6 +148,7 @@ Goal → child skill:
 | `contract_signing` | `kol-contract-coordinator` |
 | `logistics` (`address_collected` missing) | `kol-shipping-intake` |
 | `logistics` (post-address) | `kol-logistics-tracker` |
+| `payout_setup` | `kol-payout-method-intake` |
 | `content_production` (no `brief_sent`) | `kol-brief-sender` |
 | `content_production` (`brief_sent` true, no `draft_submitted`) | (wait; no draft yet) |
 | `content_review_and_golive` | `kol-content-reviewer` then `kol-golive-and-boost` |

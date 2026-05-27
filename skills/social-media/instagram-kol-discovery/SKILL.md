@@ -22,6 +22,7 @@ Before browsing, extract a compact **Campaign Context** from user input, product
 - **Product**: category, key features, materials/mechanisms/tech, price tier.
 - **Buyer**: likely age/life stage, household, home status, pain points, competitive alternatives.
 - **Purchase driver**: one Primary Driver and 1-2 Secondary Drivers from the routing table.
+- **Designer share target** (optional override): if brief carries `designer_share_target: [lo, hi]` (e.g. `[0.45, 0.75]` for a luxury statement piece, `[0.05, 0.25]` for a kid-proof family sofa), capture both bounds — they replace the driver default range in the **Vertical diversity floor** check. Absent this field, the driver default applies.
 - **Scene**: room/use case, content angle, why the product belongs there.
 - **References**: user-supplied winners/benchmarks and the likely conversion mechanism behind them.
 - **Assumptions**: mark missing fields as `inferred` and disclose them later.
@@ -31,13 +32,13 @@ If no brief exists, infer a provisional persona from product category + visible 
 ## Driver And Historical Calibration
 Pick **one Primary Purchase Driver**. If two drivers tie, choose the one closest to buyer intent, not product appearance. The same sofa may route to A for cozy aesthetics, B for family hosting, or D for home-theater/gaming setup.
 
-| Driver | Bought for | Creator worlds to test |
-|---|---|---|
-| **A. Emotion / Aesthetic** | cozy, beautiful, premium, family warmth, design statement | decor, cozy lifestyle, interior styling, day-in-life, personality-led lifestyle |
-| **B. Family Life / Practical** | hosting, kid/pet durability, big household, daily use | moms, family/couple lifestyle, homeowner, practical-home, family humor |
-| **C. Function / Storage** | organization, hidden storage, layout, cable/space efficiency | organization, renovation, DIY, productivity/hacks, practical setup |
-| **D. Device / Specialized Use** | AV fit, ventilation, cable flow, gaming/vinyl/office compatibility | home theater, setup, gaming, tech-lifestyle, makers, explainers |
-| **E. Design Authority** | materials, taste, elevated design, statement value | designers, premium stylists, design-forward creators, fashion/luxury taste-makers |
+| Driver | Bought for | Creator worlds to test | Cross-vertical bridges (REQUIRED seed diversity sources) |
+|---|---|---|---|
+| **A. Emotion / Aesthetic** | cozy, beautiful, premium, family warmth, design statement | decor, cozy lifestyle, interior styling, day-in-life, personality-led lifestyle | cozy booktok / book vloggers, slow-morning / coffee aesthetic creators, candle/scent ASMR, comfort foodies (home baking, ramen-at-home), film / K-drama mood-board creators, indie cafe culture |
+| **B. Family Life / Practical** | hosting, kid/pet durability, big household, daily use | moms, family/couple lifestyle, homeowner, practical-home, family humor | parenting comedy duos, dog / cat household creators, big-family vloggers, dinner-party foodies, kid-activity / craft creators, RV / road-family lifestyle |
+| **C. Function / Storage** | organization, hidden storage, layout, cable/space efficiency | organization, renovation, DIY, productivity/hacks, practical setup | small-space / 500sqft living, van life, dorm & first-apartment hacks, minimalist creators, ADHD / neurodivergent organization, WFH productivity creators |
+| **D. Device / Specialized Use** | AV fit, ventilation, cable flow, gaming/vinyl/office compatibility | home theater, setup, gaming, tech-lifestyle, makers, explainers | streamer / podcast creators, vinyl / music collectors, cinephile / film-club, esports personalities, sneaker / collector culture, "creator-about-creating" content |
+| **E. Design Authority** | materials, taste, elevated design, statement value | designers, premium stylists, design-forward creators, fashion/luxury taste-makers | fashion editorial / personal-style, art gallery / curator content, vintage / antique hunters, architecture appreciators, perfume / fragrance taste-makers, luxury travel |
 
 Historical priors, distilled from roughly **66 deduped campaigns / 205 raw rows**:
 
@@ -52,6 +53,8 @@ Historical priors, distilled from roughly **66 deduped campaigns / 205 raw rows*
 | **TS8136** room-upgrade furniture | `amerikada_hayattt`, `sydneywinbush` | home details, walnut/minimal styling, assembled ease, moving-in series | room-upgrade diaries, moving-in creators, home-details lifestyle |
 
 Use hook priors (`dilamiraco`, `theozspace`, `daisy.diarys`, `miausalife`) for top-of-funnel expansion only; repeated commerce winners outrank one-week hook spikes.
+
+**Bias warning on these priors.** Every benchmark above is a home / design / lifestyle creator because that's the vertical historical campaigns over-tested, NOT because other verticals fail. Use the priors for **conversion mechanism** (what hook made the Reel convert) — never for **vertical anchoring** (what niche the creator sits in). When the routing table's "Cross-vertical bridges" column conflicts with what these priors imply about niche, the bridges column wins. Treat the prior list as evidence of what worked once, not as a model of who else can work.
 
 ## Creator Scope And Mechanisms
 Creator vertical is a clue, not a gate. Home/family, tech/setup, gaming, DIY/maker, productivity, lifestyle, fashion/luxury, comedy/entertainment, and mixed creators are eligible when all pass:
@@ -109,10 +112,16 @@ If the bridge call itself fails (network, auth), do NOT silently proceed with an
 ## Discovery
 Maintain a prioritized queue and cover at least **2 discovery surfaces** unless blocked.
 
-- **Hashtags**: generate 8-12 dynamic seeds from product, room, buyer, driver, and closest historical family. Include non-home subculture terms when relevant. Direct URL: `https://www.instagram.com/explore/search/keyword/?q=%23<tag-name>`.
-- **Comment mining**: from qualified top Reels, inspect creator-looking commenters; enqueue only if preview/profile shows ≥ 100k followers.
-- **Following / Suggested / Similar**: expand from qualified profiles, applying ≥ 100k and NA checks before enqueueing.
-- **Public web fallback**: when Instagram search blocks, use NA-scoped queries and cross-verify profiles.
+- **Hashtags**: generate 12-16 dynamic seeds, split into THREE buckets with HARD QUOTAS to prevent filter-bubble collapse. The two non-product buckets are mandatory, NOT "when relevant" suggestions:
+  - **Product / category seeds (4-5, easy):** home/decor/category vocabulary tied to the driver — e.g. `#sectionalcouch`, `#mediaconsole`, `#diningtablestyling`. These mostly surface home/design creators; that's fine but it's also the bubble's gravity well, so don't stop here.
+  - **Buyer-moment seeds (4-5, MANDATORY):** anchor on the life moment where the product appears, NOT on the product itself. These cut across verticals by pulling creators who never tag furniture. Examples: `#firstapartment`, `#movingvlog`, `#newlywedhome`, `#datenightin`, `#movienightin`, `#postpartumlife`, `#hostingseason`, `#emptynesthome`, `#wfhlife`. Pick from the buyer's life stage in the Campaign Context.
+  - **Cross-vertical bridge seeds (4-5, MANDATORY):** pulled from the driver routing table's "Cross-vertical bridges" column. **At least 3 of these must come from non-home subcultures** (gaming, comedy, foodie, fashion, pet, book, fitness, etc.). E.g. for driver A: `#cozybooktok`, `#slowmorning`, `#comfortmeal`; for D: `#streamersetup`, `#vinylcollection`, `#cinephile`; for B: `#dogmomlife`, `#parentingcomedy`, `#dinnerpartytok`.
+  Direct URL: `https://www.instagram.com/explore/search/keyword/?q=%23<tag-name>`. If you cannot populate the two mandatory buckets, list the gap under `attempted_angles` and treat the discovery surface as incomplete — do NOT proceed to lateral expansion until you've at least tried the cross-vertical seeds, because lateral expansion from home-only seeds is precisely the loop that produces designer-heavy shortlists.
+- **Comment mining (two sources, both required):**
+  - From **qualified top Reels** (same-vertical signal): inspect creator-looking commenters; enqueue only if preview/profile shows ≥ 100k followers.
+  - From **buyer-moment hashtag Reels** (cross-vertical signal — the single most effective break-out lever): pick 2-3 high-engagement Reels under buyer-moment hashtags whose AUTHOR is NOT a qualified home/design KOL (could be a comedy duo, couple vlog, foodie, pet creator — anyone). The criterion is that the AUDIENCE overlaps with our buyer, not that the creator sits in our niche. Mine their commenters the same way (≥ 100k filter still applies). Audience overlap predicts branded-content fit better than creator vertical.
+- **Following / Suggested / Similar**: expand from qualified profiles, applying ≥ 100k and NA checks before enqueueing. **Cross-vertical jump rule:** in every 3-hop expansion chain, AT LEAST ONE hop must land on a creator whose primary vertical differs from the seed's vertical (verify via their last 10-15 Reels content theme, not just bio). Prefer hops that follow a visible cross-vertical collab (a home creator collab'd with a foodie → enqueue the foodie). Pure same-vertical chains beyond hop 2 are not allowed; if IG's similar-accounts panel only surfaces same-vertical handles for two hops in a row, abandon the chain and switch surface — that's the algorithm telling you the bubble is closed.
+- **Public web (Google / TikTok / Reddit) — co-primary surface, not just fallback**: required, NOT only when IG search blocks. IG's similar-accounts engine is structurally same-vertical, so this is the primary lever for surfacing creators that IG won't recommend to you. Run NA-scoped queries against the buyer-moment and cross-vertical seeds — e.g. `"first apartment tour" instagram reels`, `"streamer setup" creator NA 100k`, `site:tiktok.com cozy bookshelf US`, `reddit r/InteriorDesign favorite non-designer home creators`. MUST be invoked when (a) IG seed search returns < 5 distinct vertical sources after 2 hashtags, OR (b) the running persisted-candidate pool is ≥ 70% concentrated in one vertical (designer / interior / home-decor). Cross-verify each surfaced handle on IG before qualifying. Treat this surface as cheap insurance against the bubble — invoke it early, not only after IG breaks.
 - **Reference expansion**: if user supplies winners, inspect 5-10 Reels, extract the conversion mechanism, then expand through following/similar/commenters even outside home vertical.
 
 Lateral expansion from seed results is capped at **3 hops**. One failed hashtag, browser session, selector, or extraction call never ends the run; switch surface or seed.
@@ -131,6 +140,38 @@ attempted_angles:
 ```
 
 so the backend can decide between auto-retry and early escalation.
+
+**Vertical diversity floor (hard).** Across the persisted shortlist, the **designer / interior-stylist share** must fall inside the **active range** for this run. "Designer" = creators whose bio or last 15 Reels primarily anchor in interior design, home staging, design education, premium stylist content, or "design firm / studio principal" identity.
+
+The active range is resolved in this priority order:
+
+1. **Brief override (highest priority):** if the brief contains `designer_share_target: [lo, hi]` with `0 ≤ lo < hi ≤ 1`, use those bounds. Use this for edge cases the driver default doesn't capture well (e.g. a luxury statement piece routed to A might want `[0.45, 0.75]`; a kid-proof family sofa routed to B might want `[0.05, 0.25]`).
+2. **Driver default (fallback):** look up the Primary Driver in this table.
+
+| Primary driver | Default designer share range |
+|---|---|
+| **A. Emotion / Aesthetic** | 30% – 60% |
+| **B. Family Life / Practical** | 15% – 40% |
+| **C. Function / Storage** | 15% – 40% |
+| **D. Device / Specialized Use** | 10% – 35% |
+| **E. Design Authority** | 50% – 80% |
+
+Rationale: A/E lean toward visual taste so designers should be plural; B/C/D are bought for non-aesthetic reasons (family, organization, device fit) so designer share above ~40% almost always means filter-bubble drift rather than genuine fit. Designers are valuable — do NOT eliminate them — but exceeding the upper bound means the run has collapsed into IG's similar-accounts bubble; falling below the lower bound means design authority is underserved. Other verticals (moms, gaming, comedy, foodie, fashion, pet, book, fitness, tech-setup, etc.) are NOT individually capped — let them fill the remainder freely. When the persisted share lands outside the active range, your final answer MUST contain:
+
+```
+diversity_floor_unmet: <designer_share value, e.g. 0.85>
+active_range: [<lo>, <hi>]
+active_range_source: <"brief_override" or "driver_default:A|B|C|D|E">
+underserved_verticals:
+  - <vertical 1, e.g. family/practical creators>
+  - <vertical 2, e.g. cross-vertical buyer-moment creators>
+remediation_attempted:
+  - <which cross-vertical seeds you tried>
+  - <which buyer-moment hashtags you mined>
+  - <which public-web queries you ran>
+```
+
+Treat this with the same severity as `floor_unmet_reason` — the backend can auto-retry with a stronger cross-vertical bias. **Mid-run rebalancing is cheaper than escalation:** while the run is still in progress, if you notice the share drifting past the upper bound, STOP adding more designer candidates and run a buyer-moment hashtag pass + public-web cross-vertical query before continuing. Rebalancing now beats failing the floor at the end.
 
 Minimum evidence when reachable:
 - review at least **3 High-Match candidates**;
@@ -166,6 +207,54 @@ Notes:
 - Treat this as best-effort: if the write fails, log it but do NOT block the run. The `add-candidate` registration is the authoritative signal; the URL fact is convenience data.
 - This applies to ALL qualified candidates you call `add-candidate` on — not only the ones that make the final shortlist. They're equally valid future-campaign reuse candidates.
 
+**`primary_email` — only a real email address, never anything else.**
+
+- If the IG profile (bio text, contact button reveal, pinned post, or bio image you OCR'd via `vision_analyze`) clearly exposes a real address matching `x@y.tld` and it visibly belongs to the creator (not a sponsor / unrelated brand sidebar), you MAY include it in the `upsert-identity` payload. Attach provenance facts in the same `write-facts-multi` call: `identity.email_source = "ig_bio"`, `identity.email_discovered_at`, `identity.email_discovered_url`, `identity.email_discovery_tier = "0"` (tier 0 = discovered during shortlist qualification, before `kol-email-discovery` ever runs). Do NOT overwrite a non-empty existing `primary_email`.
+- If the profile shows ONLY a link-in-bio URL, a personal website domain, or a brand display name, do NOT shove those into `primary_email` — the bridge will 422 with a `ValueError`, wasting a turn. Route them to identity facts instead (table below) and leave `primary_email` for `kol-email-discovery` (which runs post-approval) to resolve.
+
+Identity facts for non-email contact signals — write these in the same `write-facts-multi` call you already issue for `identity.instagram_profile_url`:
+
+| Bio string | Fact key |
+|---|---|
+| `linktr.ee/…`, `beacons.ai/…`, `bio.link/…`, `lnk.bio/…`, `solo.to/…`, `linkin.bio/…` | `identity.linktree_url` |
+| Creator's personal/brand domain (their site, not a third-party shop) | `identity.personal_site_url` |
+
+These are the same keys `kol-email-discovery` writes, so the two skills don't diverge. Apply the same "do NOT overwrite a non-empty existing value" rule, and attach the provenance triple (`<key>_source = "ig_bio"`, `_discovered_at`, `_discovered_url`).
+
+**Creator brief persistence (free side effect of `add-candidate`).** Downstream outreach drafters (`kol-cold-outreach`, `kol-reengagement-outreach`) personalize the opening by reading a small "creator brief" off the identity facts. You have already navigated this candidate's profile + multiple Reels to qualify them, so you have the raw material already — **emit it as 6 identity-level facts in the same `write-facts-multi` call** that writes `identity.instagram_profile_url` above. Do not open extra pages for this; do not extend the page-load budget.
+
+For each qualified candidate, merge these keys into the same `write-facts-multi` payload (under the `identity` namespace, alongside the IG profile URL fields):
+
+| Fact key | Value shape | Source it from |
+|---|---|---|
+| `identity.content_pillars` | `list[str]`, 2-4 short phrases | Bio + recurring Reel themes |
+| `identity.signature_hooks` | `list[str]`, 2-3 hook types | The structural pattern of top Reels (e.g. "before/after walk-through", "POV diary", "honest unboxing") |
+| `identity.voice_descriptors` | `list[str]`, 2-3 tone words | **Prefer descriptors that appear repeatedly in the comments section** ("so cozy", "deadpan humor", "honest reviews") over the creator's self-description |
+| `identity.hero_post_url` | `str`, single Reel URL | The single best Reel for this product fit (highest views *and* clearest theme match) |
+| `identity.hero_post_note` | `str`, 1 sentence | Why this post is representative (e.g. "412k-view comfort tour of her new house") |
+| `identity.recommendation_reason` | `str`, 1 sentence | Same content you write into the candidate `payload.reason` — campaign-fit angle in plain language |
+
+Each of the 6 keys MUST also carry a provenance triple (same pattern as the IG profile URL above):
+
+```bash
+"identity.content_pillars_source":         "ig_profile_and_reels",
+"identity.content_pillars_discovered_at":  "<iso8601 now>",
+"identity.content_pillars_discovered_url": "<the profile or hero post URL>",
+```
+
+and likewise for the other 5 keys.
+
+**Signal sources** — all already in your tool surface, no new page loads:
+- Bio text from the profile page (already loaded for qualification).
+- Captions / hashtags from the 2-3 Reels you scored.
+- Reel cover overlay text via `browser_get_images` + `vision_analyze` when the caption is too thin (creators often print the theme on the cover).
+- Top-of-page Reel comments (first viewport only, do NOT scroll or expand "View replies") via `browser_console` — comments reveal **how viewers describe the creator**, which is more honest signal for `voice_descriptors` and `signature_hooks` than the creator's self-pitch.
+
+**Write rules** (same as the IG URL above):
+- **Do NOT overwrite a non-empty existing value.** Read `identity.content_pillars_discovered_at` first; if it exists and is **within 90 days**, skip the write. If it's older than 90 days, the loader (`kol-creator-brief-loader`) will refresh on next draft anyway — leave the stale value alone here.
+- Best-effort: if the brief generation fails (vision call errors, comments empty, LLM disagrees with itself), skip the brief writes but still write the IG profile URL. The loader has its own fallback path.
+- Applies to ALL qualified candidates, not only the final shortlist.
+
 Workflow: interpret context -> split product into 2-4 feature/selling-point groups -> choose driver/roles/history prior per group -> seed and enqueue -> capture canonical URLs with `browser_console(expression="window.location.href")` -> qualify region/Reels/context/scores -> measure views + ER -> expand laterally -> rank by Final Fit and role coverage within each group. Close posts via the in-page × button, not `browser_back`.
 
 If no group has clear recommendations, return **"No best-fit KOL identified yet"** with the blocker. If only some groups are weak, keep the group and mark the evidence gap.
@@ -182,7 +271,8 @@ Required structure:
 - Product / key selling points:
 - Primary + secondary drivers:
 - Historical prior used:
-- Search coverage:
+- Search coverage: (surfaces used, seed counts per bucket: product / buyer-moment / cross-vertical, public-web queries run)
+- Vertical coverage: designer X% | family/practical X% | tech-setup X% | foodie X% | comedy/lifestyle X% | other X% — record the active designer range (driver default or `designer_share_target` override) AND the actual share, and confirm the share lands inside that range
 
 ## Group 1: [Feature / Selling Point]
 Why this group matters: [buyer motive + content angle]
@@ -200,7 +290,7 @@ Recommended creators: 3-5 per group when available. If fewer than 3 pass, explai
 
 For every group, show **3-5 recommended bloggers** where the search surface allows. Include creator data, creator type, and the product-specific recommendation reason. Sort within each group by: Final Fit desc -> role coverage -> prior competitor collab within tier -> Showcase Score. Avoid repeating the same creator across groups unless they clearly serve different selling points.
 
-Also include: discarded candidates with failing criterion, optional reference override if any, assumptions from Brief Fallback, and search coverage (reviewed total, High-match total, surfaces used/blocked).
+Also include: discarded candidates with failing criterion, optional reference override if any, assumptions from Brief Fallback, search coverage (reviewed total, High-match total, surfaces used/blocked), and vertical-diversity stats (designer share, full vertical distribution, list of cross-vertical seeds and public-web queries attempted, plus any mid-run rebalancing actions taken).
 
 ## Mode Detection And Local Chrome Mode
 The browser tool surface (`browser_navigate / click / snapshot / console / vision`) routes through one of two backends, picked at the worker process by the presence of `BROWSER_CDP_URL`:
@@ -257,8 +347,16 @@ Used only when brief explicitly says `browser_mode: cloud` (default is `local-ch
 - **No CDP "channel closed" recovery**: if CDP truly drops, the user needs to re-run the launcher script and re-issue `/browser connect`. Surface this as `mode_gate_blocked: cdp_lost` and stop.
 - **Element-not-found** → one snapshot/scroll/snapshot retry, then skip the candidate. Do NOT keep clicking.
 
+## References
+- `references/bridge-cli-json-payloads.md` — exact kol_bridge_tool JSON field names and per-candidate persistence order for rediscovery runs.
+
 ## Pitfalls
+- For bridge CLI persistence, do not guess JSON keys per subcommand. `upsert-identity` expects `primary_handle`; `write-facts-multi` should be called with `--identity-id`; `add-candidate` is safest with `identity_id` already embedded in the JSON payload. Prefer file-backed `@/tmp/*.json` payloads.
 - Do not default to home/decor creators just because the product is furniture.
+- Do not let designer / interior-stylist creators exceed the **active upper bound** (driver default from the Vertical diversity floor table, or `designer_share_target[1]` if brief overrides). Designers are good — concentration is the failure mode, not their presence. If you're already at upper bound and about to add another designer before any cross-vertical candidate has cleared qualification, STOP and run a buyer-moment hashtag pass plus a public-web cross-vertical query first. Inversely: do NOT fall below the **active lower bound** either — that signals over-correction and a lost design-authority leg. Note the bounds differ sharply by driver (E: 50–80% designers; D: only 10–35%); pulling the right range from the table is part of the floor check, not a footnote.
+- Do not skip the buyer-moment or cross-vertical seed buckets when generating hashtags. They are mandatory quotas, not "when relevant" suggestions. Three same-vertical hashtags in a row is a sign you skipped the quota and need to back up.
+- Do not treat public web (Google / TikTok / Reddit) search as a fallback that only fires when IG breaks. It is the primary break-out lever — IG's similar-accounts engine cannot show you creators it doesn't already cluster with home.
+- Do not chain 3 same-vertical lateral hops just because each individual hop met the follower / region threshold. The cross-vertical jump rule requires at least one vertical-switch per 3-hop chain; pure same-niche chains reinforce the bubble even when every individual candidate is qualified.
 - Do not let visual similarity outrank buyer intent for functional, technical, family-practical, or use-case products.
 - Do not shortlist on Audience Match alone; Match ≥ 70 and Showcase ≥ 50 must both pass.
 - Do not reject tech, gaming, comedy, entertainment, fashion, or lifestyle creators solely by niche.

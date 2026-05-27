@@ -72,6 +72,16 @@ def test_logistics_tracking_filled_emits_event(cal_db):
     assert "logistics.tracking_filled" in _list_event_types(cal, iid)
 
 
+def test_payout_method_collected_emits_event(cal_db):
+    cal = cal_db
+    iid = _setup(cal)
+    cal.write_facts(identity_id=iid, campaign_id=CAMPAIGN,
+                    namespace="payout",
+                    facts={"payout.method_collected": True},
+                    source="skill:payout-method-intake", env="TEST")
+    assert "payout.method_collected" in _list_event_types(cal, iid)
+
+
 def test_falsy_fact_does_not_emit_event(cal_db):
     """An ``offer.contract_signed`` write with value ``False`` (e.g. a
     state-machine reset) must NOT pollute the timeline.

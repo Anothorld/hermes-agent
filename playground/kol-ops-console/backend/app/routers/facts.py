@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
+from ..campaign_id_norm import CampaignIdNormaliserMixin, norm_campaign_id
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, require_role
 
@@ -23,7 +24,7 @@ def _env(env: str | None) -> str:
     return (env or get_settings().env).upper()
 
 
-class FactsWriteBody(BaseModel):
+class FactsWriteBody(CampaignIdNormaliserMixin):
     campaign_id: Optional[str] = None
     facts: dict[str, Any]
     source: str = Field(default="console")
@@ -31,7 +32,7 @@ class FactsWriteBody(BaseModel):
     env: Optional[str] = None
 
 
-class FactsWriteMultiBody(BaseModel):
+class FactsWriteMultiBody(CampaignIdNormaliserMixin):
     campaign_id: Optional[str] = None
     namespaces: dict[str, dict[str, Any]]
     source: str = Field(default="console")
@@ -49,7 +50,9 @@ async def read_facts(
 ) -> dict:
     try:
         return await bridge.read_facts(
-            identity_id, campaign_id=campaign_id, env=_env(env)
+            identity_id,
+            campaign_id=norm_campaign_id(campaign_id),
+            env=_env(env),
         )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc

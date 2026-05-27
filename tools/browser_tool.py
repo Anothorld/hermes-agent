@@ -1184,11 +1184,16 @@ BROWSER_SESSION_INACTIVITY_TIMEOUT = int(os.environ.get("BROWSER_INACTIVITY_TIME
 # Track last activity time per session
 _session_last_activity: Dict[str, float] = {}
 
+# In-flight command count per session. Cleanup must not tear down a session
+# while a command is still running against it — see the cleanup race in
+# _cleanup_inactive_browser_sessions.
+_session_in_flight: Dict[str, int] = {}
+
 # Background cleanup thread state
 _cleanup_thread = None
 _cleanup_running = False
-# Protects _session_last_activity AND _active_sessions for thread safety
-# (subagents run concurrently via ThreadPoolExecutor)
+# Protects _session_last_activity, _session_in_flight, AND _active_sessions
+# for thread safety (subagents run concurrently via ThreadPoolExecutor)
 _cleanup_lock = threading.Lock()
 
 
@@ -1219,6 +1224,7 @@ def _emergency_cleanup_all_sessions():
             with _cleanup_lock:
                 _active_sessions.clear()
                 _session_last_activity.clear()
+                _session_in_flight.clear()
                 _recording_sessions.clear()
 
     # Sweep orphans from other crashed hermes processes.  Safe even if we
@@ -1256,8 +1262,15 @@ def _cleanup_inactive_browser_sessions():
 
     with _cleanup_lock:
         for task_id, last_time in list(_session_last_activity.items()):
-            if current_time - last_time > BROWSER_SESSION_INACTIVITY_TIMEOUT:
-                sessions_to_cleanup.append(task_id)
+            if current_time - last_time <= BROWSER_SESSION_INACTIVITY_TIMEOUT:
+                continue
+            # A long-running command (e.g. a snapshot that hasn't returned yet)
+            # must not be reaped just because its socket_dir hasn't seen new
+            # activity — tearing it down deletes _stdout_*/_stderr_* under the
+            # running subprocess.
+            if _session_in_flight.get(task_id, 0) > 0:
+                continue
+            sessions_to_cleanup.append(task_id)
 
     for task_id in sessions_to_cleanup:
         try:
@@ -1457,6 +1470,22 @@ def _stop_browser_cleanup_thread():
 def _update_session_activity(task_id: str):
     """Update the last activity timestamp for a session."""
     with _cleanup_lock:
+        _session_last_activity[task_id] = time.time()
+
+
+def _mark_command_started(task_id: str) -> None:
+    with _cleanup_lock:
+        _session_in_flight[task_id] = _session_in_flight.get(task_id, 0) + 1
+        _session_last_activity[task_id] = time.time()
+
+
+def _mark_command_finished(task_id: str) -> None:
+    with _cleanup_lock:
+        remaining = _session_in_flight.get(task_id, 0) - 1
+        if remaining <= 0:
+            _session_in_flight.pop(task_id, None)
+        else:
+            _session_in_flight[task_id] = remaining
         _session_last_activity[task_id] = time.time()
 
 
@@ -2097,6 +2126,7 @@ def _run_browser_command(
         command
     ] + args
 
+    _mark_command_started(task_id)
     try:
         # Give each task its own socket directory to prevent concurrency conflicts.
         # Without this, parallel workers fight over the same default socket path,
@@ -2206,8 +2236,31 @@ def _run_browser_command(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            logger.warning("browser '%s' timed out after %ds (task=%s, socket_dir=%s)",
-                           command, timeout, task_id, task_socket_dir)
+            # Best-effort: tail stderr (and stdout if stderr is empty) so the
+            # warning is self-contained instead of forcing log archaeology.
+            _to_tail = ""
+            for _p in (stderr_path, stdout_path):
+                try:
+                    with open(_p, "r", encoding="utf-8", errors="replace") as _f:
+                        _chunk = _f.read().strip()
+                except OSError:
+                    _chunk = ""
+                if _chunk and not _to_tail:
+                    _to_tail = _chunk[-400:]
+                try:
+                    os.unlink(_p)
+                except OSError:
+                    pass
+            if _to_tail:
+                logger.warning(
+                    "browser '%s' timed out after %ds (task=%s, socket_dir=%s) tail=%r",
+                    command, timeout, task_id, task_socket_dir, _to_tail,
+                )
+            else:
+                logger.warning(
+                    "browser '%s' timed out after %ds (task=%s, socket_dir=%s)",
+                    command, timeout, task_id, task_socket_dir,
+                )
             result = {"success": False, "error": f"Command timed out after {timeout} seconds"}
             # Fall through to fallback check below
         else:
@@ -2293,6 +2346,8 @@ def _run_browser_command(
     except Exception as e:
         logger.warning("browser '%s' exception: %s", command, e, exc_info=True)
         result = {"success": False, "error": str(e)}
+    finally:
+        _mark_command_finished(task_id)
 
     # --- Lightpanda automatic Chrome fallback ---
     # If engine is lightpanda and the result looks broken, retry with Chrome.

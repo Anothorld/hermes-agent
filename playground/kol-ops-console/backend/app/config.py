@@ -34,7 +34,13 @@ class Settings(BaseSettings):
     # --- Hermes bridge plugin ---
     bridge_base: str = "http://127.0.0.1:8080/api/plugins/kol-ops-bridge"
     bridge_key: str = Field(default_factory=_default_bridge_key)
-    bridge_timeout_sec: float = 10.0
+    # Must clear the bridge's GmailClient subprocess timeout (30s in
+    # gmail_client.py) plus the surrounding DB writes / event logging in
+    # _approve_or_reject — a 5s margin was too tight and caused console
+    # 502s while Gmail draft creation was still in flight. 60s leaves a
+    # comfortable 30s for the rest of the handler. Plain reads stay
+    # sub-second; this only matters for the Gmail-touching writes.
+    bridge_timeout_sec: float = 60.0
 
     # --- Hermes gateway ---
     gateway_base: str = "http://127.0.0.1:8642"

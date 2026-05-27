@@ -26,6 +26,7 @@ from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
 from ..bridge_runtime import ensure_gateway_bridge_key
 from ..campaign_config_sync import assert_campaign_config_complete
+from ..campaign_id_norm import CampaignIdNormaliserMixin
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
@@ -71,7 +72,7 @@ def _env(env: str | None) -> str:
     return (env or get_settings().env).upper()
 
 
-class DecisionBody(BaseModel):
+class DecisionBody(CampaignIdNormaliserMixin):
     identity_id: int
     campaign_id: Optional[str] = None
     decided_by: str = Field(min_length=1, max_length=120)
@@ -79,12 +80,14 @@ class DecisionBody(BaseModel):
     env: Optional[str] = None
 
 
-class RefineBody(BaseModel):
+class RefineBody(CampaignIdNormaliserMixin):
     """Body for POST /approvals/{fact_path}/refine.
 
     `campaign_id` is required: regeneration starts a campaign-scoped
     gateway run so the agent can re-read dispatch context and the
-    inbound message.
+    inbound message. Sentinel strings (``"null"``, ``"undefined"``)
+    are normalised to ``None`` by the mixin first, which then trips
+    the ``min_length=1`` constraint for a clean 422.
 
     ``if_captured_at`` is an optional optimistic-lock token — the
     ``captured_at`` value the operator saw on the row they're refining.

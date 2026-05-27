@@ -7,7 +7,9 @@ import { FactInput } from '../components/inputs/FactInput';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
 import { TimeAgo } from '../components/inputs/TimeAgo';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { campaignIdQueryFirst, isRealCampaignId } from '../lib/campaignId';
 import { useEnvStore, toast } from '../lib/store';
+import { useUnreadStore } from '../lib/unread';
 import { errorSummary } from '../lib/errors';
 import { dialog } from '../components/dialogs/useDialog';
 import { usePollingFallback } from '../hooks/usePollingFallback';
@@ -32,17 +34,37 @@ function EscalationList() {
   const [err, setErr] = useState<unknown>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
 
+  const markSeen = useUnreadStore((s) => s.markSeen);
   const refresh = useCallback(async () => {
     try {
       const params = new URLSearchParams({ env });
       if (state !== 'all') params.set('state', state);
       const qs = `?${params.toString()}`;
-      setRows(await api.get<EscalationRow[]>(`/escalations${qs}`));
+      const fetched = await api.get<EscalationRow[]>(`/escalations${qs}`);
+      setRows(fetched);
       setErr(null);
+      // The kanban dot is scoped per-campaign (escalations.global.<id>).
+      // This list shows escalations across all campaigns, so on each
+      // refresh fold per-campaign latest created_at and mark each scope
+      // as seen — the operator can see the row, so the dot has done its
+      // job.
+      if (state === 'awaiting_answer') {
+        const latestByCampaign: Record<string, number> = {};
+        for (const r of fetched) {
+          if (!r.campaign_id || !r.created_at) continue;
+          const t = new Date(r.created_at).getTime();
+          if (!Number.isFinite(t)) continue;
+          const cur = latestByCampaign[r.campaign_id] ?? 0;
+          if (t > cur) latestByCampaign[r.campaign_id] = t;
+        }
+        for (const [cid, ts] of Object.entries(latestByCampaign)) {
+          markSeen(`escalations.global.${cid}`, ts);
+        }
+      }
     } catch (ex) {
       setErr(ex);
     }
-  }, [env, state]);
+  }, [env, state, markSeen]);
 
   const terminate = useCallback(
     async (rowId: number) => {
@@ -131,11 +153,18 @@ function EscalationList() {
                   </Link>
                 </td>
                 <td className="p-2">
-                  <Link to={`/kols/${r.identity_id}?campaign_id=${encodeURIComponent(r.campaign_id)}`}>
-                    {r.identity_id}
-                  </Link>
+                  {isRealCampaignId(r.campaign_id) ? (
+                    <Link to={`/kols/${r.identity_id}${campaignIdQueryFirst(r.campaign_id)}`}>
+                      {r.identity_id}
+                    </Link>
+                  ) : (
+                    // identity-scoped escalation (e.g. contact_email_not_found):
+                    // no campaign context exists, so don't build a link that
+                    // would carry ``?campaign_id=null`` into KolDetailPage.
+                    <span className="text-slate-700">{r.identity_id}</span>
+                  )}
                 </td>
-                <td className="p-2">{r.campaign_id}</td>
+                <td className="p-2">{r.campaign_id ?? '—'}</td>
                 <td className="p-2">{r.rule_id ?? '—'}</td>
                 <td className="p-2">
                   <div className="text-xs text-slate-800">{r.reason}</div>
@@ -474,14 +503,18 @@ function EscalationDetail({ id }: { id: number }) {
       <div className="rounded border border-slate-200 bg-white p-3 text-sm">
         <div>
           KOL：
-          <Link
-            to={`/kols/${row.identity_id}?campaign_id=${encodeURIComponent(row.campaign_id)}`}
-            className="text-sky-700 hover:underline"
-          >
-            {row.identity_id}
-          </Link>
+          {isRealCampaignId(row.campaign_id) ? (
+            <Link
+              to={`/kols/${row.identity_id}${campaignIdQueryFirst(row.campaign_id)}`}
+              className="text-sky-700 hover:underline"
+            >
+              {row.identity_id}
+            </Link>
+          ) : (
+            <span className="text-slate-700">{row.identity_id}</span>
+          )}
         </div>
-        <div>Campaign：{row.campaign_id}</div>
+        <div>Campaign：{row.campaign_id ?? <span className="italic text-slate-500">无（identity 级 escalation）</span>}</div>
         <div>
           规则：{row.rule_id ?? '—'} · 状态：{row.state} · 创建于 <TimeAgo iso={row.created_at} />
         </div>

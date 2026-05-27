@@ -19,12 +19,16 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Annotated, Any, Mapping, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import Path as FastAPIPath
+from pydantic import BaseModel, Field, field_validator
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 from . import cal
 from . import discovery_router
@@ -74,8 +78,115 @@ def _require_bridge_key(provided: Optional[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared input normalisation
+# ---------------------------------------------------------------------------
+
+# Callers that build URLs / JSON bodies via untyped string interpolation
+# (notably the web console's React layer, where ``encodeURIComponent(null)``
+# renders the 4-char string ``"null"``) have historically leaked sentinel
+# strings into the bridge. Treat these as if the caller had omitted the
+# field — for bodies/query params we coerce them to ``None``; for path
+# params (``/campaigns/{campaign_id}/...``) the bridge raises 400 instead
+# (a missing campaign id along a campaign-scoped path is unrecoverable).
+_NULL_SENTINELS: frozenset[str] = frozenset({"null", "undefined", "nan", "none"})
+
+
+def _norm_campaign_id(value: Any) -> Optional[str]:
+    """Coerce ``"null"`` / ``"undefined"`` / ``""`` and friends to None.
+
+    Use as a Pydantic ``@field_validator(..., mode="before")`` on every
+    ``campaign_id`` body / query field. The strip+lower-case sentinel
+    set covers JS ``encodeURIComponent(null|undefined|NaN)`` and Python
+    ``str(None)`` accidents alike.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.lower() in _NULL_SENTINELS:
+        return None
+    return s
+
+
+def _reject_null_sentinel_campaign_id(campaign_id: str) -> str:
+    """Path-param guard for ``/campaigns/{campaign_id}/...`` routes.
+
+    These routes are campaign-scoped by definition; passing a sentinel
+    string means the caller has a bug (most commonly a frontend that
+    interpolated a null/undefined into the URL). Fail closed with a
+    machine-readable 400 so the console can surface a clear error
+    instead of getting a misleading "campaign not found" 404 downstream.
+    """
+    if campaign_id.strip().lower() in _NULL_SENTINELS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_campaign_id",
+                "message": (
+                    f"campaign_id path segment is the sentinel string "
+                    f"{campaign_id!r} — the caller built this URL from a "
+                    f"null/undefined value. Provide a real campaign_id."
+                ),
+            },
+        )
+    return campaign_id
+
+
+def _campaign_id_path_dep(
+    campaign_id: str = FastAPIPath(...),
+) -> str:
+    """FastAPI dependency: validates the ``{campaign_id}`` path segment.
+
+    Apply via ``Annotated[str, Depends(_campaign_id_path_dep)]`` on any
+    handler whose URL template contains ``/{campaign_id}/...``.
+    """
+    return _reject_null_sentinel_campaign_id(campaign_id)
+
+
+def _campaign_id_query_required_dep(
+    campaign_id: str = Query(..., min_length=1),
+) -> str:
+    """FastAPI dependency: validates a required ``?campaign_id=`` query.
+
+    Mirrors the path-segment guard for the handful of routes that take
+    campaign_id as a required query string (dispatch-context, lanes
+    view, etc.) instead of a path segment.
+    """
+    return _reject_null_sentinel_campaign_id(campaign_id)
+
+
+def _campaign_id_query_optional_dep(
+    campaign_id: Optional[str] = Query(default=None),
+) -> Optional[str]:
+    """FastAPI dependency: normalises an optional ``?campaign_id=`` query.
+
+    Silently coerces sentinel strings (``"null"``, ``"undefined"``, ...)
+    and empty strings to ``None`` so callers get the same semantics as
+    if the param had been omitted entirely.
+    """
+    return _norm_campaign_id(campaign_id)
+
+
+# ---------------------------------------------------------------------------
 # Pydantic bodies
 # ---------------------------------------------------------------------------
+
+
+class _CampaignIdNormaliserMixin(BaseModel):
+    """Mixin: any subclass declaring a ``campaign_id`` field gets the
+    sentinel-string → None coercion applied in ``mode="before"``.
+
+    ``check_fields=False`` lets the validator live on the mixin even
+    though it does not declare the field itself. Pydantic v2 wires it
+    up at the subclass level only when ``campaign_id`` is actually
+    declared.
+    """
+
+    @field_validator("campaign_id", mode="before", check_fields=False)
+    @classmethod
+    def _coerce_null_string_campaign_id(cls, v: Any) -> Optional[str]:
+        return _norm_campaign_id(v)
 
 
 class IdentityUpsertBody(BaseModel):
@@ -87,14 +198,32 @@ class IdentityUpsertBody(BaseModel):
     language: Optional[str] = None
     contact_role: str = "kol"
     default_shipping_address: Optional[dict[str, Any]] = None
-    default_payment_method: Optional[str] = None
+    default_payment_method: Optional[dict[str, Any]] = None
     notes: Optional[str] = None
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+    @field_validator("primary_email", mode="before")
+    @classmethod
+    def _validate_primary_email(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        if not _EMAIL_RE.match(s):
+            raise ValueError(
+                f"primary_email must look like 'x@y.tld'; got {v!r}. "
+                "If this is a link-in-bio URL, personal website, or brand "
+                "name, store it as identity.linktree_url / "
+                "identity.personal_site_url via write-facts-multi instead."
+            )
+        return s.lower()
 
 
 class CampaignConfigUpsertBody(BaseModel):
     label: Optional[str] = None
     product_display_name: Optional[str] = None
+    product_url: Optional[str] = None
     product_unit_price: Optional[float] = None
     barter_policy: Optional[str] = None
     paid_ceiling: Optional[float] = None
@@ -136,7 +265,7 @@ class CandidateStatusBody(BaseModel):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 
-class FactsWriteBody(BaseModel):
+class FactsWriteBody(_CampaignIdNormaliserMixin):
     campaign_id: Optional[str] = None
     namespace: str
     facts: dict[str, Any]
@@ -145,7 +274,7 @@ class FactsWriteBody(BaseModel):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 
-class EscalationOpenBody(BaseModel):
+class EscalationOpenBody(_CampaignIdNormaliserMixin):
     identity_id: Optional[int] = None
     campaign_id: Optional[str] = None
     goal: Optional[str] = None
@@ -165,7 +294,7 @@ class EscalationResolveBody(BaseModel):
     final_state: str = "resolved"
 
 
-class ApprovalDecisionBody(BaseModel):
+class ApprovalDecisionBody(_CampaignIdNormaliserMixin):
     identity_id: int
     campaign_id: Optional[str] = None
     decided_by: str
@@ -180,7 +309,12 @@ class ReconcileSentBody(BaseModel):
     max_results: int = Field(default=100, ge=1, le=500)
 
 
-class ArchiveBody(BaseModel):
+class ArchiveBody(_CampaignIdNormaliserMixin):
+    # NOTE: campaign_id is required. The mixin coerces sentinel strings
+    # to None first; Pydantic then rejects the resulting None against
+    # this annotation, so a caller that sent ``campaign_id: "null"``
+    # gets a 422 with a clear "field required" message instead of
+    # silently writing under a phantom campaign.
     campaign_id: str
     outcome: str
     preferred_skus: Optional[list[str]] = None
@@ -196,7 +330,7 @@ class RouteDiscoveryBody(BaseModel):
     operator_note: str = ""
 
 
-class FactsWriteMultiBody(BaseModel):
+class FactsWriteMultiBody(_CampaignIdNormaliserMixin):
     campaign_id: Optional[str] = None
     namespaces: dict[str, dict[str, Any]]
     source: str = "skill"
@@ -211,7 +345,7 @@ class PolicyPutBody(BaseModel):
     title: Optional[str] = None
 
 
-class EventWriteBody(BaseModel):
+class EventWriteBody(_CampaignIdNormaliserMixin):
     identity_id: int
     event_type: str
     actor: str
@@ -353,7 +487,7 @@ def get_reusable_facts(identity_id: int) -> dict[str, Any]:
 @router.get("/identities/{identity_id}/goals")
 def get_goal_state(
     identity_id: int,
-    campaign_id: str = Query(...),
+    campaign_id: Annotated[str, Depends(_campaign_id_query_required_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     if not cal.get_identity(identity_id):
@@ -365,8 +499,8 @@ def get_goal_state(
 @router.get("/identities/{identity_id}/timeline")
 def get_identity_timeline(
     identity_id: int,
+    campaign_id: Annotated[Optional[str], Depends(_campaign_id_query_optional_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
-    campaign_id: Optional[str] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
     """Reverse-chronological event timeline for a single KOL identity."""
@@ -385,8 +519,8 @@ def get_identity_timeline(
 
 @router.get("/events/recent")
 def get_recent_events(
+    campaign_id: Annotated[Optional[str], Depends(_campaign_id_query_optional_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
-    campaign_id: Optional[str] = Query(default=None),
     since_id: Optional[int] = Query(default=None, ge=0),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict[str, Any]:
@@ -462,7 +596,7 @@ def archive_collab(
 
 @router.put("/campaigns/{campaign_id}")
 def upsert_campaign_config(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     body: CampaignConfigUpsertBody,
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
@@ -502,7 +636,7 @@ class FactsFromTextBody(BaseModel):
 
 @router.post("/campaigns/{campaign_id}/facts-from-text")
 def append_campaign_facts_from_text(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     body: FactsFromTextBody,
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
@@ -622,7 +756,7 @@ def list_campaigns(
 
 @router.get("/campaigns/{campaign_id}")
 def get_campaign_config(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     cfg = cal.get_campaign_config(campaign_id, env=env)
@@ -633,7 +767,7 @@ def get_campaign_config(
 
 @router.get("/campaigns/{campaign_id}/candidates")
 def list_candidates(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     return {"candidates": cal.list_candidates(campaign_id, env=env)}
@@ -641,7 +775,7 @@ def list_candidates(
 
 @router.post("/campaigns/{campaign_id}/candidates")
 def upsert_candidate(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     body: CandidateUpsertBody,
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
@@ -666,7 +800,7 @@ def upsert_candidate(
 
 @router.post("/campaigns/{campaign_id}/candidates/resolve-relationships")
 def resolve_relationships(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
@@ -677,7 +811,7 @@ def resolve_relationships(
 
 @router.post("/campaigns/{campaign_id}/candidates/select")
 def select_candidates(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     body: CandidateSelectBody,
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
@@ -691,7 +825,7 @@ def select_candidates(
 
 @router.post("/campaigns/{campaign_id}/candidates/status")
 def set_candidate_status(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     body: CandidateStatusBody,
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
@@ -708,7 +842,7 @@ def set_candidate_status(
 
 @router.post("/campaigns/{campaign_id}/candidates/route-discovery")
 def route_discovery(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     body: RouteDiscoveryBody,
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
@@ -738,7 +872,7 @@ def route_discovery(
 
 @router.get("/campaigns/{campaign_id}/lanes")
 def get_lanes(
-    campaign_id: str,
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     """Return per-identity lane snapshots for the entire campaign.
@@ -747,10 +881,45 @@ def get_lanes(
     "candidate_status":..., "relationship_status":...,
     "repeat_count":..., "last_outcome":..., "archived": bool,
     "lanes":{commerce:[...], ...} }, ... ],
-    "counts": {"pending_approvals": N, "open_escalations": M} }``.
-    Suitable for the Web kanban lane filter + top-of-page badges.
+    "counts": {"pending_approvals": N, "open_escalations": M,
+    "pending_approvals_latest_at": iso|null,
+    "open_escalations_latest_at": iso|null} }``.
+    Suitable for the Web kanban lane filter + top-of-page badges
+    (counts) and the per-card unread red-dots / Draft sub-state badges
+    (per-item ``pending_approval_*`` / ``open_escalation_*`` /
+    ``reply_draft_state`` fields).
     """
     candidates = cal.list_candidates(campaign_id, env=env)
+
+    # Single sweep over the campaign-scoped queues so per-card lookup
+    # is O(1) and we avoid N+1 bridge calls. The kanban refreshes every
+    # 20s + on every data-channel event, so this matters.
+    approvals_by_id: dict[int, list[dict[str, Any]]] = {}
+    approvals_latest_at: Optional[str] = None
+    for a in cal.list_pending_approvals(env=env):
+        if a.get("campaign_id") != campaign_id:
+            continue
+        iid = a.get("identity_id")
+        if not isinstance(iid, int):
+            continue
+        approvals_by_id.setdefault(iid, []).append(a)
+        captured = a.get("captured_at")
+        if captured and (approvals_latest_at is None or captured > approvals_latest_at):
+            approvals_latest_at = captured
+
+    escalations_by_id: dict[int, list[dict[str, Any]]] = {}
+    escalations_latest_at: Optional[str] = None
+    for e in cal.list_escalations(state="awaiting_answer", env=env):
+        if e.get("campaign_id") != campaign_id:
+            continue
+        iid = e.get("identity_id")
+        if not isinstance(iid, int):
+            continue
+        escalations_by_id.setdefault(iid, []).append(e)
+        created = e.get("created_at")
+        if created and (escalations_latest_at is None or created > escalations_latest_at):
+            escalations_latest_at = created
+
     items = []
     for c in candidates:
         if not c.get("identity_id"):
@@ -764,16 +933,29 @@ def get_lanes(
             identity_id=c["identity_id"],
             campaign_id=campaign_id, env=env,
         )
+
+        iid = c["identity_id"]
+        appr_rows = approvals_by_id.get(iid, [])
+        appr_latest = max(
+            (r.get("captured_at") for r in appr_rows if r.get("captured_at")),
+            default=None,
+        )
+        esc_rows = escalations_by_id.get(iid, [])
+        esc_latest = max(
+            (r.get("created_at") for r in esc_rows if r.get("created_at")),
+            default=None,
+        )
+
         items.append({
-            "identity_id": c["identity_id"],
-            "handle": ident.get("primary_handle") or f"id{c['identity_id']}",
+            "identity_id": iid,
+            "handle": ident.get("primary_handle") or f"id{iid}",
             "candidate_status": c["candidate_status"],
             "relationship_status": c["relationship_status"],
             "repeat_count": int(rel.get("total_collabs") or 0),
             "last_outcome": rel.get("last_outcome"),
             "archived": c["candidate_status"] in ("archived", "rejected"),
             "lanes": cal.get_lanes_view(
-                identity_id=c["identity_id"],
+                identity_id=iid,
                 campaign_id=campaign_id, env=env,
             ),
             "outreach_sent_at": facts.get("offer.outreach_sent_at"),
@@ -788,18 +970,43 @@ def get_lanes(
             "outreach_draft_created": bool(facts.get("offer.outreach_draft_created")),
             "gmail_draft_id": facts.get("offer.gmail_draft_id"),
             "gmail_thread_id": facts.get("offer.gmail_thread_id"),
+            # Per-card unread + Draft sub-state inputs (Phase D fix-2).
+            "pending_approval_count": len(appr_rows),
+            "pending_approval_latest_at": appr_latest,
+            "open_escalation_count": len(esc_rows),
+            "open_escalation_latest_at": esc_latest,
+            "reply_draft_state": _reply_draft_state(facts),
         })
     counts = {
-        "pending_approvals": sum(
-            1 for a in cal.list_pending_approvals(env=env)
-            if a.get("campaign_id") == campaign_id
-        ),
-        "open_escalations": sum(
-            1 for e in cal.list_escalations(state="awaiting_answer", env=env)
-            if e.get("campaign_id") == campaign_id
-        ),
+        "pending_approvals": sum(len(v) for v in approvals_by_id.values()),
+        "open_escalations": sum(len(v) for v in escalations_by_id.values()),
+        "pending_approvals_latest_at": approvals_latest_at,
+        "open_escalations_latest_at": escalations_latest_at,
     }
     return {"items": items, "counts": counts}
+
+
+def _reply_draft_state(facts: Mapping[str, Any]) -> Optional[str]:
+    """Derive the Draft sub-state surfaced on the kanban card.
+
+    Decision flow mirrors the cold-outreach + reply-dispatcher pipeline:
+    once ``offer.outreach_sent`` flips true the draft has been delivered
+    (covers both reply drafts and cold-outreach drafts). Before that, a
+    pending ``approval.reply_draft`` means the operator still owes a
+    decision in the approval queue; a decided-approved draft with a
+    ``gmail_draft`` payload is sitting in Gmail waiting on Send. None
+    means the card has no draft in flight.
+    """
+    if facts.get("offer.outreach_sent"):
+        return "sent"
+    reply = facts.get("approval.reply_draft")
+    if isinstance(reply, dict):
+        decision = reply.get("decision")
+        if decision in (None, "pending"):
+            return "pending"
+        if decision == "approved" and isinstance(reply.get("gmail_draft"), dict):
+            return "approved_unsent"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +1109,7 @@ def write_facts_multi(
 @router.get("/identities/{identity_id}/dispatch-context")
 def get_dispatch_context(
     identity_id: int,
-    campaign_id: str = Query(...),
+    campaign_id: Annotated[str, Depends(_campaign_id_query_required_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     """Bundle the read snapshots ``kol-reply-dispatcher`` needs in one call.
@@ -932,13 +1139,28 @@ def get_dispatch_context(
             "facts": cal.get_reusable_facts(identity_id),
         },
         "campaign_config": cal.get_campaign_config(campaign_id),
+        # Per-campaign discovery evidence written by the discovery skill into
+        # ``campaign_candidates.payload_json`` (reason / niche_match /
+        # showcase_evidence / conversion_mechanism). ``None`` when the
+        # identity is not a candidate of this campaign.
+        "candidate": cal.get_candidate_for(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        ),
+        # All identity-level facts (campaign_id IS NULL), keyed as
+        # ``identity.<key>`` — surfaces the creator-brief facts
+        # (content_pillars, signature_hooks, voice_descriptors, hero_post_*,
+        # recommendation_reason) plus any other identity-scoped fact written
+        # via ``write-facts-multi``.
+        "identity_facts": cal.latest_facts_for(
+            identity_id=identity_id, campaign_id=None, env=env,
+        ),
     }
 
 
 @router.get("/facts/{identity_id}")
 def read_facts(
     identity_id: int,
-    campaign_id: Optional[str] = Query(default=None),
+    campaign_id: Annotated[Optional[str], Depends(_campaign_id_query_optional_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     if not cal.get_identity(identity_id):
@@ -1014,6 +1236,31 @@ def _approve_or_reject(
         value = {"value": previous_value}
     linked_escalation_id: Optional[int] = _linked_escalation_id(value)
     handled_escalation_id: Optional[int] = None
+    # Idempotent replay: a previous approve for this reply_draft already
+    # created the Gmail draft and persisted decision=approved. The console
+    # may retry (its httpx times out before the bridge's Gmail subprocess
+    # does) — without this short-circuit each retry would create a new
+    # Gmail draft, orphaning the previous one in Drafts.
+    prior_draft = (
+        previous_value.get("gmail_draft") if isinstance(previous_value, dict) else None
+    )
+    if (
+        decision == "approved"
+        and fact_path == "approval.reply_draft"
+        and isinstance(previous_value, dict)
+        and previous_value.get("decision") == "approved"
+        and isinstance(prior_draft, dict)
+        and prior_draft.get("draft_id")
+    ):
+        return {
+            "ok": True,
+            "decision": "approved",
+            "derived_escalation_id": None,
+            "linked_escalation_id": linked_escalation_id,
+            "handled_escalation_id": None,
+            "gmail_draft": prior_draft,
+            "idempotent_replay": True,
+        }
     gmail_draft: dict[str, Any] | None = None
     if decision == "approved" and fact_path == "approval.reply_draft":
         gmail_draft = _create_gmail_draft_for_reply_approval(

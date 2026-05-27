@@ -58,6 +58,26 @@ Call contract:
 
 >>> include: kol-email-style-loader
 
+## Creator Brief Preamble (mandatory before drafting)
+
+Immediately after the style-loader block, this skill **MUST** also invoke
+`kol-creator-brief-loader` and prepend its output as a `[P0.1]` section so
+the LLM has concrete content/style material to personalize the opening
+"why-them" line.
+
+Call contract:
+- inputs: `identity_id`, `env`, and (optional) `campaign_id` for
+  provenance.
+- output: a markdown block listing `content_pillars`, `signature_hooks`,
+  `voice_descriptors`, `hero_post_url`, `hero_post_note`,
+  `recommendation_reason`, and `brief_status ∈ {fresh|refreshed|unavailable}`.
+- order in the final prompt: `[P0]` → `[P0.1] creator brief` → `[P1]` → `[P2]` → `[P3]`.
+- failure mode: the loader never throws — on total failure it returns a
+  block with `Brief status: unavailable`. The drafter (Step 2) detects
+  that state and emits `low_personalization: true` in the envelope.
+
+>>> include: kol-creator-brief-loader
+
 ## Procedure
 
 ### Step 1 — Load context
@@ -74,48 +94,139 @@ Use:
   do NOT silently switch tone.
 - `reusable_facts['identity.primary_handle']`, `identity.region`,
   `identity.language` — to localize the salutation.
+- `identity.display_name` (from `get-identity`) — the KOL's real name
+  if it's already on file. Always **prefer** this over the handle.
 - `campaign.product_display_name` — the **operator-friendly product
   name** (e.g. "the new media console", "POVISON Atlas sofa"). This is
-  the **only** acceptable product reference in the email body. If this
-  field is empty/null, fall back to a generic category phrase
+  the **only** acceptable visible product reference in the email body.
+  If this field is empty/null, fall back to a generic category phrase
   (`"our new piece"`, `"a new release"`); **never** substitute the
-  `campaign_id`, `sku_whitelist[*]`, or any internal model code.
+  `campaign_id`, `sku_whitelist[*]`, or any internal model code as the
+  visible text.
+- `campaign.product_url` — the product page URL. When present, the
+  visible product name in Step 2 MUST be rendered as an HTML
+  hyperlink (`<a href="{product_url}">{product_display_name}</a>`).
+  If `product_url` is missing/null, render the product name as plain
+  text (no fabricated URLs).
+- `candidate.payload` (NEW) — per-campaign discovery evidence written
+  by `instagram-kol-discovery` into `campaign_candidates.payload_json`.
+  Typical keys: `reason`, `niche_match`, `showcase_evidence`,
+  `conversion_mechanism`. **Read-only** here — used as a secondary
+  source for the "why-them" line when the creator brief is sparse.
+  May be `null` when this identity wasn't discovered for this campaign
+  (e.g., operator added them manually).
+- `identity_facts` (NEW) — all identity-level (`campaign_id IS NULL`)
+  facts merged into one dict. Most important keys here:
+  `identity.content_pillars`, `identity.signature_hooks`,
+  `identity.voice_descriptors`, `identity.hero_post_url`,
+  `identity.hero_post_note`, `identity.recommendation_reason`. These
+  back the `[P0.1]` creator brief block — when the brief block exists,
+  the underlying fact values live here too.
+
+### Step 1b — Resolve the KOL's greeting name (mandatory)
+
+Use this priority order to pick the **first name** for the salutation.
+Stop at the first hit:
+
+1. `identity.display_name` is set → take its first whitespace-separated
+   token (e.g. `"Becki Owens"` → `Becki`).
+2. `reusable_facts['identity.first_name']` is set → use it verbatim.
+3. Otherwise, **parse** `identity.primary_handle` into a likely
+   `First Last` pair, then take the first token:
+   - Strip a leading `@` and any trailing digits/underscores
+     (`"beckiowens"`, `"becki_owens_"`, `"beckiowens99"` → `"beckiowens"`).
+   - If the handle already contains a separator (`.`, `_`, `-`, space),
+     split on it: `"becki_owens"` → `["becki", "owens"]`.
+   - Otherwise, attempt a single CamelCase / known-name split. If the
+     handle is mixed case (`"BeckiOwens"`), split on the second
+     capital. If all-lowercase (`"beckiowens"`), try matching the
+     longest common English first-name prefix (Becki, Sarah, Emma,
+     Olivia, Alex, Sam, etc.) against a small heuristic — only commit
+     to a split when the prefix is **3+ chars** AND the remainder is
+     **3+ chars**. Title-case both pieces (`beckiowens` → `Becki
+     Owens`). Take the first token (`Becki`).
+   - If no split is confident, fall back to the title-cased handle as
+     a single token (`"beckiowens"` → `Becki`). Never use the
+     full lowercase id as the salutation.
+4. If even that fails (numeric-only handle, empty), open an escalation
+   `kol_name_unresolvable` with the handle + identity_id and abort.
+   Do NOT email someone as `Hi user12345,`.
+
+The greeting MUST be the **first name only** — never include the
+last name in `Hi, …`. Correct: `Hi Becki,`. Wrong: `Hi Becki Owens,`,
+`Hi beckiowens,`, `Hi @beckiowens,`.
 
 ### Step 2 — Compose the email
 Constraints:
 - Subject: short, brand-name-led, no clickbait. Example:
-  "Collab idea from <Brand>" or "<Brand> × @<handle>".
+  "Collab idea from <Brand>" or "<Brand> × <FirstName>". Plain text —
+  no HTML in the subject.
+- **Body format: HTML.** Wrap paragraphs in `<p>…</p>` and use `<br>`
+  for forced line breaks. The product mention MUST be an anchor tag
+  when `campaign.product_url` is present:
+  `<a href="{campaign.product_url}">{campaign.product_display_name}</a>`.
+  Use the URL verbatim from `campaign.product_url`; do NOT fabricate,
+  shorten, or rewrap it. Set `html: true` in the draft envelope
+  (Step 4) so the bridge marks the Gmail MIME part as `text/html`.
 - Body: 3–5 short paragraphs.
-  1. One-line greeting + why-them (cite one specific recent post if
-     classifier or operator supplied it; otherwise generic).
+  1. One-line greeting + why-them. Use the first name resolved in
+     Step 1b: `<p>Hi {FirstName},</p>`. The why-them sentence MUST
+     reference **one specific detail** from the `[P0.1]` creator brief
+     — either a `content_pillar`, a `signature_hook`, the theme of
+     `hero_post` (cite what the post is *about*, not its URL), or the
+     `recommendation_reason`. Paraphrase in 1 sentence; do NOT lift
+     the brief verbatim and do NOT name-check the creator's own bio.
+     If the brief is genuinely sparse, fall back to a detail from
+     `candidate.payload.reason` / `candidate.payload.conversion_mechanism`.
+     **Only** when `brief_status == "unavailable"` AND `candidate.payload`
+     is empty/missing may you write a generic opener — and you MUST
+     then flag the draft (see "Personalization envelope flag" below).
   2. Brand one-liner + product hook. Refer to the product **only** via
-     `campaign.product_display_name` (loaded in Step 1). If that field
-     is missing, use a generic category phrase (`"our new piece"`,
-     `"a new release"`). Never include SKU codes, model numbers,
-     variant IDs, internal catalog identifiers, or the `campaign_id`
-     itself — regardless of whether they appear in `sku_whitelist`,
-     campaign label, or anywhere else in the dispatch context. Do not
-     state whether the collaboration is paid, barter/exchange, gifted,
+     the rendered anchor (`<a href="…">{product_display_name}</a>`),
+     or — if `product_url` is empty — the plain `product_display_name`.
+     If `product_display_name` itself is missing, use a generic
+     category phrase (`"our new piece"`, `"a new release"`). Never
+     include SKU codes, model numbers, variant IDs, internal catalog
+     identifiers, or the `campaign_id` itself in the visible text —
+     regardless of whether they appear in `sku_whitelist`, campaign
+     label, or anywhere else in the dispatch context. A SKU may
+     appear inside the anchor's `href` URL (that is the canonical
+     product page), but never as visible anchor text. Do not state
+     whether the collaboration is paid, barter/exchange, gifted,
      free-product, or commission-based.
   3. Soft ask: "Would you be open to chatting about a collab?"
      **Do not** ask for shipping, deliverables, or rates yet.
   4. Sign-off (style-loader handles signature in a future phase; for
-     now use "Best, <operator-name or brand>").
+     now use "Best,<br><operator-name or brand>").
 - No emoji, no excessive exclamation marks.
 - No "press release" boilerplate.
+- Allowed HTML tags: `<p>`, `<br>`, `<a href="…">`, `<strong>`,
+  `<em>`. No images, no inline styles, no `<script>`, no tracking
+  pixels. Anchor `href` values MUST be `http://` or `https://`
+  URLs only.
 
 ### Step 2b — SKU leak post-check (mandatory)
 
 After composing the draft and **before** Step 3, scan `subject` and
-`body` against the SKU-leak regex:
+the **visible text** of `body` against the SKU-leak regex:
 
 ```
 [A-Z]{2,5}[\- ]?\d{3,5}[A-Z0-9]*
 ```
 
-This catches `SEB800`, `SEB-8008`, `TS8319`, `POV-RUG-04`, etc. Also
-substring-check for every entry in `sku_whitelist` and for the
-`campaign_id`.
+Before scanning the body, strip out:
+1. Every `href="…"` attribute value (the URL is allowed to contain
+   SKU patterns — it points at the canonical product page).
+2. Every full HTML tag (so attribute names, classes, etc. don't
+   trigger).
+
+What remains is the human-visible text (anchor labels included).
+Apply the regex to that residual string and to the `subject`. Also
+substring-check the residual string + subject for every entry in
+`sku_whitelist` and for the `campaign_id`.
+
+This catches visible leaks like `SEB800`, `SEB-8008`, `TS8319`,
+`POV-RUG-04` while permitting them inside `<a href="…">` targets.
 
 If any match is found:
 - Do NOT call `write-facts-multi`.
@@ -129,6 +240,43 @@ If any match is found:
 The router will surface the failure to the operator (typically a sign
 the campaign is missing `product_display_name` or the LLM ignored the
 Step 2 constraint — escalate rather than auto-retry).
+
+### Step 2c — Personalization post-check (mandatory)
+
+After the SKU check passes, before Step 3, verify the body actually
+incorporates the creator brief.
+
+**When `brief_status ∈ {fresh, refreshed}`:**
+1. Build a set of substantive tokens from the creator brief facts:
+   - All tokens of length ≥ 4 from `identity.content_pillars[*]`.
+   - All tokens of length ≥ 4 from `identity.signature_hooks[*]`.
+   - All tokens of length ≥ 5 from `identity.recommendation_reason`
+     after stripping the words {`creator`, `content`, `audience`,
+     `engagement`, `their`, `your`, `with`, `from`, `that`, `which`,
+     `this`}.
+2. Strip HTML tags from `body` to get visible text.
+3. Case-insensitive substring match: count how many tokens appear in
+   the visible body.
+4. If **zero tokens match**, the draft did not use the brief. Re-generate
+   the draft ONCE with an extra instruction prepended:
+   *"Your previous draft did not reference any detail from the [P0.1]
+   creator brief. Rewrite the first paragraph after the greeting to
+   paraphrase one specific pillar, hook, or hero-post theme from the
+   brief — in one sentence, in your own words."*
+5. After the retry, re-run the SKU check (Step 2b) AND the personalization
+   check. If the retry still has zero matches, abort with:
+   ```json
+   {"error":"personalization_check_failed",
+    "brief_status":"<fresh|refreshed>",
+    "tokens_expected":[...],
+    "field":"body"}
+   ```
+
+**When `brief_status == "unavailable"`:**
+Skip the token check. The draft is allowed to be generic, but Step 4
+(envelope) MUST include `low_personalization: true` and
+`low_personalization_reason: "creator_brief_unavailable"` so the
+operator review surface flags the draft for manual personalization.
 
 ### Step 3 — Write outbound facts (single call)
 ```
@@ -158,12 +306,27 @@ no markdown:
   "campaign_id": "TS8319",
   "env": "TEST",
   "subject": "Collab idea from POVISON",
-  "body": "Hi @alice, ...",
+  "body": "<p>Hi Becki,</p><p>...<a href=\"https://povison.com/products/atlas-sofa\">the POVISON Atlas sofa</a>...</p>",
+  "html": true,
   "to": "<resolved from identity.primary_email>",
   "thread_id": null,
-  "facts_written": {"offer": 2, "identity": 1}
+  "facts_written": {"offer": 2, "identity": 1},
+  "brief_status": "fresh",
+  "personalization_tokens_matched": ["cozy hosting", "honest reviews"]
 }
 ```
+
+`html: true` is mandatory whenever the body contains anchor tags so
+the bridge sends the Gmail draft with a `text/html` MIME part.
+
+`brief_status` mirrors the value from the `[P0.1]` creator brief block.
+`personalization_tokens_matched` lists the brief tokens Step 2c found in
+the body — empty list is only allowed when `brief_status == "unavailable"`.
+
+When `brief_status == "unavailable"`, the envelope MUST instead include
+`low_personalization: true` and `low_personalization_reason:
+"creator_brief_unavailable"` (in lieu of `personalization_tokens_matched`)
+so the operator review queue can surface these drafts for manual edits.
 
 The caller (router or operator) is responsible for persisting the
 draft to Gmail.
@@ -191,6 +354,24 @@ Step 1 reveals `outreach.status=satisfied`. Skill aborts with
   context carries. Use `campaign.product_display_name`; if absent,
   fall back to a generic category phrase. The Step 2b regex guard is
   a backstop, not a license to skip the constraint.
+- Never lift the creator brief verbatim into the body — paraphrase in
+  your own words. A copy-pasted pillar phrase reads exactly as canned
+  as a generic opener. Step 2c only checks that a brief token appears
+  somewhere in the body, not that the sentence sounds human; you still
+  have to write a real sentence.
+- Never set `brief_status: "unavailable"` without a real loader failure.
+  If the loader returned `fresh`/`refreshed`, the brief exists and you
+  must use it — falsely flagging `unavailable` to skip Step 2c will
+  surface in operator review as a low-quality draft.
+- Never greet the KOL by their last name or full raw handle.
+  `Hi beckiowens,` / `Hi @beckiowens,` / `Hi Becki Owens,` are all
+  wrong; use `Hi Becki,` (first name only, resolved via Step 1b).
+- Never invent a `product_url`. If `campaign.product_url` is empty,
+  render the product name as plain text — do not link it to
+  `campaign_id`, the brand homepage, or a guessed product page.
+- Never set `html: false` while keeping anchor tags in `body`. The
+  draft will be sent as `text/plain` and the KOL will see raw
+  `<a href="…">…</a>` markup.
 - Never insert price / commission / deliverable count language in the
   cold email — those goals are downstream and the dispatcher will pick
   them up after the reply.

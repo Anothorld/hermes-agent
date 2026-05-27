@@ -115,6 +115,14 @@ def _contract_satisfied(s: State, c: Context) -> bool:
     return _present(s, "offer.contract_signed")
 
 
+_PAYING_MODES = frozenset({"paid", "commission", "hybrid"})
+_NON_PAYING_MODES = frozenset({"gifted", "gifted_no_product"})
+
+
+def _payout_required(s: State, c: Context) -> bool:
+    return _contract_satisfied(s, c) and s.get("offer.compensation_mode") in _PAYING_MODES
+
+
 def _outreach_sent(s: State, _c: Context) -> bool:
     return _present(s, "offer.outreach_sent")
 
@@ -238,6 +246,13 @@ GOALS: dict[str, Goal] = {
         entry=_contract_satisfied,
         skip_when=lambda s, c: s.get("offer.compensation_mode") == "commission_no_product",
         gate_predicates=(_gate_logistics_anomaly,),
+    ),
+    "payout_setup": Goal(
+        name="payout_setup",
+        lane="fulfillment",
+        required_facts=("payout.method_collected",),
+        entry=_payout_required,
+        skip_when=lambda s, c: s.get("offer.compensation_mode") in _NON_PAYING_MODES,
     ),
     "content_production": Goal(
         name="content_production",

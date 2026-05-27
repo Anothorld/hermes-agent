@@ -9,7 +9,10 @@ import { TimeAgo } from '../components/inputs/TimeAgo';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { factKeyLabel } from '../components/factKeyLabel';
 import { KolArchiveDialog } from '../components/dialogs/KolArchiveDialog';
+import { UnreadDot } from '../components/UnreadDot';
+import { isRealCampaignId } from '../lib/campaignId';
 import { useEnvStore } from '../lib/store';
+import { useUnreadStore, isUnread } from '../lib/unread';
 import { outcomeChipClass, outcomeLabel } from '../lib/kolOutcomes';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
@@ -85,16 +88,33 @@ function pickSettled<T>(r: PromiseSettledResult<T>): SectionState<T> {
 export function KolDetailPage() {
   const { id } = useParams();
   const [search] = useSearchParams();
-  const campaignId = search.get('campaign_id') || '';
+  // ``isRealCampaignId`` filters out the historical "null"/"undefined"
+  // sentinels that could arrive via a buggy link upstream (e.g. an
+  // identity-scoped escalation row whose JSON-null ``campaign_id`` got
+  // ``encodeURIComponent``-ed into the literal string ``"null"``).
+  // Treat those exactly like a missing param so the page shows the
+  // ``需要 ?campaign_id=<>`` error instead of forwarding the sentinel
+  // to every downstream API call.
+  const rawCampaignId = search.get('campaign_id');
+  const campaignId = isRealCampaignId(rawCampaignId) ? rawCampaignId : '';
   const env = useEnvStore((s) => s.env);
   const identityId = Number(id);
   const [identity, setIdentity] = useState<SectionState<IdentityResponse>>(initialSection);
   const [goals, setGoals] = useState<SectionState<GoalsResponse>>(initialSection);
   const [escalations, setEscalations] = useState<SectionState<EscalationLite[]>>(initialSection);
   const [pendingApprovals, setPendingApprovals] = useState<number>(0);
+  const [approvalLatestAt, setApprovalLatestAt] = useState<string | null>(null);
+  const [escalationLatestAt, setEscalationLatestAt] = useState<string | null>(null);
   const [facts, setFacts] = useState<SectionState<Record<string, unknown>>>(initialSection);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<number>(0);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const markSeen = useUnreadStore((s) => s.markSeen);
+  const seenApproval = useUnreadStore(
+    (s) => s.seen[`approvals.kol.${identityId}`],
+  );
+  const seenEscalation = useUnreadStore(
+    (s) => s.seen[`escalations.kol.${identityId}`],
+  );
 
   const refresh = useCallback(async () => {
     if (!identityId || !campaignId) {
@@ -107,31 +127,45 @@ export function KolDetailPage() {
         `/identities/${identityId}/goals?campaign_id=${encodeURIComponent(campaignId)}&env=${env}`,
       ),
       api.get<EscalationLite[]>(`/escalations?state=awaiting_answer&env=${env}`),
-      api.get<Array<{ identity_id?: number; campaign_id?: string }>>(`/approvals?env=${env}`),
+      api.get<Array<{ identity_id?: number; campaign_id?: string; opened_at?: string | null }>>(
+        `/approvals?env=${env}`,
+      ),
       api.get<{ facts: Record<string, unknown> }>(
         `/facts/${identityId}?campaign_id=${encodeURIComponent(campaignId)}&env=${env}`,
       ),
     ]);
     setIdentity(pickSettled(idR));
     setGoals(pickSettled(goalsR));
-    setEscalations(
-      escR.status === 'fulfilled'
-        ? {
-            status: 'ok',
-            data: (escR.value || []).filter(
-              (e) => (e as unknown as { identity_id?: number }).identity_id === identityId,
-            ),
-            error: null,
-          }
-        : { status: 'error', data: null, error: escR.reason },
-    );
-    setPendingApprovals(
-      apprR.status === 'fulfilled'
-        ? (apprR.value || []).filter(
-            (a) => a.identity_id === identityId && a.campaign_id === campaignId,
-          ).length
-        : 0,
-    );
+    let escLatest: string | null = null;
+    if (escR.status === 'fulfilled') {
+      const mine = (escR.value || []).filter(
+        (e) => (e as unknown as { identity_id?: number }).identity_id === identityId,
+      );
+      setEscalations({ status: 'ok', data: mine, error: null });
+      for (const e of mine) {
+        if (e.created_at && (!escLatest || e.created_at > escLatest)) {
+          escLatest = e.created_at;
+        }
+      }
+    } else {
+      setEscalations({ status: 'error', data: null, error: escR.reason });
+    }
+    setEscalationLatestAt(escLatest);
+
+    let apprLatest: string | null = null;
+    let apprCount = 0;
+    if (apprR.status === 'fulfilled') {
+      for (const a of apprR.value || []) {
+        if (a.identity_id !== identityId || a.campaign_id !== campaignId) continue;
+        apprCount += 1;
+        if (a.opened_at && (!apprLatest || a.opened_at > apprLatest)) {
+          apprLatest = a.opened_at;
+        }
+      }
+    }
+    setPendingApprovals(apprCount);
+    setApprovalLatestAt(apprLatest);
+
     setFacts(
       factsR.status === 'fulfilled'
         ? { status: 'ok', data: factsR.value?.facts ?? {}, error: null }
@@ -139,6 +173,20 @@ export function KolDetailPage() {
     );
     setLastRefreshedAt(Date.now());
   }, [identityId, campaignId, env]);
+
+  // Mark approvals/escalations seen ONCE per KOL visit. Doing it inside
+  // refresh() would mark the latest fetched timestamps as seen on every
+  // 20s poll, so a fresh approval landing while the operator stares at
+  // this page would never produce a dot. Marking on mount instead lets
+  // subsequent refreshes legitimately re-fire the dot for new items;
+  // navigating away and back resets the baseline.
+  useEffect(() => {
+    if (!identityId) return;
+    const nowMs = Date.now();
+    markSeen(`approvals.kol.${identityId}`, nowMs);
+    markSeen(`escalations.kol.${identityId}`, nowMs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identityId]);
 
   useEffect(() => {
     refresh();
@@ -159,7 +207,15 @@ export function KolDetailPage() {
   }, [goals]);
 
   if (!campaignId || !identityId) {
-    return <ErrorAlert error={new Error('需要 identity id 和 ?campaign_id=<>')} />;
+    // Distinguish "no campaign_id passed" from "campaign_id passed
+    // but it's a sentinel value (?campaign_id=null)" so the operator
+    // knows the link they followed is broken vs. a missing route.
+    const sentinelInUrl =
+      rawCampaignId !== null && rawCampaignId !== '' && !isRealCampaignId(rawCampaignId);
+    const msg = sentinelInUrl
+      ? `链接里的 campaign_id="${rawCampaignId}" 不是合法值（来自上游一个 null/undefined 链接）。请从 Kanban 或 Candidates 页选这个 KOL 进入。`
+      : '需要 identity id 和 ?campaign_id=<>';
+    return <ErrorAlert error={new Error(msg)} />;
   }
   if (identity.status === 'pending' || goals.status === 'pending') {
     return <div className="text-sm text-slate-500">加载中…</div>;
@@ -298,6 +354,10 @@ export function KolDetailPage() {
           }`}
         >
           待审批：{pendingApprovals}
+          <UnreadDot
+            show={isUnread(approvalLatestAt, seenApproval)}
+            title="有新的待审批"
+          />
         </Link>
         <Link
           to={`/escalations?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityVal.id}&env=${env}`}
@@ -308,6 +368,10 @@ export function KolDetailPage() {
           }`}
         >
           升级中：{escalationsList.length}
+          <UnreadDot
+            show={isUnread(escalationLatestAt, seenEscalation)}
+            title="有新的升级"
+          />
         </Link>
       </div>
 

@@ -38,6 +38,7 @@ function readLock(key: string): Lock | null {
 export type InflightLock = {
   locked: boolean;
   runId: string | null;
+  startedAtMs: number | null;
   remainingSeconds: number;
   acquire: (runId: string | null, startedAtMs?: number) => void;
   release: () => void;
@@ -78,6 +79,7 @@ export function useInflightLock(key: string): InflightLock {
   return {
     locked: lock !== null && remainingSeconds > 0,
     runId: lock?.run_id ?? null,
+    startedAtMs: lock?.started_at_ms ?? null,
     remainingSeconds,
     acquire,
     release,
