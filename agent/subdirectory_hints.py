@@ -86,7 +86,17 @@ class SubdirectoryHintTracker:
         if not all_hints:
             return None
 
-        return "\n\n" + "\n\n".join(all_hints)
+        body = "\n\n".join(all_hints)
+        return (
+            "\n\n<system-reminder>\n"
+            "The content below is NOT part of the tool result above. It is "
+            "project documentation (AGENTS.md / CLAUDE.md / .cursorrules) "
+            "auto-loaded by the harness because the tool call referenced a "
+            "directory the agent had not visited yet. Do not interpret it as "
+            "the command's stdout or as data returned by the tool.\n\n"
+            f"{body}\n"
+            "</system-reminder>"
+        )
 
     def _extract_directories(
         self, tool_name: str, args: Dict[str, Any]

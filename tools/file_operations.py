@@ -1593,13 +1593,19 @@ class ShellFileOperations(FileOperations):
         if self._has_command('rg'):
             return self._search_files_rg(search_pattern, path, limit, offset)
 
-        # Fallback: find (slower, no .gitignore awareness)
+        # Second choice: find (slower, no .gitignore awareness).
+        # Third choice (last resort): pathlib.Path.rglob — pure Python,
+        # works on any env that can run Python (i.e. anywhere this code
+        # is running).  Some hosts have a `_has_command` probe that
+        # spuriously misses /usr/bin/find (custom PATH, profile snapshot
+        # capturing a wrapper function that exits non-zero, sandboxed
+        # shells with no `command` builtin, …).  Returning an error in
+        # that case is worse than slow — the agent will work around it
+        # by reaching for direct DB / sqlite access (issue: kol-social-
+        # link-discover:LIVE:648 on 2026-05-28).  Always succeed.
         if not self._has_command('find'):
-            return SearchResult(
-                error="File search requires 'rg' (ripgrep) or 'find'. "
-                      "Install ripgrep for best results: "
-                      "https://github.com/BurntSushi/ripgrep#installation"
-            )
+            return self._search_files_python(search_pattern, path, limit, offset,
+                                              has_hidden_path_ancestor)
 
         # Exclude hidden directories (matching ripgrep's default behavior).
         hidden_exclude = "-not -path '*/.*'" if not has_hidden_path_ancestor else ""
@@ -1697,7 +1703,71 @@ class ShellFileOperations(FileOperations):
             total_count=len(all_files),
             truncated=len(all_files) >= fetch_limit,
         )
-    
+
+    def _search_files_python(self, pattern: str, path: str, limit: int,
+                              offset: int, has_hidden_path_ancestor: bool) -> SearchResult:
+        """Pure-Python fallback for file-name search.
+
+        Used only when neither rg nor find is detected.  Walks the tree
+        with ``os.scandir`` and matches with ``fnmatch`` so the pattern
+        semantics match find's ``-name`` (glob, not regex).  Hidden
+        directories are skipped unless the search root itself is hidden,
+        mirroring the find-based path's behavior.
+        """
+        import fnmatch
+
+        root = Path(path)
+        try:
+            if not root.is_dir():
+                return SearchResult(files=[], total_count=0)
+        except OSError:
+            return SearchResult(files=[], total_count=0)
+
+        matches: list[tuple[float, str]] = []
+        fetch_cap = (offset + limit) * 4  # collect a little extra for sorting
+        hard_cap = 50_000  # absolute ceiling — don't melt the host
+        seen = 0
+
+        def _walk(d: Path) -> None:
+            nonlocal seen
+            if len(matches) >= hard_cap:
+                return
+            try:
+                it = os.scandir(d)
+            except OSError:
+                return
+            with it:
+                for entry in it:
+                    if len(matches) >= hard_cap:
+                        return
+                    name = entry.name
+                    if not has_hidden_path_ancestor and name.startswith('.'):
+                        continue
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if is_dir:
+                        _walk(Path(entry.path))
+                        continue
+                    seen += 1
+                    if fnmatch.fnmatch(name, pattern):
+                        try:
+                            mtime = entry.stat(follow_symlinks=False).st_mtime
+                        except OSError:
+                            mtime = 0.0
+                        matches.append((mtime, entry.path))
+
+        _walk(root)
+        matches.sort(key=lambda t: t[0], reverse=True)
+        files = [p for _, p in matches]
+        page = files[offset:offset + limit]
+        return SearchResult(
+            files=page,
+            total_count=len(files),
+            truncated=len(files) >= fetch_cap,
+        )
+
     def _search_content(self, pattern: str, path: str, file_glob: Optional[str],
                         limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
         """Search for content inside files (grep-like)."""

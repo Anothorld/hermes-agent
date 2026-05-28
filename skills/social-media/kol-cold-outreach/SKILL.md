@@ -348,6 +348,13 @@ Step 1 reveals `total_collabs=3`. Skill aborts with
 Step 1 reveals `outreach.status=satisfied`. Skill aborts with
 `{"skipped":"already_sent"}`. The router will not re-trigger.
 
+## Redraft / operator retrigger notes
+- When an operator explicitly asks for a fresh initial-outreach draft for one already-selected identity in an existing campaign, keep the run scoped to that exact `identity_id` only. Re-verify `get-dispatch-context` for the `(identity_id, campaign_id)` pair before drafting.
+- In this redraft path, if `primary_email` is already present on `get-identity`, skip any email-discovery step and go straight to path resolution (`cold` vs `reengagement`) from CAL relationship signals.
+- Persist the regenerated draft separately from send-state: emit the `kol_initial_outreach_draft_ready` event and overwrite `approval.reply_draft` with `decision="pending"`, `kind="initial_outreach"`, and the fresh draft payload. Do NOT set `offer.outreach_sent=true` during a redraft.
+- Bridge CLI reminder: `kol_bridge_tool.py write-event` takes `--json` (or `@path`) for nested payloads; do not use `--payload-json`. For any nested draft/event body, prefer temp-file-backed `@/tmp/*.json` payloads over inline shell quoting.
+- Reference: `references/campaign-redraft-outreach-single-identity.md`
+
 ## Pitfalls
 - Never paste a SKU / model code / `campaign_id` into the email body
   or subject — even if that's the only product identifier the campaign

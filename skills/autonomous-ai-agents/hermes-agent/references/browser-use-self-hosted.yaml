@@ -1,0 +1,14 @@
+# Self-hosted browser-use cloud browser docker-compose template
+# Run with: sudo docker compose up -d
+version: "3.8"
+services:
+  browser-use:
+    image: ghcr.io/browser-use/browser-use:latest
+    ports:
+      - "7317:7317"
+    environment:
+      - API_KEY=your-custom-auth-key # Replace with your own authentication key
+      - MAX_BROWSERS=5 # Max concurrent browser instances
+      - BROWSER_TIMEOUT=300 # Browser idle timeout in seconds
+    restart: unless-stopped
+    shm_size: "2gb" # Required shared memory for Chromium

@@ -80,6 +80,18 @@ def _pid_running(pid: int | None) -> bool:
         return False
     except PermissionError:
         return True
+    # `os.kill(pid, 0)` succeeds for zombies — the kernel still has the
+    # entry until the parent reaps it. Treat zombies as not running so
+    # stop/restart isn't tricked into trying to signal a dead process.
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            capture_output=True, text=True, timeout=2,
+        )
+        if (out.stdout or "").strip().startswith("Z"):
+            return False
+    except (OSError, subprocess.SubprocessError):
+        pass
     return True
 
 
@@ -174,8 +186,11 @@ def _stop() -> dict[str, Any]:
             os.killpg(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        except PermissionError as exc:
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"cannot stop watcher: {exc}") from exc
+        except PermissionError:
+            # EPERM here typically means the pgid no longer has a living
+            # leader (zombie / orphaned). Nothing to signal; fall through
+            # and mark stopped so restart can spawn a fresh watcher.
+            pass
     state["stopped_at"] = _now()
     _save_state(state)
     return _status()

@@ -24,6 +24,7 @@ Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OA
 ## References
 
 - `references/gmail-search-syntax.md` — Gmail search operators (is:unread, from:, newer_than:, etc.)
+- `references/gmail-drafts-vs-send-safety.md` — how to verify draft capability and avoid accidental real sends when a workflow is draft-only.
 
 ## Scripts
 
@@ -162,6 +163,7 @@ Should print `AUTHENTICATED`. Setup is complete — token refreshes automaticall
 - Token is stored at `~/.hermes/google_token.json` and auto-refreshes.
 - Pending OAuth session state/verifier are stored temporarily at `~/.hermes/google_oauth_pending.json` until exchange completes.
 - If `gws` is installed, `google_api.py` points it at the same `~/.hermes/google_token.json` credentials file. Users do not need to run a separate `gws auth login` flow.
+- In profile-scoped Hermes runs, the setup script may report `AUTHENTICATED` from a profile-local token path such as `~/.hermes/profiles/<profile>/google_token.json`, while the shared home may also contain `~/.hermes/google_token.json`. Treat the live `setup.py --check` result as the source of truth for the active run instead of inferring auth state from one fixed path.
 - To revoke: `$GSETUP --revoke`
 
 ## Usage
@@ -173,6 +175,11 @@ GAPI="python ${HERMES_HOME:-$HOME/.hermes}/skills/productivity/google-workspace/
 ```
 
 ### Gmail
+
+Important operational note for analysis workflows:
+- `gmail search` returns message ids in the `id` field and conversation grouping ids in `threadId`.
+- Use the `id` field with `gmail get`; do not pass `threadId` into `gmail get` or Gmail API will return 404 `Requested entity was not found`.
+- For thread analysis, group by `threadId` but fetch bodies by message `id`.
 
 ```bash
 # Search (returns JSON array with id, from, subject, date, snippet)
@@ -197,6 +204,11 @@ $GAPI gmail labels
 $GAPI gmail modify MESSAGE_ID --add-labels LABEL_ID
 $GAPI gmail modify MESSAGE_ID --remove-labels UNREAD
 ```
+
+Important capability note:
+- The bundled `scripts/google_api.py` wrapper currently documents and exposes Gmail search/get/send/reply/labels/modify. If a workflow requires true Gmail draft creation, verify that the exact wrapper/API path supports drafts before acting.
+- Do not substitute `gmail send` for `drafts.create` just because a task is in TEST MODE. TEST inboxes are still real sends.
+- If the local `gws` binary exists but the draft path is unclear or the binary looks suspicious, stop and verify the capability explicitly before any side effect.
 
 ### Calendar
 
