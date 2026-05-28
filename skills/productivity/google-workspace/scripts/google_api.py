@@ -196,21 +196,22 @@ def _resolve_threading_headers(
 
 
 def _extract_message_body(msg: dict) -> str:
-    body = ""
+    # Outlook + Gmail-web commonly wrap content in nested multipart/* (e.g.
+    # multipart/related → multipart/alternative → text/plain), so we walk
+    # the whole MIME tree instead of only scanning the top-level parts.
+    def _find(part: dict, want: str) -> str:
+        if part.get("mimeType") == want and part.get("body", {}).get("data"):
+            return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
+        for child in part.get("parts") or []:
+            found = _find(child, want)
+            if found:
+                return found
+        return ""
+
     payload = msg.get("payload", {})
-    if payload.get("body", {}).get("data"):
-        body = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
-    elif payload.get("parts"):
-        for part in payload["parts"]:
-            if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
-                body = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
-                break
-        if not body:
-            for part in payload["parts"]:
-                if part.get("mimeType") == "text/html" and part.get("body", {}).get("data"):
-                    body = base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
-                    break
-    return body
+    if payload.get("body", {}).get("data") and not payload.get("parts"):
+        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+    return _find(payload, "text/plain") or _find(payload, "text/html")
 
 
 def _extract_doc_text(doc: dict) -> str:

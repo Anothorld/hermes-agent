@@ -97,6 +97,8 @@ All candidates must meet:
 | Competitor deals | no active exclusive direct competitor deal; past one-off competitor collab is a positive flag |
 | Scores | Match ≥ 70 and Showcase ≥ 50 |
 
+Before applying the follower threshold, normalize any locale-specific shorthand to an absolute count. Treat `K/k = 1,000`, `M = 1,000,000`, `B = 1,000,000,000`, `万/w = 10,000`, and `亿 = 100,000,000`. Example: `73.8万` = `738,000`, so it PASSES the `≥ 100k` gate; `4.6万` = `46,000`, so it fails.
+
 ## Pre-discovery do-not-contact pull
 Before the first seed search, pull the operator-maintained do-not-contact list ONCE per run from the bridge and keep it in memory for the rest of the run. These are accounts that operators have manually archived via the console with reasons like `competitor` (self-selling furniture, brand-owned account, etc.) — they must never reappear in a shortlist regardless of how good their content looks.
 
@@ -224,6 +226,12 @@ Minimum evidence when reachable:
 - use screenshots (`browser_snapshot` / `browser_vision`) and extract numbers via `browser_console(expression="...")` from the rendered page;
 - when `veedcrawl_metadata(url=...)` is in your toolset, prefer it for per-Reel facts because it is free; when it is NOT in your toolset (e.g. the active agent profile has not enabled the veedcrawl plugin), fall back to `browser_navigate` on the Reel URL plus `browser_console`/`browser_vision` to read view counts, likes and dates. Do not abort the run because veedcrawl is unavailable;
 - use `veedcrawl_extract(url=..., prompt=...)` only when the user explicitly requests paid/deep extraction.
+
+**Partial Reel-cover load is acceptable (soft).** IG's Reel grid thumbnails frequently fail to render for transient reasons (CDN flakes, lazy-load delays, IG throttling, viewport virtualization) — this is normal and does NOT mean the candidate is unjudgeable. Rules:
+- Judge showcase fit from whatever covers DID load. **6+ visible covers out of 12-15** is enough to assess content theme, scene fit, and on-camera style; do not gate qualification on a full grid.
+- Before declaring "no signal", do ONE scroll + re-snapshot to give lazy-load a chance. If still empty, try `browser_get_images` to pull whatever the page has cached.
+- Only abandon a candidate as unjudgeable when **zero** Reel covers render after that one retry AND captions/alt-text are also empty. In that case skip the candidate and move on — do NOT escalate to `mode_gate_blocked` or count this as a surface failure.
+- Do not penalize a creator's Showcase Score for a partial grid; score from the covers you can see and note "partial grid" in evidence if it affected sample size.
 
 **Anti-fabrication rule (hard).** Every handle you place into the orchestrator's `shortlist_ready` `candidates` array MUST be a handle that you actually visited via `browser_navigate("https://www.instagram.com/<handle>/")` earlier in the same run, with on-page evidence supporting the numbers you write into `audience_fit`, `engagement_quality`, `niche_match`, and `reason`. Generic-sounding placeholders (`home_style_lover`, `minimalist_home`, `cozy_living_xx`, `test_kol_*`) are red flags; if you cannot point to the corresponding `browser_navigate` call, omit the handle. It is better to return fewer real candidates (or invoke the orchestrator's zero-results escape hatch after at least 3 distinct surface visits) than to invent any.
 
@@ -406,6 +414,7 @@ Used only when brief explicitly says `browser_mode: cloud` (default is `local-ch
 - Do not keep creators who self-sell furniture (own brand, DTC, persistent furniture storefront like `mytexashouse`-style accounts) — they are direct competitors no matter how lifestyle-personal the feed looks. Always check bio, link-in-bio, pinned posts, and the last 10-15 Reels for recurring furniture-commerce signals. Self-commerce in other categories (fashion / beauty / food / kitchenware / decor accessories / tech / pet) does NOT trigger this rule.
 - Do not overfit historical winners' surface style; reuse the conversion mechanism.
 - Do not include Reels posted within the last 72h in averages.
+- Do not compare follower thresholds against locale-formatted shorthand until you have normalized it to an absolute count. `73.8万` is `738,000`, not `73.8k`.
 - Do not keep commenters with < 100k followers.
 - Do not call `veedcrawl_extract` without explicit request and both `url` + `prompt`.
 - **Local Mode — never** issue a `follow / like / comment / save / DM / share` action, even when a snapshot lists it as the easiest-looking element. The skill is read-only on the main account.

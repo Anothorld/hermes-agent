@@ -212,6 +212,25 @@ The `mcp` Python package is not installed. Install it:
 pip install mcp
 ```
 
+**Pitfall — multiple Hermes venvs after migration / repo move.** Hermes can end up with more than one venv on disk (e.g. `~/.hermes/hermes-agent/venv` from a fresh install plus `<your-checkout>/venv` from a git checkout you re-pointed the CLI/systemd at). `pip install mcp` only affects the venv whose `pip` you ran. Verify the venv that the gateway actually uses:
+
+```bash
+# What does the systemd unit launch?
+grep ExecStart ~/.config/systemd/user/hermes-gateway*.service
+
+# What does the shell wrapper resolve to?
+readlink -f "$(which hermes)"
+```
+
+Install `mcp` into THAT venv specifically:
+
+```bash
+/path/to/active/venv/bin/pip install mcp
+/path/to/active/venv/bin/python -c "import mcp; print('ok')"
+```
+
+If you see "tools not appearing" after configuring `mcp_servers`, the most common cause is that `mcp` was installed into the wrong venv and discovery silently no-ops in the live process.
+
 ### "No MCP servers configured"
 
 No `mcp_servers` key in `~/.hermes/config.yaml`, or it's empty. Add at least one server.
@@ -322,6 +341,37 @@ mcp_servers:
 
 All tools from all servers are registered and available simultaneously. Each server's tools are prefixed with its name to avoid collisions.
 
+### WSL ↔ Windows Chrome DevTools MCP pattern
+
+When Hermes runs inside **WSL** but Chrome is running on the **Windows host**, `--browserUrl http://127.0.0.1:9222` may work in Windows itself while still being unreachable from WSL. In that setup:
+
+1. Start Windows Chrome with remote debugging enabled, and bind the debug port broadly enough for WSL to reach it:
+   ```bat
+   "C:\Program Files\Google\Chrome\Application\chrome.exe" ^
+     --remote-debugging-port=9222 ^
+     --remote-debugging-address=0.0.0.0 ^
+     --user-data-dir="%LOCALAPPDATA%\ChromeDebugProfile-9222" ^
+     --no-first-run --no-default-browser-check
+   ```
+2. Verify on Windows first by opening `http://127.0.0.1:9222/json/version` in a normal browser. If it does not return JSON, Chrome was not launched with the expected flags.
+3. If Hermes in WSL still cannot connect to `127.0.0.1:9222`, use the Windows host IPv4 from `ipconfig` (for example `10.30.80.118`) in the MCP config instead:
+   ```yaml
+   mcp_servers:
+     chrome_devtools:
+       command: "npx"
+       args:
+         - "-y"
+         - "chrome-devtools-mcp@latest"
+         - "--browserUrl"
+         - "http://10.30.80.118:9222"
+         - "--no-usage-statistics"
+       timeout: 180
+       connect_timeout: 60
+   ```
+4. Install the Python MCP SDK in the same Hermes venv that actually runs the agent / gateway (`pip install mcp`), or MCP discovery will be silently unavailable in that environment.
+
+Pitfall: editing the right config but testing from the wrong runtime is common. Confirm which Hermes binary / venv is active before concluding the MCP setup is broken.
+
 ## Sampling (Server-Initiated LLM Requests)
 
 Hermes supports MCP's `sampling/createMessage` capability — MCP servers can request LLM completions through the agent during tool execution. This enables agent-in-the-loop workflows (data analysis, content generation, decision-making).
@@ -355,3 +405,46 @@ Disable sampling for untrusted servers with `sampling: { enabled: false }`.
 - The native MCP client is independent of `mcporter` -- you can use both simultaneously
 - Server connections are persistent and shared across all conversations in the same agent process
 - Adding or removing servers requires restarting the agent (no hot-reload currently)
+
+## WSL + browser-controlling MCP servers (chrome-devtools-mcp, playwright, etc.)
+
+When Hermes runs inside WSL but the browser you actually want it to drive lives on the Windows host, do NOT have the MCP server launch its own browser inside WSL. WSL has no graphical Chrome by default, and even with a headless install you lose the user's existing logged-in profile.
+
+The working topology is:
+
+1. On the **Windows** side, start Chrome with `--remote-debugging-port=9222 --user-data-dir=<separate-profile>` (use a dedicated profile so it doesn't fight your everyday Chrome).
+2. In `mcp_servers`, point the MCP server at that endpoint over loopback. WSL2 can usually reach the Windows host's `127.0.0.1:9222` directly because of the WSL/host loopback bridge:
+
+```yaml
+mcp_servers:
+  chrome_devtools:
+    command: "npx"
+    args:
+      - "-y"
+      - "chrome-devtools-mcp@latest"
+      - "--browserUrl"
+      - "http://127.0.0.1:9222"
+      - "--no-usage-statistics"
+    timeout: 180
+```
+
+3. If `127.0.0.1:9222` is not reachable from WSL (some firewall configurations, older WSL2, or non-default network modes), launch Chrome with `--remote-debugging-address=0.0.0.0` and use the Windows host's IP from inside WSL:
+
+```bash
+# Inside WSL — discover the Windows host IP
+ip route show | awk '/default/ {print $3}'
+# or, on recent WSL:
+cat /etc/resolv.conf | awk '/nameserver/ {print $2}'
+```
+
+Then put `http://<that-ip>:9222` in `--browserUrl`. Note that binding `0.0.0.0` exposes the debugging port on all interfaces — only do this on a trusted network.
+
+4. Order matters at first startup: chrome-devtools-mcp fails its initial connection if Chrome is not already listening. Start the Windows-side debug Chrome BEFORE you `hermes gateway restart`, otherwise the MCP server retries with backoff and the first user-visible call will time out. Subsequent runs reconnect automatically.
+
+5. Don't share that debugging port with another MCP / automation client at the same time. Chrome's CDP allows multiple clients but state is shared, and `chrome-devtools-mcp`'s page-tracking gets confused if a second tool is also navigating.
+
+This same pattern works for any "control a real browser via CDP" MCP server. The WSL-side gotchas (loopback reachability, `0.0.0.0` bind, host IP discovery) are the part that's easy to forget.
+
+### Migrating skills/runbooks from `browser_*` to `mcp_chrome_devtools_*`
+
+The two toolsets cover the same capability surface but the call shapes differ — `chrome-devtools-mcp` is uid-based (snapshot-driven, ephemeral identifiers) while Hermes's built-in `browser_*` is ref-based (selectors / stable refs). Any skill that previously called `browser_console`, `browser_type`, `browser_back`, `browser_vision`, etc. needs per-call-site rewriting, not a bulk rename. Full migration table, pitfalls (uid invalidation rules, IG `back` unreliability, no `vision` equivalent, stateful login profile), and a porting checklist live in `references/chrome-devtools-mcp-tool-semantics.md`.

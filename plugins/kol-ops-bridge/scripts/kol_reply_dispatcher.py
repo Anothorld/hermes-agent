@@ -31,7 +31,10 @@ Environment::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
+import errno
+import fcntl
 import json
 import logging
 import os
@@ -41,7 +44,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Literal, Optional
+from typing import Any, Iterable, Iterator, Literal, Optional
 
 # Make sibling modules importable when run via `python scripts/foo.py`.
 _PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -59,6 +62,7 @@ log = logging.getLogger("kol_reply_dispatcher")
 
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 _STATE_PATH = _HERMES_HOME / "kol-ops-bridge" / "poller_state.json"
+_LOCK_PATH = _STATE_PATH.with_suffix(".lock")
 _BRIDGE = CALClient()
 _GATEWAY_BASE = os.environ.get(
     "HERMES_GATEWAY_BASE", "http://127.0.0.1:8642"
@@ -322,8 +326,16 @@ def _process_message(msg: GmailMessage, env: str) -> ProcessStatus:
         session_id=session_id,
     )
     if not run_id:
-        log.error("gateway dispatch did not return run_id for msg=%s", msg.message_id)
-        return "retry"
+        # The inbound_reply event is already in CAL — re-running would write a
+        # duplicate row and (if the gateway recovers) fire a duplicate agent
+        # run. Treat as "dispatched" so the message is added to seen; the
+        # operator will notice the missing draft and can manually re-invoke.
+        log.error(
+            "gateway dispatch did not return run_id for msg=%s — event written"
+            " but no agent run; operator must check console",
+            msg.message_id,
+        )
+        return "dispatched"
     _register_console_run(
         campaign_id=campaign_id,
         env=env,
@@ -335,43 +347,78 @@ def _process_message(msg: GmailMessage, env: str) -> ProcessStatus:
     return "dispatched"
 
 
+@contextlib.contextmanager
+def _state_lock(*, blocking: bool = True) -> Iterator[None]:
+    """Exclusive lock around a full run_once cycle.
+
+    Without this, a watcher tick and a manually-invoked one-shot dispatcher
+    can both read ``seen_LIVE``, both miss a message, both POST /events and
+    /v1/runs for it, producing duplicate ``kol_inbound_reply`` rows and
+    duplicate agent runs in the same second (see 2026-05-28 Megan incident:
+    cal.db ids 4436/4437 landed at 02:06:49Z). Held for the whole cycle —
+    read + process + write — so the second caller waits, then re-reads the
+    updated ``seen`` and skips correctly. Lock is advisory (fcntl.flock),
+    only honored by other dispatchers; manual edits of poller_state.json
+    are still unsafe by design.
+    """
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(_LOCK_PATH, "a+")
+    flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+    try:
+        try:
+            fcntl.flock(fh.fileno(), flags)
+        except BlockingIOError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise RuntimeError(
+                    "another kol_reply_dispatcher run is in progress "
+                    f"(lock={_LOCK_PATH})"
+                ) from exc
+            raise
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
 def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int]:
     client = GmailClient()
     if not client.is_available():
         raise GmailUnavailable("Gmail token / google_api.py unavailable")
 
-    state = _load_state()
-    seen: set[str] = set(state.get(f"seen_{env}", []))
+    with _state_lock():
+        state = _load_state()
+        seen: set[str] = set(state.get(f"seen_{env}", []))
 
-    query = f"in:inbox newer_than:{int(lookback_days)}d -from:me"
-    messages = client.search(query=query, max_results=max_results)
+        query = f"in:inbox newer_than:{int(lookback_days)}d -from:me"
+        messages = client.search(query=query, max_results=max_results)
 
-    matched = 0
-    skipped = 0
-    retry = 0
-    for stub in messages:
-        if stub.message_id in seen:
-            continue
-        try:
-            full = client.get_message(stub.message_id)
-        except GmailUnavailable as exc:
-            log.warning("gmail get %s failed: %s", stub.message_id, exc)
-            continue
-        status = _process_message(full, env=env)
-        if status == "dispatched":
-            matched += 1
-            seen.add(full.message_id)
-        elif status == "skipped":
-            skipped += 1
-            seen.add(full.message_id)
-        else:
-            retry += 1
+        matched = 0
+        skipped = 0
+        retry = 0
+        for stub in messages:
+            if stub.message_id in seen:
+                continue
+            try:
+                full = client.get_message(stub.message_id)
+            except GmailUnavailable as exc:
+                log.warning("gmail get %s failed: %s", stub.message_id, exc)
+                continue
+            status = _process_message(full, env=env)
+            if status == "dispatched":
+                matched += 1
+                seen.add(full.message_id)
+            elif status == "skipped":
+                skipped += 1
+                seen.add(full.message_id)
+            else:
+                retry += 1
 
-    # Bound the seen-set so the state file doesn't grow forever.
-    state[f"seen_{env}"] = sorted(seen)[-2000:]
-    state[f"last_run_{env}"] = int(time.time())
-    _save_state(state)
-    return {"matched": matched, "skipped": skipped, "retry": retry, "scanned": len(messages)}
+        state[f"seen_{env}"] = sorted(seen)[-2000:]
+        state[f"last_run_{env}"] = int(time.time())
+        _save_state(state)
+        return {"matched": matched, "skipped": skipped, "retry": retry, "scanned": len(messages)}
 
 
 def main(argv: Optional[list[str]] = None) -> int:

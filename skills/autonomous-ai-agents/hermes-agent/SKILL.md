@@ -200,6 +200,26 @@ hermes profile export NAME  Export to tar.gz
 hermes profile import FILE  Import from archive
 ```
 
+### CLI wrapper / command-target switching
+
+When the user asks to make the shell `hermes` command point at a specific checkout, verify the live resolution chain before changing anything:
+
+1. `which hermes`
+2. `type -a hermes`
+3. `readlink -f $(which hermes)`
+4. Inspect `$PATH`
+5. Inspect `~/.local/bin/hermes` (or other wrapper script) if present
+
+Important pitfall: the repo-root launcher script (`<checkout>/hermes`) may look like the obvious target, but it can fail if invoked outside the checkout's venv context. Prefer the checkout's venv entrypoint (`<checkout>/venv/bin/hermes`) after verifying it runs successfully with `--version`.
+
+Safe update pattern:
+- Back up the current wrapper first (`~/.local/bin/hermes.bak.<timestamp>`)
+- Rewrite `~/.local/bin/hermes` to `exec` the verified target
+- Re-`chmod +x`
+- Verify with `hermes --version` and `which -a hermes`
+
+Interpretation rule: if `PATH` already prefers `<checkout>/venv/bin/hermes`, the user may still want the global wrapper updated for stability in future shells or changed PATH order. In that case, update the wrapper anyway and explain the difference between current PATH resolution and the persistent wrapper target.
+
 ### Credential Pools
 
 ```
@@ -436,6 +456,47 @@ Enable/disable via `hermes tools` (interactive) or `hermes tools enable/disable 
 Full enumeration lives in `toolsets.py` as the `TOOLSETS` dict; `_HERMES_CORE_TOOLS` is the default bundle most platforms inherit from.
 
 Tool changes take effect on `/reset` (new session). They do NOT apply mid-conversation to preserve prompt caching.
+
+### Cloud Browser Configuration
+
+The browser tool supports multiple cloud browser providers for anti-detection, geolocation spoofing, and no local Chromium installation required:
+
+#### 1. Browserbase (default recommended)
+- Setup:
+  ```bash
+  hermes tools enable browser
+  hermes config set browser.provider browserbase
+  ```
+- Add `BROWSERBASE_API_KEY=<your-key>` to `~/.hermes/.env`
+- Get API key: https://browserbase.com
+
+#### 2. Browser Use Cloud (built for browser automation agents)
+- Setup:
+  ```bash
+  hermes tools enable browser
+  hermes config set browser.provider custom
+  hermes config set browser.cdp_endpoint wss://cloud.browser-use.com/v1
+  ```
+- Add `BROWSER_USE_API_KEY=<your-key>` to `~/.hermes/.env`
+- Features: native captcha bypass, fingerprint randomization, global proxy pools
+- Get API key: https://cloud.browser-use.com/new-api-key
+
+#### 3. Camofox (anonymous browsing)
+- Setup:
+  ```bash
+  hermes tools enable browser
+  hermes config set browser.provider camofox
+  ```
+- Add `CAMOFOX_API_KEY=<your-key>` to `~/.hermes/.env`
+
+#### 4. Self-hosted browser-use
+- Use the template at `references/browser-use-self-hosted.yaml` to deploy your own cloud browser instance
+- Configure custom CDP endpoint:
+  ```bash
+  hermes config set browser.provider custom
+  hermes config set browser.cdp_endpoint http://localhost:7317
+  ```
+- Add your custom API key to `~/.hermes/.env` as `BROWSER_CDP_AUTH_TOKEN=<your-key>`
 
 ---
 

@@ -66,6 +66,27 @@ Source values are one of: `google_search_result`, `linktree`, `ig_bio`,
 ## Procedure
 
 ### Step 1 — Load identity + current URL facts
+
+> 🚫 **HARD STOP — read this BEFORE running any tool.** The bridge CLI
+> (`kol_bridge_tool.py`) is the ONLY permitted path to CAL data. If
+> get-identity or read-facts returns an empty body, exit_code != 0, a
+> truncated payload, or any error you can't parse, the **ONLY** correct
+> response is to **abort** with
+> `{"found": false, "resolved": [], "tried": ["..."], "reason_hint": "bridge CLI unavailable: <error>"}`
+> and let the operator retry from the UI. You are FORBIDDEN from any
+> of the following workaround attempts, even (especially) when you
+> think the bridge is broken:
+> - `import sqlite3` / `sqlite3.connect(...)` against any DB
+> - the `sqlite3` shell against `cal.db` or any `*.db` under `~/.hermes/`
+> - `python -c` / heredocs that read or write `cal.db`
+> - `from kol_ops_bridge ... import cal` or any direct `cal.py` import
+> - `execute_code` blocks that touch the database
+> - editing files under `~/.hermes/kol-ops-bridge/`
+>
+> A failed bridge call is **not** a license to bypass the bridge. If
+> you cannot read identity/facts via the CLI, you cannot complete this
+> skill — return the abort envelope above.
+
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-identity \
   --identity-id <identity_id> --env <TEST|LIVE>
