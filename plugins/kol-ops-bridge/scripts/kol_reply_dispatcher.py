@@ -266,6 +266,8 @@ def _build_thread_history(
     is bounded to keep prompt budgets sane on long threads.
     """
     raw = client.get_thread(thread_id)
+    # raw includes latest_message_id, but history/drop counts should not.
+    prior_message_count = sum(1 for item in raw if item.get("id") != latest_message_id)
     history: list[dict[str, str]] = []
     total = 0
     for item in raw:
@@ -279,10 +281,11 @@ def _build_thread_history(
         }
         total += len(body)
         if total > _THREAD_HISTORY_TOTAL_CAP and history:
+            dropped_count = max(prior_message_count - len(history), 0)
             history.append({
                 "from": "",
                 "date": "",
-                "body": f"... [history truncated: dropped {len(raw) - len(history)} earlier message(s)]",
+                "body": f"... [history truncated: dropped {dropped_count} earlier message(s)]",
             })
             break
         history.append(entry)
