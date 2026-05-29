@@ -9,8 +9,17 @@ tags: ["kol", "golive", "boost", "draft-generator", "publish-lane"]
 Get the post live with the right handles/hashtags, capture the live
 URL, and (if applicable) close the boost handoff loop.
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+- Reply envelope contract:
+  `references/shared/reply-envelope-contract.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **Boost code never echoes secrets.** If
   `campaign_config.boost_meta_partner_code` looks like a token (long
   alphanumeric, contains `_token_` / `secret`), abort
@@ -32,15 +41,12 @@ URL, and (if applicable) close the boost handoff loop.
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "content_review_and_golive", missing_facts: [<from goal_state>], next_action: "<confirm go-live / request boost assets>"}`,
   `current_user_id = <operator id from session>`.
-- output: prepend as the first section of the draft prompt.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
 
@@ -111,7 +117,8 @@ Read:
 ```
 
 Do **not** set `to` or `subject` — the dispatcher fills these from the
-inbound message before persisting `approval.reply_draft`.
+inbound message before persisting `approval.reply_draft` (shared:
+`references/shared/reply-envelope-contract.md`).
 
 ## Examples
 

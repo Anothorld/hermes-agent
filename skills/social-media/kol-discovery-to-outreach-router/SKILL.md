@@ -15,13 +15,19 @@ Bridge (`plugins/kol-ops-bridge/discovery_router.py`). Downstream
 outreach skills must trust the routing facts written by the Bridge and
 never re-derive them.
 
+## Shared Blocks (Phase 3)
+- Bridge runtime core:
+  `references/shared/bridge-runtime-core.md`
+- Router/dispatcher boundaries:
+  `references/shared/router-dispatcher-boundaries.md`
+
 ## Runtime Contract
 - Profile: `outreach-operator` (RBAC: operator+).
-- Bridge is the only CAL writer/reader. Forbidden: `cal.py` import,
-  direct `~/.hermes/kol-ops-bridge/cal.db` access, ad-hoc SQL,
-  `execute_code` against the DB.
-- `env` is mandatory (`TEST` or `LIVE`).
-- Drafts no email and never sends mail. The post-approval orchestrator
+- Follow shared bridge runtime core:
+  `references/shared/bridge-runtime-core.md`.
+- Follow shared router/dispatcher boundaries:
+  `references/shared/router-dispatcher-boundaries.md`.
+- The post-approval orchestrator
   invokes `kol-cold-outreach` / `kol-reengagement-outreach` after this
   routing step when the operator has approved candidates.
 - Idempotent: re-running on an already-routed pool only acts on

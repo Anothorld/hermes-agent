@@ -773,6 +773,16 @@ def list_candidates(
     return {"candidates": cal.list_candidates(campaign_id, env=env)}
 
 
+@router.get("/campaigns/{campaign_id}/candidate-handles")
+def list_candidate_handles(
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    items = cal.list_candidate_handles(campaign_id, env=env)
+    handles = [item["handle"] for item in items if item.get("handle")]
+    return {"handles": handles, "count": len(handles), "items": items}
+
+
 @router.post("/campaigns/{campaign_id}/candidates")
 def upsert_candidate(
     campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],

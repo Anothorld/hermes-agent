@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # --- Hermes gateway ---
     gateway_base: str = "http://127.0.0.1:8642"
     gateway_key: str = ""
+    # Optional session-scoped YOLO for unattended Gateway runs. Keep disabled
+    # by default; set KOC_GATEWAY_YOLO=true only for trusted automation.
+    gateway_yolo: bool = False
 
     # --- App ---
     env: str = "LIVE"  # default env to query when client omits it; LIVE|TEST

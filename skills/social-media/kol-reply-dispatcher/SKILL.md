@@ -12,23 +12,27 @@ opening an escalation) per lane — without sending mail, without writing CAL
 directly, and without making a business decision the goal-state machine
 should make.
 
+## Shared Blocks (Phase 3)
+- Bridge runtime core:
+  `references/shared/bridge-runtime-core.md`
+- Router/dispatcher boundaries:
+  `references/shared/router-dispatcher-boundaries.md`
+
 ## Runtime Contract
 - Frequency: every 10 minutes via Hermes `cronjob`. Profile:
   `outreach-operator`.
 - Cron pre-run: a minimal context collector (Phase B replacement for the
   legacy `kol_reply_dispatcher.py` script) reports a `pending_replies`
   array. If absent / empty, exit immediately. Each item must carry: matched
-  `identity_id`, `campaign_id`, `env`, the raw email, the thread summary,
-  and the dispatch-context snapshot (see Step 1). (Until that script lands
+  `identity_id`, `campaign_id`, `env`, the raw `latest_email`, the
+  `thread_history` (lean list of prior turns; see Step 0 below), and the
+  dispatch-context snapshot (see Step 1). (Until that script lands
   in a later phase, the agent may invoke this skill on-demand via chat with
   one email at a time; do **not** auto-sweep Gmail from the LLM directly.)
-- **Bridge is the only CAL writer/reader.** Forbidden: import `cal.py`,
-  open `~/.hermes/kol-ops-bridge/cal.db`, ad-hoc SQL, `execute_code`. Use
-  `plugins/kol-ops-bridge/scripts/kol_bridge_tool.py` (deterministic CLI)
-  or HTTP endpoints under `/api/plugins/kol-ops-bridge/`. Always pass
-  `--env <TEST|LIVE>`; never let it default.
-- **Drafts no email and never sends.** Drafting is delegated to a child
-  skill; sending requires explicit human action in the Gmail Drafts inbox.
+- Follow shared bridge runtime core:
+  `references/shared/bridge-runtime-core.md`.
+- Follow shared router/dispatcher boundaries:
+  `references/shared/router-dispatcher-boundaries.md`.
 - **Idempotency:** a message is processed at most once. The Gmail label
   flow (`kol-outreach/pending-reply` → `kol-outreach/handled`) is the
   authority; the classifier output is informational, not a state machine.
@@ -45,6 +49,31 @@ should make.
 
 ## Procedure
 
+### Step 0 — `thread_history` shape (read-only, supplied by pre-run)
+
+`pending_replies[i].thread_history` is the **prior** turns of the Gmail
+thread (oldest first), excluding `latest_email`. Each entry is the lean
+shape:
+
+```json
+{ "from": "alice@example.com",
+   "date": "Mon, 5 May 2026 14:02:11 -0700",
+   "body": "<the message body, clipped>" }
+```
+
+Only `from`, `date`, `body` are present — no headers, no message_id, no
+subject, no thread_id, no snippet. Per-message body is clipped to ~4k
+chars and the whole list to ~24k chars; an extra trailing entry with an
+empty `from` and a body starting with `... [history truncated:` signals
+that earlier turns were dropped. When the thread has no prior turn
+(first inbound after our cold open), `thread_history` is `[]`.
+
+**Do not** rewrap, paraphrase, or "summarize" `thread_history` before
+forwarding it to the classifier or child skills — pass it through
+verbatim. The whole point is to give downstream LLMs the actual words
+both sides used, so they don't re-ask questions that were already
+answered and don't repeat phrasing the KOL has already seen.
+
 ### Step 1 — Fetch dispatch context (one call)
 For each `pending_replies[i]`, fetch the bundled context:
 
@@ -58,11 +87,12 @@ the legacy `get-goals` + `get-relationship` + `get-reusable-facts` +
 `get-lanes` chain — do not call those individually.
 
 ### Step 2 — Run the classifier
-Invoke `kol-email-stage-classifier` with `latest_email`, `thread_summary`,
-`current_goal_state` (from Step 1's `goals`), `campaign_config_summary`,
-and (if applicable) `relationship_summary` (from Step 1's `relationship`
-+ `reusable_facts` + `campaign_config`). The classifier returns the JSON shape defined in its
-SKILL.md. **Do not paraphrase or modify** its output.
+Invoke `kol-email-stage-classifier` with `latest_email`, `thread_history`
+(verbatim from Step 0), `current_goal_state` (from Step 1's `goals`),
+`campaign_config_summary`, and (if applicable) `relationship_summary`
+(from Step 1's `relationship` + `reusable_facts` + `campaign_config`).
+The classifier returns the JSON shape defined in its SKILL.md.
+**Do not paraphrase or modify** its output.
 
 ### Step 3 — Persist extracted facts (one call across all namespaces)
 Write every non-empty namespace from `facts_extracted` in a single call:
@@ -167,6 +197,37 @@ can pick it up.
    `escalation_pattern_match:*`), it temporarily outranks `commerce`.
 3. Pick the **highest-priority lane that is not blocked/idle** as the
    primary lane. Invoke its child skill with the full reply context.
+
+   **Mandatory inputs to every reply-side child skill:**
+   - `identity_id`, `campaign_id`, `env`, `thread_id` (as before).
+   - `inbound_excerpt` — pulled from `latest_email.body` (3–5 sentence
+     quote of what the KOL just said; if the body is already short,
+     pass it whole).
+   - `thread_history` — pass through **verbatim** from Step 0. Child
+     skills feed it into their `[P0.3] Conversation history` preamble
+     so the draft does not re-ask previously-answered questions and
+     does not echo phrasing the KOL has already seen.
+   - `flow_hint` — a small JSON object the child uses for its
+     `[P0.4] Flow guidance` preamble:
+     ```json
+     {
+       "lane": "<commerce|fulfillment|publish|meta>",
+       "current_goal": "<active goal name from server goal_state>",
+       "next_goal_in_lane": "<the next goal in that lane's typical order,
+                              or null if current_goal is terminal>",
+       "missing_facts_for_current_goal": ["<from goal_state>"],
+       "kol_signaled_next_step": <true|false>
+     }
+     ```
+     `kol_signaled_next_step` is `true` iff the classifier's `signals`
+     for this lane include an unambiguous forward-intent signal — e.g.
+     `accepts_terms`, `signs_contract`, `address_provided`,
+     `submits_draft_url`, `interest_positive` with no follow-up
+     question — that maps to the lane's `next_goal_in_lane`. The
+     child skill uses this as **guidance**, not a hard switch:
+     - when `true`, the draft naturally advances to `next_goal_in_lane`;
+     - when `false`, the draft stays on `current_goal` and either
+       answers the KOL's question or asks the one fact still missing.
 4. For non-primary lanes that have a next action, do NOT invoke their
    skill. Instead append to the same `write-facts-multi` payload (or issue
    one follow-up call) under `approval`:
@@ -260,10 +321,13 @@ and the full prior `approval.reply_draft` value under
   Re-invoke **the same** `child_skill` named in `current_value_json`.
 - Pass through the original inbound context (recover from
   `kol_inbound_reply` events for `source_message_id` if needed) **plus**
-  the `operator_refinement_prompt` as an extra input field. The child
-  skill treats it as a hard constraint on the new draft's *content*
-  (tone, additions, removals) and must still return the same envelope
-  shape (`Step 5 — Return draft envelope`).
+  the `operator_refinement_prompt` as an extra input field. If a fresh
+  `thread_history` for that thread is still available, forward it as
+  well — otherwise omit the field (child skill must tolerate its
+  absence on a refinement run). The child skill treats the prompt as a
+  hard constraint on the new draft's *content* (tone, additions,
+  removals) and must still return the same envelope shape
+  (`Step 5 — Return draft envelope`).
 - Do **not** rewrite `offer.*` or any other domain facts on a refinement
   run — it is content-only.
 - Apply the **same envelope enrichment as Step 5.5** to the child's new
@@ -359,3 +423,14 @@ returns 404. Open escalation `dispatcher_missing_context`. Do NOT proceed.
 - Bridge open mode (no `X-Bridge-Key`) silently allows mutation but logs a
   WARN; in production cron you must set `HERMES_KOL_OPS_BRIDGE_KEY` so a
   rotation incident doesn't go unnoticed.
+- Never paraphrase, summarize, or re-order `thread_history` before
+  handing it to the classifier or a child skill. The pre-run already
+  stripped it to `{from, date, body}` exactly so downstream LLMs see
+  the conversation verbatim and avoid re-asking previously-answered
+  questions or echoing already-used phrasing.
+- `flow_hint.kol_signaled_next_step` is guidance, not policy. Never
+  override what the KOL actually wrote: if they asked a question on
+  the current goal, the child skill must answer it even when the hint
+  says `true`. The dispatcher's job is to point at the right child
+  skill; advancing the goal is the child's call, informed by both the
+  hint and the inbound text.

@@ -32,6 +32,11 @@ export function useDataChannel(opts: Options): { connected: boolean } {
   optsRef.current = opts;
 
   const onEvent = useCallback((e: WsEvent) => {
+    // useDataChannel only reacts to bridge-event frames. The gateway-
+    // approval channel rides on the same websocket but has its own
+    // dedicated hook (``useGatewayApprovals``); narrowing keeps both
+    // safe and avoids accidental refresh cascades on approval traffic.
+    if (e.type !== 'events') return;
     const cur = optsRef.current;
     const items = e.items || [];
     if (items.length === 0) return;

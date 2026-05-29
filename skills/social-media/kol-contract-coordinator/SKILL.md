@@ -12,8 +12,17 @@ authoring legally-binding language ourselves. Branch I now produces
 a contract docx by mechanically filling the legal-approved POVISON
 template; the agent is the **renderer**, not the **author**.
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+- Reply envelope contract:
+  `references/shared/reply-envelope-contract.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **Never invent or rewrite contract clauses.** Branch I renders the
   fixed template at `plugins/kol-ops-bridge/templates/povison_agreement.docx`
   with field substitutions only. If a required field is missing
@@ -38,15 +47,12 @@ template; the agent is the **renderer**, not the **author**.
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "contract_signing", missing_facts: [<from goal_state>], next_action: "<send | chase | acknowledge change request>"}`,
   `current_user_id = <operator id from session>`.
-- output: prepend as the first section of the draft prompt.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
 
@@ -198,7 +204,8 @@ Each row prescribes its own fact set; emit one
 ```
 
 Do **not** set `to` or `subject` — the dispatcher fills these from the
-inbound message before persisting `approval.reply_draft`.
+inbound message before persisting `approval.reply_draft` (shared:
+`references/shared/reply-envelope-contract.md`).
 `attachments` is REQUIRED for Branch I and must contain exactly the
 `contract_path` from Step I.2. For other branches it is omitted or
 `[]`. The downstream `approval.reply_draft.draft.attachments` field

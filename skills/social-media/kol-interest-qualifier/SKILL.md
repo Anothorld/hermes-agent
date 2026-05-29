@@ -16,8 +16,17 @@ short reply. Either:
 This skill is **side-effect-light**: it writes a single fact
 recording that we asked, but does NOT pre-commit interest as confirmed.
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+- Reply envelope contract:
+  `references/shared/reply-envelope-contract.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **One clarifying question max.** Never bundle interest +
   product + deliverables + price into one paragraph; that's exactly
   the trap this skill exists to avoid.
@@ -34,20 +43,97 @@ recording that we asked, but does NOT pre-commit interest as confirmed.
 4. `thread_id` (mandatory — this is a reply, not a fresh thread).
 5. `inbound_excerpt` (1-3 sentence quote of KOL's ambiguous reply,
    for grounding the question).
+6. `thread_history` (mandatory; may be `[]`) — JSON array of prior
+   turns, oldest first, from `kol-reply-dispatcher` Step 0. Each
+   entry: `{from, date, body}` only — no headers, ids, subjects.
+7. `flow_hint` — small JSON from dispatcher Step 5:
+   `{lane, current_goal, next_goal_in_lane,
+   missing_facts_for_current_goal, kol_signaled_next_step}`. Used only
+   for the `[P0.4]` block below.
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "interest_qualification", missing_facts: ["offer.interest_signal"], next_action: "Disambiguate KOL's reply with one focused question"}`,
   `current_user_id = <operator id from session>`.
-- output: prepend as the first section of the draft prompt.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
+
+## Conversation History Preamble (mandatory before drafting)
+
+After the style-loader block, prepend a `[P0.3] Conversation history`
+section to the LLM prompt. Build it from the `thread_history` input
+(verbatim from the dispatcher) as oldest → newest, one entry per turn:
+
+```
+[P0.3] Conversation history so far (oldest first; latest_email is
+shown separately under [INBOUND]):
+
+— <from> · <date>
+<body>
+
+— <from> · <date>
+<body>
+...
+```
+
+When `thread_history` is `[]`, render the block as
+`[P0.3] Conversation history so far: (none — this is the first
+inbound reply after our cold opener).`
+
+Hard rules attached to this block (include them verbatim in the
+prompt under the history):
+
+1. Do **not** re-ask a question whose answer appears anywhere above.
+   If the KOL already told us their platforms / paid stance / brand
+   fit / availability in an earlier turn, carry it forward as known
+   and ask only for what is still genuinely missing.
+2. Do **not** repeat phrasing, openers, or the same explanatory
+   sentence we have already used in earlier outbound turns above
+   (entries `from` = us). Vary the wording naturally.
+3. If the KOL has already volunteered a fact that satisfies
+   `missing_facts_for_current_goal`, mention briefly that you have it
+   noted instead of asking again, and either move toward the next
+   step (see `[P0.4]`) or close the loop on this one.
+
+## Flow Guidance Preamble (mandatory before drafting)
+
+Immediately after `[P0.3]`, prepend a `[P0.4] Flow guidance` section
+populated from the `flow_hint` input:
+
+```
+[P0.4] Flow guidance:
+- Lane: <lane>
+- Current goal in this lane: <current_goal>
+- Single fact this reply should help us collect/confirm:
+  <first item of missing_facts_for_current_goal, or "(none — current
+  goal is mostly satisfied)">
+- Next goal in this lane (if conversation naturally arrives there):
+  <next_goal_in_lane | "(this is the lane's terminal goal)">
+- KOL signaled readiness to move on: <kol_signaled_next_step>
+```
+
+Hard rules attached to this block (include them verbatim):
+
+1. The standard order in this lane is a **default**, not a forced
+   march. Stay on `current_goal` when the KOL's latest message asks
+   about it, when the KOL is unclear, or when a required fact is
+   still missing.
+2. When **all of**: (a) `kol_signaled_next_step` is `true`,
+   (b) the KOL did **not** raise a new question on `current_goal`,
+   and (c) `next_goal_in_lane` is non-null — let the reply naturally
+   transition toward `next_goal_in_lane` (a one-sentence handoff is
+   fine; do not jam the whole next-stage agenda into this one mail).
+3. Never **skip backwards** to an earlier goal in the lane unless
+   the KOL explicitly reopened it in `latest_email` (e.g. asks to
+   swap SKU after `product_selection` already satisfied).
+4. The aim is to gently guide the conversation forward, not to
+   railroad it. If `[P0.3]` shows we've already nudged in this
+   direction and the KOL deflected, do not push again — answer
+   what they raised and let the operator decide on the next move.
 
 ## Procedure
 
@@ -101,7 +187,8 @@ reply (via classifier on the next inbound) sets that.
 ```
 
 Do **not** set `to` or `subject` — the dispatcher fills these from the
-inbound message before persisting `approval.reply_draft`.
+inbound message before persisting `approval.reply_draft` (shared:
+`references/shared/reply-envelope-contract.md`).
 
 ## Examples
 
@@ -123,3 +210,10 @@ next active goal instead.
   skill scope and removes their negotiation surface.
 - Pre-committing `interest_signal=confirmed` on the basis of "love
   it!" alone — must wait for the KOL's actual confirmation reply.
+- Asking a question the KOL already answered in `thread_history`.
+  The whole point of the `[P0.3]` block is to prevent this loop —
+  always scan it before composing the question.
+- Forcing the lane forward when the KOL just asked a clarifying
+  question on `current_goal`. `[P0.4]` rule 1 takes precedence over
+  rule 2: answer first, advance only when the path is genuinely
+  clear.

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .db import _connect, init_db
 from .deps import shutdown_bridge, shutdown_gateway
+from .gateway_approval_watcher import watcher as approval_watcher
 from .routers import (
     admin,
     approvals,
@@ -22,6 +23,7 @@ from .routers import (
     escalations,
     events as events_router,
     facts,
+    gateway_approvals,
     goals,
     kols,
     policies,
@@ -64,7 +66,9 @@ def _ensure_owner() -> None:
 async def _lifespan(app: FastAPI):
     init_db()
     _ensure_owner()
+    await approval_watcher.start(get_settings())
     yield
+    await approval_watcher.stop()
     await events_router.hub.stop()
     await shutdown_bridge()
     await shutdown_gateway()
@@ -102,6 +106,7 @@ def create_app() -> FastAPI:
     app.include_router(relationships.router)
     app.include_router(escalations.router)
     app.include_router(approvals.router)
+    app.include_router(gateway_approvals.router)
     app.include_router(policies.router)
     app.include_router(reply_watcher.router)
     app.include_router(admin.router)

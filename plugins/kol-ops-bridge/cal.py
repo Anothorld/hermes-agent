@@ -664,6 +664,45 @@ def list_candidates(campaign_id: str, *, env: str = "LIVE") -> list[dict[str, An
     return out
 
 
+def list_candidate_handles(campaign_id: str, *, env: str = "LIVE") -> list[dict[str, Any]]:
+    """Return campaign candidates joined to their canonical identity handles."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT c.id                  AS candidate_id,
+                      c.identity_id         AS identity_id,
+                      i.primary_handle      AS handle,
+                      i.platform            AS platform,
+                      c.source              AS source,
+                      c.discovery_score     AS discovery_score,
+                      c.relationship_status AS relationship_status,
+                      c.candidate_status    AS candidate_status,
+                      c.review_reason       AS review_reason,
+                      c.payload_json        AS payload_json,
+                      c.created_at          AS created_at,
+                      c.updated_at          AS updated_at
+                 FROM campaign_candidates c
+            LEFT JOIN kol_identity i ON i.id = c.identity_id
+                WHERE c.campaign_id=? AND c.env=?
+             ORDER BY c.id""",
+            (campaign_id, env),
+        ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        payload = _jl(item.pop("payload_json", "{}"), {})
+        handle = item.get("handle")
+        if isinstance(handle, str):
+            handle = handle.strip().lstrip("@")
+            item["handle"] = handle or None
+        if item.get("handle"):
+            item["profile_url"] = f"https://www.instagram.com/{item['handle']}/"
+        else:
+            item["profile_url"] = None
+        item["payload"] = payload
+        items.append(item)
+    return items
+
+
 def get_candidate_for(
     *, identity_id: int, campaign_id: str, env: str = "LIVE"
 ) -> Optional[dict[str, Any]]:

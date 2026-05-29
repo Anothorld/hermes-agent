@@ -19,8 +19,17 @@ questions:
 - KOL asks for a non-PayPal method (wire / Stripe / Payoneer / crypto)
   → open escalation; do not commit. PayPal is the default channel.
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+- Reply envelope contract:
+  `references/shared/reply-envelope-contract.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **Mask any prior PayPal email in the email body** as
   `<first char>***@<domain>` (e.g. `j***@gmail.com`). Never echo the
   full local-part.
@@ -50,15 +59,12 @@ questions:
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "payout_setup", missing_facts: ["payout.method_collected"], next_action: "<reuse default PayPal / collect new PayPal details>"}`,
   `current_user_id = <operator id from session>`.
-- output: prepend as the first section of the draft prompt.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
 
@@ -148,7 +154,8 @@ write is atomic.
 ```
 
 Do **not** set `to` or `subject` — the dispatcher fills these from the
-inbound message before persisting `approval.reply_draft`.
+inbound message before persisting `approval.reply_draft` (shared:
+`references/shared/reply-envelope-contract.md`).
 
 ## Examples
 

@@ -59,10 +59,17 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts \
   --env TEST \
   --identity-id 9 \
   --json '{"campaign_id":"TS8319 Test","namespace":"offer","source":"skill:negotiation","facts":{"offer.latest_requested_amount":1200,"offer.latest_counter_amount":1000}}'
+
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-candidate-handles \
+  --env TEST \
+  --campaign-id "TS8319 Test" \
+  --plain
 ```
 
 The wrapper requires explicit `env` for mutating calls and never imports or
-opens CAL SQLite directly.
+opens CAL SQLite directly. Use dedicated projection commands such as
+`list-candidate-handles` instead of piping `list-candidates` into ad hoc
+`python -c` snippets.
 
 ## Auth
 

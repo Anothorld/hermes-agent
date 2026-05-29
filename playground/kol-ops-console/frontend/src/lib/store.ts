@@ -173,6 +173,36 @@ export const useAgentDockStore = create<AgentDockState>()(
   ),
 );
 
+// ------------------- gateway-approval dock store -------------------
+// UI state for the global gateway-approval dock — the right-edge
+// floating panel that lists every API-triggered agent run currently
+// blocked on a dangerous-command approval. ``open`` is persisted so
+// operators returning to the console keep their preferred view; it is
+// overridden when a *new* approval request lands (the hook in
+// ``hooks/useGatewayApprovals.ts`` calls ``setOpen(true)`` only when a
+// previously-unseen run_id appears, so manually collapsing the panel is
+// not fought by re-broadcast of already-known entries).
+
+type GatewayApprovalDockState = {
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  toggle: () => void;
+};
+
+export const useGatewayApprovalDockStore = create<GatewayApprovalDockState>()(
+  persist(
+    (set) => ({
+      open: false,
+      setOpen: (open) => set({ open }),
+      toggle: () => set((s) => ({ open: !s.open })),
+    }),
+    {
+      name: 'koc.gatewayApprovalDock',
+      storage: createJSONStorage(() => localStorage),
+    },
+  ),
+);
+
 // ------------------- dev / preferences store -------------------
 // Operator preferences that change rendering but not data. Today only
 // `showRawFactKeys` (renders fact_path next to the friendly label —

@@ -10,8 +10,17 @@ Move logistics from `address_collected` to `delivered_confirmed`
 through three explicit modes; surface any anomaly as an escalation
 rather than freelancing a fix.
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+- Reply envelope contract:
+  `references/shared/reply-envelope-contract.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **Never invent tracking numbers.** `mode=send_tracking` requires a
   caller-supplied `tracking_no` and `carrier`; abort if missing.
 - **Anomalies escalate, never freelance.** Damage / loss / wrong-item
@@ -30,15 +39,12 @@ rather than freelancing a fix.
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "logistics", missing_facts: [<from goal_state>], next_action: "<send tracking / chase delivery / handle response>"}`,
   `current_user_id = <operator id from session>`.
-- output: prepend as the first section of the draft prompt.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
 
@@ -115,7 +121,8 @@ the email comes from the escalation resumer later).
 ```
 
 Do **not** set `to` or `subject` — the dispatcher fills these from the
-inbound message before persisting `approval.reply_draft`.
+inbound message before persisting `approval.reply_draft` (shared:
+`references/shared/reply-envelope-contract.md`).
 
 ## Examples
 

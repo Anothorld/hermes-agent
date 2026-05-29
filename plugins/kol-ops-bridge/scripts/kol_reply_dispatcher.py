@@ -242,14 +242,67 @@ def _dispatch_context(identity_id: int, campaign_id: Optional[str], env: str) ->
         return {"error": "dispatch_context_unavailable", "detail": str(exc)}
 
 
+_THREAD_MSG_BODY_CAP = 4000
+_THREAD_HISTORY_TOTAL_CAP = 24000
+
+
+def _build_thread_history(
+    *,
+    client: GmailClient,
+    thread_id: str,
+    latest_message_id: str,
+) -> list[dict[str, str]]:
+    """Return the prior-turn history for a Gmail thread, lean and ordered.
+
+    Shape (oldest → newest, excludes the latest message which the dispatcher
+    passes separately as ``latest_email``)::
+
+        [{"from": "alice@x.com", "date": "Mon, 5 May 2026 ...", "body": "..."},
+         ...]
+
+    We strip every other field (id, headers, snippet, labels, thread_id,
+    to/subject) — child drafting skills need the conversational text plus
+    "who said when", nothing else. Each body is clipped, and the whole list
+    is bounded to keep prompt budgets sane on long threads.
+    """
+    raw = client.get_thread(thread_id)
+    history: list[dict[str, str]] = []
+    total = 0
+    for item in raw:
+        if item.get("id") == latest_message_id:
+            continue
+        body = _clip_text(item.get("body", ""), _THREAD_MSG_BODY_CAP)
+        entry = {
+            "from": item.get("from", ""),
+            "date": item.get("date", ""),
+            "body": body,
+        }
+        total += len(body)
+        if total > _THREAD_HISTORY_TOTAL_CAP and history:
+            history.append({
+                "from": "",
+                "date": "",
+                "body": f"... [history truncated: dropped {len(raw) - len(history)} earlier message(s)]",
+            })
+            break
+        history.append(entry)
+    return history
+
+
 def _pending_reply_payload(
     *,
+    client: GmailClient,
     msg: GmailMessage,
     identity_id: int,
     campaign_id: Optional[str],
     env: str,
 ) -> dict[str, Any]:
     context = _dispatch_context(identity_id, campaign_id, env)
+    thread_history = _build_thread_history(
+        client=client,
+        thread_id=msg.thread_id,
+        latest_message_id=msg.message_id,
+    )
     return {
         "identity_id": identity_id,
         "campaign_id": campaign_id,
@@ -266,7 +319,7 @@ def _pending_reply_payload(
             "snippet": msg.snippet,
             "body": _clip_text(msg.body),
         },
-        "thread_summary": _clip_text(msg.snippet or msg.body, 2000),
+        "thread_history": thread_history,
         "dispatch_context": context,
     }
 
@@ -274,7 +327,7 @@ def _pending_reply_payload(
 ProcessStatus = Literal["dispatched", "skipped", "retry"]
 
 
-def _process_message(msg: GmailMessage, env: str) -> ProcessStatus:
+def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> ProcessStatus:
     """Return whether the message was dispatched, skipped, or should retry."""
     matched = _match_identity(msg, env=env)
     if not matched:
@@ -313,6 +366,7 @@ def _process_message(msg: GmailMessage, env: str) -> ProcessStatus:
     input_text = json.dumps({
         "pending_replies": [
             _pending_reply_payload(
+                client=client,
                 msg=msg,
                 identity_id=identity_id,
                 campaign_id=campaign_id,
@@ -405,7 +459,7 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
             except GmailUnavailable as exc:
                 log.warning("gmail get %s failed: %s", stub.message_id, exc)
                 continue
-            status = _process_message(full, env=env)
+            status = _process_message(full, env=env, client=client)
             if status == "dispatched":
                 matched += 1
                 seen.add(full.message_id)

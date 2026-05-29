@@ -51,6 +51,7 @@ router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[5])
 _KOL_ORCHESTRATOR_SESSIONS = Path.home() / ".hermes/profiles/kol-orchestrator/sessions"
+_KOL_ORCHESTRATOR_STATE_DB = Path.home() / ".hermes/profiles/kol-orchestrator/state.db"
 _MAX_TRANSCRIPT_CHARS = 4000
 
 # Structured system prompt for the launch agent run.  Listed values are
@@ -1112,6 +1113,84 @@ def _parse_session_file(path: Path, limit: int) -> list[dict[str, Any]] | None:
     return items[-limit:]
 
 
+def _parse_state_db_messages(session_id: str, limit: int) -> list[dict[str, Any]] | None:
+    """Read transcript rows from hermes ``state.db`` for ``session_id``.
+
+    state.db is hermes's canonical message store (the per-session JSON file
+    is an opt-in snapshot that is off by default for this profile). For
+    closed sessions the JSON file usually doesn't exist, so reading
+    directly from state.db is the only way to render their history.
+
+    Returns ``None`` when state.db is missing or the session row doesn't
+    exist (caller falls back to the JSON file). Returns ``[]`` when the
+    session exists but has no usable messages.
+
+    The shape returned matches ``_parse_session_file`` — same kinds,
+    labels, and clipping — so the endpoint can splice the two sources
+    without UI changes.
+    """
+    if not _KOL_ORCHESTRATOR_STATE_DB.exists():
+        return None
+    try:
+        with sqlite3.connect(f"file:{_KOL_ORCHESTRATOR_STATE_DB}?mode=ro", uri=True) as db:
+            db.row_factory = sqlite3.Row
+            exists = db.execute(
+                "SELECT 1 FROM sessions WHERE id=? LIMIT 1", (session_id,)
+            ).fetchone()
+            if exists is None:
+                return None
+            rows = db.execute(
+                """SELECT role, content, tool_calls, tool_name, timestamp
+                     FROM messages
+                    WHERE session_id=?
+                    ORDER BY id""",
+                (session_id,),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"could not read session transcript from state.db: {exc}",
+        ) from exc
+
+    items: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        role = row["role"]
+        content = row["content"]
+        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
+            items.append({
+                "index": index,
+                "kind": role,
+                "label": "operator" if role == "user" else "assistant",
+                "message": _clip_text(content),
+            })
+        tool_calls_raw = row["tool_calls"]
+        if tool_calls_raw:
+            try:
+                tool_calls = json.loads(tool_calls_raw)
+            except (json.JSONDecodeError, TypeError):
+                tool_calls = None
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if isinstance(call, dict):
+                        items.append({
+                            "index": index,
+                            "kind": "tool_call",
+                            "label": "tool call",
+                            "message": _tool_call_label(call),
+                        })
+        if role == "tool":
+            name = row["tool_name"] or "tool"
+            body = content if isinstance(content, str) else ""
+            kind = "error" if "\"success\": false" in body or "\"error\"" in body.lower() else "tool_result"
+            items.append({
+                "index": index,
+                "kind": kind,
+                "label": str(name),
+                "message": _clip_text(body),
+            })
+    return items[-limit:]
+
+
 def _transcript_items(campaign_id: str, env: str, limit: int) -> list[dict[str, Any]] | None:
     return _parse_session_file(_session_file(campaign_id, env), limit)
 
@@ -1483,30 +1562,39 @@ async def agent_session_log(
 ) -> dict:
     """Session-scoped historical transcript.
 
-    Reads ``~/.hermes/profiles/kol-orchestrator/sessions/session_{sid}.json``
-    directly. Hermes keys these files by the full session_id (matching
-    what ``/campaigns/agent-sessions`` surfaces), so this works for
-    closed sessions even after the gateway has evicted its per-run
-    event ring buffers — the rich step-by-step history is what the dock
-    needs to show "this finished run, what did the agent do".
+    Reads hermes's canonical ``state.db`` first (``~/.hermes/profiles/
+    kol-orchestrator/state.db``). hermes persists every message there
+    regardless of whether the opt-in JSON snapshot writer is enabled,
+    so closed sessions render their full step-by-step history even
+    after the gateway has evicted its per-run event ring buffers — the
+    rich history is what the dock needs to show "this finished run,
+    what did the agent do".
 
-    Items are returned without ``run_id`` attribution because the file
-    is a single time-ordered conversation, not a per-run feed. The
-    consuming UI knows they are session-scoped (came from this endpoint)
-    and renders them directly rather than filtering by run_id.
+    Falls back to the legacy per-session JSON file
+    (``sessions/session_{sid}.json``) when state.db doesn't have the
+    session — covers older snapshots written before this profile owned
+    a state.db, and any session that lives only in the JSON snapshot.
 
-    Returns ``items=[]`` when no file exists — pseudo-sessions
-    (``run:{run_id}``) and namespaces whose runtime doesn't persist a
-    session file land here.
+    Items are returned without ``run_id`` attribution because the
+    underlying store is a single time-ordered conversation, not a
+    per-run feed. The consuming UI knows they are session-scoped (came
+    from this endpoint) and renders them directly rather than filtering
+    by run_id.
+
+    Returns ``items=[]`` when neither source has the session — pseudo-
+    sessions (``run:{run_id}``) and unknown ids land here.
 
     The caller URL-encodes the session_id (it contains colons like
     ``kol-campaign:LIVE:CID-42``); FastAPI decodes it before binding.
     Containment guard: any embedded path separator is rejected so the
-    session_id can't traverse out of the sessions directory.
+    session_id can't traverse out of the sessions directory when we
+    fall back to the JSON file.
     """
     if "/" in session_id or "\\" in session_id or ".." in session_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid session_id")
-    items = _parse_session_file(_session_file_by_sid(session_id), limit) or []
+    items = _parse_state_db_messages(session_id, limit)
+    if items is None:
+        items = _parse_session_file(_session_file_by_sid(session_id), limit) or []
     return {"session_id": session_id, "env": env, "items": items}
 
 

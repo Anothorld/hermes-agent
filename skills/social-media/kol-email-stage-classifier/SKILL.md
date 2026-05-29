@@ -22,7 +22,22 @@ extraction in a single LLM pass — never split across goals/stages.
 ## Inputs
 1. `latest_email` — full body + headers (from / subject / date / message-id /
    in-reply-to).
-2. `thread_summary` — last 3–5 messages, oldest first, condensed.
+2. `thread_history` — JSON array of the **prior** turns in this Gmail
+   thread, oldest first, excluding `latest_email`. Each entry has
+   **exactly** these three keys:
+
+   ```json
+   { "from": "alice@example.com",
+      "date": "Mon, 5 May 2026 14:02:11 -0700",
+      "body": "<the message body, clipped>" }
+   ```
+
+   No headers, message_id, subject, snippet, or labels. Per-message
+   body is clipped (~4k chars); the whole list is bounded (~24k);
+   a sentinel entry with empty `from` and `body` starting with
+   `... [history truncated:` marks dropped earlier turns. May be `[]`
+   for the very first inbound after a cold open. **Read verbatim** —
+   do not paraphrase before reasoning over it.
 3. `current_goal_state` — `{commerce: <goal_name|null>, fulfillment:
    <goal_name|null>, publish: <goal_name|null>}` plus each goal's
    `missing_facts`. The dispatcher fetches this via
@@ -131,7 +146,17 @@ Common signals, append-only — emit only when evidence is in the email body:
   policy doc — Phase E)
 
 ## Procedure
-1. Read `latest_email` body + `thread_summary` for context.
+1. Read `latest_email` body for what the KOL just said. Read
+   `thread_history` (oldest → newest) for what has already been said
+   on both sides. The history exists so you can:
+   - Avoid emitting an `ambiguity` for a question the KOL already
+     answered earlier in the thread.
+   - Recognize when the KOL is **repeating** a prior point (i.e. we
+     ignored it last turn) — bias confidence higher for that signal.
+   - Treat facts the KOL volunteered in an earlier turn (e.g. address,
+     platform preference, paid-only stance) as already on the record;
+     do not re-extract them as if new, but do extract any **change**
+     in the latest message.
 2. Look at `current_goal_state` to know what facts the dispatcher is hunting.
    Bias your fact extraction toward `missing_facts` — but do NOT invent values
    to fill them.
@@ -261,3 +286,6 @@ Common signals, append-only — emit only when evidence is in the email body:
 - Skipped fact extraction in a non-active lane when the email contains
   fulfillment/publish info — multi-namespace extraction is mandatory in one
   pass.
+- Ignored `thread_history` and emitted an `ambiguity` for something the
+  KOL plainly answered two turns ago. The history is part of context for
+  exactly this reason — read it before declaring ambiguity.

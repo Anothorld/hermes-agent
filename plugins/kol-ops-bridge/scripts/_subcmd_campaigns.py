@@ -79,6 +79,18 @@ def cmd_list_candidates(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_list_candidate_handles(args: argparse.Namespace) -> None:
+    data = client_from_args(args).request(
+        "GET", f"/campaigns/{args.campaign_id}/candidate-handles",
+        params={"env": args.env},
+    )
+    if args.plain:
+        for handle in data.get("handles", []):
+            print(handle)
+        return
+    print_json(data)
+
+
 def cmd_resolve_relationships(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "POST",
@@ -181,6 +193,16 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p)
     p.add_argument("--campaign-id", required=True)
     p.set_defaults(func=cmd_list_candidates)
+
+    p = sub.add_parser(
+        "list-candidate-handles",
+        help="GET /campaigns/{id}/candidate-handles — list canonical IG handles.",
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--campaign-id", required=True)
+    p.add_argument("--plain", action="store_true", help="Print one handle per line.")
+    p.set_defaults(func=cmd_list_candidate_handles)
 
     p = sub.add_parser(
         "resolve-relationships",

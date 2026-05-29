@@ -5,6 +5,12 @@ trigger: Use when an operator asks "how does the KOL pipeline work end-to-end?",
 tags: ["kol", "orchestrator", "lifecycle", "documentation", "meta"]
 ---
 
+## Shared References (Phase 3)
+- Bridge runtime core:
+  `references/shared/bridge-runtime-core.md`
+- Router/dispatcher boundaries:
+  `references/shared/router-dispatcher-boundaries.md`
+
 ## Architecture in one diagram
 
 ```
@@ -131,6 +137,9 @@ Failure to notify is logged but never blocks a fact write.
 If you find yourself needing to "run the orchestrator", you almost
 certainly want `kol-reply-dispatcher` (inbound) or
 `kol-discovery-to-outreach-router` (outbound first contact).
+
+This boundary aligns with
+`references/shared/router-dispatcher-boundaries.md`.
 
 ## Pitfalls
 - Treating this map as the sole source of truth at runtime — the

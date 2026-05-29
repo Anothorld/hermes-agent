@@ -147,10 +147,15 @@ def test_null_session_id_becomes_run_pseudo_session() -> None:
 
 
 def test_session_log_reads_per_session_file(tmp_path, monkeypatch) -> None:
-    # Redirect the sessions dir to a tmp path so we don't read the real
-    # ~/.hermes file. Write one session_{sid}.json with messages mixing
-    # operator / assistant / tool_call / tool roles.
+    # Redirect the sessions dir + state.db to tmp paths so we don't read
+    # the real ~/.hermes files. Pointing state.db at a non-existent path
+    # forces the JSON-file fallback that this test exercises. Write one
+    # session_{sid}.json with messages mixing operator / assistant /
+    # tool_call / tool roles.
     monkeypatch.setattr(campaigns_router, "_KOL_ORCHESTRATOR_SESSIONS", tmp_path)
+    monkeypatch.setattr(
+        campaigns_router, "_KOL_ORCHESTRATOR_STATE_DB", tmp_path / "absent.db"
+    )
     sid = "kol-campaign:TEST:CID-42"
     payload = {
         "messages": [
@@ -188,6 +193,9 @@ def test_session_log_reads_per_session_file(tmp_path, monkeypatch) -> None:
 
 def test_session_log_missing_file_returns_empty(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(campaigns_router, "_KOL_ORCHESTRATOR_SESSIONS", tmp_path)
+    monkeypatch.setattr(
+        campaigns_router, "_KOL_ORCHESTRATOR_STATE_DB", tmp_path / "absent.db"
+    )
     client = _build_app(_seed_conn())
     res = client.get(
         "/campaigns/agent-sessions/run:r-orphan/log",
@@ -197,8 +205,131 @@ def test_session_log_missing_file_returns_empty(tmp_path, monkeypatch) -> None:
     assert res.json() == {"session_id": "run:r-orphan", "env": "TEST", "items": []}
 
 
+def _seed_state_db(path, *, session_id: str, rows: list[dict]) -> None:
+    """Build a minimal state.db that mirrors hermes's real schema for
+    the columns the transcript reader touches. Keeping the schema close
+    to production (sessions table + messages table with the same column
+    set) catches column-rename regressions without dragging in the full
+    hermes migration stack."""
+    import sqlite3 as _sql
+
+    conn = _sql.connect(path)
+    try:
+        conn.execute(
+            """CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                ended_at REAL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, 'gateway', 0)",
+            (session_id,),
+        )
+        for i, row in enumerate(rows):
+            conn.execute(
+                """INSERT INTO messages
+                       (session_id, role, content, tool_calls, tool_name, timestamp)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    session_id,
+                    row["role"],
+                    row.get("content"),
+                    row.get("tool_calls"),
+                    row.get("tool_name"),
+                    float(i),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_session_log_reads_state_db_when_json_missing(tmp_path, monkeypatch) -> None:
+    # state.db is hermes's canonical store; the JSON snapshot is opt-in
+    # and absent for closed sessions on this profile. The dock must
+    # still render the transcript — that's what this test pins down.
+    db_path = tmp_path / "state.db"
+    sid = "kol-campaign:LIVE:CID-99"
+    _seed_state_db(
+        db_path,
+        session_id=sid,
+        rows=[
+            {"role": "user", "content": "kick off"},
+            {
+                "role": "assistant",
+                "tool_calls": (
+                    "[{\"function\": {\"name\": \"list_candidates\","
+                    " \"arguments\": \"{\\\"limit\\\": 3}\"}}]"
+                ),
+            },
+            {"role": "tool", "tool_name": "list_candidates",
+             "content": "{\"success\": true, \"count\": 3}"},
+            {"role": "assistant", "content": "found three"},
+        ],
+    )
+    monkeypatch.setattr(campaigns_router, "_KOL_ORCHESTRATOR_SESSIONS", tmp_path)
+    monkeypatch.setattr(campaigns_router, "_KOL_ORCHESTRATOR_STATE_DB", db_path)
+
+    client = _build_app(_seed_conn())
+    res = client.get(f"/campaigns/agent-sessions/{sid}/log", params={"env": "LIVE"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["session_id"] == sid
+    kinds = [it["kind"] for it in body["items"]]
+    assert kinds == ["user", "tool_call", "tool_result", "assistant"]
+    # tool_result error-detection branch should NOT mistake "success: true"
+    # for a failure — the row stays a tool_result, not an error.
+    assert body["items"][2]["label"] == "list_candidates"
+
+
+def test_session_log_falls_back_to_json_when_state_db_lacks_session(
+    tmp_path, monkeypatch
+) -> None:
+    # state.db exists but doesn't have THIS session — legacy snapshots
+    # written before the profile owned a state.db should still render.
+    db_path = tmp_path / "state.db"
+    _seed_state_db(db_path, session_id="some-other-session", rows=[])
+
+    sid = "kol-legacy:TEST:CID-legacy"
+    payload = {
+        "messages": [
+            {"role": "user", "content": "legacy ping"},
+            {"role": "assistant", "content": "legacy pong"},
+        ]
+    }
+    (tmp_path / f"session_{sid}.json").write_text(
+        __import__("json").dumps(payload)
+    )
+
+    monkeypatch.setattr(campaigns_router, "_KOL_ORCHESTRATOR_SESSIONS", tmp_path)
+    monkeypatch.setattr(campaigns_router, "_KOL_ORCHESTRATOR_STATE_DB", db_path)
+
+    client = _build_app(_seed_conn())
+    res = client.get(f"/campaigns/agent-sessions/{sid}/log", params={"env": "TEST"})
+    assert res.status_code == 200, res.text
+    kinds = [it["kind"] for it in res.json()["items"]]
+    assert kinds == ["user", "assistant"]
+
+
 def test_session_log_rejects_path_traversal(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(campaigns_router, "_KOL_ORCHESTRATOR_SESSIONS", tmp_path)
+    monkeypatch.setattr(
+        campaigns_router, "_KOL_ORCHESTRATOR_STATE_DB", tmp_path / "absent.db"
+    )
     client = _build_app(_seed_conn())
     # URLs containing literal slashes are blocked by Starlette routing
     # (returns 404 before we run). What our handler must defend against

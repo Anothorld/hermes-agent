@@ -20,6 +20,7 @@ import { BreadcrumbBar } from './components/shell/BreadcrumbBar';
 import { DialogHost } from './components/dialogs/DialogHost';
 import { ToastHost } from './components/feedback/ToastHost';
 import { AgentSessionDock } from './components/agent-dock/AgentSessionDock';
+import { GatewayApprovalDock } from './components/gateway-approval/GatewayApprovalDock';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
@@ -64,6 +65,7 @@ export function App() {
         />
       </Routes>
       <AgentSessionDock />
+      <GatewayApprovalDock />
       <DialogHost />
       <ToastHost />
     </>

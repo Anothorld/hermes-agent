@@ -11,8 +11,15 @@ to produce and what to send back for review. After this turn, the
 lane waits for `fulfillment.draft_submitted=true` (handled by
 classifier on the next inbound).
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **Brief content from config, not LLM creativity.** The body should
   be a faithful render of `campaign_config.brief_template_id` (referred
   to by id) + `audit_standards_md` + `extra_notes`. Do not invent
@@ -32,9 +39,8 @@ classifier on the next inbound).
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "content_production", missing_facts: ["fulfillment.brief_sent"], next_action: "Send brief / posting notes / hashtags"}`,
@@ -42,7 +48,6 @@ Call contract:
 - output: prepend as the first section of the draft prompt; verbatim brief
   body from `campaign_config.brief_template_id` is content (not style) and
   is **not** subject to P1/P2 rewriting.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
 

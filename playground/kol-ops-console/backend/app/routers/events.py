@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
 from ..deps import current_user, get_bridge
+from ..gateway_approval_watcher import watcher as approval_watcher
 from ..security import decode_token
 
 log = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ class _Hub:
         self._clients: set[WebSocket] = set()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
+        self._approval_task: asyncio.Task | None = None
         self._last_id: int = 0
 
     async def add(self, ws: WebSocket) -> None:
@@ -109,16 +111,20 @@ class _Hub:
                 self._clients.discard(ws)
 
     async def start_poller(self, bridge: BridgeClient) -> None:
-        if self._task is not None:
-            return
-        self._task = asyncio.create_task(self._poll_loop(bridge))
+        if self._task is None:
+            self._task = asyncio.create_task(self._poll_loop(bridge))
+        if self._approval_task is None:
+            self._approval_task = asyncio.create_task(self._approval_relay_loop())
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
+        for attr in ("_task", "_approval_task"):
+            task = getattr(self, attr)
+            if task is None:
+                continue
+            task.cancel()
             with suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+                await task
+            setattr(self, attr, None)
 
     async def _poll_loop(self, bridge: BridgeClient) -> None:
         env = get_settings().env
@@ -141,6 +147,22 @@ class _Hub:
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.warning("event poll error: %s", exc)
+
+    async def _approval_relay_loop(self) -> None:
+        """Fan watcher events out to websocket clients.
+
+        Frame type is ``"gateway_approvals"`` so the frontend hook can
+        discriminate against the existing ``"events"`` (bridge) feed.
+        """
+        q = approval_watcher.subscribe()
+        try:
+            while True:
+                ev = await q.get()
+                await self.broadcast({"type": "gateway_approvals", "items": [ev]})
+        except asyncio.CancelledError:
+            raise
+        finally:
+            approval_watcher.unsubscribe(q)
 
 
 hub = _Hub()

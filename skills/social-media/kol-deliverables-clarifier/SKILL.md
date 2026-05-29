@@ -10,8 +10,17 @@ Lock the FRAMEWORK of the collab — platforms, count per platform,
 usage rights — without committing to compensation. After this skill,
 the dispatcher can advance to `compensation_negotiation`.
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+- Reply envelope contract:
+  `references/shared/reply-envelope-contract.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **Answer scope. Defer price.** If KOL asks "what's your budget?"
   in the same email, acknowledge the question but say "let's
   align on scope first, then I'll come back with numbers" — do NOT
@@ -27,20 +36,89 @@ the dispatcher can advance to `compensation_negotiation`.
 ## Inputs
 1. `identity_id`, `campaign_id`, `env`, `thread_id`.
 2. `inbound_excerpt`.
+3. `thread_history` (mandatory; may be `[]`) — JSON array of prior
+   turns, oldest first, from `kol-reply-dispatcher` Step 0. Each
+   entry: `{from, date, body}` only.
+4. `flow_hint` — small JSON from dispatcher Step 5:
+   `{lane, current_goal, next_goal_in_lane,
+   missing_facts_for_current_goal, kol_signaled_next_step}`.
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "deliverables_scope", missing_facts: [<from goal_state>], next_action: "Communicate deliverable framework (no price)"}`,
   `current_user_id = <operator id from session>`.
-- output: prepend as the first section of the draft prompt.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
+
+## Conversation History Preamble (mandatory before drafting)
+
+After the style-loader block, prepend a `[P0.3] Conversation history`
+section to the LLM prompt, built verbatim from the `thread_history`
+input (oldest → newest, one entry per turn):
+
+```
+[P0.3] Conversation history so far (oldest first; latest_email is
+shown separately under [INBOUND]):
+
+— <from> · <date>
+<body>
+
+— <from> · <date>
+<body>
+...
+```
+
+When `thread_history` is `[]`, render
+`[P0.3] Conversation history so far: (none).`
+
+Hard rules attached to this block (include verbatim):
+
+1. Do **not** re-propose a platform / count / usage-rights line that
+   appears verbatim or near-verbatim in an earlier outbound turn
+   above. Vary the phrasing; do not echo a prior pitch.
+2. If the KOL has already named the platforms they care about in an
+   earlier turn, lead with **those** in the scope sentence rather
+   than restating the full whitelist.
+3. Do **not** re-ask a deliverables sub-question the KOL already
+   answered earlier in the thread (e.g. preferred platform mix).
+
+## Flow Guidance Preamble (mandatory before drafting)
+
+Immediately after `[P0.3]`, prepend a `[P0.4] Flow guidance` block
+populated from `flow_hint`:
+
+```
+[P0.4] Flow guidance:
+- Lane: <lane>
+- Current goal in this lane: <current_goal>
+- Single fact this reply should help us collect/confirm:
+  <first item of missing_facts_for_current_goal>
+- Next goal in this lane (if conversation naturally arrives there):
+  <next_goal_in_lane>
+- KOL signaled readiness to move on: <kol_signaled_next_step>
+```
+
+Hard rules (verbatim):
+
+1. The standard lane order is a **default**, not a forced march.
+   When `latest_email` asks a scope question, answer it on
+   `current_goal` (this skill's job) and do not jump ahead.
+2. When **all of** (a) `kol_signaled_next_step` is `true`,
+   (b) the KOL did **not** raise a new scope question, and
+   (c) `next_goal_in_lane` is non-null — the reply may close out
+   scope and add a one-sentence soft handoff toward
+   `next_goal_in_lane` (e.g. "once that's good, I'll come back with
+   the comp side"). Do **not** start negotiating
+   `next_goal_in_lane` in this same draft.
+3. Never reopen a lane goal that is already satisfied unless the
+   KOL explicitly reopens it.
+4. If `[P0.3]` shows we already softly nudged toward
+   `next_goal_in_lane` and the KOL didn't bite, do not push again
+   here — keep the focus on scope.
 
 ## Procedure
 
@@ -130,7 +208,8 @@ next inbound confirms agreement.
 ```
 
 Do **not** set `to` or `subject` — the dispatcher fills these from the
-inbound message before persisting `approval.reply_draft`.
+inbound message before persisting `approval.reply_draft` (shared:
+`references/shared/reply-envelope-contract.md`).
 
 ## Examples
 
@@ -158,3 +237,10 @@ config: platforms=[instagram,tiktok], count=1. → Escalation opened.
 - Setting non-`_proposed` keys (`offer.deliverable_platforms`)
   before KOL agreement. Only the classifier on the next reply
   promotes `_proposed` → committed.
+- Restating the same scope sentence the KOL already saw in
+  `[P0.3]`. Vary the wording when re-confirming; never copy-paste a
+  prior outbound paragraph.
+- Jumping to comp talk because `kol_signaled_next_step=true` even
+  though the KOL just asked a follow-up scope question. Answer
+  scope first; one soft handoff sentence is the maximum forward
+  motion allowed in a single reply.

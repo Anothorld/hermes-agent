@@ -218,6 +218,39 @@ class GmailClient:
             body=str(payload.get("body", "")),
         )
 
+    def get_thread(self, thread_id: str) -> list[dict]:
+        """Return the lean conversation list for a Gmail thread.
+
+        Each entry: ``{"id": str, "from": str, "date": str, "body": str}``
+        — intentionally drops headers/labels/snippet/to/subject so the
+        downstream KOL reply pipeline sees only body + minimal who/when.
+
+        Returns ``[]`` (not raise) when the thread_id is empty or Gmail is
+        unavailable; the dispatcher then falls back to the single latest
+        email and continues. Conversation history is best-effort context,
+        never a hard dependency.
+        """
+        if not thread_id:
+            return []
+        try:
+            payload = self._invoke(["gmail", "thread", thread_id])
+        except GmailUnavailable as exc:
+            log.warning("gmail thread %s unavailable: %s", thread_id, exc)
+            return []
+        if not isinstance(payload, list):
+            return []
+        out: list[dict] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            out.append({
+                "id": str(item.get("id", "")),
+                "from": str(item.get("from", "")),
+                "date": str(item.get("date", "")),
+                "body": str(item.get("body", "")),
+            })
+        return out
+
     def list_sent_thread_ids(
         self,
         *,

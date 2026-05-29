@@ -110,6 +110,10 @@ const RUN_STATE_RUNNING = new Set([
   'stopping',
 ]);
 
+function kolDetailPath(identityId: number, campaignId: string, env: string): string {
+  return `/kols/${identityId}?campaign_id=${encodeURIComponent(campaignId)}&env=${encodeURIComponent(env)}`;
+}
+
 function StatusPill({ s }: { s: CampaignRow['status'] }) {
   const cls =
     s === 'running'
@@ -247,10 +251,14 @@ function ReplyWatcherPanel({
 function KolList({
   ids,
   kols,
+  campaignId,
+  env,
   emptyText = 'no KOL events yet',
 }: {
   ids: number[];
   kols: Record<string, KolIdent>;
+  campaignId: string;
+  env: string;
   emptyText?: string;
 }) {
   if (ids.length === 0) return <span className="text-xs text-slate-400">{emptyText}</span>;
@@ -261,7 +269,7 @@ function KolList({
         const label = k?.display_name || k?.primary_handle || `#${id}`;
         return (
           <li key={id} className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-slate-700">
-            <Link to={`/kols/${id}`} className="hover:text-emerald-700">
+            <Link to={kolDetailPath(id, campaignId, env)} className="hover:text-emerald-700">
               {label}
               {k?.platform && <span className="ml-1 text-slate-400">({k.platform})</span>}
             </Link>
@@ -401,7 +409,7 @@ function ShortlistReviewPanel({
                   <span className="font-medium">
                     {c.identity_id ? (
                       <Link
-                        to={`/kols/${c.identity_id}`}
+                        to={kolDetailPath(c.identity_id, campaignId, env)}
                         className="text-emerald-800 hover:underline"
                         onClick={(e) => e.stopPropagation()}
                       >
@@ -702,6 +710,8 @@ function CampaignCard({
         <KolList
           ids={c.contacted_kol_ids}
           kols={kols}
+          campaignId={c.campaign_id}
+          env={c.env}
           emptyText="暂无已建联 KOL — 审批 shortlist 后将生成初邀草稿"
         />
       </div>

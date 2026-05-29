@@ -68,6 +68,7 @@ class GatewayClient:
         instructions: Optional[str] = None,
         session_id: Optional[str] = None,
         model: Optional[str] = None,
+        yolo: Optional[bool] = None,
     ) -> dict[str, Any]:
         """POST ``/v1/runs`` — start an async agent run, return ``{run_id,...}``.
 
@@ -86,10 +87,34 @@ class GatewayClient:
             body["session_id"] = session_id
         if model:
             body["model"] = model
+        effective_yolo = yolo if yolo is not None else get_settings().gateway_yolo
+        if effective_yolo:
+            body["yolo"] = True
         url = f"{self._base}/v1/runs"
         try:
             r = await self._client.post(
                 url, headers=self._headers, json=body, timeout=30.0
+            )
+        except httpx.HTTPError as exc:
+            raise GatewayError(502, f"gateway unreachable: {exc}") from exc
+        if r.status_code >= 400:
+            raise GatewayError(r.status_code, r.text)
+        return r.json()
+
+    async def resolve_approval(
+        self, run_id: str, *, choice: str,
+    ) -> dict[str, Any]:
+        """POST ``/v1/runs/{id}/approval`` — resolve a pending approval.
+
+        ``choice`` is one of ``once / session / always / deny``. The
+        gateway returns ``{run_id, choice, resolved}`` on success, 404
+        when the run is unknown, 409 when no approval is currently
+        pending.
+        """
+        url = f"{self._base}/v1/runs/{run_id}/approval"
+        try:
+            r = await self._client.post(
+                url, headers=self._headers, json={"choice": choice},
             )
         except httpx.HTTPError as exc:
             raise GatewayError(502, f"gateway unreachable: {exc}") from exc

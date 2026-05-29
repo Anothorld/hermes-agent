@@ -10,8 +10,17 @@ Compare submitted draft against the configured audit standards and
 either approve, request a bounded revision, or escalate. Never make
 substantive creative judgments outside `audit_standards_md`.
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+- Reply envelope contract:
+  `references/shared/reply-envelope-contract.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **Standards in, decisions out.** Every revision item must cite a
   specific clause of `audit_standards_md` (or a contract clause).
   Items not grounded in standards must NOT be requested.
@@ -32,16 +41,14 @@ substantive creative judgments outside `audit_standards_md`.
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "content_review_and_golive", missing_facts: [<from goal_state>], next_action: "<approve / request revision / escalate>"}`,
   `current_user_id = <operator id from session>`.
 - output: prepend as the first section of the draft prompt; verbatim audit
   standards from `campaign_config.audit_standards_md` are P0 content.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
 
@@ -118,7 +125,8 @@ Read:
 ```
 
 Do **not** set `to` or `subject` — the dispatcher fills these from the
-inbound message before persisting `approval.reply_draft`.
+inbound message before persisting `approval.reply_draft` (shared:
+`references/shared/reply-envelope-contract.md`).
 
 ## Examples
 

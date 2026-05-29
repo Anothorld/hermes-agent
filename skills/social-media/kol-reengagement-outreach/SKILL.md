@@ -15,9 +15,19 @@ Produce one warm re-engagement email that
 and atomically records the outreach on the Bridge. No reply handling,
 no Gmail send.
 
+## Shared Blocks (Phase 1)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style + creator-brief preamble order:
+  `references/shared/style-and-brief-preambles.md`
+- Greeting name resolution:
+  `references/shared/greeting-name-resolution.md`
+- Personalization post-check baseline:
+  `references/shared/personalization-check.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`.
-- Bridge is the only CAL writer. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **Refuses risky repeats.** If
   `relationship.last_outcome ∈ {disputed, content_failed, aborted}`,
   abort and return
@@ -43,37 +53,19 @@ no Gmail send.
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. The loader returns a single markdown block enforcing
-**P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared preamble rules in
+`references/shared/style-and-brief-preambles.md`.
 
-Call contract:
-- inputs: `goal_brief = {goal: "reengagement_outreach", missing_facts: ["offer.outreach_draft_ready"], next_action: "<one-line summary referencing prior collab>"}`,
-  `current_user_id = <operator id from session>`.
-- output: prepend as the **first section** of the draft prompt — before any
-  goal-specific instructions in this skill's Procedure.
-- failure mode: if the loader fails, use empty-doc fallbacks and continue.
+Re-engagement specific call inputs:
+- `goal_brief = {goal: "reengagement_outreach", missing_facts: ["offer.outreach_draft_ready"], next_action: "<one-line summary referencing prior collab>"}`
+- `current_user_id = <operator id from session>`
 
 >>> include: kol-email-style-loader
 
 ## Creator Brief Preamble (mandatory before drafting)
 
-Immediately after the style-loader block, this skill **MUST** also invoke
-`kol-creator-brief-loader` and prepend its output as a `[P0.1]` section so
-the LLM can tie the proposed next-collab back to one specific element of
-the creator's content style. Even for repeat KOLs we re-personalize each
-opening — the prior collab is shared history, but the creator's content
-angle is what makes the proposal land.
-
-Call contract:
-- inputs: `identity_id`, `env`, optional `campaign_id`.
-- output: markdown block with `content_pillars`, `signature_hooks`,
-  `voice_descriptors`, `hero_post_url`, `hero_post_note`,
-  `recommendation_reason`, and `brief_status ∈ {fresh|refreshed|unavailable}`.
-- order in the final prompt: `[P0]` → `[P0.1] creator brief` → `[P1]` → `[P2]` → `[P3]`.
-- failure mode: loader never throws; on `unavailable` the drafter (Step 2)
-  emits `low_personalization: true` in the envelope.
+This skill still requires `[P0.1]` creator brief so the proposal
+anchors to one concrete creator-style detail.
 
 >>> include: kol-creator-brief-loader
 
@@ -116,31 +108,9 @@ Required signals:
 
 ### Step 1b — Resolve the KOL's greeting name (mandatory)
 
-Use this priority order to pick the **first name** for the salutation.
-Stop at the first hit:
-
-1. `identity.display_name` is set → take its first whitespace-separated
-   token (e.g. `"Becki Owens"` → `Becki`).
-2. `reusable_facts['identity.first_name']` is set → use it verbatim.
-3. Otherwise, **parse** `identity.primary_handle` into a likely
-   `First Last`, then take the first token:
-   - Strip a leading `@` and any trailing digits/underscores.
-   - If the handle contains `.`, `_`, `-`, or space, split on that
-     separator: `"becki_owens"` → `["becki","owens"]`.
-   - Otherwise attempt a CamelCase / known-name split. For mixed case
-     (`"BeckiOwens"`), split at the second capital. For all-lowercase
-     (`"beckiowens"`), only split when a 3+ char common English first
-     name prefix matches and leaves a 3+ char remainder.
-   - Title-case the result and take the first token (`"beckiowens"`
-     → `Becki Owens` → `Becki`).
-   - If no confident split, fall back to the title-cased whole handle
-     (`"beckiowens"` → `Becki`). Never use the lowercase id verbatim.
-4. If still unresolvable (numeric handle, empty), open an escalation
-   `kol_name_unresolvable` and abort.
-
-The greeting MUST be the **first name only** — never include the
-last name in `Hi, …`. Correct: `Hi Becki,`. Wrong: `Hi Becki Owens,`,
-`Hi beckiowens,`, `Hi @beckiowens,`.
+Use the shared algorithm in
+`references/shared/greeting-name-resolution.md`.
+If unresolved, open escalation `kol_name_unresolvable` and abort.
 
 ### Step 2 — Compose the email
 Constraints:
@@ -186,36 +156,14 @@ Constraints:
 
 ### Step 2c — Personalization post-check (mandatory)
 
-Before Step 3, verify the body incorporates the creator brief.
+Follow shared baseline in
+`references/shared/personalization-check.md`.
 
-**When `brief_status ∈ {fresh, refreshed}`:**
-1. Build a set of substantive tokens from the brief facts:
-   - All tokens of length ≥ 4 from `identity.content_pillars[*]`.
-   - All tokens of length ≥ 4 from `identity.signature_hooks[*]`.
-   - All tokens of length ≥ 5 from `identity.recommendation_reason`
-     after stripping common filler words (same stoplist as
-     `kol-cold-outreach` Step 2c).
-2. Strip HTML tags from `body` to get visible text.
-3. Case-insensitive substring match: count how many tokens appear.
-4. If **zero tokens match**, re-generate the draft ONCE with this
-   instruction prepended:
-   *"Your previous draft did not reference any detail from the [P0.1]
-   creator brief. Rewrite paragraph 2 (the proposal) so it ties the
-   proposed product to one specific pillar, hook, or hero-post theme
-   from the brief — in one short clause."*
-5. Re-run the personalization check on the retry. Still zero matches
-   → abort:
-   ```json
-   {"error":"personalization_check_failed",
-    "brief_status":"<fresh|refreshed>",
-    "tokens_expected":[...],
-    "field":"body"}
-   ```
-
-**When `brief_status == "unavailable"`:**
-Skip the token check. Step 4 envelope MUST include
-`low_personalization: true` and `low_personalization_reason:
-"creator_brief_unavailable"`.
+Re-engagement override for one-time regeneration instruction:
+*"Your previous draft did not reference any detail from the [P0.1]
+creator brief. Rewrite paragraph 2 (the proposal) so it ties the
+proposed product to one specific pillar, hook, or hero-post theme
+from the brief — in one short clause."*
 
 ### Step 3 — Write outbound facts (single call)
 ```
@@ -287,6 +235,9 @@ should have caught this upstream and opened an escalation instead.
 `{"skipped":"not_a_repeat_kol","delegate_to":"kol-cold-outreach"}`.
 
 ## Pitfalls
+- Start with shared pitfalls in
+  `references/shared/runtime-draft-guardrails.md` and
+  `references/shared/personalization-check.md`.
 - Never quote prices, commission percentages, or deliverable counts
   in the reengagement email. Continuity ≠ blanket-renewal of terms.
 - Never let a repeat-collab opening read like a transactional reorder.
@@ -314,4 +265,3 @@ should have caught this upstream and opened an escalation instead.
 - Do not redraft if `outreach_sent=true`; abort with `already_sent`.
   Do not redraft if `outreach_draft_ready=true`; abort with
   `draft_already_ready`.
-- Do not call `cal.py` / direct SQL / `execute_code`.

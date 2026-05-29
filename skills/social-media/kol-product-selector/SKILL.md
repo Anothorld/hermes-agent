@@ -16,8 +16,17 @@ Land on a product (SKU + color/variant if applicable) that is BOTH in
 - Open an escalation when KOL insists on off-policy (defense:
   classifier should have already flagged this; we re-check).
 
+## Shared Blocks (Phase 2)
+- Runtime/draft guardrails:
+  `references/shared/runtime-draft-guardrails.md`
+- Style preamble baseline:
+  `references/shared/style-and-brief-preambles.md`
+- Reply envelope contract:
+  `references/shared/reply-envelope-contract.md`
+
 ## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
+- Follow shared runtime rules in
+  `references/shared/runtime-draft-guardrails.md`.
 - **No price talk.** Pricing is `kol-compensation-negotiator`'s
   domain; this skill confirms what they're getting, not what it
   costs.
@@ -34,20 +43,83 @@ Land on a product (SKU + color/variant if applicable) that is BOTH in
 2. `inbound_excerpt`.
 3. Optional `kol_requested_sku`, `kol_requested_color` (extracted by
    classifier into `facts_extracted.offer`).
+4. `thread_history` (mandatory; may be `[]`) — JSON array of prior
+   turns, oldest first, from `kol-reply-dispatcher` Step 0. Each
+   entry: `{from, date, body}` only.
+5. `flow_hint` — small JSON from dispatcher Step 5:
+   `{lane, current_goal, next_goal_in_lane,
+   missing_facts_for_current_goal, kol_signaled_next_step}`.
 
 ## Email Style Preamble (mandatory before drafting)
 
-Before composing any draft, this skill **MUST** invoke
-`kol-email-style-loader` and prepend its output verbatim to the LLM
-prompt. **P0 (goal / required facts) > P1 (company style) > P2 (personal style)**.
+Follow shared style-preamble baseline in
+`references/shared/style-and-brief-preambles.md`.
 
 Call contract:
 - inputs: `goal_brief = {goal: "product_selection", missing_facts: [<from goal_state>], next_action: "Propose / confirm SKU + color within whitelist"}`,
   `current_user_id = <operator id from session>`.
-- output: prepend as the first section of the draft prompt.
-- failure mode: empty-doc fallbacks; never block.
 
 >>> include: kol-email-style-loader
+
+## Conversation History Preamble (mandatory before drafting)
+
+After the style-loader block, prepend a `[P0.3] Conversation history`
+section, built verbatim from `thread_history` (oldest → newest):
+
+```
+[P0.3] Conversation history so far (oldest first; latest_email is
+shown separately under [INBOUND]):
+
+— <from> · <date>
+<body>
+...
+```
+
+When `thread_history` is `[]`, render
+`[P0.3] Conversation history so far: (none).`
+
+Hard rules (verbatim):
+
+1. Do **not** re-propose a SKU the KOL has already declined in an
+   earlier turn. Scan `[P0.3]` before picking proposal options.
+2. Do **not** keep re-listing the same 3 whitelist items if a prior
+   outbound already listed them and the KOL deflected — narrow to
+   1-2 different options and add one sentence of guidance.
+3. If the KOL volunteered a color / variant preference in an
+   earlier turn, treat it as already noted; check it against the
+   policy and confirm rather than re-asking.
+
+## Flow Guidance Preamble (mandatory before drafting)
+
+Immediately after `[P0.3]`, prepend `[P0.4] Flow guidance` from
+`flow_hint`:
+
+```
+[P0.4] Flow guidance:
+- Lane: <lane>
+- Current goal in this lane: <current_goal>
+- Single fact this reply should help us collect/confirm:
+  <first item of missing_facts_for_current_goal>
+- Next goal in this lane (if conversation naturally arrives there):
+  <next_goal_in_lane>
+- KOL signaled readiness to move on: <kol_signaled_next_step>
+```
+
+Hard rules (verbatim):
+
+1. Standard lane order is a **default**, not a forced march. If the
+   KOL is still picking a SKU (asks a fit question, asks for an
+   option list), stay on `product_selection` regardless of
+   `kol_signaled_next_step`.
+2. When **all of** (a) `kol_signaled_next_step` is `true`,
+   (b) the KOL did **not** raise a new product question, and
+   (c) `next_goal_in_lane` is non-null — confirm the SKU and
+   optionally add a one-sentence handoff toward `next_goal_in_lane`
+   (e.g. "I'll come back next with the scope side"). Never start
+   negotiating the next goal here.
+3. Never reopen an earlier lane goal unless the KOL explicitly
+   reopens it (e.g. "actually I want to drop the collab" → that
+   belongs to a different lane / escalation path, not here).
 
 ## Procedure
 
@@ -132,7 +204,8 @@ Do NOT set `sku_locked` until KOL replies confirming a single SKU.
 ```
 
 Do **not** set `to` or `subject` — the dispatcher fills these from the
-inbound message before persisting `approval.reply_draft`.
+inbound message before persisting `approval.reply_draft` (shared:
+`references/shared/reply-envelope-contract.md`).
 
 ## Examples
 
@@ -158,3 +231,8 @@ Inbound: "I'd only do this with the limited gold edition."
   about fit; the price line is about negotiation.
 - Forgetting `color_or_variant_locked` — downstream brief-sender
   needs it.
+- Re-proposing a SKU the KOL declined in `[P0.3]`. The history
+  block exists precisely to prevent this stall loop.
+- Pushing toward the next lane goal while the KOL is still
+  comparing options. Confirmation and a one-sentence handoff is
+  the maximum forward motion in a single reply.

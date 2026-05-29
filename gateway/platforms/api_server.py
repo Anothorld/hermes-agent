@@ -3077,6 +3077,7 @@ class APIServerAdapter(BasePlatformAdapter):
         run_id = f"run_{uuid.uuid4().hex}"
         session_id = body.get("session_id") or stored_session_id or run_id
         approval_session_key = gateway_session_key or session_id or run_id
+        yolo_requested = _coerce_request_bool(body.get("yolo"), default=False)
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
         q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
@@ -3110,6 +3111,7 @@ class APIServerAdapter(BasePlatformAdapter):
             created_at=created_at,
             session_id=session_id,
             model=body.get("model", self._model_name),
+            yolo=yolo_requested,
         )
 
         async def _run_and_close():
@@ -3142,6 +3144,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 def _run_sync():
                     from gateway.session_context import clear_session_vars, set_session_vars
                     from tools.approval import (
+                        disable_session_yolo,
+                        enable_session_yolo,
+                        is_session_yolo_enabled,
                         register_gateway_notify,
                         reset_current_session_key,
                         set_current_session_key,
@@ -3151,6 +3156,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     effective_task_id = session_id or run_id
                     approval_token = None
                     session_tokens = []
+                    yolo_was_enabled = False
                     try:
                         # Bind approval/session identity for this API run via
                         # contextvars so concurrent runs do not share process
@@ -3160,6 +3166,9 @@ class APIServerAdapter(BasePlatformAdapter):
                             platform="api_server",
                             session_key=approval_session_key,
                         )
+                        if yolo_requested:
+                            yolo_was_enabled = is_session_yolo_enabled(approval_session_key)
+                            enable_session_yolo(approval_session_key)
                         register_gateway_notify(approval_session_key, _approval_notify)
                         r = agent.run_conversation(
                             user_message=user_message,
@@ -3178,6 +3187,11 @@ class APIServerAdapter(BasePlatformAdapter):
                             if session_tokens:
                                 try:
                                     clear_session_vars(session_tokens)
+                                except Exception:
+                                    pass
+                            if yolo_requested and not yolo_was_enabled:
+                                try:
+                                    disable_session_yolo(approval_session_key)
                                 except Exception:
                                     pass
                     u = {

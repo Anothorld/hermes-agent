@@ -8,6 +8,7 @@ libraries if `gws` is not installed.
 Usage:
   python google_api.py gmail search "is:unread" [--max 10]
   python google_api.py gmail get MESSAGE_ID
+  python google_api.py gmail thread THREAD_ID
   python google_api.py gmail send --to user@example.com --subject "Hi" --body "Hello"
   python google_api.py gmail reply MESSAGE_ID --body "Thanks"
   python google_api.py calendar list [--from DATE] [--to DATE] [--calendar primary]
@@ -375,6 +376,39 @@ def gmail_get(args):
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
+
+
+def gmail_thread(args):
+    """Return the lean message list inside a Gmail thread.
+
+    Output shape (JSON array, oldest first):
+        [{"id": str, "from": str, "date": str, "body": str}, ...]
+
+    We deliberately strip headers, labels, snippet, to/subject — the only
+    consumers of this command (KOL reply pipeline) need the conversational
+    text plus a minimal "who/when" stamp, not every MIME header.
+    """
+    if _gws_binary():
+        thread = _run_gws(
+            ["gmail", "users", "threads", "get"],
+            params={"userId": "me", "id": args.thread_id, "format": "full"},
+        )
+    else:
+        service = build_service("gmail", "v1")
+        thread = service.users().threads().get(
+            userId="me", id=args.thread_id, format="full"
+        ).execute()
+
+    out: list[dict] = []
+    for msg in thread.get("messages") or []:
+        headers = _headers_dict(msg)
+        out.append({
+            "id": msg.get("id", ""),
+            "from": headers.get("From", ""),
+            "date": headers.get("Date", ""),
+            "body": _extract_message_body(msg),
+        })
+    print(json.dumps(out, indent=2, ensure_ascii=False))
 
 
 def _build_outbound_message(args):
@@ -1217,6 +1251,10 @@ def main():
     p = gmail_sub.add_parser("get")
     p.add_argument("message_id")
     p.set_defaults(func=gmail_get)
+
+    p = gmail_sub.add_parser("thread")
+    p.add_argument("thread_id")
+    p.set_defaults(func=gmail_thread)
 
     p = gmail_sub.add_parser("draft")
     p.add_argument("--to", required=True)
