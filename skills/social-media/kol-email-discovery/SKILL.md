@@ -273,6 +273,24 @@ The orchestrator's expected next action for a miss is
 `open-escalation` with `reason="contact_email_not_found"` and the
 `tried` list pasted into `question_to_operator`.
 
+## Minimal canonical output (format anchor)
+
+Use this as a shape check; keep keys stable and return JSON only:
+
+```json
+{
+  "skill": "kol-email-discovery",
+  "identity_id": 42,
+  "env": "TEST",
+  "found": true,
+  "email": "hello@kolsite.com",
+  "source": "personal_site",
+  "tier": 1,
+  "discovered_url": "https://kolsite.com/contact",
+  "tried": ["GoogleSearch:\"@handle\" email contact", "https://kolsite.com/contact"]
+}
+```
+
 ## Pitfalls
 - Never construct an email from a name + a guessed domain
   (`firstname@brand-domain`). Operator policy: miss > guess.

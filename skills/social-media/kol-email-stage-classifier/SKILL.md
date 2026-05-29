@@ -191,6 +191,39 @@ Common signals, append-only — emit only when evidence is in the email body:
    **not** invent rule_ids and do **not** re-rank rules; the first match
    in declared order wins.
 
+## Minimal canonical output (format anchor)
+
+Use this as the minimum shape contract (JSON object only):
+
+```json
+{
+  "active_goals_by_lane": {
+    "commerce": "interest_qualification",
+    "fulfillment": null,
+    "publish": null,
+    "meta": null
+  },
+  "facts_extracted": {
+    "identity": {},
+    "offer": { "offer.interest_signal": "needs_more_info" },
+    "fulfillment": {},
+    "payout": {},
+    "approval": {}
+  },
+  "signals": [
+    { "name": "interest_unclear", "confidence": 0.86, "evidence": "tell me more" }
+  ],
+  "ambiguity": "",
+  "escalation_hint": {
+    "should_consider": false,
+    "reason": "",
+    "matched_rule_id": "",
+    "suggested_question": "",
+    "required_facts_to_resume": []
+  }
+}
+```
+
 ## Failure Modes (all graded)
 - Emitted any fact key without a namespace prefix → Bridge will reject.
 - Hallucinated a fact value the email doesn't state.

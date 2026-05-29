@@ -266,6 +266,21 @@ detect this state and emit `low_personalization: true` +
 envelope so the operator review surface flags it. **Never** raise an
 exception or block the drafter.
 
+## Minimal canonical return block (format anchor)
+
+Use this exact section structure so downstream drafters can paste reliably:
+
+```
+### [P0.1] Creator brief (use to personalize — MUST cite at least one detail)
+- Handle: @example_handle
+- Content pillars: cozy hosting · family meals
+- Signature hooks: before/after walk-through · POV diary
+- Voice: warm, candid
+- Hero post: https://www.instagram.com/reel/abc123/ — apartment hosting tour with strong audience resonance
+- Why we picked them: Their recurring family-hosting theme matches the comfort-at-home positioning.
+- Brief status: fresh
+```
+
 ## Pitfalls
 - Do NOT call `veedcrawl_extract` (paid). Only `veedcrawl_metadata`
   (free, for view/ER) is allowed.
