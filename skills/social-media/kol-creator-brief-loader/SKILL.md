@@ -266,41 +266,6 @@ detect this state and emit `low_personalization: true` +
 envelope so the operator review surface flags it. **Never** raise an
 exception or block the drafter.
 
-## Examples
-
-### Fresh — passive path
-`@cozyhome_emma`, identity already has 6 brief facts written 12 days ago
-by `instagram-kol-discovery`. `get-facts` returns them. Skip Steps 2-3.
-Assemble the markdown block with `Brief status: fresh`. Zero browser
-calls, zero LLM calls.
-
-### Refreshed — active fetch
-`@beckiowens`, no brief facts on file (legacy identity from before this
-skill existed). Step 2 navigates the profile, picks 3 hero Reels, pulls
-captions + cover overlay text + first-viewport comments. Step 3 LLM
-distills:
-- pillars: ["interior styling", "family hosting", "honest reviews"]
-- hooks: ["before/after walk-through", "house-tour vlog"]
-- voice: ["warm", "candid"]
-- hero_post: a 412k-view comfort-tour Reel
-- recommendation_reason: "her hosting tours match the family-warmth angle
-  we want for the sofa"
-`write-facts-multi` writes all 24 fact entries (6 keys × 4 provenance
-fields each). Return block with `Brief status: refreshed`.
-
-### Unavailable — IG checkpoint
-`@silentkol`, profile page returns IG's "suspicious login attempt"
-interstitial. Skill stops the active fetch, returns the placeholder
-block with `Brief status: unavailable`. Cold-outreach sees this, drafts
-a generic opening, and sets `low_personalization: true` in the envelope.
-Operator sees the flag in their review queue.
-
-### Stale refresh
-`@oldfriend`, brief facts written 137 days ago. Passive freshness check
-fails (> 90 days). Active fetch runs, new LLM-distilled facts overwrite
-the old ones (write_facts append-only history is preserved — the new
-values just become the latest). `Brief status: refreshed`.
-
 ## Pitfalls
 - Do NOT call `veedcrawl_extract` (paid). Only `veedcrawl_metadata`
   (free, for view/ER) is allowed.

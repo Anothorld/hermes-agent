@@ -273,43 +273,6 @@ The orchestrator's expected next action for a miss is
 `open-escalation` with `reason="contact_email_not_found"` and the
 `tried` list pasted into `question_to_operator`.
 
-## Examples
-
-### Success — Tier 1 Google search
-`@cozyhome_emma`. Google Search surfaces `linktr.ee/cozyhome_emma`.
-WebFetch on that page returns body text with `business: emma@cozyhome.studio`.
-Verification passes (creator-owned domain, business-inquiries label).
-Step 4a writes `primary_email` + 4 identity facts. Returns
-`{"found": true, "tier": 1, ...}`.
-
-### Success — Facebook discovery path
-`@mariahomecooks`, platform `facebook`. Google Search returns the
-official Facebook Page. Public About lists `maria@homecooks.co` next to
-"Business inquiries" and links to the same domain used in the Page
-profile. Verification passes, source is `facebook_about`, tier is 1,
-and the return envelope includes both the Google query and Facebook
-About URL in `tried`.
-
-### Success — Tier 2
-`@nanaeats_atl`. Step 2 finds nothing useful (link-in-bio is a Spotify
-playlist). Step 3 navigates to IG bio, sees `📩 nanaforcollabs at
-gmail dot com` rendered as bio text, parses to
-`nanaforcollabs@gmail.com`. Tier 2, source `ig_bio`. Persists +
-returns.
-
-### Miss
-`@silent_kol_99`. No personal site, link-in-bio is a private Discord
-invite, IG bio has no contact line, Facebook About is login-blocked,
-and there is no agency listing. After 6 page loads, return
-`{"found": false, ...}` with the full `tried` list.
-Orchestrator opens `contact_email_not_found` escalation.
-
-### Failure — already has email
-Step 1 reveals `primary_email="alice@kolsite.com"`. Abort with
-`{"skipped": "already_has_email", "email": "alice@kolsite.com"}`. Do
-NOT re-verify; the operator is the source of truth for already-set
-contact data.
-
 ## Pitfalls
 - Never construct an email from a name + a guessed domain
   (`firstname@brand-domain`). Operator policy: miss > guess.
