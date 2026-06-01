@@ -293,3 +293,30 @@ def test_policy_override_max_depth(cal_db):
     # the hint, not waiting for the third.
     assert rows[e2]["resume_context"].get("force_human_takeover_hint") is True
     assert rows[e2]["resume_context"].get("max_escalation_depth") == 2
+
+
+def test_get_escalation_returns_decoded_row_or_none(cal_db):
+    """CLI ``get-escalation`` / GET /escalations/{id} read path."""
+    cal = cal_db
+    iid = _bootstrap(cal)
+    eid = cal.open_escalation(
+        identity_id=iid, campaign_id=CAMPAIGN, env="TEST",
+        goal="product_selection",
+        reason="missing_test_mode_to_in_cal",
+        question_to_operator="provide test inbox?",
+        resume_context={"matched_rule_id": "r1"},
+    )
+    assert eid is not None
+
+    row = cal.get_escalation(eid)
+    assert row is not None
+    assert row["id"] == eid
+    assert row["identity_id"] == iid
+    assert row["campaign_id"] == CAMPAIGN
+    assert row["state"] == "awaiting_answer"
+    assert isinstance(row["resume_context"], dict)
+    assert row["resume_context"].get("matched_rule_id") == "r1"
+    assert "resume_context_json" not in row
+    assert "operator_facts_json" not in row
+
+    assert cal.get_escalation(9_999_999) is None

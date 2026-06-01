@@ -92,6 +92,7 @@ TABLES: dict[str, str] = {
             extra_notes                       TEXT,
             brief_template_id                 TEXT,
             sku_whitelist_json                TEXT NOT NULL DEFAULT '[]',
+            variant_candidates_json           TEXT NOT NULL DEFAULT '[]',
             color_variant_policy              TEXT,
             audit_standards_md                TEXT,
             test_mode_to                      TEXT,

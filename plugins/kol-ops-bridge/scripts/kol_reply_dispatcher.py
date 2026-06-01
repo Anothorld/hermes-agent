@@ -217,7 +217,9 @@ _DISPATCHER_INSTRUCTIONS = (
     "skill OR open an escalation per the skill's Step 3.5. If a child skill "
     "returns a draft envelope, persist it back to CAL as a `kol_reply_draft_ready` "
     "event and an `approval.reply_draft` fact for operator review. Do not send "
-    "mail directly."
+    "mail directly. For Step 6 idempotency labels, use only "
+    "`kol_bridge_tool.py mark-reply-handled`; do not call Gmail label APIs "
+    "or custom scripts directly."
 )
 
 

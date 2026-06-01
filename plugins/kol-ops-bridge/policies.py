@@ -237,11 +237,83 @@ def parse_escalation_rules(content_md: str) -> dict[str, Any]:
     return {"top": top, "rules": rules}
 
 
+DEFAULT_MAX_ESCALATION_DEPTH: Final[int] = 3
+
+
+def match_escalation_rules(
+    parsed: dict[str, Any],
+    signals: Any,
+) -> dict[str, Any]:
+    """Deterministically match classifier signals against escalation rules.
+
+    A rule matches when **all** of its ``signals_match`` names are present in
+    the detected signals (subset semantics). Rules are evaluated in document
+    order; the first match wins. This replaces the per-dispatch LLM rule-match
+    step so the ``escalation_hint`` is reproducible.
+
+    Args:
+        parsed: output of :func:`parse_escalation_rules`
+            (``{"top": {...}, "rules": [...]}``).
+        signals: list of signal names (``["not_received", ...]``) or list of
+            signal dicts (``[{"name": "not_received", ...}]``).
+
+    Returns:
+        An ``escalation_hint`` dict: ``{should_consider, matched_rule_id,
+        reason, suggested_question, required_facts_to_resume, severity,
+        max_escalation_depth}``.
+    """
+    top = parsed.get("top") or {}
+    rules = parsed.get("rules") or []
+    names = _signal_names(signals)
+    max_depth = top.get("max_escalation_depth", DEFAULT_MAX_ESCALATION_DEPTH)
+    empty = {
+        "should_consider": False,
+        "matched_rule_id": "",
+        "reason": "",
+        "suggested_question": "",
+        "required_facts_to_resume": [],
+        "severity": "normal",
+        "max_escalation_depth": max_depth,
+    }
+    if not names or not rules:
+        return empty
+    for rule in rules:
+        wanted = rule.get("signals_match") or []
+        if isinstance(wanted, str):
+            wanted = [wanted]
+        if wanted and set(wanted).issubset(names):
+            required = rule.get("required_facts_to_resume") or []
+            if isinstance(required, str):
+                required = [required]
+            return {
+                "should_consider": True,
+                "matched_rule_id": rule.get("id", ""),
+                "reason": "rule pattern matched",
+                "suggested_question": rule.get("suggested_question", ""),
+                "required_facts_to_resume": list(required),
+                "severity": rule.get("severity", "normal"),
+                "max_escalation_depth": max_depth,
+            }
+    return empty
+
+
+def _signal_names(signals: Any) -> set[str]:
+    names: set[str] = set()
+    for sig in signals or []:
+        if isinstance(sig, str):
+            names.add(sig)
+        elif isinstance(sig, dict) and sig.get("name"):
+            names.add(str(sig["name"]))
+    return names
+
+
 __all__ = [
     "POLICY_SCOPES",
     "PolicyScope",
+    "DEFAULT_MAX_ESCALATION_DEPTH",
     "get_policy",
     "list_policy_history",
+    "match_escalation_rules",
     "parse_escalation_rules",
     "put_policy",
 ]

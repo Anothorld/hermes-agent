@@ -31,8 +31,14 @@ from pydantic import BaseModel, Field, field_validator
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 from . import cal
+from . import campaign_validation
+from . import confirmed_ingest
+from . import confirmed_fact_buffer
 from . import discovery_router
+from . import dispatch_router
 from . import policies as _policies
+from . import pricing_engine
+from . import reply_draft
 from .gmail_client import GmailClient, GmailUnavailable
 from .schema import FACT_NAMESPACES, GOAL_NAMES, SCHEMA_VERSION
 
@@ -233,6 +239,7 @@ class CampaignConfigUpsertBody(BaseModel):
     extra_notes: Optional[str] = None
     brief_template_id: Optional[str] = None
     sku_whitelist: Optional[list[str]] = None
+    variant_candidates: Optional[list[dict[str, Any]]] = None
     color_variant_policy: Optional[str] = None
     audit_standards_md: Optional[str] = None
     test_mode_to: Optional[str] = None
@@ -309,6 +316,13 @@ class ReconcileSentBody(BaseModel):
     max_results: int = Field(default=100, ge=1, le=500)
 
 
+class MarkReplyHandledBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    message_id: str = Field(min_length=1, max_length=256)
+    handled_label: str = Field(default="kol-outreach/handled", min_length=1, max_length=120)
+    pending_label: str = Field(default="kol-outreach/pending-reply", min_length=1, max_length=120)
+
+
 class ArchiveBody(_CampaignIdNormaliserMixin):
     # NOTE: campaign_id is required. The mixin coerces sentinel strings
     # to None first; Pydantic then rejects the resulting None against
@@ -328,6 +342,55 @@ class RouteDiscoveryBody(BaseModel):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
     selected_by: str = "agent"
     operator_note: str = ""
+
+
+class IngestIdentityBody(BaseModel):
+    primary_handle: str
+    platform: str = "instagram"
+    display_name: Optional[str] = None
+    primary_email: Optional[str] = None
+
+    @field_validator("primary_email", mode="before")
+    @classmethod
+    def _validate_primary_email(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        if not _EMAIL_RE.match(s):
+            raise ValueError(
+                f"primary_email must look like 'x@y.tld'; got {v!r}"
+            )
+        return s.lower()
+
+
+class IngestCandidateBody(BaseModel):
+    source: str
+    discovery_score: Optional[float] = None
+    payload: Optional[dict[str, Any]] = None
+    candidate_status: str = Field(
+        default="discovered",
+        pattern="^(discovered|shortlisted|selected_for_outreach|needs_review|rejected|archived)$",
+    )
+
+
+class IngestConfirmedCandidateBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    source: str
+    ingest_id: Optional[str] = None
+    identity: IngestIdentityBody
+    candidate: IngestCandidateBody
+    identity_facts: Optional[dict[str, Any]] = None
+
+
+class BufferConfirmedCandidateBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    source: str
+    ingest_id: Optional[str] = None
+    identity: IngestIdentityBody
+    candidate: IngestCandidateBody
+    identity_facts: Optional[dict[str, Any]] = None
 
 
 class FactsWriteMultiBody(_CampaignIdNormaliserMixin):
@@ -878,6 +941,79 @@ def route_discovery(
         selected_by=body.selected_by,
         operator_note=body.operator_note,
     )
+
+
+@router.post("/campaigns/{campaign_id}/ingest-confirmed-candidate")
+def ingest_confirmed_candidate(
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
+    body: IngestConfirmedCandidateBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Deterministic single-candidate ingest: identity → facts → candidate.
+
+    Intended for agent/tool use immediately after a KOL candidate is confirmed
+    from CDP/browser extraction. No LLM transformation — payload must be
+    structured JSON matching the body schema.
+    """
+    _require_bridge_key(x_bridge_key)
+    try:
+        return confirmed_ingest.ingest_confirmed_candidate(
+            campaign_id=campaign_id,
+            env=body.env,
+            source=body.source,
+            identity=body.identity.model_dump(exclude_none=True),
+            candidate=body.candidate.model_dump(exclude_none=True),
+            identity_facts=body.identity_facts,
+            ingest_id=body.ingest_id,
+        )
+    except confirmed_ingest.IngestValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/campaigns/{campaign_id}/buffer-confirmed-candidate")
+def buffer_confirmed_candidate(
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
+    body: BufferConfirmedCandidateBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Append a confirmed candidate to the local jsonl ingest buffer."""
+    _require_bridge_key(x_bridge_key)
+    payload = {
+        "source": body.source,
+        "identity": body.identity.model_dump(exclude_none=True),
+        "candidate": body.candidate.model_dump(exclude_none=True),
+        "identity_facts": body.identity_facts,
+    }
+    event = confirmed_fact_buffer.append_enqueue(
+        path=confirmed_fact_buffer.default_buffer_path(),
+        campaign_id=campaign_id,
+        env=body.env,
+        payload=payload,
+        fact_id=body.ingest_id,
+        identity_hint=body.identity.primary_handle,
+    )
+    return {"buffered": True, "event": event}
+
+
+@router.post("/ingest-buffer/replay")
+def replay_ingest_buffer(
+    limit: int = Query(default=50, ge=1, le=500),
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Replay pending/failed buffered ingest events into CAL."""
+    _require_bridge_key(x_bridge_key)
+    return confirmed_fact_buffer.replay_pending(limit=limit)
+
+
+@router.get("/ingest-buffer/pending")
+def list_ingest_buffer_pending(
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """List pending/failed entries in the confirmed ingest buffer."""
+    _require_bridge_key(x_bridge_key)
+    buf = confirmed_fact_buffer.default_buffer_path()
+    pending = confirmed_fact_buffer.list_pending(buf)
+    return {"buffer_path": str(buf), "count": len(pending), "items": pending}
 
 
 @router.get("/campaigns/{campaign_id}/lanes")
@@ -1629,6 +1765,38 @@ def reconcile_sent(
     }
 
 
+@router.post("/gmail/mark-reply-handled")
+def mark_reply_handled(
+    body: MarkReplyHandledBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Apply handled label + remove pending-reply label on one message.
+
+    Deterministic helper for dispatcher workflows that need idempotency
+    label transitions without hand-rolling Gmail label logic in SKILL code.
+    """
+    _require_bridge_key(x_bridge_key)
+    client = GmailClient()
+    if not client.is_available():
+        raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    try:
+        result = client.modify_labels(
+            body.message_id,
+            add_names=[body.handled_label],
+            remove_names=[body.pending_label],
+        )
+    except GmailUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "env": body.env,
+        "message_id": body.message_id,
+        "added_label": body.handled_label,
+        "removed_label": body.pending_label,
+        "result": result,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Escalations
 # ---------------------------------------------------------------------------
@@ -1640,6 +1808,14 @@ def list_escalations(
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     return {"escalations": cal.list_escalations(state=state, env=env)}
+
+
+@router.get("/escalations/{escalation_id}")
+def get_escalation(escalation_id: int) -> dict[str, Any]:
+    row = cal.get_escalation(escalation_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="escalation not found")
+    return row
 
 
 @router.post("/escalations")
@@ -1695,6 +1871,156 @@ def resolve_escalation(
     except cal.EscalationStateError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Deterministic logic helpers (toolized skill steps)
+#
+# These endpoints expose pure decision logic that used to live inside the
+# KOL skills as model-generated reasoning. They take structured input and
+# return structured output with NO DB read/write, so they need no bridge key.
+# Keeping them server-side lets both the skills and the Web console share one
+# authoritative implementation (see pricing_engine / campaign_validation /
+# dispatch_router / policies.match_escalation_rules).
+# ---------------------------------------------------------------------------
+
+
+class ComputeOfferBody(BaseModel):
+    payload: dict[str, Any]
+
+
+@router.post("/logic/compute-compensation-offer")
+def compute_compensation_offer(body: ComputeOfferBody) -> dict[str, Any]:
+    try:
+        return pricing_engine.compute_offer(body.payload)
+    except pricing_engine.PricingInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class ValidateCampaignBody(BaseModel):
+    campaign_id: str
+    candidate: dict[str, Any]
+    confirmed_high_budget: bool = False
+
+
+@router.post("/logic/validate-campaign-config")
+def validate_campaign_config_route(body: ValidateCampaignBody) -> dict[str, Any]:
+    return campaign_validation.validate_campaign_config(
+        body.candidate,
+        campaign_id=body.campaign_id,
+        confirmed_high_budget=body.confirmed_high_budget,
+    )
+
+
+class SelectNextSkillBody(BaseModel):
+    goals: dict[str, Any] = Field(default_factory=dict)
+    facts: dict[str, Any] = Field(default_factory=dict)
+    signals: list[dict[str, Any]] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/logic/select-next-skill")
+def select_next_skill_route(body: SelectNextSkillBody) -> dict[str, Any]:
+    return dispatch_router.select_next_skill(body.model_dump())
+
+
+class MatchEscalationRulesBody(BaseModel):
+    parsed: Optional[dict[str, Any]] = None
+    signals: list[Any] = Field(default_factory=list)
+
+
+@router.post("/logic/match-escalation-rules")
+def match_escalation_rules_route(body: MatchEscalationRulesBody) -> dict[str, Any]:
+    parsed = body.parsed
+    if parsed is None:
+        # Fetch + parse the active escalation_rules policy when the caller
+        # did not supply one (saves the classifier a round-trip).
+        with cal._connect() as conn:  # type: ignore[attr-defined]
+            row = _policies.get_policy(conn, scope="escalation_rules")
+        parsed = _policies.parse_escalation_rules((row or {}).get("content_md", ""))
+    return _policies.match_escalation_rules(parsed, body.signals)
+
+
+# ---------------------------------------------------------------------------
+# Reply-draft persistence (toolized dispatcher Step 5.5)
+# ---------------------------------------------------------------------------
+
+
+class PersistReplyDraftBody(BaseModel):
+    identity_id: int
+    campaign_id: str
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    source_message_id: str
+    primary_lane: str
+    primary_goal: str
+    child_skill: str
+    child_envelope: dict[str, Any]
+    latest_email: dict[str, Any]
+    linked_escalation_id: Optional[int] = None
+
+
+@router.post("/reply-drafts/persist")
+def persist_reply_draft(
+    body: PersistReplyDraftBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Enrich + persist a reply draft as a CAL event + approval fact.
+
+    Composes the two Step 5.5 writes the dispatcher used to hand-build:
+    (1) ``kol_reply_draft_ready`` event, (2) ``approval.reply_draft`` fact.
+    Envelope enrichment (``to`` / ``Re:`` subject / thread_id) is done first,
+    so the approval fact never fails the Bridge's non-empty draft validator.
+    """
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_identity(body.identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    try:
+        merged = reply_draft.enrich_envelope(body.child_envelope, body.latest_email)
+    except reply_draft.ReplyDraftError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    event_payload = reply_draft.build_draft_event_payload(
+        source_message_id=body.source_message_id,
+        primary_lane=body.primary_lane,
+        primary_goal=body.primary_goal,
+        child_skill=body.child_skill,
+        merged_draft=merged,
+    )
+    event_id = cal.write_event(
+        identity_id=body.identity_id,
+        event_type="kol_reply_draft_ready",
+        actor="agent:kol-reply-dispatcher",
+        campaign_id=body.campaign_id,
+        lane=body.primary_lane,
+        goal=body.primary_goal,
+        payload=event_payload,
+        env=body.env,
+    )
+    fact_value = reply_draft.build_approval_fact_value(
+        source_message_id=body.source_message_id,
+        primary_lane=body.primary_lane,
+        primary_goal=body.primary_goal,
+        child_skill=body.child_skill,
+        merged_draft=merged,
+        linked_escalation_id=body.linked_escalation_id,
+    )
+    try:
+        written = cal.write_facts_multi(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            namespaces={"approval": {"approval.reply_draft": fact_value}},
+            source=f"draft:{body.source_message_id}",
+            source_event_id=event_id,
+            env=body.env,
+        )
+    except cal.FactNamespaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "ok": True,
+        "draft_event_id": event_id,
+        "written": written,
+        "draft": merged,
+    }
 
 
 # ---------------------------------------------------------------------------

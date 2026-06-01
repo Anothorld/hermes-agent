@@ -158,7 +158,10 @@ Pass it to a cheap LLM (e.g. Haiku) with this output contract:
 >   "dry", "warm") over the creator's self-description.
 > - `hero_post_url`: the single Reel URL with the strongest theme match
 >   for a home / lifestyle / family-warmth campaign (or the highest-engagement
->   one if none clearly leads). Must be one of the URLs in the input.
+>   one if none clearly leads). Must be one of the URLs in the input, and must
+>   be a canonical Instagram media URL: `https://www.instagram.com/reel/<shortcode>/`
+>   or `https://www.instagram.com/p/<shortcode>/` (no handle-prefixed path,
+>   no query string, no fragment).
 > - `hero_post_note`: 1 sentence describing why this Reel is representative
 >   (e.g. "moving-into-new-house comfort tour, viewers repeatedly called it
 >   'so cozy'").

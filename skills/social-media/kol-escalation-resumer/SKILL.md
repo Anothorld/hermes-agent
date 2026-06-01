@@ -113,13 +113,15 @@ confirm and dispatches the next sub-skill.
 
 #### 3b. `override_and_continue`
 Parse `operator_answer` for the `override_config_patch:` block. The
-block is a YAML/JSON snippet identifying campaign-level overrides
-(e.g. `compensation_cap_usd: 2000`, `gift_max_msrp_usd: 800`). Write
-via:
+block is a YAML/JSON snippet with **canonical `campaign_config` column
+names** only (e.g. `paid_ceiling: 2000`, `product_unit_price: 800`).
+Aliases like `compensation_cap_usd` are **not** accepted — the Bridge
+silently ignores keys outside the upsert whitelist. Write via merge
+upsert (partial body updates only the supplied columns):
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py upsert-campaign-config \
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py upsert-campaign \
   --campaign-id "<campaign_id>" --env <TEST|LIVE> \
-  --patch-json '<override_config_patch>'
+  --json '<override_config_patch>'
 ```
 Then write any incidental `operator_facts` from Step 3a.
 

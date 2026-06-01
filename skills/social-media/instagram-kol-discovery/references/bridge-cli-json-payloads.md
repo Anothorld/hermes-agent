@@ -38,12 +38,67 @@ Do not rely on handle-only candidate payloads. Safe shape:
   }
 }
 
-4. Recommended persistence order for each verified candidate
+4. Recommended persistence order for each verified candidate (preferred)
 - browser_navigate to profile URL and collect profile evidence
-- upsert-identity with primary_handle (NO primary_email)
-- write-facts-multi with --identity-id (identity.instagram_profile_url, creator brief, and link-in-bio / personal-site URL if observed)
-- add-candidate with identity_id in JSON
+- build one file-backed ingest payload: /tmp/ingest_<handle>.json
+- ingest-confirmed-candidate (single deterministic endpoint: identity → facts → candidate)
 - optional list-candidates verification
+
+ingest-confirmed-candidate minimal shape:
+{
+  "env": "LIVE",
+  "source": "skill:instagram-kol-discovery",
+  "ingest_id": "<uuid>",
+  "identity": {
+    "primary_handle": "thecozyfarmhouse",
+    "platform": "instagram"
+  },
+  "candidate": {
+    "source": "rediscovery_profile_verification",
+    "discovery_score": 82,
+    "payload": {
+      "evidence_url": "https://www.instagram.com/thecozyfarmhouse/",
+      "followers": "220K",
+      "reason": "..."
+    }
+  },
+  "identity_facts": {
+    "identity.instagram_profile_url": "https://www.instagram.com/thecozyfarmhouse/",
+    "identity.instagram_profile_url_source": "ig_bio",
+    "identity.instagram_profile_url_discovered_at": "<iso8601>",
+    "identity.instagram_profile_url_discovered_url": "https://www.instagram.com/thecozyfarmhouse/"
+  }
+}
+
+ingest payload hard validation rules (apply before CLI call):
+
+- Treat top-level `source` and `identity.*_source` as different fields:
+  - top-level `source` = workflow origin string (for example `skill:instagram-kol-discovery`);
+  - `identity.*_source` must be one of:
+    `google_search_result`, `linktree`, `ig_bio`, `facebook_about`,
+    `fb_creator_profile`, `personal_site`, `media_kit`, `agency_page`,
+    `ig_profile_and_reels`, `ig_reel_pick`, `llm_summary`.
+- Every `*_url` in `identity_facts` must be an absolute `http(s)` URL.
+- `identity.linktree_url` accepts only these hosts:
+  `linktr.ee`, `beacons.ai`, `bio.link`, `lnk.bio`, `solo.to`, `linkin.bio`.
+- If a link-in-bio host is not on the allowlist (for example `msha.ke`), do not force it into `identity.linktree_url`; either:
+  - omit that field, or
+  - store the full URL under `identity.personal_site_url` when it is creator-owned.
+- Optional-field policy: when a field fails validation and is not required for identity/candidate creation, remove the field and retry the same ingest (do not keep guessing alternate string formats).
+
+CLI:
+python .../kol_bridge_tool.py ingest-confirmed-candidate \
+  --campaign-id <campaign_id> --env LIVE --json @/tmp/ingest_<handle>.json
+
+Fallback when ingest endpoint unavailable:
+python .../kol_bridge_tool.py buffer-confirmed-candidate \
+  --campaign-id <campaign_id> --env LIVE --json @/tmp/ingest_<handle>.json
+python .../kol_bridge_tool.py replay-ingest-buffer --limit 50
+
+Legacy three-step chain (deprecated for new runs):
+- upsert-identity with primary_handle (NO primary_email)
+- write-facts-multi with --identity-id
+- add-candidate with identity_id in JSON
 
 5. Use file-backed JSON by default.
 This avoids shell quoting issues and keeps bridge writes reproducible:

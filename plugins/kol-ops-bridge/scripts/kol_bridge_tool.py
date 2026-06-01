@@ -24,6 +24,9 @@ Subcommands are registered by domain modules:
 - ``_subcmd_identities`` — identity + event + timeline
 - ``_subcmd_facts``      — facts read/write
 - ``_subcmd_governance`` — escalations + approvals + policies
+- ``_subcmd_logic``      — toolized deterministic skill steps
+  (pricing / campaign validation / lane routing / escalation
+  matching / reply-draft persistence)
 
 Run ``kol_bridge_tool.py --help`` for the full subcommand list.
 """
@@ -45,6 +48,7 @@ import _subcmd_campaigns  # noqa: E402
 import _subcmd_facts  # noqa: E402
 import _subcmd_governance  # noqa: E402
 import _subcmd_identities  # noqa: E402
+import _subcmd_logic  # noqa: E402
 from _cal_client import (  # noqa: E402
     add_common_args,
     add_env_arg,
@@ -73,6 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _subcmd_identities.register(sub)
     _subcmd_facts.register(sub)
     _subcmd_governance.register(sub)
+    _subcmd_logic.register(sub)
     return p
 
 

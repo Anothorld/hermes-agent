@@ -350,6 +350,15 @@ After Step 5.5 (or an escalation was opened), apply the Gmail label
 state-machine for "have we processed this email"; do **not** rely on CAL
 events for re-entry detection.
 
+Use the deterministic bridge CLI command below; do **not** hand-roll
+Gmail label calls in ad-hoc Python:
+
+```
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py mark-reply-handled \
+  --env <TEST|LIVE> \
+  --message-id "<inbound_message_id>"
+```
+
 ### Step 7 — Final report
 Return a JSON summary covering each processed reply:
 

@@ -131,6 +131,19 @@ link-in-bio, personal-site, or Facebook target:
 Record every URL you actually fetched in a running `tried` list so the
 final envelope (and any escalation) can show what was checked.
 
+**Immediate persistence rule (hard).** This skill must not keep
+"found-but-not-written" facts in long-running memory. As soon as a
+verified email is found:
+
+1. Run `upsert-identity` immediately for that single email.
+2. Immediately run `write-facts-multi` for provenance (and any social
+   URLs already seen on the same evidence pages).
+3. Only after both writes complete do you return the success envelope.
+
+Forbidden pattern: continue crawling/summarizing after discovering an
+email while delaying writes until the end. Durable state in CAL is the
+source of truth; in-memory notes are not.
+
 ### Step 3 — Tier 2: BrowserUse fallback
 Only invoke when Step 2 returns no verified hit. Tier 2 is reserved
 for surfaces that WebFetch cannot render (Instagram bio behind JS,
@@ -185,9 +198,10 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
 ```
 
 If `upsert-identity` succeeds but `write-facts-multi` returns
-`FactNamespaceError`, do NOT roll back the email — log the fact-write
-failure in the return envelope so the orchestrator can backfill. The
-column is the authoritative source; the facts are audit metadata.
+`FactNamespaceError`, do NOT roll back the email. Fix the payload
+immediately (usually missing/invalid provenance fields), retry
+`write-facts-multi` for the same identity, and only then continue.
+Return success only after provenance write succeeds.
 
 #### Step 4a-bis — Social-platform URL side effect (no extra budget)
 While browsing the pages above in Step 2/3, you already see most of
@@ -308,10 +322,9 @@ Use this as a shape check; keep keys stable and return JSON only:
 - Do not invoke `kol-cold-outreach` or `kol-reengagement-outreach`
   from inside this skill. Returning the envelope is the entire
   hand-off — the orchestrator chains the next step.
-- Do not retry `upsert-identity` if it returned `FactNamespaceError`
-  on the follow-up facts write. The column write already landed; a
-  retry would be a no-op (COALESCE preserves the existing email) or
-  worse, racy if a parallel skill wrote a different address.
+- Do not retry `upsert-identity` when only `write-facts-multi` failed.
+  The email column write already landed; fix and retry the facts payload
+  instead.
 - Budget cap is a hard ceiling, not a soft target. Eight page loads
   per identity is enough to clear public surfaces; further crawling
   is the operator's job, not the skill's.

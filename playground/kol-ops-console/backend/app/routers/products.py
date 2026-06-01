@@ -25,6 +25,7 @@ from ..gateway_client import (
     TERMINAL_STATES,
 )
 from ..product_variants import parse_variants_from_url
+from ..variant_candidates import normalize_variant
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -371,6 +372,11 @@ class ProductVariant(BaseModel):
     label: str | None = None
     url: str | None = None
     attributes: dict[str, str] = Field(default_factory=dict)
+    merchant_sku: str | None = None
+    price: float | None = None
+    discounted_price: float | None = None
+    sale_price: float | None = None
+    price_updated_at: str | None = None
 
 
 class ProductBody(BaseModel):
@@ -539,6 +545,26 @@ def upsert_product(
 ) -> dict:
     now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
     variants_payload = [v.model_dump() for v in body.variants]
+    if body.url:
+        auto_variants = parse_variants_from_url(body.url)
+        if auto_variants:
+            merged: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            # Keep operator-entered rows first, then add newly discovered ones.
+            for v in [*variants_payload, *auto_variants]:
+                vid = str(v.get("id") or "").strip()
+                if not vid or vid in seen:
+                    continue
+                seen.add(vid)
+                merged.append(v)
+            variants_payload = merged
+    normalized_variants: list[dict[str, Any]] = []
+    for v in variants_payload:
+        try:
+            normalized_variants.append(normalize_variant(v))
+        except ValueError:
+            continue
+    variants_payload = normalized_variants
     conn.execute(
         """INSERT INTO products (
               sku, name, url, tags_json, notes, created_at,

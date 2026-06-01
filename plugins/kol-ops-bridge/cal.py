@@ -34,6 +34,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Callable, Final, Iterable, Iterator, Mapping, Optional
+from urllib.parse import urlparse
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -122,6 +123,10 @@ def _bootstrap(path: Path) -> None:
         _ensure_column(conn, "campaign_config", "test_mode_to", "TEXT")
         _ensure_column(conn, "campaign_config", "product_display_name", "TEXT")
         _ensure_column(conn, "campaign_config", "product_url", "TEXT")
+        _ensure_column(
+            conn, "campaign_config", "variant_candidates_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
         for ddl in VIEWS.values():
             conn.execute(ddl)
         for idx in INDEXES:
@@ -491,6 +496,7 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
         "commission_band": "commission_band_json",
         "deliverable_platforms": "deliverable_platforms_json",
         "sku_whitelist": "sku_whitelist_json",
+        "variant_candidates": "variant_candidates_json",
         "followup_intervals": "followup_intervals_json",
     }
     scalar_allowed = {
@@ -598,6 +604,7 @@ def get_campaign_config(campaign_id: str, *, env: Optional[str] = None) -> Optio
     out["commission_band"] = _jl(out.pop("commission_band_json", "{}"), {})
     out["deliverable_platforms"] = _jl(out.pop("deliverable_platforms_json", "[]"), [])
     out["sku_whitelist"] = _jl(out.pop("sku_whitelist_json", "[]"), [])
+    out["variant_candidates"] = _jl(out.pop("variant_candidates_json", "[]"), [])
     out["followup_intervals"] = _jl(out.pop("followup_intervals_json", "{}"), {})
     out["contract_required"] = bool(out.get("contract_required", 1))
     return out
@@ -890,8 +897,350 @@ def _validate_approval_reply_draft(value: Any) -> None:
         )
 
 
+_DISCOVERY_ALLOWED_SOURCES: Final[set[str]] = {
+    "google_search_result",
+    "linktree",
+    "ig_bio",
+    "facebook_about",
+    "fb_creator_profile",
+    "personal_site",
+    "media_kit",
+    "agency_page",
+    "ig_profile_and_reels",
+    "ig_reel_pick",
+    "llm_summary",
+}
+
+_DISCOVERY_BASE_KEYS_REQUIRING_TRIPLE: Final[set[str]] = {
+    "identity.content_pillars",
+    "identity.signature_hooks",
+    "identity.voice_descriptors",
+    "identity.hero_post_url",
+    "identity.hero_post_note",
+    "identity.recommendation_reason",
+    "identity.instagram_profile_url",
+    "identity.tiktok_profile_url",
+    "identity.youtube_profile_url",
+    "identity.facebook_profile_url",
+    "identity.twitter_profile_url",
+    "identity.threads_profile_url",
+    "identity.linktree_url",
+    "identity.personal_site_url",
+}
+
+
+def _require_non_empty_string(*, key: str, value: Any, max_len: int = 500) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise FactNamespaceError(f"{key} must be a non-empty string")
+    s = value.strip()
+    if len(s) > max_len:
+        raise FactNamespaceError(f"{key} is too long (>{max_len})")
+    return s
+
+
+def _require_url(*, key: str, value: Any, allowed_hosts: Optional[tuple[str, ...]] = None) -> str:
+    s = _require_non_empty_string(key=key, value=value, max_len=1000)
+    parsed = urlparse(s)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise FactNamespaceError(
+            f"{key} must be an absolute http(s) URL; got {s!r}"
+        )
+    host = parsed.netloc.lower()
+    if allowed_hosts is not None:
+        if not any(host == h or host.endswith(f".{h}") for h in allowed_hosts):
+            raise FactNamespaceError(
+                f"{key} must be on one of: {', '.join(allowed_hosts)}; got host {host!r}"
+            )
+    return s
+
+
+def _require_iso8601(*, key: str, value: Any) -> None:
+    s = _require_non_empty_string(key=key, value=value, max_len=64)
+    normalized = s[:-1] + "+00:00" if s.endswith("Z") else s
+    try:
+        _dt.datetime.fromisoformat(normalized)
+    except ValueError as exc:  # pragma: no cover - exact parser msg not stable
+        raise FactNamespaceError(f"{key} must be ISO-8601 timestamp") from exc
+
+
+def _validate_string_list(
+    *,
+    key: str,
+    value: Any,
+    min_items: int,
+    max_items: int,
+    item_max_len: int,
+) -> None:
+    if not isinstance(value, list):
+        raise FactNamespaceError(f"{key} must be a list")
+    n = len(value)
+    if n < min_items or n > max_items:
+        raise FactNamespaceError(
+            f"{key} must contain {min_items}-{max_items} items"
+        )
+    for idx, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise FactNamespaceError(f"{key}[{idx}] must be a non-empty string")
+        if len(item.strip()) > item_max_len:
+            raise FactNamespaceError(f"{key}[{idx}] is too long (>{item_max_len})")
+
+
+def _validate_instagram_media_url(value: Any) -> None:
+    s = _require_url(
+        key="identity.hero_post_url",
+        value=value,
+        allowed_hosts=("instagram.com",),
+    )
+    parsed = urlparse(s)
+    host = parsed.netloc.lower()
+    if host not in {"instagram.com", "www.instagram.com"}:
+        raise FactNamespaceError(
+            "identity.hero_post_url must use instagram.com or www.instagram.com"
+        )
+    # Only accept direct content URLs; disallow share/redirect helpers and
+    # query/fragment based tracking links that often bounce elsewhere.
+    if parsed.query or parsed.fragment:
+        raise FactNamespaceError(
+            "identity.hero_post_url must be a direct URL without query/fragment"
+        )
+    # Canonical-only guard: reject handle-prefixed variants like
+    # /<handle>/reel/<id> because they can visually imply a wrong owner and
+    # may bounce to another creator's canonical post URL.
+    if not re.fullmatch(r"/(?:reel|p)/[A-Za-z0-9_-]+/?", parsed.path):
+        raise FactNamespaceError(
+            "identity.hero_post_url must be canonical /reel/<id> or /p/<id>"
+        )
+
+
+def _validate_discovery_source(value: Any) -> None:
+    s = _require_non_empty_string(key="identity.*_source", value=value, max_len=64)
+    if s not in _DISCOVERY_ALLOWED_SOURCES:
+        allowed = ", ".join(sorted(_DISCOVERY_ALLOWED_SOURCES))
+        raise FactNamespaceError(
+            "identity.*_source contains unsupported source value "
+            f"{s!r}; allowed values: {allowed}"
+        )
+
+
+def _validate_discovery_provenance_bundle(*, namespace: str, facts: Mapping[str, Any]) -> None:
+    if namespace != "identity":
+        return
+    for base in _DISCOVERY_BASE_KEYS_REQUIRING_TRIPLE:
+        if base not in facts:
+            continue
+        missing = [
+            f"{base}_source",
+            f"{base}_discovered_at",
+            f"{base}_discovered_url",
+        ]
+        missing = [k for k in missing if k not in facts]
+        if missing:
+            raise FactNamespaceError(
+                f"{base} requires provenance keys in same write: {', '.join(missing)}"
+            )
+
+
+def _extract_instagram_profile_handle(url: str) -> Optional[str]:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host not in {"instagram.com", "www.instagram.com"}:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+    m = re.fullmatch(r"/([A-Za-z0-9._]+)/?", parsed.path or "")
+    if not m:
+        return None
+    return m.group(1).lower()
+
+
+def _read_identity_primary_handle(*, identity_id: int, env: str) -> Optional[str]:
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT primary_handle
+               FROM kol_identity
+               WHERE id=? AND env=?
+               LIMIT 1""",
+            (identity_id, env),
+        ).fetchone()
+    if not row:
+        return None
+    raw = row["primary_handle"]
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip().lower()
+
+
+def _validate_discovery_identity_match(
+    *,
+    identity_id: int,
+    namespace: str,
+    facts: Mapping[str, Any],
+    env: str,
+) -> None:
+    if namespace != "identity" or "identity.hero_post_url" not in facts:
+        return
+    discovered_url = facts.get("identity.hero_post_url_discovered_url")
+    if not isinstance(discovered_url, str):
+        # Detailed type/shape error is covered by per-key validators.
+        return
+    owner_handle = _extract_instagram_profile_handle(discovered_url)
+    if owner_handle is None:
+        raise FactNamespaceError(
+            "identity.hero_post_url_discovered_url must be the creator's instagram profile URL for owner verification"
+        )
+    expected_handle = _read_identity_primary_handle(identity_id=identity_id, env=env)
+    if expected_handle is None:
+        raise FactNamespaceError(
+            "identity_id not found for hero_post_url owner verification"
+        )
+    if owner_handle != expected_handle:
+        raise FactNamespaceError(
+            "hero_post_url owner mismatch: discovered profile handle does not match identity.primary_handle"
+        )
+
+
 _FACT_SHAPE_VALIDATORS: Final[dict[str, Callable[[Any], None]]] = {
     "approval.reply_draft": _validate_approval_reply_draft,
+    "identity.content_pillars": lambda v: _validate_string_list(
+        key="identity.content_pillars", value=v, min_items=2, max_items=4, item_max_len=80,
+    ),
+    "identity.signature_hooks": lambda v: _validate_string_list(
+        key="identity.signature_hooks", value=v, min_items=2, max_items=3, item_max_len=80,
+    ),
+    "identity.voice_descriptors": lambda v: _validate_string_list(
+        key="identity.voice_descriptors", value=v, min_items=2, max_items=3, item_max_len=40,
+    ),
+    "identity.hero_post_url": _validate_instagram_media_url,
+    "identity.hero_post_note": lambda v: _require_non_empty_string(
+        key="identity.hero_post_note", value=v, max_len=300,
+    ),
+    "identity.recommendation_reason": lambda v: _require_non_empty_string(
+        key="identity.recommendation_reason", value=v, max_len=500,
+    ),
+    "identity.instagram_profile_url": lambda v: _require_url(
+        key="identity.instagram_profile_url", value=v, allowed_hosts=("instagram.com",),
+    ),
+    "identity.tiktok_profile_url": lambda v: _require_url(
+        key="identity.tiktok_profile_url", value=v, allowed_hosts=("tiktok.com",),
+    ),
+    "identity.youtube_profile_url": lambda v: _require_url(
+        key="identity.youtube_profile_url", value=v, allowed_hosts=("youtube.com", "youtu.be"),
+    ),
+    "identity.facebook_profile_url": lambda v: _require_url(
+        key="identity.facebook_profile_url", value=v, allowed_hosts=("facebook.com", "fb.com"),
+    ),
+    "identity.twitter_profile_url": lambda v: _require_url(
+        key="identity.twitter_profile_url", value=v, allowed_hosts=("twitter.com", "x.com"),
+    ),
+    "identity.threads_profile_url": lambda v: _require_url(
+        key="identity.threads_profile_url", value=v, allowed_hosts=("threads.net", "threads.com"),
+    ),
+    "identity.linktree_url": lambda v: _require_url(
+        key="identity.linktree_url",
+        value=v,
+        allowed_hosts=("linktr.ee", "beacons.ai", "bio.link", "lnk.bio", "solo.to", "linkin.bio"),
+    ),
+    "identity.personal_site_url": lambda v: _require_url(
+        key="identity.personal_site_url", value=v,
+    ),
+    "identity.hero_post_url_source": _validate_discovery_source,
+    "identity.hero_post_note_source": _validate_discovery_source,
+    "identity.recommendation_reason_source": _validate_discovery_source,
+    "identity.content_pillars_source": _validate_discovery_source,
+    "identity.signature_hooks_source": _validate_discovery_source,
+    "identity.voice_descriptors_source": _validate_discovery_source,
+    "identity.instagram_profile_url_source": _validate_discovery_source,
+    "identity.tiktok_profile_url_source": _validate_discovery_source,
+    "identity.youtube_profile_url_source": _validate_discovery_source,
+    "identity.facebook_profile_url_source": _validate_discovery_source,
+    "identity.twitter_profile_url_source": _validate_discovery_source,
+    "identity.threads_profile_url_source": _validate_discovery_source,
+    "identity.linktree_url_source": _validate_discovery_source,
+    "identity.personal_site_url_source": _validate_discovery_source,
+    "identity.hero_post_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.hero_post_url_discovered_at", value=v,
+    ),
+    "identity.hero_post_note_discovered_at": lambda v: _require_iso8601(
+        key="identity.hero_post_note_discovered_at", value=v,
+    ),
+    "identity.recommendation_reason_discovered_at": lambda v: _require_iso8601(
+        key="identity.recommendation_reason_discovered_at", value=v,
+    ),
+    "identity.content_pillars_discovered_at": lambda v: _require_iso8601(
+        key="identity.content_pillars_discovered_at", value=v,
+    ),
+    "identity.signature_hooks_discovered_at": lambda v: _require_iso8601(
+        key="identity.signature_hooks_discovered_at", value=v,
+    ),
+    "identity.voice_descriptors_discovered_at": lambda v: _require_iso8601(
+        key="identity.voice_descriptors_discovered_at", value=v,
+    ),
+    "identity.instagram_profile_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.instagram_profile_url_discovered_at", value=v,
+    ),
+    "identity.tiktok_profile_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.tiktok_profile_url_discovered_at", value=v,
+    ),
+    "identity.youtube_profile_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.youtube_profile_url_discovered_at", value=v,
+    ),
+    "identity.facebook_profile_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.facebook_profile_url_discovered_at", value=v,
+    ),
+    "identity.twitter_profile_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.twitter_profile_url_discovered_at", value=v,
+    ),
+    "identity.threads_profile_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.threads_profile_url_discovered_at", value=v,
+    ),
+    "identity.linktree_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.linktree_url_discovered_at", value=v,
+    ),
+    "identity.personal_site_url_discovered_at": lambda v: _require_iso8601(
+        key="identity.personal_site_url_discovered_at", value=v,
+    ),
+    "identity.hero_post_url_discovered_url": lambda v: _require_url(
+        key="identity.hero_post_url_discovered_url", value=v,
+    ),
+    "identity.hero_post_note_discovered_url": lambda v: _require_url(
+        key="identity.hero_post_note_discovered_url", value=v,
+    ),
+    "identity.recommendation_reason_discovered_url": lambda v: _require_url(
+        key="identity.recommendation_reason_discovered_url", value=v,
+    ),
+    "identity.content_pillars_discovered_url": lambda v: _require_url(
+        key="identity.content_pillars_discovered_url", value=v,
+    ),
+    "identity.signature_hooks_discovered_url": lambda v: _require_url(
+        key="identity.signature_hooks_discovered_url", value=v,
+    ),
+    "identity.voice_descriptors_discovered_url": lambda v: _require_url(
+        key="identity.voice_descriptors_discovered_url", value=v,
+    ),
+    "identity.instagram_profile_url_discovered_url": lambda v: _require_url(
+        key="identity.instagram_profile_url_discovered_url", value=v,
+    ),
+    "identity.tiktok_profile_url_discovered_url": lambda v: _require_url(
+        key="identity.tiktok_profile_url_discovered_url", value=v,
+    ),
+    "identity.youtube_profile_url_discovered_url": lambda v: _require_url(
+        key="identity.youtube_profile_url_discovered_url", value=v,
+    ),
+    "identity.facebook_profile_url_discovered_url": lambda v: _require_url(
+        key="identity.facebook_profile_url_discovered_url", value=v,
+    ),
+    "identity.twitter_profile_url_discovered_url": lambda v: _require_url(
+        key="identity.twitter_profile_url_discovered_url", value=v,
+    ),
+    "identity.threads_profile_url_discovered_url": lambda v: _require_url(
+        key="identity.threads_profile_url_discovered_url", value=v,
+    ),
+    "identity.linktree_url_discovered_url": lambda v: _require_url(
+        key="identity.linktree_url_discovered_url", value=v,
+    ),
+    "identity.personal_site_url_discovered_url": lambda v: _require_url(
+        key="identity.personal_site_url_discovered_url", value=v,
+    ),
 }
 
 
@@ -940,6 +1289,10 @@ def write_facts(
         validator = _FACT_SHAPE_VALIDATORS.get(k)
         if validator is not None:
             validator(v)
+    _validate_discovery_provenance_bundle(namespace=namespace, facts=facts)
+    _validate_discovery_identity_match(
+        identity_id=identity_id, namespace=namespace, facts=facts, env=env,
+    )
 
     def _do() -> int:
         with _connect() as conn:
@@ -1011,6 +1364,10 @@ def write_facts_multi(
             validator = _FACT_SHAPE_VALIDATORS.get(k)
             if validator is not None:
                 validator(v)
+        _validate_discovery_provenance_bundle(namespace=ns, facts=facts)
+        _validate_discovery_identity_match(
+            identity_id=identity_id, namespace=ns, facts=facts, env=env,
+        )
 
     written: dict[str, int] = {}
     for ns, facts in namespaces.items():
@@ -1077,6 +1434,7 @@ def _recompute_goals_inner(
     if cfg:
         cfg["contract_required"] = bool(cfg.get("contract_required", 1))
         cfg["sku_whitelist"] = _jl(cfg.get("sku_whitelist_json"), [])
+        cfg["variant_candidates"] = _jl(cfg.get("variant_candidates_json"), [])
         cfg["deliverable_count_per_platform"] = cfg.get("deliverable_count_per_platform")
     rel_row = conn.execute(
         "SELECT * FROM kol_relationship WHERE identity_id=?", (identity_id,)
@@ -1508,6 +1866,21 @@ def get_escalation_campaign_id(escalation_id: int) -> Optional[str]:
         return None
     cid = row["campaign_id"]
     return str(cid) if cid else None
+
+
+def get_escalation(escalation_id: int) -> Optional[dict[str, Any]]:
+    """Return one escalation row by id with JSON columns decoded, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM kol_escalations WHERE id=?",
+            (escalation_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["resume_context"] = _jl(d.pop("resume_context_json", "{}"), {})
+    d["operator_facts"] = _jl(d.pop("operator_facts_json", None), None)
+    return d
 
 
 def list_escalations(*, state: Optional[str] = None, env: str = "LIVE") -> list[dict[str, Any]]:

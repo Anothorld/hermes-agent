@@ -12,6 +12,9 @@ type ProductVariant = {
   label?: string | null;
   url?: string | null;
   attributes?: Record<string, string>;
+  price?: number | null;
+  discounted_price?: number | null;
+  sale_price?: number | null;
 };
 
 type ProductSummary = {
@@ -121,7 +124,7 @@ export function ProductListPage() {
     try {
       const r = await api.post<{ variants: ProductVariant[] }>('/products/parse-variants', { url: u });
       if (!r.variants || r.variants.length === 0) {
-        toast.info('链接里没有识别出 variant 参数', '请手动添加 variant。');
+        toast.info('未识别到可用规格', '请手动添加 variant。');
       } else {
         setVariants((prev) => {
           const ids = new Set(prev.map((v) => v.id));
@@ -162,6 +165,13 @@ export function ProductListPage() {
         label: (v.label || '').trim() || null,
         url: (v.url || '').trim() || null,
         attributes: v.attributes || {},
+        price: typeof v.price === 'number' && Number.isFinite(v.price) ? v.price : null,
+        discounted_price:
+          typeof v.discounted_price === 'number' && Number.isFinite(v.discounted_price)
+            ? v.discounted_price
+            : null,
+        sale_price:
+          typeof v.sale_price === 'number' && Number.isFinite(v.sale_price) ? v.sale_price : null,
       }))
       .filter((v) => v.id.length > 0);
     const seen = new Set<string>();
@@ -355,13 +365,22 @@ export function ProductListPage() {
                     placeholder="label / 颜色 / 尺寸"
                     value={v.label || ''}
                     onChange={(e) => onUpdateVariant(idx, { label: e.target.value })}
-                    className="col-span-3 rounded border px-1 py-0.5"
+                    className="col-span-2 rounded border px-1 py-0.5"
+                  />
+                  <input
+                    placeholder="price (USD, optional)"
+                    value={v.price ?? ''}
+                    onChange={(e) => {
+                      const t = e.target.value.trim();
+                      onUpdateVariant(idx, { price: t === '' ? null : Number(t) });
+                    }}
+                    className="col-span-1 rounded border px-1 py-0.5"
                   />
                   <input
                     placeholder="variant url (可选)"
                     value={v.url || ''}
                     onChange={(e) => onUpdateVariant(idx, { url: e.target.value })}
-                    className="col-span-6 rounded border px-1 py-0.5"
+                    className="col-span-5 rounded border px-1 py-0.5"
                   />
                   <button
                     type="button"

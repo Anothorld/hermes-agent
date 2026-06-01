@@ -141,6 +141,22 @@ Lateral expansion from seed results is capped at **3 hops**. One failed hashtag,
 ## Persistence And Run
 Do not stop at the first acceptable candidate. Continue until each priority product feature / selling-point group has a defensible creator set, or all relevant surfaces are exhausted.
 
+**Immediate persistence rule (hard).** To reduce long-context drift and
+memory contamination, persistence is **streaming, one candidate at a
+time**:
+
+1. Qualify one handle from on-page evidence.
+2. Immediately persist that single handle (`upsert-identity` ->
+   `write-facts-multi` -> `add-candidate`) before moving to the next
+   profile.
+3. After the write succeeds, treat the candidate as "persisted state"
+   and continue browsing; do **not** keep unpersisted candidate queues in
+   memory across many profiles.
+
+Forbidden pattern: browsing/LLM-summarizing 5-20 candidates first and
+batch-writing at the end of the run. If a run crashes midway, all
+already-qualified candidates must already be durable in CAL.
+
 **Structured diagnostics (mandatory in EVERY final answer).** Every run — whether you hit the floor or not — MUST end with the following YAML block so the backend can persist it for future rounds. The console parser keys on these exact field names; do not rename them.
 
 ```
@@ -235,7 +251,90 @@ Minimum evidence when reachable:
 
 **Anti-fabrication rule (hard).** Every handle you place into the orchestrator's `shortlist_ready` `candidates` array MUST be a handle that you actually visited via `browser_navigate("https://www.instagram.com/<handle>/")` earlier in the same run, with on-page evidence supporting the numbers you write into `audience_fit`, `engagement_quality`, `niche_match`, and `reason`. Generic-sounding placeholders (`home_style_lover`, `minimalist_home`, `cozy_living_xx`, `test_kol_*`) are red flags; if you cannot point to the corresponding `browser_navigate` call, omit the handle. It is better to return fewer real candidates (or invoke the orchestrator's zero-results escape hatch after at least 3 distinct surface visits) than to invent any.
 
-**IG profile URL persistence (free side effect of `add-candidate`).** Every handle that survives qualification has by definition been visited at `https://www.instagram.com/<handle>/`. After you call `add-candidate` for a handle, also persist that profile URL as a reusable identity fact so the web detail page can offer a one-click quick-link to the creator's IG profile and so the next campaign that touches this KOL inherits the URL. Issue ONE `write-facts-multi` call per candidate immediately after `add-candidate` succeeds (the response carries `identity_id`):
+**Confirmed-candidate ingest (hard).** After you confirm one qualified handle,
+persist it immediately through the deterministic Bridge endpoint — do NOT
+hand-roll three separate CLI calls and do NOT batch multiple handles.
+
+Preferred path (direct ingest):
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py ingest-confirmed-candidate \
+  --campaign-id <campaign_id> --env <env> \
+  --json @/tmp/ingest_<handle>.json
+```
+
+`/tmp/ingest_<handle>.json` shape:
+
+```json
+{
+  "env": "LIVE",
+  "source": "skill:instagram-kol-discovery",
+  "ingest_id": "<uuid-or-stable-id>",
+  "identity": {
+    "primary_handle": "<handle>",
+    "platform": "instagram",
+    "display_name": "<optional>",
+    "primary_email": "<optional x@y.tld only>"
+  },
+  "candidate": {
+    "source": "discovery:profile_verification",
+    "discovery_score": 82,
+    "payload": {
+      "evidence_url": "https://www.instagram.com/<handle>/",
+      "followers": "220K",
+      "reason": "..."
+    }
+  },
+  "identity_facts": {
+    "identity.instagram_profile_url": "https://www.instagram.com/<handle>/",
+    "identity.instagram_profile_url_source": "ig_bio",
+    "identity.instagram_profile_url_discovered_at": "<iso8601>",
+    "identity.instagram_profile_url_discovered_url": "https://www.instagram.com/<handle>/",
+    "identity.hero_post_url": "https://www.instagram.com/reel/<shortcode>/",
+    "identity.hero_post_url_source": "ig_reel_pick",
+    "identity.hero_post_url_discovered_at": "<iso8601>",
+    "identity.hero_post_url_discovered_url": "https://www.instagram.com/<handle>/"
+  }
+}
+```
+
+Fallback path (when Bridge ingest endpoint is temporarily unavailable):
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py buffer-confirmed-candidate \
+  --campaign-id <campaign_id> --env <env> \
+  --json @/tmp/ingest_<handle>.json
+```
+
+Then replay buffered rows:
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py replay-ingest-buffer --limit 50
+```
+
+Rules:
+- One handle per ingest call; never accumulate unpersisted candidates in memory.
+- `identity.hero_post_url` MUST be canonical `/reel/<shortcode>/` or `/p/<shortcode>/` (no `/<handle>/reel/...`, no query/fragment).
+- `identity.hero_post_url_discovered_url` MUST be the creator's own profile URL and match `identity.primary_handle`.
+- Do not confuse top-level `source` with identity fact provenance:
+  - top-level `source` is the ingest workflow source (e.g. `skill:instagram-kol-discovery`);
+  - each `identity.*_source` field must be one of:
+    `google_search_result`, `linktree`, `ig_bio`, `facebook_about`,
+    `fb_creator_profile`, `personal_site`, `media_kit`, `agency_page`,
+    `ig_profile_and_reels`, `ig_reel_pick`, `llm_summary`.
+- Every `identity.*_url` value must be an absolute `http(s)` URL.
+- `identity.linktree_url` accepts only:
+  `linktr.ee`, `beacons.ai`, `bio.link`, `lnk.bio`, `solo.to`, `linkin.bio`.
+  If the host is outside this list (e.g. `msha.ke`), either write it to
+  `identity.personal_site_url` when creator-owned, or omit the field.
+- Optional-field retry policy: when ingest fails on an optional field
+  format, remove/fix that field and retry the same handle immediately;
+  do not keep guessing alternate string formats across multiple retries.
+- If ingest returns validation errors, fix payload and retry the same handle before moving on.
+
+**IG profile URL persistence (included in ingest payload).** Every handle that survives qualification has by definition been visited at `https://www.instagram.com/<handle>/`. Include profile URL + creator brief facts in the same `identity_facts` object passed to `ingest-confirmed-candidate` (legacy separate `upsert-identity` → `write-facts-multi` → `add-candidate` chain is deprecated for this skill).
+
+Legacy reference (do not use in new runs):
 
 ```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
@@ -253,10 +352,9 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
 ```
 
 Notes:
-- `campaign_id: null` makes the URL a reusable identity fact (the IG handle doesn't change per campaign).
-- **Do NOT overwrite a non-empty existing value.** If `read-facts` (or a prior call) already shows `identity.instagram_profile_url` is set, skip the write.
-- Treat this as best-effort: if the write fails, log it but do NOT block the run. The `add-candidate` registration is the authoritative signal; the URL fact is convenience data.
-- This applies to ALL qualified candidates you call `add-candidate` on — not only the ones that make the final shortlist. They're equally valid future-campaign reuse candidates.
+- `campaign_id: null` in `identity_facts` scope is enforced server-side (identity-level reusable facts).
+- **Do NOT overwrite a non-empty existing value.** The ingest endpoint skips existing identity facts automatically.
+- This write is mandatory for every qualified candidate, not only final shortlist members.
 
 **`primary_email` — only a real email address, never anything else.**
 
@@ -281,7 +379,7 @@ For each qualified candidate, merge these keys into the same `write-facts-multi`
 | `identity.content_pillars` | `list[str]`, 2-4 short phrases | Bio + recurring Reel themes |
 | `identity.signature_hooks` | `list[str]`, 2-3 hook types | The structural pattern of top Reels (e.g. "before/after walk-through", "POV diary", "honest unboxing") |
 | `identity.voice_descriptors` | `list[str]`, 2-3 tone words | **Prefer descriptors that appear repeatedly in the comments section** ("so cozy", "deadpan humor", "honest reviews") over the creator's self-description |
-| `identity.hero_post_url` | `str`, single Reel URL | The single best Reel for this product fit (highest views *and* clearest theme match) |
+| `identity.hero_post_url` | `str`, single Reel URL | The single best Reel for this product fit (highest views *and* clearest theme match). MUST be canonical `https://www.instagram.com/reel/<shortcode>/` (or `/p/<shortcode>/`), never `/<handle>/reel/...` |
 | `identity.hero_post_note` | `str`, 1 sentence | Why this post is representative (e.g. "412k-view comfort tour of her new house") |
 | `identity.recommendation_reason` | `str`, 1 sentence | Same content you write into the candidate `payload.reason` — campaign-fit angle in plain language |
 
@@ -300,6 +398,12 @@ and likewise for the other 5 keys.
 - Captions / hashtags from the 2-3 Reels you scored.
 - Reel cover overlay text via `browser_get_images` + `vision_analyze` when the caption is too thin (creators often print the theme on the cover).
 - Top-of-page Reel comments (first viewport only, do NOT scroll or expand "View replies") via `browser_console` — comments reveal **how viewers describe the creator**, which is more honest signal for `voice_descriptors` and `signature_hooks` than the creator's self-pitch.
+
+Before writing `identity.hero_post_url`, do a canonicalization check:
+- open the candidate Reel URL once;
+- read `window.location.href`;
+- persist that final canonical URL only when it is `https://www.instagram.com/reel/<shortcode>/` or `/p/<shortcode>/` with no query/fragment.
+If the resolved URL includes `/share/`, a handle-prefixed path, query params, or bounces to a different structure, reject it and pick another Reel.
 
 **Write rules** (same as the IG URL above):
 - **Do NOT overwrite a non-empty existing value.** Read `identity.content_pillars_discovered_at` first; if it exists and is **within 90 days**, skip the write. If it's older than 90 days, the loader (`kol-creator-brief-loader`) will refresh on next draft anyway — leave the stale value alone here.

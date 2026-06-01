@@ -1,9 +1,10 @@
 """Governance subcommands: escalations, approvals, policies.
 
 Covers:
-- ``list-escalations``, ``open-escalation``, ``resolve-escalation``
+- ``list-escalations``, ``get-escalation``, ``open-escalation``, ``resolve-escalation``
 - ``list-approvals``, ``approve``, ``reject``
 - ``reconcile-sent``
+- ``mark-reply-handled``
 - ``get-policy``, ``set-policy``, ``list-policy-history``,
   ``get-parsed-escalation-rules``
 """
@@ -32,6 +33,12 @@ def cmd_list_escalations(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "GET", "/escalations",
         params={"env": args.env, "state": args.state},
+    ))
+
+
+def cmd_get_escalation(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "GET", f"/escalations/{args.escalation_id}",
     ))
 
 
@@ -99,6 +106,18 @@ def cmd_reconcile_sent(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_mark_reply_handled(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "POST", "/gmail/mark-reply-handled",
+        body={
+            "env": args.env,
+            "message_id": args.message_id,
+            "handled_label": args.handled_label,
+            "pending_label": args.pending_label,
+        },
+    ))
+
+
 # ---------------------------------------------------------------- policies
 def cmd_get_policy(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
@@ -159,6 +178,15 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.set_defaults(func=cmd_list_escalations)
 
     p = sub.add_parser(
+        "get-escalation",
+        help="GET /escalations/{id} — read one escalation (full row).",
+    )
+    add_common_args(p)
+    add_env_arg(p, required=False)
+    p.add_argument("--escalation-id", type=int, required=True)
+    p.set_defaults(func=cmd_get_escalation)
+
+    p = sub.add_parser(
         "open-escalation",
         help=("POST /escalations — open one. JSON body must contain {reason} "
               "+ optional {identity_id, campaign_id, goal, severity, "
@@ -215,6 +243,27 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--lookback-days", type=int, default=7)
     p.add_argument("--max-results", type=int, default=100)
     p.set_defaults(func=cmd_reconcile_sent)
+
+    p = sub.add_parser(
+        "mark-reply-handled",
+        help=("POST /gmail/mark-reply-handled — apply handled label and "
+              "remove pending-reply label for one Gmail message."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--message-id", required=True,
+                   help="Gmail message id to mark handled.")
+    p.add_argument(
+        "--handled-label",
+        default="kol-outreach/handled",
+        help="Label to add (default: %(default)s).",
+    )
+    p.add_argument(
+        "--pending-label",
+        default="kol-outreach/pending-reply",
+        help="Label to remove (default: %(default)s).",
+    )
+    p.set_defaults(func=cmd_mark_reply_handled)
 
     # ---- stuck-goal scan (plan C6: 48h DingTalk cron)
     p = sub.add_parser(

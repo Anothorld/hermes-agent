@@ -69,7 +69,7 @@ Source values are one of: `google_search_result`, `linktree`, `ig_bio`,
 
 > 🚫 **HARD STOP — read this BEFORE running any tool.** The bridge CLI
 > (`kol_bridge_tool.py`) is the ONLY permitted path to CAL data. If
-> get-identity or read-facts returns an empty body, exit_code != 0, a
+> get-identity or get-facts returns an empty body, exit_code != 0, a
 > truncated payload, or any error you can't parse, the **ONLY** correct
 > response is to **abort** with
 > `{"found": false, "resolved": [], "tried": ["..."], "reason_hint": "bridge CLI unavailable: <error>"}`
@@ -92,12 +92,12 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-identity \
   --identity-id <identity_id> --env <TEST|LIVE>
 ```
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py read-facts \
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-facts \
   --identity-id <identity_id> --env <TEST|LIVE>
 ```
 
 Build a `missing_keys` set: every target URL key (see table above) that
-is **not** already present and non-empty in the read-facts response.
+is **not** already present and non-empty in the get-facts response.
 If `missing_keys` is empty, abort with
 `{"skipped": "already_has_all_social_links"}`.
 
@@ -184,8 +184,19 @@ A candidate URL must clear ALL of these to count as a hit:
 - Not a Mailchimp / Substack tracking URL.
 
 ### Step 5 — Persist + return
-For every newly resolved key (i.e., in `missing_keys` AND verified
-above), write a single `write-facts-multi` call:
+**Immediate persistence rule (hard).** For every newly resolved key
+(i.e., in `missing_keys` AND verified above), persist it immediately
+when discovered — do not hold multiple unresolved writes in memory until
+the end of the run.
+
+Persistence cadence:
+1. Resolve one verified `<fact_key, url, source, discovered_url>`.
+2. Immediately write that single key + provenance triple via
+   `write-facts-multi`.
+3. Append it to `resolved` only after the write succeeds.
+4. Continue browsing for the next missing key.
+
+Canonical single-key write shape:
 
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
@@ -198,10 +209,6 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
                 "identity.tiktok_profile_url_source":          "linktree",
                 "identity.tiktok_profile_url_discovered_at":   "<iso8601>",
                 "identity.tiktok_profile_url_discovered_url":  "https://linktr.ee/kol_handle",
-                "identity.youtube_profile_url":                "https://www.youtube.com/@kolchannel",
-                "identity.youtube_profile_url_source":         "linktree",
-                "identity.youtube_profile_url_discovered_at":  "<iso8601>",
-                "identity.youtube_profile_url_discovered_url": "https://linktr.ee/kol_handle"
               }
             }}'
 ```
@@ -215,6 +222,9 @@ to `missing_keys`; if a parallel writer landed a value between Step 1
 and Step 5, the bridge's `write-facts-multi` will see the existing
 value via its own read-before-write — but be defensive: include only
 the newly resolved keys in your call.
+
+If a key write fails validation, fix that key payload immediately and
+retry it before moving to other keys. Do not silently skip failed keys.
 
 ### Step 6 — Return envelope
 Single JSON object, no prose, no markdown:
@@ -290,10 +300,13 @@ existing URLs.
 - Never call `kol-email-discovery` from inside this skill. If the email
   is missing, the operator runs that separately via its own button.
 - Never call `cal.py` / direct SQL / `execute_code`. The single write
-  surface is `write-facts-multi` (and `read-facts` for Step 1).
+  surface is `write-facts-multi` (and `get-facts` for Step 1).
 - Do not write the URL fact without its `_source` + `_discovered_at` +
   `_discovered_url` provenance triple. The detail page's audit panel
   relies on the triple to explain where each URL came from.
 - Budget cap is a hard ceiling. Eight page loads per identity is enough
   to clear public surfaces; further crawling is the operator's job
   (they can manually fill via the "✏️ 手动添加" form on the detail page).
+- Do not batch 5-8 resolved URLs and write them at run end. Persist each
+  verified key immediately so partial progress is durable when the run
+  is interrupted.

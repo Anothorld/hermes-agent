@@ -156,20 +156,38 @@ def test_dispatch_context_exposes_candidate_payload_and_identity_facts(cal_db):
     iid = _seed(cal, candidate_payload=payload)
 
     # Discovery side-effect: persist a creator brief at identity scope
-    # (campaign_id=None).
+    # (campaign_id=None). Each summary field needs a provenance triple and
+    # must pass the shape validators in cal._FACT_SHAPE_VALIDATORS.
+    _prov = {
+        "_source": "ig_profile_and_reels",
+        "_at": "2026-05-29T10:11:12+00:00",
+        "_url": "https://www.instagram.com/erin/",
+    }
+
+    def _with_prov(base_key: str, value: object) -> dict[str, object]:
+        return {
+            base_key: value,
+            f"{base_key}_source": _prov["_source"],
+            f"{base_key}_discovered_at": _prov["_at"],
+            f"{base_key}_discovered_url": _prov["_url"],
+        }
+
     cal.write_facts_multi(
         identity_id=iid, campaign_id=None,
         namespaces={
             "identity": {
-                "identity.content_pillars": ["cozy hosting", "honest reviews"],
-                "identity.signature_hooks": ["before/after walk-through"],
-                "identity.voice_descriptors": ["warm", "candid"],
-                "identity.hero_post_url": "https://instagram.com/p/abc/",
-                "identity.hero_post_note": "412k-view comfort-tour reel",
-                "identity.recommendation_reason": (
-                    "her hosting tours match the family-warmth angle "
-                    "we want for the sofa"
-                ),
+                **_with_prov("identity.content_pillars",
+                              ["cozy hosting", "honest reviews"]),
+                **_with_prov("identity.signature_hooks",
+                              ["before/after walk-through", "hosting POV"]),
+                **_with_prov("identity.voice_descriptors", ["warm", "candid"]),
+                **_with_prov("identity.hero_post_url",
+                              "https://www.instagram.com/reel/abc123/"),
+                **_with_prov("identity.hero_post_note",
+                              "412k-view comfort-tour reel"),
+                **_with_prov("identity.recommendation_reason",
+                              "her hosting tours match the family-warmth angle "
+                              "we want for the sofa"),
             },
         },
         source="skill:instagram-kol-discovery", env="LIVE",
@@ -186,5 +204,5 @@ def test_dispatch_context_exposes_candidate_payload_and_identity_facts(cal_db):
     assert identity_facts["identity.content_pillars"] == [
         "cozy hosting", "honest reviews"]
     assert identity_facts["identity.hero_post_url"] == \
-        "https://instagram.com/p/abc/"
+        "https://www.instagram.com/reel/abc123/"
     assert "cozy hosting" in identity_facts["identity.content_pillars"]

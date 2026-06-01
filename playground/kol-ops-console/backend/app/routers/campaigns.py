@@ -37,7 +37,7 @@ from ..discovery_gate import (
     _count_uncontacted_candidates,
     _trigger_rediscover_internal,
 )
-from ..gateway_client import RUNNING_STATES, TERMINAL_STATES, GatewayClient, GatewayError
+from ..variant_candidates import human_spec_text, resolve_campaign_variants
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
     get_inflight_run,
@@ -297,22 +297,19 @@ _APPROVAL_INSTRUCTIONS = (
 
 
 def _selected_variants(product: sqlite3.Row, variant_ids: list[str] | None) -> list[dict[str, Any]]:
-    """Filter the product's known variants down to the ones the campaign opted in to.
-
-    Empty ``variant_ids`` (or missing variants column) means "all known
-    variants are in scope". Returns ``[]`` when the product has no variants
-    on record — downstream callers treat that as a single implicit variant.
-    """
+    """Filter catalog variants for this campaign (delegates to canonical helper)."""
     try:
         all_variants = json.loads(product["variants_json"] or "[]") if "variants_json" in product.keys() else []
     except (json.JSONDecodeError, TypeError):
         all_variants = []
-    if not all_variants:
-        return []
-    if not variant_ids:
-        return list(all_variants)
-    wanted = {str(v) for v in variant_ids}
-    return [v for v in all_variants if str(v.get("id")) in wanted]
+    product_url = product["url"] if "url" in product.keys() else None
+    return resolve_campaign_variants(
+        product_variants=all_variants,
+        selected_ids=variant_ids,
+        product_sku=str(product["sku"]),
+        product_name=str(product["name"]),
+        product_url=product_url,
+    )
 
 
 _VALID_BROWSER_MODES = {"cloud", "local-chrome"}
@@ -344,15 +341,20 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         body.headcount_target * 3, body.headcount_target + 5
     )
     selected_variants = _selected_variants(product, body.product_variant_ids)
+    whitelist_ids = [str(v["id"]) for v in selected_variants]
     lines = [
         "# campaign_config",
         f"campaign_id: {campaign_id}",
         f"product_sku: {product['sku']}",
         f"product_name: {product['name']}",
+        f"product_display_name: {body.product_display_name}",
         f"mode: {body.env}",
         f"browser_mode: {_resolve_browser_mode()}",
         "sku_whitelist:",
-        f"  - {sku_ref}",
+    ]
+    for vid in whitelist_ids:
+        lines.append(f"  - {vid}")
+    lines.extend([
         f"budget_total: {body.budget_total:g}",
         f"budget_per_kol: {body.budget_per_kol:g}",
         f"absolute_floor: {body.absolute_floor:g}",
@@ -360,7 +362,7 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         f"discovery_target_count: {discovery_target}",
         f"test_mode_to: {body.test_mode_to}",
         "triggered_by: web",
-    ]
+    ])
     if product["url"]:
         lines.append(f"product_url: {product['url']}")
     if tags:
@@ -380,13 +382,12 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         lines.extend(["", "# audit_standards_md", body.audit_standards_md.strip()])
 
     if selected_variants:
-        lines.extend(["", "# product_variants (operator-selected, KOL may pick one)"])
+        lines.extend(["", "# variant_candidates (KOL email options — no internal ids in copy)"])
         for v in selected_variants:
-            attrs = v.get("attributes") or {}
-            attr_bits = " ".join(f"{k}={val}" for k, val in attrs.items())
-            line = f"- id: {v.get('id')} | label: {v.get('label') or v.get('id')}"
-            if attr_bits:
-                line += f" | {attr_bits}"
+            spec = human_spec_text(v.get("attributes") or {}) or (v.get("label") or "")
+            line = f"- {body.product_display_name}"
+            if spec:
+                line += f" — {spec}"
             if v.get("url"):
                 line += f" | url: {v.get('url')}"
             lines.append(line)
@@ -652,11 +653,13 @@ async def start(
                 "close it first or pass ?force=true",
             )
 
+    selected_variants = _selected_variants(product, body.product_variant_ids)
+    whitelist_ids = [str(v["id"]) for v in selected_variants]
     payload = body.model_dump()
     sku_ref = product["url"] or product["sku"]
     payload["product_name"] = product["name"]
     payload["product_url"] = product["url"]
-    payload["sku_whitelist"] = [sku_ref]
+    payload["sku_whitelist"] = whitelist_ids
     brief_text = _compose_brief(campaign_id, product, body)
     payload["brief"] = brief_text
     payload["triggered_by"] = "web"
@@ -665,7 +668,6 @@ async def start(
 
     # Seed campaign metadata in the bridge first so downstream skills can
     # find the campaign row before discovery starts writing candidates.
-    selected_variants = _selected_variants(product, body.product_variant_ids)
     upsert_body = build_campaign_config_upsert_body(
         product=product,
         body=body,

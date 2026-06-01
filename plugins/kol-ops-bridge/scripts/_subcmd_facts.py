@@ -84,6 +84,7 @@ def register(sub: "argparse._SubParsersAction") -> None:
 
     p = sub.add_parser(
         "get-facts",
+        aliases=["read-facts"],
         help="GET /facts/{identity_id} — read latest facts (optionally scoped by campaign).",
     )
     add_common_args(p)

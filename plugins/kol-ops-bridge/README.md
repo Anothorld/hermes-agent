@@ -64,12 +64,91 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-candidate-handles 
   --env TEST \
   --campaign-id "TS8319 Test" \
   --plain
+
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py mark-reply-handled \
+  --env LIVE \
+  --message-id "19e749bada32cc15"
+
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-escalation \
+  --escalation-id 42
+
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py upsert-campaign \
+  --env TEST --campaign-id "TS8319 Test" \
+  --json '{"paid_ceiling": 1500}'
 ```
+
+Partial-field `upsert-campaign --json` merges into the existing
+`campaign_config` row (only supplied columns are updated). Use canonical
+column names (`paid_ceiling`, `sku_whitelist`, …); unknown keys are
+ignored.
 
 The wrapper requires explicit `env` for mutating calls and never imports or
 opens CAL SQLite directly. Use dedicated projection commands such as
 `list-candidate-handles` instead of piping `list-candidates` into ad hoc
 `python -c` snippets.
+
+### Confirmed-candidate ingest guardrails
+
+For discovery persistence, prefer one-call deterministic ingest:
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py ingest-confirmed-candidate \
+  --campaign-id "<campaign_id>" --env LIVE --json @/tmp/ingest_<handle>.json
+```
+
+Key payload rules (most frequent failure modes):
+
+- Treat top-level `source` and `identity.*_source` as different fields.
+  - top-level `source`: workflow origin (for example `skill:instagram-kol-discovery`)
+  - `identity.*_source`: strict enum only (`google_search_result`, `linktree`,
+    `ig_bio`, `facebook_about`, `fb_creator_profile`, `personal_site`,
+    `media_kit`, `agency_page`, `ig_profile_and_reels`, `ig_reel_pick`,
+    `llm_summary`)
+- Every `identity.*_url` must be an absolute `http(s)` URL.
+- `identity.linktree_url` host allowlist: `linktr.ee`, `beacons.ai`,
+  `bio.link`, `lnk.bio`, `solo.to`, `linkin.bio`.
+- Optional-field policy: if an optional field fails validation, remove/fix
+  that field and retry the same handle; do not guess alternate formats
+  repeatedly.
+
+Canonical shape examples and skill-side persistence conventions:
+`skills/social-media/instagram-kol-discovery/references/bridge-cli-json-payloads.md`.
+
+## Toolized deterministic skill steps
+
+Several KOL skill steps used to be model-generated reasoning. They are now
+**pure, server-side decision functions** exposed as CLI subcommands + HTTP
+endpoints so the number / verdict / routing is reproducible and shared by the
+Web console. The agent calls the tool instead of re-deriving the logic.
+
+| Concern | Pure module | CLI subcommand | Endpoint |
+|---|---|---|---|
+| Compensation number / bounds / human-gate | `pricing_engine.py` | `compute-compensation-offer` | `POST /logic/compute-compensation-offer` |
+| Campaign-config safety-field validation | `campaign_validation.py` | `validate-campaign-config` | `POST /logic/validate-campaign-config` |
+| Per-turn lane routing (primary skill + side-topics) | `dispatch_router.py` | `select-next-skill` | `POST /logic/select-next-skill` |
+| Escalation-rule matching → `escalation_hint` | `policies.match_escalation_rules` | `match-escalation-rules` | `POST /logic/match-escalation-rules` |
+| Reply-draft envelope enrichment + atomic persist | `reply_draft.py` | `persist-reply-draft` | `POST /reply-drafts/persist` |
+
+The four `/logic/*` endpoints are pure (no DB read/write) and need no bridge
+key. `persist-reply-draft` writes CAL (event + `approval.reply_draft` fact in
+one call, after enriching `to` / `Re:`-subject / `thread_id`) and requires the
+key like every other mutating route.
+
+```bash
+# Pricing: returns {mode_decided, target_number, lower/upper_bound,
+#   requires_human_gate, gate_reason, suggested_wording, rationale_one_line}
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+  compute-compensation-offer --json @/tmp/pricing.json
+
+# Lane routing: returns {primary_lane, primary_goal, primary_skill,
+#   side_topics, severity_reversal_applied}
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+  select-next-skill --json @/tmp/dispatch.json
+
+# Persist a reply draft (replaces the dispatcher's two hand-built writes)
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+  persist-reply-draft --env TEST --json @/tmp/draft.json
+```
 
 ## Auth
 

@@ -44,6 +44,20 @@ def cmd_upsert_campaign(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_upsert_campaign_config(args: argparse.Namespace) -> None:
+    """Partial-update a campaign_config via PUT (server merges, excluding None).
+
+    Alias of ``upsert-campaign`` tuned for the escalation-resumer's
+    ``override_and_continue`` branch: only the keys present in ``--patch-json``
+    are written; unset fields keep their stored value.
+    """
+    body = parse_json_arg(args.patch_json)
+    body.setdefault("env", args.env)
+    print_json(client_from_args(args).request(
+        "PUT", f"/campaigns/{args.campaign_id}", body=body,
+    ))
+
+
 def cmd_get_campaign(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "GET", f"/campaigns/{args.campaign_id}",
@@ -136,6 +150,39 @@ def cmd_route_discovery(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_ingest_confirmed_candidate(args: argparse.Namespace) -> None:
+    body = parse_json_arg(args.json)
+    body.setdefault("env", args.env)
+    require_keys(body, "source", "identity", "candidate")
+    print_json(client_from_args(args).request(
+        "POST",
+        f"/campaigns/{args.campaign_id}/ingest-confirmed-candidate",
+        body=body,
+    ))
+
+
+def cmd_buffer_confirmed_candidate(args: argparse.Namespace) -> None:
+    body = parse_json_arg(args.json)
+    body.setdefault("env", args.env)
+    require_keys(body, "source", "identity", "candidate")
+    print_json(client_from_args(args).request(
+        "POST",
+        f"/campaigns/{args.campaign_id}/buffer-confirmed-candidate",
+        body=body,
+    ))
+
+
+def cmd_replay_ingest_buffer(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "POST", "/ingest-buffer/replay",
+        params={"limit": args.limit},
+    ))
+
+
+def cmd_list_ingest_buffer_pending(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request("GET", "/ingest-buffer/pending"))
+
+
 def cmd_get_lanes(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "GET", f"/campaigns/{args.campaign_id}/lanes",
@@ -162,6 +209,19 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--test-mode-to", help="TEST-mode recipient for draft/test outbound mail.")
     p.add_argument("--json", help="Full CampaignConfigUpsertBody as JSON or @path")
     p.set_defaults(func=cmd_upsert_campaign)
+
+    p = sub.add_parser(
+        "upsert-campaign-config",
+        help=("PUT /campaigns/{id} — partial update from --patch-json. "
+              "Only supplied keys are written (server merges, excludes None). "
+              "Used by escalation-resumer's override_and_continue branch."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--campaign-id", required=True)
+    p.add_argument("--patch-json", required=True,
+                   help="Partial CampaignConfigUpsertBody as JSON or @path.")
+    p.set_defaults(func=cmd_upsert_campaign_config)
 
     p = sub.add_parser(
         "get-campaign", help="GET /campaigns/{id} — read campaign_config.",
@@ -251,6 +311,44 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--operator-note", default="",
                    help="One-line summary attached to any opened escalations.")
     p.set_defaults(func=cmd_route_discovery)
+
+    p = sub.add_parser(
+        "ingest-confirmed-candidate",
+        help=("POST .../ingest-confirmed-candidate — deterministic single-candidate "
+              "ingest (identity → facts → candidate). JSON body required."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--campaign-id", required=True)
+    p.add_argument("--json", required=True, help="IngestConfirmedCandidateBody JSON or @path")
+    p.set_defaults(func=cmd_ingest_confirmed_candidate)
+
+    p = sub.add_parser(
+        "buffer-confirmed-candidate",
+        help=("POST .../buffer-confirmed-candidate — append one candidate to jsonl buffer."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--campaign-id", required=True)
+    p.add_argument("--json", required=True, help="BufferConfirmedCandidateBody JSON or @path")
+    p.set_defaults(func=cmd_buffer_confirmed_candidate)
+
+    p = sub.add_parser(
+        "replay-ingest-buffer",
+        help="POST /ingest-buffer/replay — import pending buffered candidates into CAL.",
+    )
+    add_common_args(p)
+    add_env_arg(p, required=False)
+    p.add_argument("--limit", type=int, default=50)
+    p.set_defaults(func=cmd_replay_ingest_buffer)
+
+    p = sub.add_parser(
+        "list-ingest-buffer-pending",
+        help="GET /ingest-buffer/pending — list pending/failed buffer entries.",
+    )
+    add_common_args(p)
+    add_env_arg(p, required=False)
+    p.set_defaults(func=cmd_list_ingest_buffer_pending)
 
     p = sub.add_parser("get-lanes",
                        help="GET /campaigns/{id}/lanes — kanban snapshot per identity.")

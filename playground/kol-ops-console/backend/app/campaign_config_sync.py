@@ -31,6 +31,11 @@ from typing import Any, TYPE_CHECKING
 from fastapi import HTTPException, status
 
 from .bridge_client import BridgeClient, BridgeError
+from .variant_candidates import (
+    build_color_variant_policy,
+    normalize_variant,
+    resolve_campaign_variants,
+)
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only import
     from .routers.campaigns import StartCampaignBody
@@ -51,32 +56,30 @@ def build_campaign_config_upsert_body(
     accidentally diverging from the bridge schema.
 
     ``selected_variants`` is the operator-filtered variant list (output
-    of ``_selected_variants(product, body.product_variant_ids)``);
-    passed in rather than recomputed so this helper stays free of the
-    router's private helpers.
+    of ``resolve_campaign_variants(...)``); passed in rather than
+    recomputed so this helper stays free of the router's private helpers.
+    Each candidate carries ``id`` (internal), human ``label``/``attributes``,
+    optional ``url``, and optional price fields for operator reference.
     """
-    color_variant_policy: str | None = None
-    if selected_variants:
-        labels = [v.get("label") or v.get("id") for v in selected_variants]
-        color_variant_policy = "operator_selected: " + " | ".join(
-            str(x) for x in labels
-        )
+    candidates = [normalize_variant(v) for v in selected_variants]
+    color_variant_policy = build_color_variant_policy(candidates)
     extra_notes_chunks: list[str] = []
     if product["selling_points"]:
         extra_notes_chunks.append(
             f"# selling_points\n{product['selling_points']}"
         )
-    if selected_variants:
+    if candidates:
         extra_notes_chunks.append(
             "# product_variants\n"
-            + json.dumps(selected_variants, ensure_ascii=False)
+            + json.dumps(candidates, ensure_ascii=False)
         )
     extra_notes = "\n\n".join(extra_notes_chunks) or None
 
     upsert_body: dict[str, Any] = {
         "label": product["name"],
         "product_display_name": body.product_display_name,
-        "sku_whitelist": [sku_ref],
+        "sku_whitelist": [v["id"] for v in candidates],
+        "variant_candidates": candidates,
         "paid_ceiling": body.budget_per_kol,
         "contract_required": True,
         "test_mode_to": body.test_mode_to,

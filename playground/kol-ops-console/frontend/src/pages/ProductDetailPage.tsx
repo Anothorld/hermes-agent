@@ -15,6 +15,10 @@ type ProductVariant = {
   label?: string | null;
   url?: string | null;
   attributes?: Record<string, string>;
+  price?: number | null;
+  discounted_price?: number | null;
+  sale_price?: number | null;
+  price_updated_at?: string | null;
 };
 
 type Product = {
@@ -1384,6 +1388,9 @@ export function ProductDetailPage() {
                 >
                   <span className="font-mono">{v.id}</span>
                   {v.label && <span>· {v.label}</span>}
+                  {v.price != null && (
+                    <span className="ml-1 text-slate-600">${v.price}</span>
+                  )}
                   {v.url && (
                     <a
                       href={v.url}
