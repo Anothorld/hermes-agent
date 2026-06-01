@@ -38,17 +38,31 @@ extraction in a single LLM pass — never split across goals/stages.
    `... [history truncated:` marks dropped earlier turns. May be `[]`
    for the very first inbound after a cold open. **Read verbatim** —
    do not paraphrase before reasoning over it.
-3. `current_goal_state` — `{commerce: <goal_name|null>, fulfillment:
+3. `anomaly_signals` (optional but strongly recommended) — deterministic
+   pre-classification signals from the poller:
+
+   ```json
+   {
+     "thread_integrity": {"status":"strict|weak|detached", "matched_by":"in_reply_to|thread_id|heuristic|none"},
+     "identity_integrity": {"status":"matched|drifted|delegated|unknown", "sender_email":"...", "expected_email":"...", "reasons":[...]},
+     "content_risk": "c1|c2|c3",
+     "risk_controls": {"allow_autoflow": true, "gate_budget": false, "gate_contract": false, "gate_payout": false}
+   }
+   ```
+
+   The classifier may refine these judgments from email semantics, but must
+   keep them deterministic-friendly (no fabricated identity claims).
+4. `current_goal_state` — `{commerce: <goal_name|null>, fulfillment:
    <goal_name|null>, publish: <goal_name|null>}` plus each goal's
    `missing_facts`. The dispatcher fetches this via
    `kol_bridge_tool.py get-goals --identity-id <id> --campaign-id <cid> --env TEST|LIVE`.
-4. `campaign_config_summary` — `paid_ceiling`, `commission_band`,
+5. `campaign_config_summary` — `paid_ceiling`, `commission_band`,
    `sku_whitelist`, `deliverable_count_per_platform`, `contract_required`,
    `audit_standards_md` excerpt. Used **only** as context, never to make a
    business decision; that's the dispatcher's job.
-5. `relationship_summary` (optional) — for repeat KOLs: `last_outcome`,
+6. `relationship_summary` (optional) — for repeat KOLs: `last_outcome`,
    `preferred_skus`, `preferred_mode`, `default_shipping_address` flag.
-6. `escalation_rules` (Phase E, optional) — parsed payload from
+7. `escalation_rules` (Phase E, optional) — parsed payload from
    `kol_bridge_tool.py get-parsed-escalation-rules`:
    `{ "top": {...}, "rules": [ {"id": str, "signals_match": [str],
    "severity": str, "suggested_question": str,
@@ -79,6 +93,23 @@ Exactly one JSON object, keys in this order, no markdown wrapping:
     { "name": "<signal_id>", "confidence": 0.0-1.0, "evidence": "<short quote>" }
   ],
   "ambiguity": "<empty string if none, otherwise a one-sentence description>",
+  "thread_integrity": {
+    "status": "strict|weak|detached",
+    "matched_by": "in_reply_to|thread_id|heuristic|none",
+    "notes": []
+  },
+  "identity_integrity": {
+    "status": "matched|drifted|delegated|unknown",
+    "sender_email": "<email|null>",
+    "expected_email": "<email|null>",
+    "reasons": []
+  },
+  "risk_controls": {
+    "allow_autoflow": true,
+    "gate_budget": false,
+    "gate_contract": false,
+    "gate_payout": false
+  },
   "escalation_hint": {
     "should_consider": true|false,
     "reason": "<empty | rule pattern matched | structural ambiguity | over-cap signal>",
@@ -173,7 +204,22 @@ Common signals, append-only — emit only when evidence is in the email body:
    `paid_ceiling`, requests SKU outside whitelist, asks to change a contract
    core term, requests deliverables > campaign cap, claims package lost /
    address dispute, multi-round revision overflow.
-7. **Rule matching (Phase E).** If `escalation_rules` is provided, walk
+7. Use `anomaly_signals` as the baseline for identity/thread/risk controls:
+   - Preserve `thread_integrity.status` / `matched_by` unless the email body
+     makes the baseline clearly inconsistent.
+   - Preserve `identity_integrity` unless the email explicitly self-identifies
+     a delegated role ("I'm <name>, creator's manager/assistant").
+   - Keep `risk_controls.allow_autoflow=false` once false (never auto-upgrade
+     to true in classifier output). You may only tighten gates, never loosen.
+8. Promote anomaly-driven escalation hints when warranted:
+   - `thread_integrity.status == "detached"` AND any of
+     `gate_budget|gate_contract|gate_payout` true;
+   - `identity_integrity.status in {"delegated","unknown"}` AND any gate true;
+   - `content_risk == "c3"` (authority/ownership handoff cues).
+   In these cases set `escalation_hint.should_consider=true` and put a short,
+   machine-readable reason in `escalation_hint.reason` (e.g.
+   `identity_drift_sensitive_topic`).
+9. **Rule matching (Phase E).** If `escalation_rules` is provided, walk
    each rule in `escalation_rules.rules` and check whether **every** entry
    in `rule.signals_match` is present in the `signals` array you just
    emitted (compare by `signal.name`; case-sensitive; no fuzzy match). On
@@ -214,6 +260,23 @@ Use this as the minimum shape contract (JSON object only):
     { "name": "interest_unclear", "confidence": 0.86, "evidence": "tell me more" }
   ],
   "ambiguity": "",
+  "thread_integrity": {
+    "status": "strict",
+    "matched_by": "in_reply_to",
+    "notes": []
+  },
+  "identity_integrity": {
+    "status": "matched",
+    "sender_email": "alice@example.com",
+    "expected_email": "alice@example.com",
+    "reasons": []
+  },
+  "risk_controls": {
+    "allow_autoflow": true,
+    "gate_budget": false,
+    "gate_contract": false,
+    "gate_payout": false
+  },
   "escalation_hint": {
     "should_consider": false,
     "reason": "",

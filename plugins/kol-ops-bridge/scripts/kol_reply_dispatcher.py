@@ -5,9 +5,11 @@ Phase B reply pipeline. One-shot or daemon mode. Steps per tick:
 
 1. Query Gmail INBOX (``in:inbox newer_than:<lookback>d``) via the
    bundled ``GmailClient``.
-2. For each candidate message, look up the matching outbound event in
-   the bridge (by RFC822 ``In-Reply-To`` / ``References`` headers, then
-   fallback to ``From:`` lookup against ``kol_facts.contact.gmail``).
+2. For each candidate message, resolve identity/campaign through a
+   deterministic matcher: strict RFC822 ``In-Reply-To`` hit, then
+   ``thread_id`` hit, then detached-thread heuristic (sender+subject+time
+   window). Emit anomaly signals (thread integrity, identity integrity,
+   risk controls) for downstream soft-gating.
 3. If matched, POST a ``kol_inbound_reply`` event to the bridge so
    ``kol_conversation_events`` reflects the new turn.
 4. Fire ``POST /v1/runs`` against the configured Hermes gateway with a
@@ -38,11 +40,14 @@ import fcntl
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, Optional
 
@@ -68,6 +73,31 @@ _GATEWAY_BASE = os.environ.get(
     "HERMES_GATEWAY_BASE", "http://127.0.0.1:8642"
 ).rstrip("/")
 _GATEWAY_KEY = os.environ.get("HERMES_GATEWAY_KEY")
+_DETACHED_MATCH_WINDOW_DAYS = 14
+_PERSONAL_EMAIL_DOMAINS = {
+    "gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "aol.com",
+    "live.com", "proton.me", "protonmail.com",
+}
+_AGENCY_CUE_RE = re.compile(
+    r"\b(agent|agency|management|manager|assistant|team|talent|rep|representative)\b",
+    re.IGNORECASE,
+)
+_PAYMENT_CUE_RE = re.compile(
+    r"\b(paypal|wire|bank|swift|iban|payoneer|stripe|crypto|usdt|wallet|invoice|payout)\b",
+    re.IGNORECASE,
+)
+_CONTRACT_CUE_RE = re.compile(
+    r"\b(contract|agreement|msa|nda|clause|term[s]?)\b",
+    re.IGNORECASE,
+)
+_BUDGET_CUE_RE = re.compile(
+    r"\b(rate|budget|quote|quoted|price|pricing|paid|commission|compensation)\b",
+    re.IGNORECASE,
+)
+_HANDOFF_CUE_RE = re.compile(
+    r"\b(contact|reach out|coordinate|follow up).{0,50}\b(agent|manager|assistant|team)\b",
+    re.IGNORECASE,
+)
 
 # Console-side run registry. Best-effort: failure here must not block reply
 # dispatch. The console may not be installed on every host running the
@@ -177,19 +207,179 @@ def _gateway_run(*, instructions: str, input_text: str, session_id: str) -> Opti
 
 
 # ----------------------------------------------------------------- matching
+@dataclass(frozen=True)
+class IdentityMatch:
+    identity_id: int
+    campaign_id: Optional[str]
+    thread_integrity: str
+    matched_by: str
+    history_thread_id: Optional[str]
+    identity_integrity: str
+    reasons: list[str]
+    content_risk: str
+    risk_controls: dict[str, bool]
+    sender_email: Optional[str]
+    expected_email: Optional[str]
+
+
+def _extract_email(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    _, addr = parseaddr(value)
+    addr = (addr or "").strip().lower()
+    return addr or None
+
+
+def _email_domain(value: Optional[str]) -> Optional[str]:
+    if not value or "@" not in value:
+        return None
+    return value.rsplit("@", 1)[-1].strip().lower() or None
+
+
+def _normalize_subject(value: Optional[str]) -> str:
+    raw = (value or "").strip().lower()
+    while raw.startswith(("re:", "fw:", "fwd:")):
+        raw = raw.split(":", 1)[-1].strip()
+    return raw
+
+
+def _event_message_ids(payload: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for key in ("message_id", "source_message_id"):
+        val = payload.get(key)
+        if isinstance(val, str) and val:
+            ids.add(val)
+    for key in ("draft", "gmail_draft"):
+        block = payload.get(key)
+        if isinstance(block, dict):
+            val = block.get("message_id")
+            if isinstance(val, str) and val:
+                ids.add(val)
+    return ids
+
+
+def _event_thread_ids(payload: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    val = payload.get("thread_id")
+    if isinstance(val, str) and val:
+        ids.add(val)
+    for key in ("draft", "gmail_draft"):
+        block = payload.get(key)
+        if isinstance(block, dict):
+            t = block.get("thread_id")
+            if isinstance(t, str) and t:
+                ids.add(t)
+    return ids
+
+
+def _event_emails(payload: dict[str, Any]) -> set[str]:
+    emails: set[str] = set()
+    for key in ("to", "from", "from_addr"):
+        parsed = _extract_email(payload.get(key) if isinstance(payload.get(key), str) else None)
+        if parsed:
+            emails.add(parsed)
+    draft = payload.get("draft")
+    if isinstance(draft, dict):
+        parsed = _extract_email(draft.get("to") if isinstance(draft.get("to"), str) else None)
+        if parsed:
+            emails.add(parsed)
+    return emails
+
+
+def _event_subject(payload: dict[str, Any]) -> Optional[str]:
+    for key in ("subject",):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    draft = payload.get("draft")
+    if isinstance(draft, dict):
+        value = draft.get("subject")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _parse_event_timestamp(raw: Any) -> Optional[_dt.datetime]:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        dt = _dt.datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
+
+def _derive_content_risk(msg: GmailMessage) -> tuple[str, dict[str, bool]]:
+    haystack = f"{msg.subject}\n{msg.body}".lower()
+    gate_budget = bool(_BUDGET_CUE_RE.search(haystack))
+    gate_contract = bool(_CONTRACT_CUE_RE.search(haystack))
+    gate_payout = bool(_PAYMENT_CUE_RE.search(haystack))
+    if _HANDOFF_CUE_RE.search(haystack):
+        risk = "c3"
+        gate_budget = True
+        gate_contract = True
+        gate_payout = True
+    elif gate_budget or gate_contract or gate_payout:
+        risk = "c2"
+    else:
+        risk = "c1"
+    return risk, {
+        "gate_budget": gate_budget,
+        "gate_contract": gate_contract,
+        "gate_payout": gate_payout,
+    }
+
+
+def _classify_identity_integrity(
+    *,
+    sender_email: Optional[str],
+    expected_email: Optional[str],
+    from_header: str,
+    body: str,
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    if not expected_email:
+        reasons.append("identity_primary_email_missing")
+        return "unknown", reasons
+    if sender_email == expected_email:
+        return "matched", reasons
+    sender_domain = _email_domain(sender_email)
+    expected_domain = _email_domain(expected_email)
+    if sender_domain and expected_domain and sender_domain == expected_domain:
+        if sender_domain in _PERSONAL_EMAIL_DOMAINS:
+            reasons.append("same_provider_domain_not_authoritative")
+            return "drifted", reasons
+        reasons.append("same_domain_alias")
+        return "drifted", reasons
+    if _AGENCY_CUE_RE.search(from_header) or _AGENCY_CUE_RE.search(body):
+        reasons.append("agency_cue_detected")
+        return "delegated", reasons
+    reasons.append("sender_email_mismatch")
+    return "drifted", reasons
+
+
+def _expected_identity_email(identity_id: int) -> Optional[str]:
+    try:
+        identity = _BRIDGE.request("GET", f"/identities/{identity_id}")
+    except SystemExit:
+        return None
+    if not isinstance(identity, dict):
+        return None
+    primary = identity.get("primary_email")
+    if not isinstance(primary, str):
+        return None
+    normalized = primary.strip().lower()
+    return normalized or None
+
+
 def _match_identity(
     msg: GmailMessage,
     env: str,
-) -> Optional[tuple[int, Optional[str]]]:
-    """Return (identity_id, campaign_id) for an inbound msg or None.
-
-    Strategy:
-    1. If ``In-Reply-To`` is set, search recent events for a payload
-       referencing ``message_id`` / ``thread_id`` and recover identity.
-    2. Otherwise return ``None`` — caller logs and skips.
-    """
-    if not msg.in_reply_to and not msg.thread_id:
-        return None
+) -> Optional[IdentityMatch]:
+    """Return enriched identity-match context for an inbound msg or None."""
     try:
         page = _BRIDGE.request(
             "GET", "/events/recent", params={"env": env, "limit": 1000},
@@ -198,15 +388,147 @@ def _match_identity(
         log.error("bridge /events/recent failed: %s", exc)
         return None
     events: Iterable[dict[str, Any]] = (page or {}).get("events") or []
+    strict_hit: Optional[tuple[int, Optional[str], str, str, Optional[str]]] = None
+    weak_hit: Optional[tuple[int, Optional[str], str, str, Optional[str]]] = None
+    sender_email = _extract_email(msg.from_addr)
+    norm_subject = _normalize_subject(msg.subject)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    best_detached_score = -1
+    detached_hit: Optional[tuple[int, Optional[str], str, str, Optional[str]]] = None
+    detached_candidates: dict[tuple[int, Optional[str]], dict[str, Any]] = {}
+
     for ev in events:
         if ev.get("env") != env:
             continue
         payload = ev.get("payload") or {}
-        if msg.in_reply_to and payload.get("message_id") == msg.in_reply_to:
-            return int(ev["identity_id"]), ev.get("campaign_id")
-        if msg.thread_id and payload.get("thread_id") == msg.thread_id:
-            return int(ev["identity_id"]), ev.get("campaign_id")
-    return None
+        if not isinstance(payload, dict):
+            continue
+        if not isinstance(ev.get("identity_id"), int):
+            continue
+        identity_id = int(ev["identity_id"])
+        campaign_id = ev.get("campaign_id")
+
+        event_message_ids = _event_message_ids(payload)
+        event_thread_ids = _event_thread_ids(payload)
+        canonical_thread_id = sorted(event_thread_ids)[0] if event_thread_ids else None
+        if msg.in_reply_to and msg.in_reply_to in event_message_ids:
+            strict_hit = (
+                identity_id,
+                campaign_id,
+                "strict",
+                "in_reply_to",
+                canonical_thread_id or msg.thread_id or None,
+            )
+            break
+        if msg.thread_id and msg.thread_id in event_thread_ids and weak_hit is None:
+            weak_hit = (
+                identity_id,
+                campaign_id,
+                "weak",
+                "thread_id",
+                msg.thread_id,
+            )
+
+        if not sender_email:
+            continue
+        event_emails = _event_emails(payload)
+        if sender_email not in event_emails:
+            continue
+        score = 2
+        event_subject = _normalize_subject(_event_subject(payload))
+        if norm_subject and event_subject and norm_subject == event_subject:
+            score += 1
+        event_dt = _parse_event_timestamp(ev.get("created_at") or ev.get("captured_at"))
+        if event_dt and (now - event_dt).days <= _DETACHED_MATCH_WINDOW_DAYS:
+            score += 1
+        subject_match = bool(norm_subject and event_subject and norm_subject == event_subject)
+        recent_match = bool(
+            event_dt and (now - event_dt).days <= _DETACHED_MATCH_WINDOW_DAYS
+        )
+        is_outbound_event = str(ev.get("event_type") or "").startswith("outbound_")
+        if score > best_detached_score:
+            best_detached_score = score
+            detached_hit = (
+                identity_id,
+                campaign_id,
+                "detached",
+                "heuristic",
+                canonical_thread_id or msg.thread_id or None,
+            )
+        candidate_key = (identity_id, campaign_id)
+        current = detached_candidates.get(candidate_key)
+        if current is None or score > int(current.get("score", -1)):
+            detached_candidates[candidate_key] = {
+                "score": score,
+                "campaign_id": campaign_id,
+                "canonical_thread_id": canonical_thread_id,
+                "subject_match": subject_match,
+                "recent_match": recent_match,
+                "is_outbound_event": is_outbound_event,
+            }
+
+    hit = strict_hit or weak_hit
+    if hit is None and best_detached_score >= 3 and detached_hit is not None:
+        hit = detached_hit
+    # Safer soft fallback: only accept detached matching when exactly one
+    # (identity, campaign) candidate exists and it has recent outbound + same
+    # subject evidence. Otherwise keep unmatched so downstream can queue manual
+    # triage instead of silently attaching to the wrong campaign.
+    if hit is None and len(detached_candidates) == 1:
+        (only_identity_id, only_campaign_id), candidate = next(iter(detached_candidates.items()))
+        if (
+            int(candidate.get("score", -1)) >= 3
+            and bool(candidate.get("subject_match"))
+            and bool(candidate.get("recent_match"))
+            and bool(candidate.get("is_outbound_event"))
+        ):
+            canonical_thread_id = candidate.get("canonical_thread_id")
+            hit = (
+                only_identity_id,
+                only_campaign_id,
+                "detached",
+                "heuristic_unique_sender",
+                str(canonical_thread_id) if canonical_thread_id else (msg.thread_id or None),
+            )
+    if hit is None:
+        return None
+
+    identity_id, campaign_id, thread_integrity, matched_by, history_thread_id = hit
+    expected_email = _expected_identity_email(identity_id)
+    content_risk, controls = _derive_content_risk(msg)
+    identity_integrity, reasons = _classify_identity_integrity(
+        sender_email=sender_email,
+        expected_email=expected_email,
+        from_header=msg.from_addr,
+        body=msg.body,
+    )
+    allow_autoflow = True
+    if content_risk == "c3":
+        allow_autoflow = False
+    elif thread_integrity == "detached" and (
+        controls["gate_budget"] or controls["gate_contract"] or controls["gate_payout"]
+    ):
+        allow_autoflow = False
+    elif identity_integrity in {"delegated", "unknown"} and (
+        controls["gate_budget"] or controls["gate_contract"] or controls["gate_payout"]
+    ):
+        allow_autoflow = False
+    risk_controls = {"allow_autoflow": allow_autoflow, **controls}
+    if thread_integrity == "detached":
+        reasons.append("detached_thread_heuristic_match")
+    return IdentityMatch(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        thread_integrity=thread_integrity,
+        matched_by=matched_by,
+        history_thread_id=history_thread_id,
+        identity_integrity=identity_integrity,
+        reasons=sorted(set(reasons)),
+        content_risk=content_risk,
+        risk_controls=risk_controls,
+        sender_email=sender_email,
+        expected_email=expected_email,
+    )
 
 
 # ---------------------------------------------------------------- main loop
@@ -217,7 +539,9 @@ _DISPATCHER_INSTRUCTIONS = (
     "skill OR open an escalation per the skill's Step 3.5. If a child skill "
     "returns a draft envelope, persist it back to CAL as a `kol_reply_draft_ready` "
     "event and an `approval.reply_draft` fact for operator review. Do not send "
-    "mail directly. For Step 6 idempotency labels, use only "
+    "mail directly. Respect each reply's `anomaly_signals` soft-control flags "
+    "(especially allow_autoflow / gate_budget / gate_contract / gate_payout). "
+    "For Step 6 idempotency labels, use only "
     "`kol_bridge_tool.py mark-reply-handled`; do not call Gmail label APIs "
     "or custom scripts directly."
 )
@@ -298,14 +622,15 @@ def _pending_reply_payload(
     *,
     client: GmailClient,
     msg: GmailMessage,
-    identity_id: int,
-    campaign_id: Optional[str],
+    matched: IdentityMatch,
     env: str,
 ) -> dict[str, Any]:
+    identity_id = matched.identity_id
+    campaign_id = matched.campaign_id
     context = _dispatch_context(identity_id, campaign_id, env)
     thread_history = _build_thread_history(
         client=client,
-        thread_id=msg.thread_id,
+        thread_id=matched.history_thread_id or msg.thread_id,
         latest_message_id=msg.message_id,
     )
     return {
@@ -325,6 +650,21 @@ def _pending_reply_payload(
             "body": _clip_text(msg.body),
         },
         "thread_history": thread_history,
+        "anomaly_signals": {
+            "thread_integrity": {
+                "status": matched.thread_integrity,
+                "matched_by": matched.matched_by,
+                "history_thread_id": matched.history_thread_id or msg.thread_id,
+            },
+            "identity_integrity": {
+                "status": matched.identity_integrity,
+                "sender_email": matched.sender_email,
+                "expected_email": matched.expected_email,
+                "reasons": matched.reasons,
+            },
+            "content_risk": matched.content_risk,
+            "risk_controls": matched.risk_controls,
+        },
         "dispatch_context": context,
     }
 
@@ -338,7 +678,8 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
     if not matched:
         log.info("[skip] msg=%s no identity match (from=%s)", msg.message_id, msg.from_addr)
         return "skipped"
-    identity_id, campaign_id = matched
+    identity_id = matched.identity_id
+    campaign_id = matched.campaign_id
 
     event_body = {
         "identity_id": identity_id,
@@ -359,6 +700,21 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
             # diagnostic surface.
             "body": _clip_text(msg.body, 8000),
             "date": msg.date,
+            "anomaly_signals": {
+                "thread_integrity": {
+                    "status": matched.thread_integrity,
+                    "matched_by": matched.matched_by,
+                    "history_thread_id": matched.history_thread_id or msg.thread_id,
+                },
+                "identity_integrity": {
+                    "status": matched.identity_integrity,
+                    "sender_email": matched.sender_email,
+                    "expected_email": matched.expected_email,
+                    "reasons": matched.reasons,
+                },
+                "content_risk": matched.content_risk,
+                "risk_controls": matched.risk_controls,
+            },
         },
     }
     try:
@@ -373,8 +729,7 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
             _pending_reply_payload(
                 client=client,
                 msg=msg,
-                identity_id=identity_id,
-                campaign_id=campaign_id,
+                matched=matched,
                 env=env,
             )
         ],
@@ -401,8 +756,16 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
         run_id=run_id,
         session_id=session_id,
     )
-    log.info("dispatched msg=%s identity=%s campaign=%s run_id=%s",
-             msg.message_id, identity_id, campaign_id, run_id)
+    log.info(
+        "dispatched msg=%s identity=%s campaign=%s run_id=%s thread=%s identity=%s risk=%s",
+        msg.message_id,
+        identity_id,
+        campaign_id,
+        run_id,
+        matched.thread_integrity,
+        matched.identity_integrity,
+        matched.content_risk,
+    )
     return "dispatched"
 
 

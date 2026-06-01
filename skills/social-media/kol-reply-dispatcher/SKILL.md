@@ -25,7 +25,9 @@ should make.
   legacy `kol_reply_dispatcher.py` script) reports a `pending_replies`
   array. If absent / empty, exit immediately. Each item must carry: matched
   `identity_id`, `campaign_id`, `env`, the raw `latest_email`, the
-  `thread_history` (lean list of prior turns; see Step 0 below), and the
+  `thread_history` (lean list of prior turns; see Step 0 below),
+  deterministic `anomaly_signals` (thread/identity/risk soft-controls; see
+  Step 0b below), and the
   dispatch-context snapshot (see Step 1). (Until that script lands
   in a later phase, the agent may invoke this skill on-demand via chat with
   one email at a time; do **not** auto-sweep Gmail from the LLM directly.)
@@ -74,6 +76,26 @@ verbatim. The whole point is to give downstream LLMs the actual words
 both sides used, so they don't re-ask questions that were already
 answered and don't repeat phrasing the KOL has already seen.
 
+### Step 0b — `anomaly_signals` shape (read-only, supplied by pre-run)
+
+`pending_replies[i].anomaly_signals` provides deterministic integrity and
+soft-gating hints from the pre-run matcher:
+
+```json
+{
+  "thread_integrity": {"status":"strict|weak|detached", "matched_by":"in_reply_to|thread_id|heuristic|none"},
+  "identity_integrity": {"status":"matched|drifted|delegated|unknown", "sender_email":"...", "expected_email":"...", "reasons":[...]},
+  "content_risk": "c1|c2|c3",
+  "risk_controls": {"allow_autoflow": true, "gate_budget": false, "gate_contract": false, "gate_payout": false}
+}
+```
+
+Treat these as baseline controls:
+- `allow_autoflow=false` means this reply should not continue normal
+  auto-negotiation flow in this turn.
+- `gate_*` flags indicate sensitive dimensions requiring human gate even when
+  the rest of the flow can continue.
+
 ### Step 1 — Fetch dispatch context (one call)
 For each `pending_replies[i]`, fetch the bundled context:
 
@@ -88,7 +110,8 @@ the legacy `get-goals` + `get-relationship` + `get-reusable-facts` +
 
 ### Step 2 — Run the classifier
 Invoke `kol-email-stage-classifier` with `latest_email`, `thread_history`
-(verbatim from Step 0), `current_goal_state` (from Step 1's `goals`),
+(verbatim from Step 0), `anomaly_signals` (from Step 0b),
+`current_goal_state` (from Step 1's `goals`),
 `campaign_config_summary`, and (if applicable) `relationship_summary`
 (from Step 1's `relationship` + `reusable_facts` + `campaign_config`).
 The classifier returns the JSON shape defined in its SKILL.md.
@@ -119,6 +142,24 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
 - After the write, re-fetch dispatch context with `get-dispatch-context`.
   This is the **server's** view of which goals are now active / satisfied
   / blocked, and supersedes the classifier's `active_goals_by_lane`.
+
+### Step 3.25 — Soft-control anomaly gating (mandatory)
+
+Read effective controls from classifier output `risk_controls` (fallback to
+Step 0b `anomaly_signals.risk_controls` when missing):
+
+1. If `allow_autoflow == false`:
+   - Open escalation `reply_identity_or_thread_anomaly`.
+   - Do **not** invoke a normal business child skill this turn.
+   - Write `approval.pending_topics += ["meta:identity_verification:confirm sender authority before continuing"]`.
+2. If `allow_autoflow == true` but any `gate_* == true`:
+   - Continue non-sensitive progression.
+   - For sensitive goals, force human gate (no direct drafting):
+     - `gate_budget=true` blocks compensation quoting/countering.
+     - `gate_contract=true` blocks contract-term acceptance/changes.
+     - `gate_payout=true` blocks payout method/account changes.
+   - Surface this as `approval.pending_topics` entries so operators can
+     resolve without losing lane context.
 
 ### Step 3.5 — Honor classifier `escalation_hint`
 The classifier's output may include an `escalation_hint` block. When
@@ -195,6 +236,9 @@ can pick it up.
    `severity ∈ {critical, blocking}` from the classifier's `signals` (e.g.
    `not_received`, `address_questioned`, `rejects_revisions`,
    `escalation_pattern_match:*`), it temporarily outranks `commerce`.
+   Additionally, if a lane is currently blocked by Step 3.25 soft-controls
+   (`allow_autoflow=false` or lane-relevant `gate_*`), treat that lane as
+   non-authorable for this turn.
 3. Pick the **highest-priority lane that is not blocked/idle** as the
    primary lane. Invoke its child skill with the full reply context.
 
