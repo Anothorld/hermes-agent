@@ -1,14 +1,17 @@
 ---
 name: kol-email-discovery
-description: Searches the public web for a KOL's outreach email when CAL has no `identity.primary_email`. Tries explicit Google Search paths plus WebSearch/WebFetch first (cheap, covers public contact pages, link-in-bio aggregators, personal sites, media kits, and public Facebook profile/about pages), then falls back to BrowserUse for JS-rendered surfaces (IG bio, Facebook About, Beacons, Linktree). On hit, writes `primary_email` via `upsert-identity` and provenance via `write-facts-multi`. On miss, returns `{"found": false, "tried": [...]}` — never guesses or fabricates an address. Caller decides what to do with a miss (typically: open an escalation with the `tried` list attached as the reason).
+description: Finds a KOL's outreach email when CAL has no `identity.primary_email`, prioritizing the creator's personal collab/business inbox over talent-agency or MCN mailboxes. Tries Google Search + WebFetch first, then BrowserUse for JS surfaces. Writes `primary_email` + provenance on hit; returns `{"found": false, "tried": [...]}` on miss — never guesses.
 trigger: Invoked by the post-approval orchestrator (web `approve-shortlist` agent run, or chat-side "approve KOLs ..." flow) for each approved identity whose `identity.primary_email` is empty. Also invocable on demand when the operator says "find an email for @<handle>".
 tags: ["kol", "outreach", "enrichment", "email", "contact-discovery", "pre-draft"]
 ---
 
 ## Goal
-Resolve a single KOL identity's outreach email from public sources so
-the cold/reengagement outreach draft skills have a `to:` address. Never
-fabricate. A miss is a legitimate outcome — escalation, not invention.
+Resolve a single KOL identity's **personal collaboration email** from
+public sources so the cold/reengagement outreach draft skills have a
+direct `to:` address. Agency / talent-management inboxes are a **last
+resort** only when no verified creator-owned address exists within the
+page-load budget. Never fabricate. A miss is a legitimate outcome —
+escalation, not invention.
 
 ## Runtime Contract
 - Profile: `outreach-operator`.
@@ -30,9 +33,15 @@ fabricate. A miss is a legitimate outcome — escalation, not invention.
   scale, no databroker lookups. Public surfaces only: the creator's own
   bio, link-in-bio aggregators, their personal/portfolio site, their
   press / media kit page, their newsletter sign-up, their podcast show
-  notes, public agency rosters, public Facebook profile/Page About
-  sections, and read-only Facebook creator discovery metadata when the
-  configured tool is already available.
+  notes, public Facebook profile/Page About sections, and read-only
+  Facebook creator discovery metadata when the configured tool is
+  already available. Public **agency rosters** are allowed only as a
+  fallback surface after creator-owned paths are exhausted.
+- **Personal email first (hard preference).** Within the page-load
+  budget, exhaust creator-owned contact surfaces before accepting an
+  agency/management inbox. Do not stop at the first verified address
+  when that address is agency-classified and cheaper creator-owned
+  paths (IG bio, link-in-bio, personal `/contact`) remain untried.
 
 ## Inputs
 1. `identity_id` (mandatory).
@@ -56,19 +65,55 @@ Use:
   search results.
 
 ### Step 2 — Tier 1: Google Search + WebSearch + WebFetch
-Cheap, fast, and covers ~70-80% of public creators. Run the discovery
-paths in this order and stop the moment one verified email is found.
-Use Google Search directly when a browser/search tool is available;
-otherwise run the same query strings through `WebSearch`. Record each
-query in `tried` as `GoogleSearch:"..."` or `WebSearch:"..."`.
+Cheap, fast, and covers ~70-80% of public creators. Run discovery in
+**surface-priority order** (creator-owned first, agency last). Use Google
+Search directly when a browser/search tool is available; otherwise run
+the same query strings through `WebSearch`. Record each query in `tried`
+as `GoogleSearch:"..."` or `WebSearch:"..."`.
+
+Maintain two in-memory candidate slots while crawling (never written
+until Step 4a):
+- `personal_candidate` — verified creator-owned collab/business email.
+- `agency_candidate` — verified agency/management inbox (fallback only).
+
+**Stopping rule.** Persist immediately when `personal_candidate` is set
+and all higher-priority creator-owned surfaces in the checklist below
+are either tried or skipped (no URL known). If only `agency_candidate`
+is set, keep searching creator-owned surfaces until the page-load budget
+is exhausted, then persist the agency address as last resort.
+
+#### Surface-priority checklist (try in this order)
+
+1. **Creator link-in-bio** — Linktree / Beacons / bio.link / lnk.bio /
+   solo.to / linkin.bio for the handle.
+2. **Creator personal site** — `/contact`, `/about`, `/work-with-me`,
+   `/press`, `/media-kit` on a domain visibly owned by the creator
+   (handle/name in domain or page branding).
+3. **Creator platform profiles** — public IG bio (Tier 2 if JS-gated),
+   Facebook About/Contact on the creator's own Page/profile.
+4. **Creator media kit** — PDF/page on the creator's domain or link-in-bio
+   (not a third-party press aggregator).
+5. **Targeted Google on creator signals** — Path A queries below,
+   prioritizing results whose URLs belong to surfaces 1–4.
+6. **Agency / management roster (fallback only)** — official agency
+   page listing this creator by name + handle, or a Google hit clearly
+   titled "represented by …" / "talent management". Record any hit
+   in `agency_candidate` only; do not return yet if surfaces 1–4 remain
+   untried within budget.
 
 #### Path A — Google search queries
+
+Run these after (or in parallel with) direct fetches of known
+link-in-bio / personal-site URLs from CAL or earlier search hits.
+Prefer opening creator-owned result URLs before agency domains.
 
 1. `"<handle>" (email OR contact OR "business inquiries" OR collab OR partnership)`
 2. `"<display_name>" "<region>" (email OR contact OR "business inquiries")` (only if `display_name` is present and the handle didn't disambiguate)
 3. `site:instagram.com "<handle>" (email OR contact OR "business inquiries")`
-4. `site:facebook.com "<handle>" (email OR contact OR "business inquiries" OR "about")`
-5. `(site:linktr.ee OR site:beacons.ai OR site:bio.link) "<handle>"`
+4. `(site:linktr.ee OR site:beacons.ai OR site:bio.link) "<handle>"`
+5. `"<handle>" (site:<personal_domain> OR "<personal_domain>") contact` (only when CAL or a prior hit exposes a creator personal domain)
+6. `site:facebook.com "<handle>" (email OR contact OR "business inquiries" OR "about")`
+7. `"<display_name>" "<handle>" (talent OR management OR agency OR "represented by")` — **fallback only**, after 1–6 yield no `personal_candidate`
 
 Add local-language contact words from `language` / `region` when they
 are obvious (for example `合作`, `商务`, `pr`, `contacto`) but do not
@@ -102,21 +147,52 @@ the creator was originally sourced through `fb_creator`.
    in, send a message, or treat a Messenger button as an email hit.
 
 Verification rules — an email candidate must clear ALL of these to
-count as a hit:
+count as verified:
 - Appears on a page that visibly belongs to the creator (their domain,
-  their named profile, their official agency page listing them by
-  name + handle). Random third-party aggregators don't count.
+  their named profile) **or**, as fallback only, their official agency
+  page listing them by name + handle. Random third-party aggregators
+  don't count.
 - Local part is not obviously a role inbox of a different brand
   (e.g. `support@unrelatedbrand.com` found in a sidebar).
 - Not a `noreply@`, `donotreply@`, `notifications@` address.
 - Not a Mailchimp / Substack tracking address
   (`*@email.mailchimpapp.com`, `*@substack.com` notification reflectors).
 
+#### Classify each verified address: personal vs agency
+
+**Personal (preferred)** — treat as `personal_candidate`:
+- Domain matches the creator's personal site, link-in-bio target domain,
+  or handle/name (e.g. `hello@janedoe.com`, `collab@byjanedoe.co`).
+- Found on the creator's IG bio, link-in-bio page, personal
+  `/contact` / `/work-with-me`, or creator-branded media kit.
+- Labeled "business inquiries", "collabs", "partnerships", "PR",
+  "work with me", or equivalent **on a creator-owned page**.
+- `mailto:` link next to the creator's own name (not "contact our
+  team at … agency").
+
+**Agency (fallback only)** — treat as `agency_candidate`; do not
+persist until creator-owned surfaces are exhausted:
+- Domain is a talent agency, MCN, management firm, or casting company
+  (page header/footer names the agency; roster lists multiple creators).
+- Copy says "represented by", "managed by", "for bookings contact",
+  "talent inquiries", or lists the creator under an agent's name.
+- Local parts like `talent@`, `bookings@`, `creators@`, `management@`,
+  `partnerships@` on a **non-creator** domain.
+- Google result/snippet is clearly an agency roster, not the creator's
+  own site.
+
+When uncertain, prefer classifying as personal only if the page is
+single-creator branded; if multiple creators are listed, classify as
+agency.
+
 If multiple emails appear on the same page, prefer in this order:
-1. Address visibly labeled "business inquiries" / "collabs" /
-   "partnerships" / "PR".
-2. Address on a `mailto:` link associated with the creator's name.
-3. The first address on a named contact page (`/contact`, `/about`).
+1. Personal address labeled "business inquiries" / "collabs" /
+   "partnerships" / "PR" / "work with me".
+2. Personal `mailto:` link associated with the creator's name.
+3. Other personal address on a creator-owned contact page.
+4. Agency inbox explicitly scoped to this creator (named agent line).
+5. Generic agency talent/bookings inbox — only if nothing above exists
+   anywhere within budget.
 
 Common public-surface URLs to try when Google/Search returns a
 link-in-bio, personal-site, or Facebook target:
@@ -132,17 +208,19 @@ Record every URL you actually fetched in a running `tried` list so the
 final envelope (and any escalation) can show what was checked.
 
 **Immediate persistence rule (hard).** This skill must not keep
-"found-but-not-written" facts in long-running memory. As soon as a
-verified email is found:
+"found-but-not-written" facts in long-running memory.
 
-1. Run `upsert-identity` immediately for that single email.
-2. Immediately run `write-facts-multi` for provenance (and any social
-   URLs already seen on the same evidence pages).
-3. Only after both writes complete do you return the success envelope.
+- When `personal_candidate` is verified and all higher-priority
+  creator-owned surfaces in the checklist are tried or skipped: run
+  Step 4a **immediately** with that address.
+- When only `agency_candidate` exists: finish the surface-priority
+  checklist and Tier 2 within the page-load budget first; persist the
+  agency address only if no `personal_candidate` appears.
+- Forbidden pattern: persist an agency inbox while IG bio, link-in-bio,
+  or known personal-site `/contact` URLs remain untried; or continue
+  crawling/summarizing after a personal hit while delaying writes.
 
-Forbidden pattern: continue crawling/summarizing after discovering an
-email while delaying writes until the end. Durable state in CAL is the
-source of truth; in-memory notes are not.
+Durable state in CAL is the source of truth; in-memory notes are not.
 
 ### Step 3 — Tier 2: BrowserUse fallback
 Only invoke when Step 2 returns no verified hit. Tier 2 is reserved
@@ -154,17 +232,20 @@ Use the built-in BrowserUse tools — `browser_navigate`,
 `browser_snapshot`, `browser_get_images`, `browser_click`,
 `vision_analyze`. Do NOT use the `mcp_chrome_devtools_*` family.
 
-Browse sequence (stop on first verified hit):
+Browse sequence (prefer personal; hold agency as fallback):
 1. `https://www.instagram.com/<handle>/` — snapshot bio text + the
-   link-in-bio URL if present.
-2. The official public Facebook profile/Page/About URL when Step 2 found one or the identity's platform is Facebook.
-3. The link-in-bio target itself (Linktree / Beacons / personal site).
-4. The "Contact" / "About" / "Press" / "Work with me" subpage of the
+   link-in-bio URL if present. Bio emails are almost always personal.
+2. The link-in-bio target itself (Linktree / Beacons / personal site).
+3. The "Contact" / "About" / "Press" / "Work with me" subpage of the
    personal site if the homepage didn't surface an address.
+4. The official public Facebook profile/Page/About URL when Step 2
+   found one or the identity's platform is Facebook.
 5. If the bio shows an email embedded in an image (common on IG to
    defeat scrapers), use `browser_get_images` + `vision_analyze` with
    prompt: "Extract any email addresses visible in this image. Reply
    with addresses only, one per line, or 'NONE'."
+6. Agency roster / management page — **only when** steps 1–5 found no
+   `personal_candidate` and Step 2 already surfaced an agency URL.
 
 Budget cap: at most 8 fetched/rendered page loads total across Tier 1
 and Tier 2 per identity. Search queries and read-only `fb_creator`
@@ -175,7 +256,8 @@ the cap, treat as miss.
 Apply the same verification rules from Step 2 to any Tier 2 candidate.
 
 ### Step 4a — On hit: persist + return
-Two calls, in this order:
+Choose the winning address: `personal_candidate` if set, else
+`agency_candidate`. Two calls, in this order:
 
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py upsert-identity \
@@ -252,11 +334,29 @@ Return envelope (single JSON object, no prose, no markdown):
   "identity_id": 42,
   "env": "TEST",
   "found": true,
-  "email": "hello@kolsite.com",
-  "source": "personal_site",
+  "email": "collab@janedoe.com",
+  "source": "ig_bio",
+  "email_class": "personal",
   "tier": 1,
-  "discovered_url": "https://kolsite.com/contact",
-  "tried": ["GoogleSearch:\"@handle\" email contact", "https://www.google.com/search?q=...", "https://linktr.ee/handle", "https://kolsite.com/contact"]
+  "discovered_url": "https://www.instagram.com/janedoe/",
+  "tried": ["https://linktr.ee/janedoe", "https://www.instagram.com/janedoe/"]
+}
+```
+
+Agency fallback example (only after creator-owned surfaces exhausted):
+
+```json
+{
+  "skill": "kol-email-discovery",
+  "identity_id": 42,
+  "env": "TEST",
+  "found": true,
+  "email": "talent@example-agency.com",
+  "source": "agency_page",
+  "email_class": "agency",
+  "tier": 1,
+  "discovered_url": "https://example-agency.com/talent/janedoe",
+  "tried": ["https://linktr.ee/janedoe", "https://www.instagram.com/janedoe/", "https://janedoe.com/contact", "GoogleSearch:\"@janedoe\" talent management", "https://example-agency.com/talent/janedoe"]
 }
 ```
 
@@ -297,17 +397,22 @@ Use this as a shape check; keep keys stable and return JSON only:
   "identity_id": 42,
   "env": "TEST",
   "found": true,
-  "email": "hello@kolsite.com",
-  "source": "personal_site",
+  "email": "collab@janedoe.com",
+  "source": "ig_bio",
+  "email_class": "personal",
   "tier": 1,
-  "discovered_url": "https://kolsite.com/contact",
-  "tried": ["GoogleSearch:\"@handle\" email contact", "https://kolsite.com/contact"]
+  "discovered_url": "https://www.instagram.com/janedoe/",
+  "tried": ["https://linktr.ee/janedoe", "https://www.instagram.com/janedoe/"]
 }
 ```
 
 ## Pitfalls
 - Never construct an email from a name + a guessed domain
   (`firstname@brand-domain`). Operator policy: miss > guess.
+- Never persist an **agency** inbox while creator-owned surfaces (IG bio,
+  link-in-bio, personal `/contact`) remain untried within budget.
+- Never treat the first Google hit as done when it is an agency roster
+  and the creator's Linktree or personal site is still unchecked.
 - Never write a Mailchimp / Substack / newsletter reflector address as
   the primary email. Those are one-way; outreach to them silently
   drops.
