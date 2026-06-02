@@ -1329,6 +1329,24 @@ def get_dispatch_context(
     }
 
 
+@router.get("/identities/{identity_id}/reply-dispatch-status")
+def get_reply_dispatch_status(
+    identity_id: int,
+    campaign_id: Annotated[str, Depends(_campaign_id_query_required_dep)],
+    message_id: str = Query(..., min_length=1, max_length=256),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Idempotency probe for the Gmail reply poller (no mutation)."""
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    return cal.reply_dispatch_status(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        message_id=message_id,
+        env=env,
+    )
+
+
 @router.get("/facts/{identity_id}")
 def read_facts(
     identity_id: int,
@@ -1791,6 +1809,25 @@ def reconcile_sent(
     }
 
 
+_OPTIONAL_REPLY_LABELS = ("kol-outreach/pending-reply",)
+
+
+def _modify_reply_idempotency_labels(
+    client: GmailClient,
+    message_id: str,
+    *,
+    add_names: list[str],
+    remove_names: list[str],
+) -> dict[str, Any]:
+    """Apply reply idempotency labels; pending-reply is optional if missing."""
+    return client.modify_labels(
+        message_id,
+        add_names=add_names,
+        remove_names=remove_names,
+        skip_missing_names=_OPTIONAL_REPLY_LABELS,
+    )
+
+
 @router.post("/gmail/mark-reply-handled")
 def mark_reply_handled(
     body: MarkReplyHandledBody,
@@ -1806,7 +1843,8 @@ def mark_reply_handled(
     if not client.is_available():
         raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
     try:
-        result = client.modify_labels(
+        result = _modify_reply_idempotency_labels(
+            client,
             body.message_id,
             add_names=[body.handled_label],
             remove_names=[body.pending_label],
@@ -1819,6 +1857,38 @@ def mark_reply_handled(
         "message_id": body.message_id,
         "added_label": body.handled_label,
         "removed_label": body.pending_label,
+        "result": result,
+    }
+
+
+@router.post("/gmail/unmark-reply-handled")
+def unmark_reply_handled(
+    body: MarkReplyHandledBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Reverse ``mark-reply-handled`` so a reply can be re-dispatched.
+
+    Removes the handled label and re-applies the pending-reply label.
+    """
+    _require_bridge_key(x_bridge_key)
+    client = GmailClient()
+    if not client.is_available():
+        raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    try:
+        result = _modify_reply_idempotency_labels(
+            client,
+            body.message_id,
+            add_names=[body.pending_label],
+            remove_names=[body.handled_label],
+        )
+    except GmailUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "env": body.env,
+        "message_id": body.message_id,
+        "added_label": body.pending_label,
+        "removed_label": body.handled_label,
         "result": result,
     }
 
@@ -2035,19 +2105,32 @@ def persist_reply_draft(
     except reply_draft.ReplyDraftError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    contributing_skills = body.contributing or [
-        {
-            "lane": body.primary_lane,
-            "goal": body.primary_goal,
-            "skill": body.child_skill,
-        }
-    ]
+    child_skill = (body.child_skill or "").strip()
+    contributing_skills = list(body.contributing) if body.contributing else []
+    if not child_skill:
+        if len(contributing_skills) > 1:
+            child_skill = "kol-reply-synthesizer"
+        elif contributing_skills:
+            child_skill = str(contributing_skills[0].get("skill") or "").strip()
+    if not child_skill:
+        raise HTTPException(
+            status_code=400,
+            detail="child_skill is required (or pass contributing[] with skill names)",
+        )
+    if not contributing_skills:
+        contributing_skills = [
+            {
+                "lane": body.primary_lane,
+                "goal": body.primary_goal,
+                "skill": child_skill,
+            },
+        ]
 
     event_payload = reply_draft.build_draft_event_payload(
         source_message_id=body.source_message_id,
         primary_lane=body.primary_lane,
         primary_goal=body.primary_goal,
-        child_skill=body.child_skill,
+        child_skill=child_skill,
         merged_draft=merged,
         contributing_skills=contributing_skills,
     )
@@ -2065,7 +2148,7 @@ def persist_reply_draft(
         source_message_id=body.source_message_id,
         primary_lane=body.primary_lane,
         primary_goal=body.primary_goal,
-        child_skill=body.child_skill,
+        child_skill=child_skill,
         merged_draft=merged,
         linked_escalation_id=body.linked_escalation_id,
         contributing_skills=contributing_skills,
@@ -2086,6 +2169,8 @@ def persist_reply_draft(
         "draft_event_id": event_id,
         "written": written,
         "draft": merged,
+        "child_skill": child_skill,
+        "contributing_skills": contributing_skills,
     }
 
 

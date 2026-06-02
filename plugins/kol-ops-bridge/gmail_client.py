@@ -37,7 +37,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -303,6 +303,7 @@ class GmailClient:
         *,
         add_names: Optional[list[str]] = None,
         remove_names: Optional[list[str]] = None,
+        skip_missing_names: Optional[Iterable[str]] = None,
     ) -> dict[str, Any]:
         """Apply / remove labels on a single Gmail message by **name**.
 
@@ -311,20 +312,26 @@ class GmailClient:
         a name does not exist, the cache is refreshed once before raising
         :class:`GmailUnavailable` — callers should treat label apply as
         best-effort (do not abort the surrounding workflow on failure).
+
+        Names listed in ``skip_missing_names`` are omitted when absent in
+        Gmail (no error). Used for optional labels such as
+        ``kol-outreach/pending-reply`` when the workspace has not created it.
         """
         if not message_id:
             raise GmailUnavailable("message_id is required")
         adds = list(add_names or [])
         removes = list(remove_names or [])
+        optional = set(skip_missing_names or ())
         if not adds and not removes:
             return {"id": message_id, "labels": [], "noop": True}
 
-        def _resolve(names: list[str]) -> list[str]:
+        def _resolve(names: list[str]) -> tuple[list[str], list[str]]:
             if not names:
-                return []
+                return [], []
             labels = self.list_labels()
             resolved: list[str] = []
             missing: list[str] = []
+            skipped: list[str] = []
             for name in names:
                 if not name:
                     continue
@@ -339,18 +346,32 @@ class GmailClient:
             if missing:
                 # One forced refresh in case the label was just created.
                 labels = self.list_labels(refresh=True)
-                still_missing = [n for n in missing if n not in labels]
+                still_missing: list[str] = []
+                for name in missing:
+                    if name not in labels:
+                        if name in optional:
+                            skipped.append(name)
+                        else:
+                            still_missing.append(name)
+                    else:
+                        resolved.append(labels[name])
                 if still_missing:
                     raise GmailUnavailable(
                         f"unknown gmail label(s): {still_missing}; "
                         "create them in Gmail first"
                     )
-                resolved.extend(labels[n] for n in missing)
-            return resolved
+            return resolved, skipped
 
-        add_ids = _resolve(adds)
-        remove_ids = _resolve(removes)
-        cmd = ["gmail", "modify", "--message-id", message_id]
+        add_ids, add_skipped = _resolve(adds)
+        remove_ids, remove_skipped = _resolve(removes)
+        if not add_ids and not remove_ids:
+            return {
+                "id": message_id,
+                "labels": [],
+                "noop": True,
+                "skipped_missing_labels": add_skipped + remove_skipped,
+            }
+        cmd = ["gmail", "modify", message_id]
         if add_ids:
             cmd.extend(["--add-labels", ",".join(add_ids)])
         if remove_ids:
@@ -358,6 +379,9 @@ class GmailClient:
         payload = self._invoke(cmd)
         if not isinstance(payload, dict):
             raise GmailUnavailable("gmail modify returned non-dict payload")
+        skipped = add_skipped + remove_skipped
+        if skipped:
+            payload["skipped_missing_labels"] = skipped
         return payload
 
 

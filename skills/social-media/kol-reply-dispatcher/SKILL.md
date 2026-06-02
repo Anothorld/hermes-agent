@@ -19,6 +19,8 @@ should make.
   `references/shared/router-dispatcher-boundaries.md`
 - Fact ownership (fragment mode):
   `references/shared/fact-ownership.md`
+- Bridge endpoints (CLI names — **use this, not missing paths**):
+  `references/shared/bridge-http-api-endpoints.md`
 
 ## Runtime Contract
 - Frequency: every 10 minutes via Hermes `cronjob`. Profile:
@@ -202,6 +204,8 @@ Notes:
   as primary author in Step 5; it is treated as `blocked`.
 
 ### Step 4 — Draftable plan (multi-goal)
+
+Endpoint details: `references/shared/bridge-http-api-endpoints.md`.
 
 After Step 3 re-fetch, call the deterministic plan endpoint:
 
@@ -416,6 +420,20 @@ Two fragment skills propose the same fact key. Open
 ### Failure — missing config
 `campaign_config` not in the snapshot. Open escalation
 `dispatcher_missing_context`. Do NOT proceed.
+
+## Tool failures (HARD — do not improvise)
+
+| Failure | Required action |
+|---------|-----------------|
+| `select-draftable-plan` / `persist-reply-draft` HTTP **404** | Stop. Escalate `bridge_stale_or_down`. **Do not** `import dispatch_router`, run plugin loaders, or use `execute_code` for routing. |
+| `skill_view` file not found | Use only files listed in `available_files` or `bridge-http-api-endpoints.md`. |
+| `mark-reply-handled` **503** on handled label | Escalate `gmail_label_error`. Pending-reply missing is OK (Bridge skips it). |
+| `FactNamespaceError` on write | Escalate `fact_namespace_violation`; do not munge keys. |
+| Fragment `assert_disjoint` conflict | Escalate `fragment_fact_conflict`. |
+
+Allowed tools for deterministic steps: **`kol_bridge_tool.py` subcommands** and
+`delegate_task` for fragment child skills only. **Never** use `terminal` or
+`execute_code` to call the Bridge or load `kol-ops-bridge` Python modules.
 
 ## Pitfalls
 - The classifier's `active_goals_by_lane` is a **hint**, not the truth.

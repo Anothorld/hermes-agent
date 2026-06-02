@@ -544,7 +544,11 @@ _DISPATCHER_INSTRUCTIONS = (
     "Respect each reply's `anomaly_signals` soft-control flags "
     "(especially allow_autoflow / gate_budget / gate_contract / gate_payout). "
     "For idempotency labels, use only `kol_bridge_tool.py mark-reply-handled`; "
-    "do not call Gmail label APIs or custom scripts directly."
+    "do not call Gmail label APIs or custom scripts directly. "
+    "Routing/facts/drafts: use only kol_bridge_tool.py subcommands documented in "
+    "kol-reply-dispatcher/references/shared/bridge-http-api-endpoints.md — "
+    "never import kol-ops-bridge Python modules or use terminal/execute_code "
+    "for Bridge HTTP."
 )
 
 
@@ -682,6 +686,30 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
     identity_id = matched.identity_id
     campaign_id = matched.campaign_id
 
+    try:
+        dispatch_status = _BRIDGE.request(
+            "GET",
+            f"/identities/{identity_id}/reply-dispatch-status",
+            params={
+                "campaign_id": campaign_id,
+                "message_id": msg.message_id,
+                "env": env,
+            },
+        )
+    except SystemExit:
+        dispatch_status = {}
+    if isinstance(dispatch_status, dict) and dispatch_status.get("should_skip_poller"):
+        log.info(
+            "[skip] msg=%s identity=%s already has reply draft (poller idempotency)",
+            msg.message_id,
+            identity_id,
+        )
+        return "skipped"
+    retry_gateway_only = bool(
+        isinstance(dispatch_status, dict)
+        and dispatch_status.get("should_retry_gateway_only")
+    )
+
     event_body = {
         "identity_id": identity_id,
         "event_type": "kol_inbound_reply",
@@ -718,11 +746,18 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
             },
         },
     }
-    try:
-        _BRIDGE.request("POST", "/events", body=event_body)
-    except SystemExit as exc:
-        log.error("bridge POST /events failed for msg=%s: %s", msg.message_id, exc)
-        return "retry"
+    if not retry_gateway_only:
+        try:
+            _BRIDGE.request("POST", "/events", body=event_body)
+        except SystemExit as exc:
+            log.error("bridge POST /events failed for msg=%s: %s", msg.message_id, exc)
+            return "retry"
+    else:
+        log.info(
+            "[retry-gateway] msg=%s identity=%s inbound event exists, no draft yet",
+            msg.message_id,
+            identity_id,
+        )
 
     session_id = f"kol-reply:{env}:{identity_id}:{msg.message_id}"
     input_text = json.dumps({

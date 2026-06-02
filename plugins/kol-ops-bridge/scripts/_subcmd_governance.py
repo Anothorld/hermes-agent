@@ -118,6 +118,18 @@ def cmd_mark_reply_handled(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_unmark_reply_handled(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "POST", "/gmail/unmark-reply-handled",
+        body={
+            "env": args.env,
+            "message_id": args.message_id,
+            "handled_label": args.handled_label,
+            "pending_label": args.pending_label,
+        },
+    ))
+
+
 # ---------------------------------------------------------------- policies
 def cmd_get_policy(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
@@ -264,6 +276,27 @@ def register(sub: "argparse._SubParsersAction") -> None:
         help="Label to remove (default: %(default)s).",
     )
     p.set_defaults(func=cmd_mark_reply_handled)
+
+    p = sub.add_parser(
+        "unmark-reply-handled",
+        help=("POST /gmail/unmark-reply-handled — remove handled label and "
+              "restore pending-reply for re-dispatch."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--message-id", required=True,
+                   help="Gmail message id to unmark.")
+    p.add_argument(
+        "--handled-label",
+        default="kol-outreach/handled",
+        help="Label to remove (default: %(default)s).",
+    )
+    p.add_argument(
+        "--pending-label",
+        default="kol-outreach/pending-reply",
+        help="Label to add back (default: %(default)s).",
+    )
+    p.set_defaults(func=cmd_unmark_reply_handled)
 
     # ---- stuck-goal scan (plan C6: 48h DingTalk cron)
     p = sub.add_parser(

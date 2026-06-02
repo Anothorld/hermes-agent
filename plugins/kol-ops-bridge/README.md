@@ -129,6 +129,8 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Multi-goal draftable plan (fragment dispatch) | `dispatch_router.py` | `select-draftable-plan` | `POST /logic/select-draftable-plan` |
 | Escalation-rule matching → `escalation_hint` | `policies.match_escalation_rules` | `match-escalation-rules` | `POST /logic/match-escalation-rules` |
 | Classifier committed-key sanitize (preview) | `classifier_facts.py` | `sanitize-classifier-facts` | `POST /logic/sanitize-classifier-facts` |
+| Reply poller idempotency probe | `cal.reply_dispatch_status` | *(GET only)* | `GET /identities/{id}/reply-dispatch-status` |
+| Gmail unmark for re-dispatch | `gmail_client.py` | `unmark-reply-handled` | `POST /gmail/unmark-reply-handled` |
 | Reply-draft envelope enrichment + atomic persist | `reply_draft.py` | `persist-reply-draft` | `POST /reply-drafts/persist` |
 
 `write-facts-multi` with `source=email:<message_id>` auto-sanitizes namespaces

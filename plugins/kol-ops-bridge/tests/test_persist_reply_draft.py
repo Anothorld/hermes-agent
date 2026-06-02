@@ -79,6 +79,29 @@ def test_persist_enriches_and_writes(cal_db):
     assert draft_fact["draft"]["to"] == "kol@x.com"
 
 
+def test_persist_defaults_synthesizer_when_contributing_without_child_skill(cal_db):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="t1d", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="C1", env="TEST")
+    contributing = [
+        {"lane": "commerce", "goal": "product_selection", "skill": "kol-product-selector"},
+        {"lane": "commerce", "goal": "deliverables_scope", "skill": "kol-deliverables-clarifier"},
+    ]
+    out = plugin_api.persist_reply_draft(
+        _body(
+            plugin_api,
+            identity_id=iid,
+            child_skill="",
+            contributing=contributing,
+        ),
+        x_bridge_key=None,
+    )
+    assert out["ok"] is True
+    assert out["child_skill"] == "kol-reply-synthesizer"
+    facts = cal_db.latest_facts_for(identity_id=iid, campaign_id="C1", env="TEST")
+    assert facts["approval.reply_draft"]["child_skill"] == "kol-reply-synthesizer"
+
+
 def test_persist_with_contributing_skills(cal_db):
     plugin_api = _load_plugin_api()
     iid = cal_db.upsert_identity(primary_handle="t1c", platform="instagram")

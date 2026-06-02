@@ -1591,6 +1591,64 @@ def list_events(
     return _safe("list_events", _do) or []
 
 
+def reply_dispatch_status(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    message_id: str,
+    env: str = "LIVE",
+) -> dict[str, Any]:
+    """Return poller idempotency hints for one inbound Gmail message."""
+
+    def _do() -> dict[str, Any]:
+        with _connect() as conn:
+            draft_ready = conn.execute(
+                """SELECT id FROM kol_conversation_events
+                    WHERE identity_id=? AND campaign_id=? AND env=?
+                      AND event_type='kol_reply_draft_ready'
+                      AND json_extract(payload_json,'$.source_message_id')=?
+                    LIMIT 1""",
+                (identity_id, campaign_id, env, message_id),
+            ).fetchone()
+            inbound = conn.execute(
+                """SELECT id FROM kol_conversation_events
+                    WHERE identity_id=? AND campaign_id=? AND env=?
+                      AND event_type='kol_inbound_reply'
+                      AND json_extract(payload_json,'$.message_id')=?
+                    LIMIT 1""",
+                (identity_id, campaign_id, env, message_id),
+            ).fetchone()
+            fact_row = conn.execute(
+                """SELECT fact_value FROM kol_facts_latest
+                    WHERE identity_id=? AND campaign_id=? AND env=?
+                      AND fact_key='approval.reply_draft'""",
+                (identity_id, campaign_id, env),
+            ).fetchone()
+        has_pending_draft = False
+        if fact_row:
+            val = _jl(fact_row["fact_value"], {})
+            if isinstance(val, dict) and val.get("source_message_id") == message_id:
+                has_pending_draft = val.get("decision") == "pending"
+        has_draft_ready = draft_ready is not None
+        has_inbound = inbound is not None
+        return {
+            "message_id": message_id,
+            "has_inbound_event": has_inbound,
+            "has_draft_ready_event": has_draft_ready,
+            "has_pending_reply_draft": has_pending_draft,
+            "should_skip_poller": bool(has_draft_ready or has_pending_draft),
+            "should_retry_gateway_only": bool(
+                has_inbound and not has_draft_ready and not has_pending_draft
+            ),
+        }
+
+    return _safe("reply_dispatch_status", _do) or {
+        "message_id": message_id,
+        "should_skip_poller": False,
+        "should_retry_gateway_only": False,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Escalations
 # ---------------------------------------------------------------------------
@@ -2182,6 +2240,7 @@ __all__ = [
     "list_approved_reply_drafts",
     "open_escalation",
     "recompute_goals",
+    "reply_dispatch_status",
     "resolve_candidate_relationships",
     "resolve_escalation",
     "select_candidates_for_outreach",
