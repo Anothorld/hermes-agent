@@ -6,9 +6,10 @@ import datetime as _dt
 import json
 import sqlite3
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
@@ -34,6 +35,17 @@ def _env(env: str | None) -> str:
     return (env or get_settings().env).upper()
 
 
+def _is_http_url(raw: str) -> bool:
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 # Subset of stages we care about for "current node" derivation, ordered so
 # the *latest event in time* wins (we don't try to be smarter than the bridge).
 _KNOWN_STAGES = {
@@ -48,11 +60,147 @@ _KNOWN_STAGES = {
 }
 
 
+_EVENT_LABELS: dict[str, str] = {
+    "shortlist_ready": "候选池已就绪",
+    "approved": "shortlist 已审批",
+    "outbound_draft_created": "初邀草稿已生成",
+    "kol_initial_outreach_draft_ready": "初邀草稿已生成",
+    "initial_drafted": "初邀草稿已生成",
+    "outbound_sent": "初邀已发送",
+    "kol_inbound_reply": "KOL 已回复",
+}
+
+
+def _event_matches_product(
+    ev: dict[str, Any],
+    *,
+    product_sku: str,
+    campaign_skus: set[str] | None = None,
+) -> bool:
+    """Return whether an event should be counted for a SKU rollup."""
+    campaign_id = ev.get("campaign_id")
+    if campaign_skus and isinstance(campaign_id, str) and campaign_id in campaign_skus:
+        return True
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    event_sku = ev.get("product_sku") or payload.get("product_sku")
+    return event_sku == product_sku
+
+
+def _classify_lane_item(item: dict[str, Any]) -> str:
+    """Classify one lane item into an operator-facing outreach bucket."""
+    if int(item.get("open_escalation_count") or 0) > 0 or item.get("reply_draft_state") == "pending":
+        return "needs_attention"
+    signal = str(item.get("interest_signal") or "").strip().lower()
+    commerce_goal = None
+    goals = item.get("goals")
+    if isinstance(goals, dict):
+        commerce = goals.get("commerce")
+        if isinstance(commerce, dict):
+            commerce_goal = commerce.get("goal")
+    if signal == "declined":
+        return "declined"
+    if signal in {"confirmed", "interested"}:
+        if commerce_goal and commerce_goal != "interest_qualification":
+            return "progressing"
+        return "replied"
+    if item.get("outreach_sent_at"):
+        return "sent_waiting"
+    if item.get("reply_draft_state") == "approved_unsent" or bool(item.get("outreach_draft_created")):
+        return "draft_ready"
+    if item.get("candidate_status") == "selected_for_outreach":
+        return "approved_idle"
+    return "discovered"
+
+
+def _summarize_outreach(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build counts + grouped KOLs from lane snapshots."""
+    counts = {
+        "discovered": 0,
+        "pending_review": 0,
+        "approved": 0,
+        "draft_ready": 0,
+        "sent": 0,
+        "replied": 0,
+        "needs_attention": 0,
+    }
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "needs_attention": [],
+        "replied": [],
+        "sent_waiting": [],
+        "draft_ready": [],
+        "approved_idle": [],
+    }
+    active_ids: list[int] = []
+    active_seen: set[int] = set()
+    for item in items:
+        status = _classify_lane_item(item)
+        candidate_status = str(item.get("candidate_status") or "")
+        if candidate_status != "selected_for_outreach":
+            counts["pending_review"] += 1
+        else:
+            counts["approved"] += 1
+        if status == "discovered":
+            counts["discovered"] += 1
+        elif status in {"replied", "progressing"}:
+            counts["replied"] += 1
+        elif status == "sent_waiting":
+            counts["sent"] += 1
+        elif status == "draft_ready":
+            counts["draft_ready"] += 1
+        elif status == "needs_attention":
+            counts["needs_attention"] += 1
+        kid = item.get("identity_id")
+        if not isinstance(kid, int):
+            continue
+        if status in {"needs_attention", "replied", "progressing", "sent_waiting", "draft_ready", "approved_idle"}:
+            if kid not in active_seen:
+                active_seen.add(kid)
+                active_ids.append(kid)
+        bucket_key = "replied" if status == "progressing" else status
+        if bucket_key in buckets:
+            buckets[bucket_key].append({
+                "identity_id": kid,
+                "handle": item.get("handle"),
+                "status": status,
+            })
+    return {
+        "outreach_counts": counts,
+        "outreach_kols": buckets,
+        "outreach_active_ids": active_ids,
+    }
+
+
+def _human_last_activity(
+    *,
+    summary: dict[str, Any],
+    kols: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    et = summary.get("last_event_type")
+    ts = summary.get("last_event_ts")
+    if not et and not ts:
+        return None
+    kid = summary.get("last_event_identity_id")
+    handle = None
+    if isinstance(kid, int) and isinstance(kols, dict):
+        ident = kols.get(str(kid)) or {}
+        handle = ident.get("primary_handle") or ident.get("display_name")
+    label = _EVENT_LABELS.get(str(et), str(et or "最近有更新"))
+    if handle:
+        label = f"{label} · @{str(handle).lstrip('@')}"
+    return {
+        "label": label,
+        "event_type": et,
+        "ts": ts,
+        "identity_id": kid if isinstance(kid, int) else None,
+    }
+
+
 def _summarize_events(
     events: list[dict[str, Any]],
     *,
     campaign_id: str | None = None,
     product_sku: str | None = None,
+    campaign_skus: set[str] | None = None,
 ) -> dict[str, Any]:
     """Reduce a recent-event list to one campaign's current state.
 
@@ -64,9 +212,11 @@ def _summarize_events(
     for ev in events:
         if campaign_id is not None and ev.get("campaign_id") != campaign_id:
             continue
-        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
-        event_sku = ev.get("product_sku") or payload.get("product_sku")
-        if product_sku is not None and event_sku != product_sku:
+        # Campaign-scoped summaries should trust campaign_id and avoid
+        # dropping valid rows that don't carry top-level/payload product_sku.
+        if campaign_id is None and product_sku is not None and not _event_matches_product(
+            ev, product_sku=product_sku, campaign_skus=campaign_skus,
+        ):
             continue
         matched.append(ev)
     if not matched:
@@ -75,8 +225,11 @@ def _summarize_events(
             "sub_status": None,
             "last_event_type": None,
             "last_event_ts": None,
+            "last_event_identity_id": None,
             "kol_identity_ids": [],
             "contacted_kol_ids": [],
+            "sent_kol_ids": [],
+            "replied_kol_ids": [],
             "shortlist_ready": False,
             "shortlist_approved": False,
             "event_count": 0,
@@ -102,18 +255,27 @@ def _summarize_events(
             kol_ids.append(kid)
     contacted_ids: list[int] = []
     contacted_seen: set[int] = set()
+    sent_ids: list[int] = []
+    sent_seen: set[int] = set()
+    replied_ids: list[int] = []
+    replied_seen: set[int] = set()
     draft_event_types = {
         "initial_drafted",
         "kol_initial_outreach_draft_ready",
         "outbound_draft_created",
     }
     for ev in matched:
-        if ev.get("event_type") not in draft_event_types:
-            continue
+        et = ev.get("event_type")
         kid = ev.get("identity_id")
-        if isinstance(kid, int) and kid not in contacted_seen:
+        if et in draft_event_types and isinstance(kid, int) and kid not in contacted_seen:
             contacted_seen.add(kid)
             contacted_ids.append(kid)
+        if et == "outbound_sent" and isinstance(kid, int) and kid not in sent_seen:
+            sent_seen.add(kid)
+            sent_ids.append(kid)
+        if et == "kol_inbound_reply" and isinstance(kid, int) and kid not in replied_seen:
+            replied_seen.add(kid)
+            replied_ids.append(kid)
     has_shortlist = any(
         ev.get("event_type") == "shortlist_ready" for ev in matched
     )
@@ -123,8 +285,11 @@ def _summarize_events(
         "sub_status": sub_status,
         "last_event_type": last.get("event_type"),
         "last_event_ts": last.get("ts"),
+        "last_event_identity_id": last.get("identity_id"),
         "kol_identity_ids": kol_ids,
         "contacted_kol_ids": contacted_ids,
+        "sent_kol_ids": sent_ids,
+        "replied_kol_ids": replied_ids,
         "shortlist_ready": has_shortlist,
         "shortlist_approved": has_approved,
         "event_count": len(matched),
@@ -382,7 +547,7 @@ class ProductVariant(BaseModel):
 class ProductBody(BaseModel):
     sku: str = Field(min_length=1)
     name: str
-    url: str | None = None
+    url: str = Field(min_length=1, max_length=2_000)
     tags: list[str] = Field(default_factory=list)
     notes: str | None = None
     # Operator-supplied selling-points + pitch markdown captured upfront so
@@ -397,9 +562,25 @@ class ProductBody(BaseModel):
     default_budget_total: float | None = None
     default_absolute_floor: float | None = None
 
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        v = value.strip()
+        if not _is_http_url(v):
+            raise ValueError("product url must be a valid http(s) URL")
+        return v
+
 
 class ParseVariantsBody(BaseModel):
     url: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        v = value.strip()
+        if not _is_http_url(v):
+            raise ValueError("url must be a valid http(s) URL")
+        return v
 
 
 def _row_to_product(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -495,13 +676,16 @@ async def list_products_summary(
         # most-recently-started row, so the UI can render a discovery-
         # progress badge without per-campaign drilldown.
         gate_row = active[0] if active else (cs[0] if cs else None)
-        latest = _summarize_events(events, product_sku=sku) if cs else {
+        campaign_skus = {c["campaign_id"] for c in cs}
+        latest = _summarize_events(events, product_sku=sku, campaign_skus=campaign_skus) if cs else {
             "stage": None,
             "sub_status": None,
             "last_event_type": None,
             "last_event_ts": None,
             "kol_identity_ids": [],
             "contacted_kol_ids": [],
+            "replied_kol_ids": [],
+            "sent_kol_ids": [],
             "event_count": 0,
         }
         variants = json.loads(p["variants_json"] or "[]") if p["variants_json"] is not None else []
@@ -526,6 +710,8 @@ async def list_products_summary(
             "last_event_type": latest["last_event_type"],
             "last_event_ts": latest["last_event_ts"],
             "kols_contacted": len(latest.get("contacted_kol_ids", [])),
+            "kols_replied": len(latest.get("replied_kol_ids", [])),
+            "kols_sent": len(latest.get("sent_kol_ids", [])),
             "discovery_floor": gate_row["target_floor"] if gate_row else None,
             "discovery_retry_count": (
                 gate_row["retry_count"] if gate_row else 0
@@ -650,14 +836,24 @@ async def list_product_campaigns(
     needed_ids: set[int] = set()
     campaigns: list[dict] = []
     for r in rows:
-        summary = _summarize_events(events, campaign_id=r["campaign_id"], product_sku=sku)
+        summary = _summarize_events(events, campaign_id=r["campaign_id"])
         try:
             candidates = await bridge.list_candidates(r["campaign_id"], env=e)
         except BridgeError:
             candidates = []
+        try:
+            lane_payload = await bridge.get_lanes(r["campaign_id"], env=e)
+            lane_items = lane_payload.get("items", []) if isinstance(lane_payload, dict) else []
+        except BridgeError:
+            lane_items = []
         visible_candidates = [
             c for c in candidates if c.get("candidate_status") not in {"rejected", "archived"}
         ]
+        visible_lane_items = [
+            it for it in lane_items
+            if isinstance(it, dict) and it.get("candidate_status") not in {"rejected", "archived"}
+        ]
+        outreach = _summarize_outreach(visible_lane_items)
         selected_count = sum(
             1 for c in visible_candidates
             if c.get("candidate_status") == "selected_for_outreach"
@@ -665,8 +861,13 @@ async def list_product_campaigns(
         candidate_ids = [
             c.get("identity_id") for c in visible_candidates if isinstance(c.get("identity_id"), int)
         ]
-        kol_identity_ids = list(dict.fromkeys([*summary["kol_identity_ids"], *candidate_ids]))
+        lane_ids = [
+            it.get("identity_id") for it in visible_lane_items if isinstance(it.get("identity_id"), int)
+        ]
+        active_ids = [iid for iid in outreach.get("outreach_active_ids", []) if isinstance(iid, int)]
+        kol_identity_ids = list(dict.fromkeys([*summary["kol_identity_ids"], *candidate_ids, *lane_ids]))
         needed_ids.update(kol_identity_ids)
+        needed_ids.update(active_ids)
         gw = run_state_map.get(r["campaign_id"], {})
         # ``pending`` = visible candidates the operator has NOT yet approved
         # (anything except selected_for_outreach). Used by the UI so a
@@ -694,7 +895,9 @@ async def list_product_campaigns(
             "gate_state": gw.get("gate_state"),
             "gate_active": bool(gw.get("gate_active")),
             **summary,
+            **outreach,
             "kol_identity_ids": kol_identity_ids,
+            "contacted_kol_ids": list(dict.fromkeys([*summary.get("contacted_kol_ids", []), *active_ids])),
             "candidate_count": len(visible_candidates),
             "pending_candidate_count": pending_count,
             "shortlist_ready": summary["shortlist_ready"] or bool(visible_candidates),
@@ -711,4 +914,6 @@ async def list_product_campaigns(
         })
 
     kols = await _get_identity_map(bridge, needed_ids) if needed_ids else {}
+    for c in campaigns:
+        c["last_activity"] = _human_last_activity(summary=c, kols=kols)
     return {"campaigns": campaigns, "kols": kols}

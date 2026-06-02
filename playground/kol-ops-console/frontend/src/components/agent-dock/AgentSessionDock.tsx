@@ -28,7 +28,7 @@ export function AgentSessionDock() {
     setLoading(true);
     try {
       const r = await api.get<AgentSessionsResponse>(
-        `/campaigns/agent-sessions?env=${env}&limit=200`,
+        `/campaigns/agent-sessions?env=${env}&limit=50`,
       );
       setSessions(r.sessions ?? []);
       setError(null);
@@ -44,10 +44,11 @@ export function AgentSessionDock() {
     // Reset the first-load flag whenever env flips so the stale-selection
     // effect waits for fresh data before clearing the persisted choice.
     firstLoadDone.current = false;
+    if (!open || !getToken()) return;
     fetchSessions();
     const id = window.setInterval(fetchSessions, POLL_MS);
     return () => window.clearInterval(id);
-  }, [env, fetchSessions]);
+  }, [open, env, fetchSessions]);
 
   // Self-guard: this component is mounted at the App root next to
   // DialogHost/ToastHost (which live outside RequireAuth). Hide on

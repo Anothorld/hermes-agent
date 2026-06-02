@@ -23,6 +23,7 @@ Three layers:
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import sqlite3
 from typing import Any
 
@@ -328,6 +329,102 @@ def test_launch_502_when_upsert_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     # No agent run was spawned — the launch refused before
     # ``gateway.start_run``.
     assert gateway.runs_started == []
+
+
+def test_launch_400_when_product_url_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _seed_conn()
+    # Simulate legacy catalog row missing URL; launch must now block.
+    conn.execute("UPDATE products SET url=NULL WHERE sku='SKU-1'")
+    bridge = _StubBridge()
+    gateway = _StubGateway()
+    from app.routers import campaigns as _c
+    monkeypatch.setattr(_c, "ensure_gateway_bridge_key", lambda: "stub")
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).post("/campaigns/CID-1/start", json=_launch_body())
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "product_url_required"
+    assert gateway.runs_started == []
+
+
+def test_launch_400_when_variant_whitelist_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _seed_conn()
+    conn.execute(
+        "UPDATE products SET variants_json=? WHERE sku='SKU-1'",
+        (json.dumps([{"id": "v-1", "label": "green"}]),),
+    )
+    bridge = _StubBridge()
+    gateway = _StubGateway()
+    from app.routers import campaigns as _c
+    monkeypatch.setattr(_c, "ensure_gateway_bridge_key", lambda: "stub")
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).post("/campaigns/CID-1/start", json=_launch_body())
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "variant_whitelist_required"
+    assert gateway.runs_started == []
+
+
+def test_launch_upserts_commission_band_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _seed_conn()
+    conn.execute(
+        "UPDATE products SET variants_json=? WHERE sku='SKU-1'",
+        (json.dumps([{"id": "v-1", "label": "green"}]),),
+    )
+    bridge = _StubBridge()
+    gateway = _StubGateway()
+    from app.routers import campaigns as _c
+    monkeypatch.setattr(_c, "ensure_gateway_bridge_key", lambda: "stub")
+
+    body = _launch_body()
+    body.update({
+        "product_variant_ids": ["v-1"],
+        "compensation_mode": "hybrid",
+        "commission_min_pct": 10.0,
+        "commission_max_pct": 20.0,
+    })
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).post("/campaigns/CID-1/start", json=body)
+
+    assert r.status_code == 200, r.text
+    assert bridge.upsert_calls, "expected bridge upsert call"
+    _cid, payload = bridge.upsert_calls[0]
+    assert payload["barter_policy"] == "hybrid"
+    assert payload["commission_band"] == {"min": 0.1, "max": 0.2}
+
+
+def test_patch_config_maps_compensation_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _seed_conn()
+    bridge = _StubBridge()
+    gateway = _StubGateway()
+    from app.routers import campaigns as _c
+    monkeypatch.setattr(_c, "ensure_gateway_bridge_key", lambda: "stub")
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).patch(
+        "/campaigns/CID-1/config",
+        json={
+            "env": "LIVE",
+            "compensation_mode": "commission",
+            "commission_min_pct": 12,
+            "commission_max_pct": 20,
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    assert bridge.upsert_calls, "expected bridge upsert call"
+    _cid, payload = bridge.upsert_calls[0]
+    assert payload["env"] == "LIVE"
+    assert payload["barter_policy"] == "commission"
+    assert payload["commission_band"] == {"min": 0.12, "max": 0.2}
 
 
 def test_redraft_400_when_cal_missing_product_display_name(

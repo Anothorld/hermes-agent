@@ -1,172 +1,44 @@
 ---
 name: kol-archival-writer
-description: After a campaign engagement closes (status `done` or `aborted`), back-fills durable cross-campaign facts on the KOL's `kol_identity` and `kol_relationship` rows: total_collabs, last_outcome, default_shipping_address (if shipping drift was approved), default_payment_method (if payment drift was approved), preferred_compensation_mode, response_time_avg_h, last_engaged_at, plus a one-line `relationship_notes` summary. Writes nothing to per-campaign `kol_facts` (that namespace is closed); writes only to identity/relationship via dedicated bridge endpoints. Idempotent on `approval.archival_done==true`.
-trigger: Invoked by `kol-reply-dispatcher` (or a closing cron) when `goals.archival.status == "active"` AND `approval.archival_done != true`. Pre-condition: the campaign-level closing goal (`content_review_and_golive` done OR `engagement_aborted` done) must already be marked.
-tags: ["kol", "archival", "kol_identity", "kol_relationship", "meta-lane"]
+description: Post-collaboration archival — sync relationship memory and close archival goal.
+tags: ["kol", "archival", "relationship", "meta"]
 ---
 
-## Goal
-Promote learnings from this campaign into the KOL's persistent
-profile so the NEXT campaign starts with a smarter cold-vs-reengage
-decision and pre-populated defaults.
+# kol-archival-writer
 
-## Runtime Contract
-- Profile: `outreach-operator`. `--env <TEST|LIVE>` mandatory.
-- **Identity writes are gated.** `default_shipping_address` is only
-  promoted when `approval.identity_drift_review.decision == "approved"`
-  for the address change. `default_payment_method` is only promoted
-  when `approval.identity_drift_review_payment.decision == "approved"`
-  for the PayPal change. Otherwise leave identity values untouched.
-- **No fact-namespace writes.** Per-campaign `kol_facts` is frozen
-  after archival; this skill writes only via identity/relationship
-  endpoints.
-- **Idempotent.** If `approval.archival_done==true`, abort
-  `{"skipped":"already_archived"}`.
-- **Closing goal precondition.** Aborts if neither
-  `content_review_and_golive` nor `engagement_aborted` is `done`.
+Runs when `post_collab_archival` is the active meta goal. Persists outcome into
+`kol_relationship` and writes required `approval.*` archival facts.
 
-## Inputs
-1. `identity_id`, `campaign_id`, `env`.
-2. Optional `operator_summary` (free-text one-line note appended to
-   `relationship_notes`).
+## Bridge tool (required)
 
-## Procedure
-
-### Step 1 — Load context
-```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
-```
-Read:
-- `goals.archival.status`, `goals.content_review_and_golive.status`,
-  `goals.engagement_aborted.status`.
-- `relationship.total_collabs` (current).
-- All `offer.*` keys (latest), `fulfillment.*` keys, `payout.*` keys,
-  `approval.identity_drift_review` (shipping) and
-  `approval.identity_drift_review_payment` (PayPal) if present.
-- Inbox metadata (response_time_avg_h is computed by the bridge or
-  falls back to the existing relationship value).
-
-### Step 2 — Derive update payload
-
-**Outcome derivation** (one of, picked in order):
-1. `engagement_aborted.status == "done"` → `last_outcome = "aborted"`
-   + capture `last_outcome_reason` from
-   `approval.engagement_abort_reason` if present.
-2. `fulfillment.golive_done == true` → `last_outcome = "delivered"`.
-3. `fulfillment.draft_approved && !fulfillment.golive_done` →
-   `last_outcome = "approved_no_golive"` (rare; treat like delivered).
-4. Otherwise → `last_outcome = "incomplete"` (defensive).
-
-**Counter increments:**
-- `total_collabs += 1` when `last_outcome` ∈ `{delivered, approved_no_golive}`.
-- `total_aborted += 1` when `last_outcome == "aborted"`.
-
-**Preferred compensation mode** (relationship-level):
-- If `last_outcome == "delivered"` AND `offer.compensation_mode` is set,
-  copy it to `relationship.preferred_compensation_mode`.
-
-**Default shipping address (identity-level):**
-- ONLY if `approval.identity_drift_review.decision == "approved"`
-  AND `fulfillment.shipping_address` was used this campaign:
-  set `kol_identity.default_shipping_address` to that snapshot.
-- Else: do not touch identity address.
-
-**Default payment method (identity-level):**
-- ONLY if `approval.identity_drift_review_payment.decision == "approved"`
-  AND `payout.method_collected == true` AND `payout.payment_method`
-  was captured this campaign: set
-  `kol_identity.default_payment_method` to that snapshot.
-- Else: do not touch identity payment method. PayPal-only enforcement
-  lives in the intake skill; archival just promotes whatever was
-  approved.
-
-**Relationship notes:**
-- Compose a one-line summary like:
-  `"<campaign_id>: <last_outcome>; mode=<mode>; sku=<sku>; revisions=<n>"`
-- Append `operator_summary` if provided (separated by ` — `).
-- Push to `relationship.relationship_notes` (append, do not replace).
-
-**Last engaged at:**
-- Set `relationship.last_engaged_at = now`.
-
-### Step 3 — Write via the bridge CLI
-All archival writes go through the deterministic CLI — **never** craft
-raw HTTP or SQL. Two atomic calls:
-
-1. **Archive the identity / relationship** (single transaction —
-   identity row + relationship row + closing facts):
-   ```
-   python <PROJECT>/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
-     archive-identity --identity-id <id> --campaign-id <cid> \
-     --outcome <delivered|cancelled|no_show|...> \
-     --decided-by skill:archival-writer \
-     --json @/tmp/archive.json
-   ```
-   The JSON body carries the optional `identity_updates`,
-   `relationship_updates`, and `post_mortem_facts` blocks (see
-   `ArchiveBody` schema). If the bridge rejects with
-   `endpoint_not_available`, abort with
-   `{"error":"archival_endpoints_not_available"}` and log a TODO
-   rather than freelancing fact writes.
-
-2. **Stamp the per-campaign closure flag** (must be the LAST write):
-   ```
-   python <PROJECT>/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
-     write-facts-multi --env TEST|LIVE --identity-id <id> --json @/tmp/closing.json
-   ```
-   The body sets `approval.archival_done=true` +
-   `approval.archival_done_at` under the `approval` namespace.
-
-### Step 4 — Return result envelope
-```json
-{
-  "skill": "kol-archival-writer",
-  "identity_id": 42,
-  "campaign_id": "TS8319",
-  "env": "TEST",
-  "subject": null,
-  "body": null,
-  "branch_action": "archived",
-  "last_outcome": "delivered",
-  "identity_updated": {"default_shipping_address": false, "default_payment_method": false},
-  "relationship_updated": {"total_collabs": 4, "preferred_compensation_mode": "paid",
-                            "relationship_notes_appended": true,
-                            "last_engaged_at": "<iso8601>"},
-  "facts_written": {"meta": 2}
-}
+```bash
+kol_bridge_tool archive-identity --identity-id ID --env LIVE --json '{
+  "campaign_id": "C1",
+  "outcome": "success",
+  "preferred_mode": "gifted",
+  "negotiation_style": "soft_anchor",
+  "preferred_skus": ["SKU-1"],
+  "delivery_quality": 0.9,
+  "decided_by": "skill:kol-archival-writer"
+}'
 ```
 
-This skill never drafts an email. `body: null` always.
+HTTP: `POST /identities/{id}/archive` with the same body fields.
 
-## Examples
+### `negotiation_style` (learning field)
 
-### Delivered + drift approved
-- `golive_done=true`, `approval.identity_drift_review.decision="approved"`.
-- Updates: `total_collabs=4 (was 3)`, `preferred_compensation_mode="paid"`,
-  `default_shipping_address=<new Berlin>`, notes appended, archival_done=true.
+Set when the thread showed clear negotiation behavior:
 
-### Aborted
-- `engagement_aborted.status="done"`, reason="contract_rejected".
-- Updates: `total_aborted=1 (was 0)`, `last_outcome="aborted"`,
-  `last_outcome_reason="contract_rejected"`, no compensation/address
-  promotion, notes appended.
+| Value | When |
+|-------|------|
+| `hard_anchor` | Firm rate floor, refused gifted-only |
+| `soft_anchor` | Flexible once scope clear |
+| `unknown` | Not enough signal |
 
-### Idempotent
-`approval.archival_done=true` already. Aborts `{"skipped":"already_archived"}`.
+This feeds `reusable_facts.facts.personalization_hint` on the next campaign via
+`get-dispatch-context`.
 
 ## Pitfalls
-- Promoting a new shipping address WITHOUT operator approval — silently
-  reshapes future campaigns. Always gate on
-  `approval.identity_drift_review.decision == "approved"`.
-- Promoting a new PayPal email WITHOUT operator approval — same risk
-  for payouts. Always gate on
-  `approval.identity_drift_review_payment.decision == "approved"`.
-  Confusing this key with the shipping drift key (`identity_drift_review`)
-  will promote the wrong thing.
-- Overwriting `relationship_notes` instead of appending. The notes
-  field is a running ledger, not a current-state field.
-- Forgetting to increment `total_collabs` (or wrongly counting an
-  aborted engagement toward it). Branch on outcome.
-- Writing more `kol_facts.*` keys after `approval.archival_done=true`.
-  The fact namespace is closed.
+
+- Do not mark `success` without delivery evidence in facts/events.
+- Always pass explicit `env=LIVE` for production archival.

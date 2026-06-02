@@ -42,6 +42,20 @@ the dispatcher can advance to `compensation_negotiation`.
 4. `flow_hint` — small JSON from dispatcher Step 5:
    `{lane, current_goal, next_goal_in_lane,
    missing_facts_for_current_goal, kol_signaled_next_step}`.
+5. `learning_hints` — passed through by the dispatcher (reject few-shot +
+   `reply_strategy` + `company_style`).
+
+## Learning hints (advisory)
+
+Read `learning_hints` per
+`../kol-reply-dispatcher/references/shared/learning-hints.md`. Apply
+`reply_strategy` / `reply_learning` / `company_style` for `deliverables_scope`
+as advisory wording/sequencing only. **Priority on conflict:** fact ownership
+> pricing engine output > escalation gates > this skill's HARD rules
+(`*_proposed` keys only, no price) > learning hints. When
+`references/learned/deliverables_scope.md` exists, treat it as an
+auto-promoted, advisory playbook under the same priority. Before drafting, if
+`references/learned/deliverables_scope.md` exists, read it via `skill_view`.
 
 ## Email Style Preamble (mandatory before drafting)
 

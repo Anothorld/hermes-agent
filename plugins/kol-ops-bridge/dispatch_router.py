@@ -76,6 +76,9 @@ GOAL_OWNED_FACTS: dict[str, tuple[str, ...]] = {
         "offer.proposed_basis",
         "offer.proposed_currency",
         "offer.kol_paid_quote",
+        "offer.barter_attempted",
+        "offer.rate_requested",
+        "offer.paid_hold_sent",
     ),
     "contract_signing": (
         "offer.contract_sent",

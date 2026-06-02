@@ -11,9 +11,11 @@ import { ReplyMonitorPage } from './pages/ReplyMonitorPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { EscalationConsolePage } from './pages/EscalationConsolePage';
 import { ApprovalsPage } from './pages/ApprovalsPage';
+import { LearningPage } from './pages/LearningPage';
 import { PolicyEditorPage } from './pages/PolicyEditorPage';
 import { CampaignCandidatesPage } from './pages/CampaignCandidatesPage';
 import { AgentTranscriptPage } from './pages/AgentTranscriptPage';
+import { GateMetricsPage } from './pages/GateMetricsPage';
 import { GlobalNav } from './components/shell/GlobalNav';
 import { EnvBanner } from './components/shell/EnvBanner';
 import { BreadcrumbBar } from './components/shell/BreadcrumbBar';
@@ -55,7 +57,9 @@ export function App() {
                   <Route path="/escalations" element={<EscalationConsolePage />} />
                   <Route path="/escalations/:id" element={<EscalationConsolePage />} />
                   <Route path="/approvals" element={<ApprovalsPage />} />
+                  <Route path="/learning" element={<LearningPage />} />
                   <Route path="/policies" element={<PolicyEditorPage />} />
+                  <Route path="/metrics" element={<GateMetricsPage />} />
                   <Route path="/replies" element={<ReplyMonitorPage />} />
                   <Route path="/settings" element={<SettingsPage />} />
                 </Routes>

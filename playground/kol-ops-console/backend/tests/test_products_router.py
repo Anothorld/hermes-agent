@@ -130,3 +130,39 @@ def test_post_products_auto_ingests_url_variants_and_merges_manual(monkeypatch):
     assert [v["id"] for v in body["variants"]] == ["37384", "35590"]
     assert body["variants"][0]["label"] == "manual green row"
     assert body["variants"][1]["url"] == "https://www.povison.com/foo.html?variant=35590"
+
+
+def test_post_products_rejects_missing_or_invalid_url():
+    conn = _seed_conn()
+    client = _build_client(conn)
+
+    missing = client.post(
+        "/products",
+        json={
+            "sku": "SKU-NO-URL",
+            "name": "No URL Sofa",
+            "tags": [],
+            "variants": [],
+        },
+    )
+    assert missing.status_code == 422, missing.text
+
+    invalid = client.post(
+        "/products",
+        json={
+            "sku": "SKU-BAD-URL",
+            "name": "Bad URL Sofa",
+            "url": "not-a-url",
+            "tags": [],
+            "variants": [],
+        },
+    )
+    assert invalid.status_code == 422, invalid.text
+
+
+def test_parse_variants_rejects_invalid_url():
+    conn = _seed_conn()
+    client = _build_client(conn)
+
+    r = client.post("/products/parse-variants", json={"url": "broken-url"})
+    assert r.status_code == 422, r.text

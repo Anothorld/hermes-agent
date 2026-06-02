@@ -14,8 +14,10 @@ import json
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -37,6 +39,7 @@ from ..discovery_gate import (
     _count_uncontacted_candidates,
     _trigger_rediscover_internal,
 )
+from ..gateway_client import GatewayClient, GatewayError, RUNNING_STATES, TERMINAL_STATES
 from ..variant_candidates import human_spec_text, resolve_campaign_variants
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
@@ -53,6 +56,8 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[5])
 _KOL_ORCHESTRATOR_SESSIONS = Path.home() / ".hermes/profiles/kol-orchestrator/sessions"
 _KOL_ORCHESTRATOR_STATE_DB = Path.home() / ".hermes/profiles/kol-orchestrator/state.db"
 _MAX_TRANSCRIPT_CHARS = 4000
+_LANES_CACHE_TTL_SECONDS = 3.0
+_LANES_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 
 # Structured system prompt for the launch agent run.  Listed values are
 # the contract that downstream skills (kol-campaign-intake,
@@ -252,11 +257,14 @@ _APPROVAL_INSTRUCTIONS = (
     "   b) `write-facts-multi` with `approval.reply_draft={decision:\n"
     "      \"pending\", kind:\"initial_outreach\", child_skill, draft}`.\n"
     "   This is the durable Web approval queue.\n"
-    "8. In TEST mode, any Gmail draft/test target must be test_mode_to from\n"
-    "   campaign_config. Never send mail without another explicit operator\n"
-    "   action. If Gmail draft creation is unavailable, the CAL\n"
-    "   `approval.reply_draft` record is still required.\n"
-    "9. Stop after draft records or escalations are persisted and summarize\n"
+    "8. In TEST mode, any eventual Gmail draft target (created only after\n"
+    "   approval.reply_draft is approved) must use test_mode_to from\n"
+    "   campaign_config. This shortlist run MUST NOT create Gmail drafts;\n"
+    "   it only stages `approval.reply_draft` with decision=pending.\n"
+    "9. Gmail draft creation is approval-gated: only the explicit\n"
+    "   `/approvals/approval.reply_draft/approve` action may create a\n"
+    "   Gmail draft. Never bypass that gate.\n"
+    "10. Stop after draft records or escalations are persisted and summarize\n"
     "   per approved KOL: enrichment outcome (hit/miss/skipped),\n"
     "   idempotency outcome (already_drafted | proceeded), draft or\n"
     "   escalation status, and (for misses) the `tried` list.\n"
@@ -380,6 +388,13 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         )
     if body.audit_standards_md and body.audit_standards_md.strip():
         lines.extend(["", "# audit_standards_md", body.audit_standards_md.strip()])
+    if body.compensation_mode:
+        lines.append(f"compensation_mode: {body.compensation_mode}")
+    if body.commission_min_pct is not None and body.commission_max_pct is not None:
+        lines.append(
+            "commission_band_pct: "
+            f"{body.commission_min_pct:g}-{body.commission_max_pct:g}"
+        )
 
     if selected_variants:
         lines.extend(["", "# variant_candidates (KOL email options — no internal ids in copy)"])
@@ -427,6 +442,17 @@ _MAX_PRODUCT_PITCH = 64_000
 # enforce the same shape here so a friendly `product_display_name` can
 # never silently default to a SKU.
 _SKU_CODE_RE = re.compile(r"^[A-Z]{2,5}[\- ]?\d{3,5}[A-Z0-9]*$")
+
+
+def _is_http_url(raw: str | None) -> bool:
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _validate_product_display_name(
@@ -577,6 +603,23 @@ class StartCampaignBody(BaseModel):
         default=None, max_length=8_000,
         description="Brand/legal compliance standards the content review skill enforces.",
     )
+    compensation_mode: str | None = Field(
+        default=None,
+        pattern="^(gifted|paid|commission|hybrid)$",
+        description="Optional compensation mode used by downstream negotiator.",
+    )
+    commission_min_pct: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Commission lower bound in percent (0-100).",
+    )
+    commission_max_pct: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Commission upper bound in percent (0-100).",
+    )
 
     @model_validator(mode="after")
     def _require_test_mode_to_for_test_env(self) -> "StartCampaignBody":
@@ -593,15 +636,34 @@ class StartCampaignBody(BaseModel):
         )
         return self
 
+    @model_validator(mode="after")
+    def _validate_compensation(self) -> "StartCampaignBody":
+        # Commission fields are required only when the mode needs them.
+        needs_commission = self.compensation_mode in {"commission", "hybrid"}
+        has_min = self.commission_min_pct is not None
+        has_max = self.commission_max_pct is not None
+        if needs_commission and (not has_min or not has_max):
+            raise ValueError(
+                "commission_min_pct and commission_max_pct are required "
+                "when compensation_mode is commission or hybrid"
+            )
+        if has_min != has_max:
+            raise ValueError(
+                "commission_min_pct and commission_max_pct must be provided together"
+            )
+        if has_min and has_max and self.commission_min_pct > self.commission_max_pct:
+            raise ValueError("commission_min_pct must be <= commission_max_pct")
+        return self
+
 
 @router.post("/{campaign_id}/start")
 async def start(
     campaign_id: str,
     body: StartCampaignBody,
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
-    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    gateway: GatewayClient = Depends(get_gateway),
     force: bool = Query(False, description="Override duplicate-campaign guard."),
 ) -> dict:
     product = conn.execute(
@@ -611,6 +673,17 @@ async def start(
     ).fetchone()
     if not product:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "sku not found")
+    if not _is_http_url(product["url"]):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            {
+                "code": "product_url_required",
+                "message": (
+                    "product_url is required before campaign launch; "
+                    "update the product catalog entry with a valid http(s) URL"
+                ),
+            },
+        )
     # Validate operator-selected variants against the product catalog.
     if body.product_variant_ids:
         known = {
@@ -624,6 +697,22 @@ async def start(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 f"unknown product variants: {unknown}; refresh the product detail page",
+            )
+    else:
+        known_variants = (
+            json.loads(product["variants_json"] or "[]")
+            if product["variants_json"] else []
+        )
+        if known_variants:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                {
+                    "code": "variant_whitelist_required",
+                    "message": (
+                        "product_variant_ids is required when product has variants; "
+                        "select at least one whitelist variant before launch"
+                    ),
+                },
             )
 
     # Anti-duplicate guard. The bridge does not currently dedupe, so the
@@ -843,9 +932,9 @@ async def rediscover(
     campaign_id: str,
     body: RediscoverBody,
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
-    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    gateway: GatewayClient = Depends(get_gateway),
 ) -> dict[str, Any]:
     """Spawn a discovery-only agent run for an existing campaign.
 
@@ -968,9 +1057,9 @@ class CloseCampaignBody(BaseModel):
 async def close(
     campaign_id: str,
     body: CloseCampaignBody,
-    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    gateway: GatewayClient = Depends(get_gateway),
     env: str = Query(..., pattern="^(LIVE|TEST)$"),
 ) -> dict:
     """Best-effort stop the gateway run, then close the console row.
@@ -1497,12 +1586,71 @@ async def _gateway_completed_snapshot(
     return items or None
 
 
+async def _reconcile_recent_session_runs(
+    *,
+    conn: sqlite3.Connection,
+    gateway: GatewayClient,
+    env: str,
+    limit: int,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Mark stale open runs as ended before grouping session rows.
+
+    The Agent Session Dock uses ``ended_at IS NULL`` to decide whether a
+    session is still "live". If the transcript SSE stream breaks (e.g. auth /
+    validation error) we may miss the terminal frame and ``ended_at`` remains
+    null forever. This light reconcile pass closes those stale rows by polling
+    gateway terminal state once during the list call.
+    """
+    from ..run_registry import mark_run_ended
+
+    open_run_ids = {
+        str(r.get("run_id") or "")
+        for r in rows
+        if r.get("run_id") and not r.get("ended_at")
+    }
+    if not open_run_ids:
+        return rows
+
+    semaphore = asyncio.Semaphore(8)
+
+    async def _is_terminal(run_id: str) -> tuple[str, bool]:
+        async with semaphore:
+            info: dict[str, Any] | None
+            try:
+                info = await gateway.get_run(run_id)
+            except GatewayError:
+                info = None
+            # Gateway TTL-evicted run objects are terminal by contract.
+            terminal = info is None
+            if isinstance(info, dict):
+                state = str(info.get("status") or "").lower()
+                terminal = state in TERMINAL_STATES
+            return run_id, terminal
+
+    probe_results = await asyncio.gather(*(_is_terminal(run_id) for run_id in open_run_ids))
+    changed = False
+    for run_id, is_terminal in probe_results:
+        if not is_terminal:
+            continue
+        try:
+            mark_run_ended(conn, run_id=run_id)
+            changed = True
+        except sqlite3.Error:
+            continue
+
+    if not changed:
+        return rows
+    return list_recent_runs(conn, env=env, limit=limit)
+
+
 @router.get("/agent-sessions")
 async def agent_sessions(
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     _: Annotated[dict, Depends(current_user)],
     env: str = Query("TEST", pattern="^(LIVE|TEST)$"),
     limit: int = Query(200, ge=1, le=500),
+    gateway: GatewayClient = Depends(get_gateway),
 ) -> dict:
     """Recent runs grouped by ``session_id`` — feeds the global Agent
     Session Dock.
@@ -1515,6 +1663,9 @@ async def agent_sessions(
     appears as a separate row.
     """
     runs = list_recent_runs(conn, env=env, limit=limit)
+    runs = await _reconcile_recent_session_runs(
+        conn=conn, gateway=gateway, env=env, limit=limit, rows=runs,
+    )
     groups: dict[str, dict] = {}
     for r in runs:
         sid = r.get("session_id") or f"run:{r['run_id']}"
@@ -1603,12 +1754,12 @@ async def agent_session_log(
 @router.get("/{campaign_id}/agent-log")
 async def agent_log(
     campaign_id: str,
-    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     _: Annotated[dict, Depends(current_user)],
     env: str = Query("TEST", pattern="^(LIVE|TEST)$"),
     limit: int = Query(120, ge=1, le=500),
+    gateway: GatewayClient = Depends(get_gateway),
 ) -> dict:
     """Return recent visible transcript items for one campaign session.
 
@@ -1887,12 +2038,12 @@ async def _proxy_run_events(
 @router.get("/{campaign_id}/agent-stream")
 async def agent_stream(
     campaign_id: str,
-    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     _: Annotated[dict, Depends(current_user)],
     env: str = Query("TEST", pattern="^(LIVE|TEST)$"),
     limit: int = Query(120, ge=1, le=500),
+    gateway: GatewayClient = Depends(get_gateway),
 ) -> StreamingResponse:
     """Live transcript feed for a campaign.
 
@@ -2035,12 +2186,30 @@ async def get_shortlist(
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     raw_candidates = out.get("candidates", []) if isinstance(out, dict) else []
-    candidates: list[dict[str, Any]] = []
+    hidden_count = 0
+    snapshot_ts: str | None = None
+    visible_rows: list[dict[str, Any]] = []
     for row in raw_candidates:
         if not isinstance(row, dict):
             continue
         if row.get("candidate_status") in {"rejected", "archived"}:
+            hidden_count += 1
             continue
+        visible_rows.append(row)
+        updated_at = row.get("updated_at")
+        if isinstance(updated_at, str) and (snapshot_ts is None or updated_at > snapshot_ts):
+            snapshot_ts = updated_at
+    last_selected_at = max(
+        (
+            row.get("selected_at")
+            for row in visible_rows
+            if row.get("candidate_status") == "selected_for_outreach"
+            and isinstance(row.get("selected_at"), str)
+        ),
+        default=None,
+    )
+    candidates: list[dict[str, Any]] = []
+    for row in visible_rows:
         identity_id = row.get("identity_id")
         ident: dict[str, Any] = {}
         if isinstance(identity_id, int):
@@ -2051,12 +2220,20 @@ async def get_shortlist(
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         score = row.get("discovery_score")
         score_pct = round(score * 100) if isinstance(score, (int, float)) else None
+        candidate_status = row.get("candidate_status")
+        updated_at = row.get("updated_at") if isinstance(row.get("updated_at"), str) else None
         handle = (
             ident.get("primary_handle")
             or row.get("primary_handle")
             or payload.get("handle")
             or (f"id{identity_id}" if identity_id is not None else "unknown")
         )
+        is_new_since_last_approval = False
+        if candidate_status != "selected_for_outreach":
+            if updated_at and isinstance(last_selected_at, str):
+                is_new_since_last_approval = updated_at > last_selected_at
+            else:
+                is_new_since_last_approval = True
         candidates.append({
             "handle": str(handle).lstrip("@"),
             "platform": ident.get("platform") or row.get("platform"),
@@ -2067,9 +2244,22 @@ async def get_shortlist(
             "engagement_quality": payload.get("engagement_quality") or payload.get("showcase_score"),
             "niche_match": payload.get("niche_match") or payload.get("match_score"),
             "reason": row.get("review_reason") or payload.get("reason") or row.get("source"),
-            "candidate_status": row.get("candidate_status"),
+            "candidate_status": candidate_status,
+            "updated_at": updated_at,
+            "selected_at": row.get("selected_at") if isinstance(row.get("selected_at"), str) else None,
+            "is_new_since_last_approval": is_new_since_last_approval,
         })
-    return {"campaign_id": campaign_id, "candidates": candidates}
+    counts = {
+        "pending": sum(1 for c in candidates if c.get("candidate_status") != "selected_for_outreach"),
+        "already_approved": sum(1 for c in candidates if c.get("candidate_status") == "selected_for_outreach"),
+        "rejected_or_archived_hidden": hidden_count,
+    }
+    return {
+        "campaign_id": campaign_id,
+        "snapshot_ts": snapshot_ts,
+        "counts": counts,
+        "candidates": candidates,
+    }
 
 
 def _compose_approval_brief(
@@ -2106,8 +2296,9 @@ def _compose_approval_brief(
         f"- Use {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
         "- Every CLI call MUST pass --env matching `mode` above.",
         "- If bridge auth fails, stop and report the missing HERMES_KOL_OPS_BRIDGE_KEY; do not bypass CAL.",
-        "- In TEST mode, route any draft/test outbound email to test_mode_to above.",
-        "- Create Gmail drafts or deterministic draft records only; never send mail without another explicit operator action.",
+        "- In TEST mode, route any eventual Gmail draft target to test_mode_to above.",
+        "- During this run, do NOT create Gmail drafts. Only persist `approval.reply_draft` with `decision=pending`.",
+        "- Gmail drafts are created only after explicit ApprovalsPage approve of `approval.reply_draft`.",
         "- Record progress/events through the bridge CLI so the console can show what happened.",
     ])
     return "\n".join(lines)
@@ -2159,9 +2350,9 @@ async def approve_shortlist(
     campaign_id: str,
     body: ApproveShortlistBody,
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
-    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    gateway: GatewayClient = Depends(get_gateway),
 ) -> dict:
     """Approve candidates in CAL, then launch the post-approval agent run.
 
@@ -2440,14 +2631,21 @@ def _compose_redraft_brief(
             "for a fresh draft."
         ),
         (
-            "5. Do NOT send email. Do NOT write `offer.outreach_sent=true`. "
-            "The console operator approves the new draft separately."
+            "5. Do NOT create Gmail drafts in this redraft run. Persist only "
+            "`approval.reply_draft` (decision=pending), then wait for console "
+            "approval."
+        ),
+        (
+            "6. Do NOT send email. Do NOT write `offer.outreach_sent=true`. "
+            "Gmail drafts are created only after the operator approves "
+            "`approval.reply_draft`."
         ),
         "",
         "## Runtime contract",
         f"- Use {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
         "- Every CLI call MUST pass --env matching `mode` above.",
-        "- In TEST mode, route any draft target to test_mode_to above.",
+        "- In TEST mode, route any eventual Gmail draft target to test_mode_to above.",
+        "- This endpoint must not create Gmail drafts directly; it only refreshes pending approval draft content.",
     ])
     return "\n".join(lines)
 
@@ -2458,15 +2656,15 @@ async def redraft_outreach(
     identity_id: int,
     body: RedraftOutreachBody,
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
-    gateway: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    gateway: GatewayClient = Depends(get_gateway),
 ) -> dict:
-    """Regenerate the initial-outreach Gmail draft for a single KOL.
+    """Regenerate the initial-outreach pending approval draft for a single KOL.
 
-    Used from KolDetailPage when the operator sees a KOL stuck in
-    "approved but no Gmail draft" or "Gmail draft pending send" and
-    wants to (re-)build the draft. Internally launches a focused agent
+    Used from KolDetailPage when the operator sees a KOL that needs a
+    refreshed pending approval draft and wants to (re-)build the draft
+    content. Internally launches a focused agent
     run that re-invokes kol-cold-outreach / kol-reengagement-outreach
     for one identity, mirroring approve-shortlist but at single-KOL
     scope.
@@ -2708,6 +2906,12 @@ class PatchCampaignConfigBody(BaseModel):
     color_variant_policy: str | None = Field(default=None, max_length=2_000)
     extra_notes: str | None = Field(default=None, max_length=8_000)
     paid_ceiling: float | None = Field(default=None, gt=0)
+    compensation_mode: str | None = Field(
+        default=None,
+        pattern="^(gifted|paid|commission|hybrid)$",
+    )
+    commission_min_pct: float | None = Field(default=None, ge=0, le=100)
+    commission_max_pct: float | None = Field(default=None, ge=0, le=100)
     contract_required: bool | None = None
     env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
 
@@ -2717,6 +2921,24 @@ class PatchCampaignConfigBody(BaseModel):
             self.product_display_name = _validate_product_display_name(
                 self.product_display_name,
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_commission_band(self) -> "PatchCampaignConfigBody":
+        needs_commission = self.compensation_mode in {"commission", "hybrid"}
+        has_min = self.commission_min_pct is not None
+        has_max = self.commission_max_pct is not None
+        if needs_commission and (not has_min or not has_max):
+            raise ValueError(
+                "commission_min_pct and commission_max_pct are required "
+                "when compensation_mode is commission or hybrid"
+            )
+        if has_min != has_max:
+            raise ValueError(
+                "commission_min_pct and commission_max_pct must be provided together"
+            )
+        if has_min and has_max and self.commission_min_pct > self.commission_max_pct:
+            raise ValueError("commission_min_pct must be <= commission_max_pct")
         return self
 
 
@@ -2737,6 +2959,12 @@ async def patch_campaign_config(
     payload = body.model_dump(exclude_none=True)
     env = payload.pop("env", "TEST")
     payload["env"] = env
+    if "compensation_mode" in payload:
+        payload["barter_policy"] = payload.pop("compensation_mode")
+    min_pct = payload.pop("commission_min_pct", None)
+    max_pct = payload.pop("commission_max_pct", None)
+    if min_pct is not None and max_pct is not None:
+        payload["commission_band"] = {"min": min_pct / 100.0, "max": max_pct / 100.0}
     if "audit_standards_md" in payload:
         payload["audit_standards_md"] = payload["audit_standards_md"].strip() or None
         if payload["audit_standards_md"] is None:
@@ -3224,6 +3452,14 @@ async def lanes(
     Returns ``{campaign_id, lanes: LaneSnapshot[], counts:
     {pending_approvals, open_escalations}}``. Bridge errors → 502.
     """
+    cache_key = (campaign_id, env)
+    now = time.monotonic()
+    cached = _LANES_CACHE.get(cache_key)
+    if cached is not None:
+        cached_at, payload = cached
+        if now - cached_at <= _LANES_CACHE_TTL_SECONDS:
+            return payload
+
     try:
         raw = await bridge.get_lanes(campaign_id, env=env)
     except BridgeError as exc:
@@ -3254,7 +3490,7 @@ async def lanes(
             "reply_draft_state": it.get("reply_draft_state"),
         })
     counts_in = raw.get("counts") or {}
-    return {
+    payload = {
         "campaign_id": campaign_id,
         "lanes": items_out,
         "counts": {
@@ -3264,3 +3500,5 @@ async def lanes(
             "open_escalations_latest_at": counts_in.get("open_escalations_latest_at"),
         },
     }
+    _LANES_CACHE[cache_key] = (now, payload)
+    return payload

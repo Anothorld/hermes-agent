@@ -30,7 +30,7 @@ only when the KOL has confirmed a single variant in this turn (Branch A).
 keys only; the classifier promotes to committed on a later inbound when
 the KOL agrees. Writing committed keys from a fragment would incorrectly
 satisfy the goal in the same turn.
-| `compensation_negotiation` | `offer.compensation_mode`, `offer.proposed_amount`, `offer.proposed_basis`, `offer.proposed_currency`, `offer.kol_paid_quote` (not `offer.agreed_terms` — classifier only on KOL accept) |
+| `compensation_negotiation` | `offer.compensation_mode`, `offer.proposed_amount`, `offer.proposed_basis`, `offer.proposed_currency`, `offer.kol_paid_quote`, `offer.barter_attempted`, `offer.rate_requested`, `offer.paid_hold_sent` (not `offer.agreed_terms` — classifier only on KOL accept; `paid_hold_sent` is legacy-compatible with `rate_requested`) |
 | `contract_signing` | `offer.contract_sent`, `offer.contract_signed` |
 
 ## fulfillment lane

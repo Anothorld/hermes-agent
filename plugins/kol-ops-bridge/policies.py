@@ -5,6 +5,7 @@ Three logical scopes (versioned, append-only):
 * ``company_style`` — single global doc; only ``owner`` may write.
 * ``user_style``    — one doc per ``owner_user_id``; user or owner may write.
 * ``escalation_rules`` — single global doc; only ``owner`` may write.
+* ``reply_learning`` / ``reply_strategy`` / ``pricing_calibration`` — env-scoped (TEST | LIVE).
 
 Each PUT writes a new row with ``version = previous + 1`` and flips the
 prior active row to ``is_active=0`` so the latest active row is queried by
@@ -35,8 +36,27 @@ from typing import Any, Final, Literal, Optional
 
 log = logging.getLogger(__name__)
 
-POLICY_SCOPES: Final[tuple[str, ...]] = ("company_style", "user_style", "escalation_rules")
-PolicyScope = Literal["company_style", "user_style", "escalation_rules"]
+POLICY_SCOPES: Final[tuple[str, ...]] = (
+    "company_style",
+    "user_style",
+    "escalation_rules",
+    "reply_learning",
+    "reply_strategy",
+    "pricing_calibration",
+)
+ENV_SCOPED_POLICIES: Final[frozenset[str]] = frozenset({
+    "reply_learning",
+    "reply_strategy",
+    "pricing_calibration",
+})
+PolicyScope = Literal[
+    "company_style",
+    "user_style",
+    "escalation_rules",
+    "reply_learning",
+    "reply_strategy",
+    "pricing_calibration",
+]
 
 
 def _now() -> str:
@@ -57,26 +77,45 @@ def _validate_owner(scope: str, owner_user_id: Optional[int]) -> None:
             raise ValueError(f"{scope} must have owner_user_id=NULL")
 
 
+def _resolve_env(scope: str, env: Optional[str]) -> Optional[str]:
+    if scope in ENV_SCOPED_POLICIES:
+        return env or "LIVE"
+    return None
+
+
 def get_policy(
     conn: sqlite3.Connection,
     *,
     scope: str,
     owner_user_id: Optional[int] = None,
+    env: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
-    """Return the latest active row for (scope, owner_user_id) or None."""
+    """Return the latest active row for (scope, owner_user_id[, env]) or None."""
     _validate_scope(scope)
     _validate_owner(scope, owner_user_id)
+    resolved_env = _resolve_env(scope, env)
     if owner_user_id is None:
-        row = conn.execute(
-            """SELECT * FROM policy_documents
-                WHERE scope=? AND owner_user_id IS NULL AND is_active=1
-                ORDER BY version DESC LIMIT 1""",
-            (scope,),
-        ).fetchone()
+        if resolved_env is None:
+            row = conn.execute(
+                """SELECT * FROM policy_documents
+                    WHERE scope=? AND owner_user_id IS NULL AND is_active=1
+                      AND env IS NULL
+                    ORDER BY version DESC LIMIT 1""",
+                (scope,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT * FROM policy_documents
+                    WHERE scope=? AND owner_user_id IS NULL AND is_active=1
+                      AND COALESCE(env, 'LIVE')=?
+                    ORDER BY version DESC LIMIT 1""",
+                (scope, resolved_env),
+            ).fetchone()
     else:
         row = conn.execute(
             """SELECT * FROM policy_documents
                 WHERE scope=? AND owner_user_id=? AND is_active=1
+                  AND env IS NULL
                 ORDER BY version DESC LIMIT 1""",
             (scope, owner_user_id),
         ).fetchone()
@@ -91,6 +130,7 @@ def put_policy(
     updated_by: str,
     owner_user_id: Optional[int] = None,
     title: Optional[str] = None,
+    env: Optional[str] = None,
 ) -> dict[str, Any]:
     """Append a new version and deactivate previous active rows.
 
@@ -98,36 +138,55 @@ def put_policy(
     """
     _validate_scope(scope)
     _validate_owner(scope, owner_user_id)
+    resolved_env = _resolve_env(scope, env)
     now = _now()
     if owner_user_id is None:
-        prev = conn.execute(
-            """SELECT MAX(version) AS v FROM policy_documents
-                WHERE scope=? AND owner_user_id IS NULL""",
-            (scope,),
-        ).fetchone()
-        conn.execute(
-            """UPDATE policy_documents SET is_active=0
-                WHERE scope=? AND owner_user_id IS NULL AND is_active=1""",
-            (scope,),
-        )
+        if resolved_env is None:
+            prev = conn.execute(
+                """SELECT MAX(version) AS v FROM policy_documents
+                    WHERE scope=? AND owner_user_id IS NULL AND env IS NULL""",
+                (scope,),
+            ).fetchone()
+            conn.execute(
+                """UPDATE policy_documents SET is_active=0
+                    WHERE scope=? AND owner_user_id IS NULL AND is_active=1
+                      AND env IS NULL""",
+                (scope,),
+            )
+        else:
+            prev = conn.execute(
+                """SELECT MAX(version) AS v FROM policy_documents
+                    WHERE scope=? AND owner_user_id IS NULL
+                      AND COALESCE(env, 'LIVE')=?""",
+                (scope, resolved_env),
+            ).fetchone()
+            conn.execute(
+                """UPDATE policy_documents SET is_active=0
+                    WHERE scope=? AND owner_user_id IS NULL AND is_active=1
+                      AND COALESCE(env, 'LIVE')=?""",
+                (scope, resolved_env),
+            )
     else:
         prev = conn.execute(
             """SELECT MAX(version) AS v FROM policy_documents
-                WHERE scope=? AND owner_user_id=?""",
+                WHERE scope=? AND owner_user_id=? AND env IS NULL""",
             (scope, owner_user_id),
         ).fetchone()
         conn.execute(
             """UPDATE policy_documents SET is_active=0
-                WHERE scope=? AND owner_user_id=? AND is_active=1""",
+                WHERE scope=? AND owner_user_id=? AND is_active=1 AND env IS NULL""",
             (scope, owner_user_id),
         )
     next_version = ((prev["v"] if prev and prev["v"] is not None else 0) or 0) + 1
     cur = conn.execute(
         """INSERT INTO policy_documents
               (scope, owner_user_id, title, content_md, version,
-               updated_by, updated_at, is_active)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1)""",
-        (scope, owner_user_id, title, content_md, next_version, updated_by, now),
+               updated_by, updated_at, is_active, env)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+        (
+            scope, owner_user_id, title, content_md, next_version,
+            updated_by, now, resolved_env,
+        ),
     )
     new_id = cur.lastrowid
     conn.commit()
@@ -142,23 +201,35 @@ def list_policy_history(
     *,
     scope: str,
     owner_user_id: Optional[int] = None,
+    env: Optional[str] = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     _validate_scope(scope)
     _validate_owner(scope, owner_user_id)
+    resolved_env = _resolve_env(scope, env)
     if owner_user_id is None:
-        rows = conn.execute(
-            """SELECT id, version, updated_by, updated_at, is_active
-                 FROM policy_documents
-                WHERE scope=? AND owner_user_id IS NULL
-                ORDER BY version DESC LIMIT ?""",
-            (scope, limit),
-        ).fetchall()
+        if resolved_env is None:
+            rows = conn.execute(
+                """SELECT id, version, updated_by, updated_at, is_active, env
+                     FROM policy_documents
+                    WHERE scope=? AND owner_user_id IS NULL AND env IS NULL
+                    ORDER BY version DESC LIMIT ?""",
+                (scope, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, version, updated_by, updated_at, is_active, env
+                     FROM policy_documents
+                    WHERE scope=? AND owner_user_id IS NULL
+                      AND COALESCE(env, 'LIVE')=?
+                    ORDER BY version DESC LIMIT ?""",
+                (scope, resolved_env, limit),
+            ).fetchall()
     else:
         rows = conn.execute(
-            """SELECT id, version, updated_by, updated_at, is_active
+            """SELECT id, version, updated_by, updated_at, is_active, env
                  FROM policy_documents
-                WHERE scope=? AND owner_user_id=?
+                WHERE scope=? AND owner_user_id=? AND env IS NULL
                 ORDER BY version DESC LIMIT ?""",
             (scope, owner_user_id, limit),
         ).fetchall()
@@ -308,6 +379,7 @@ def _signal_names(signals: Any) -> set[str]:
 
 
 __all__ = [
+    "ENV_SCOPED_POLICIES",
     "POLICY_SCOPES",
     "PolicyScope",
     "DEFAULT_MAX_ESCALATION_DEPTH",

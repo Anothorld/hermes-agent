@@ -157,7 +157,20 @@ export function streamLines(
         if (!res.ok || !res.body) {
           // Other HTTP errors are surfaced but still retried — the
           // server may be temporarily 502'ing during a redeploy.
-          onError?.(new ApiError(res.status, await res.text().catch(() => '')));
+          const body = await res.text().catch(() => '');
+          const apiErr = new ApiError(res.status, body);
+          onError?.(apiErr);
+          // Client-side validation / authz style errors (4xx, excluding
+          // retryable conflict/rate-limit classes) are not recoverable by
+          // blind reconnect loops; stop retrying to avoid endless 422 spam.
+          if (
+            res.status >= 400
+            && res.status < 500
+            && ![408, 409, 425, 429].includes(res.status)
+          ) {
+            unrecoverable = true;
+            break;
+          }
         } else {
           attempt = 0;
           setState('open', attempt);

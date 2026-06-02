@@ -10,8 +10,10 @@ const ITEMS = [
   ['/kols', 'KOL'],
   ['/kols/archive', '历史合作'],
   ['/approvals', '待审批'],
+  ['/learning', '自主学习'],
   ['/escalations', '升级'],
   ['/policies', '策略'],
+  ['/metrics', '指标'],
   ['/settings', '设置'],
 ] as const;
 

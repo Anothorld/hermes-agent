@@ -48,8 +48,8 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-facts \
   --identity-id <identity_id> --env <TEST|LIVE>
 ```
 
-Inspect the returned `facts` dict for these 6 brief keys plus their
-provenance `_discovered_at` triples:
+Inspect the returned `facts` dict for these 6 brief keys plus full
+provenance triples (`_source`, `_discovered_at`, `_discovered_url`):
 
 - `identity.content_pillars`
 - `identity.signature_hooks`
@@ -174,6 +174,10 @@ Pass it to a cheap LLM (e.g. Haiku) with this output contract:
 If the LLM call succeeds and returns valid JSON, persist the 6 keys via
 **one** `write-facts-multi` call at identity scope (so the brief is
 reusable across campaigns):
+
+Hard write invariant (do not skip): any `identity.*` base key in this set
+must be written together with its provenance triple in the SAME write
+payload, otherwise bridge validation will reject the request.
 
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \

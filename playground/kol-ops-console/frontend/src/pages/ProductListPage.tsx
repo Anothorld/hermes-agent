@@ -38,7 +38,20 @@ type ProductSummary = {
   last_event_type: string | null;
   last_event_ts: string | null;
   kols_contacted: number;
+  kols_replied?: number;
+  kols_sent?: number;
 };
+
+function isHttpUrl(raw: string): boolean {
+  const s = raw.trim();
+  if (!s) return false;
+  try {
+    const u = new URL(s);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 function StatusBadges({ p }: { p: ProductSummary }) {
   if (p.campaigns_total === 0) {
@@ -53,12 +66,19 @@ function StatusBadges({ p }: { p: ProductSummary }) {
       ) : (
         <span className="rounded bg-slate-200 px-2 py-0.5 text-slate-700">no active run</span>
       )}
-      {p.stage && (
-        <span className="rounded bg-sky-100 px-2 py-0.5 text-sky-800">stage: {p.stage}</span>
+      {(p.kols_replied ?? 0) > 0 && (
+        <span className="rounded bg-emerald-100 px-2 py-0.5 text-emerald-800">
+          已回复 {p.kols_replied}
+        </span>
       )}
-      {p.kols_contacted > 0 && (
+      {(p.kols_sent ?? 0) > 0 && (
         <span className="rounded bg-violet-100 px-2 py-0.5 text-violet-800">
-          KOLs · {p.kols_contacted}
+          已发送 {p.kols_sent}
+        </span>
+      )}
+      {(p.kols_replied ?? 0) === 0 && (p.kols_sent ?? 0) === 0 && p.kols_contacted > 0 && (
+        <span className="rounded bg-sky-100 px-2 py-0.5 text-sky-800">
+          已生成草稿 {p.kols_contacted}
         </span>
       )}
       {p.last_event_ts && (
@@ -99,6 +119,7 @@ export function ProductListPage() {
   const [draft, setDraft] = useState<DraftForm>(EMPTY_DRAFT);
   const [variants, setVariants] = useState<ProductVariant[]>([]);
   const [variantBusy, setVariantBusy] = useState(false);
+  const [lastParsedUrl, setLastParsedUrl] = useState<string>('');
   const [err, setErr] = useState<unknown>(null);
 
   const refresh = () =>
@@ -113,16 +134,22 @@ export function ProductListPage() {
 
   usePollingFallback(refresh, 30_000);
 
-  const onDetectVariants = async () => {
+  const onDetectVariants = async (opts?: { force?: boolean }) => {
     const u = draft.url.trim();
     if (!u) {
       toast.error('请先填写商品链接');
       return;
     }
+    if (!isHttpUrl(u)) {
+      toast.error('商品链接格式不合法', '请填写 http(s) 开头的完整 URL');
+      return;
+    }
+    if (!opts?.force && u === lastParsedUrl) return;
     setVariantBusy(true);
     setErr(null);
     try {
       const r = await api.post<{ variants: ProductVariant[] }>('/products/parse-variants', { url: u });
+      setLastParsedUrl(u);
       if (!r.variants || r.variants.length === 0) {
         toast.info('未识别到可用规格', '请手动添加 variant。');
       } else {
@@ -159,6 +186,11 @@ export function ProductListPage() {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setErr(null);
+    const productUrl = draft.url.trim();
+    if (!isHttpUrl(productUrl)) {
+      toast.error('Product URL 必填且必须是有效链接');
+      return;
+    }
     const cleanVariants = variants
       .map((v) => ({
         id: v.id.trim(),
@@ -192,7 +224,7 @@ export function ProductListPage() {
       await api.post('/products', {
         sku: draft.sku.trim(),
         name: draft.name.trim(),
-        url: draft.url.trim() || null,
+        url: productUrl,
         tags: draft.tags.split(',').map((t) => t.trim()).filter(Boolean),
         notes: draft.notes || null,
         pitch_md: draft.pitch_md.trim() || null,
@@ -245,10 +277,19 @@ export function ProductListPage() {
               <span className="text-slate-400">(支持 ?variant=... 解析)</span>
             </span>
             <input
+              type="url"
               placeholder="https://www.povison.com/...?variant=32529"
               value={draft.url}
-              onChange={(e) => setDraft({ ...draft, url: e.target.value })}
+              onChange={(e) => {
+                const next = e.target.value;
+                setDraft({ ...draft, url: next });
+                if (next.trim() !== lastParsedUrl) setLastParsedUrl('');
+              }}
+              onBlur={() => {
+                void onDetectVariants();
+              }}
               className="rounded border px-2 py-1"
+              required
             />
           </label>
           <label className="flex flex-col text-xs">
@@ -334,7 +375,9 @@ export function ProductListPage() {
             </span>
             <button
               type="button"
-              onClick={onDetectVariants}
+              onClick={() => {
+                void onDetectVariants({ force: true });
+              }}
               disabled={variantBusy}
               className="ml-auto rounded border border-sky-300 px-2 py-0.5 text-sky-700 hover:bg-sky-50 disabled:opacity-50"
             >

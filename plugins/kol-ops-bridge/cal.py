@@ -127,6 +127,10 @@ def _bootstrap(path: Path) -> None:
             conn, "campaign_config", "variant_candidates_json",
             "TEXT NOT NULL DEFAULT '[]'",
         )
+        _ensure_column(conn, "campaign_config", "paid_target_budget", "REAL")
+        _ensure_column(conn, "campaign_config", "paid_ratio_override", "REAL")
+        _ensure_column(conn, "kol_relationship", "negotiation_style", "TEXT")
+        _ensure_column(conn, "policy_documents", "env", "TEXT")
         for ddl in VIEWS.values():
             conn.execute(ddl)
         for idx in INDEXES:
@@ -279,6 +283,7 @@ def upsert_relationship(
     increment_collabs: bool = False,
     last_archived_at: Optional[str] = None,
     reputation_score: Optional[float] = None,
+    negotiation_style: Optional[str] = None,
 ) -> Optional[int]:
     def _do() -> int:
         with _connect() as conn:
@@ -299,13 +304,14 @@ def upsert_relationship(
                          preferred_mode       = COALESCE(?, preferred_mode),
                          avg_delivery_quality = COALESCE(?, avg_delivery_quality),
                          avg_revision_rounds  = COALESCE(?, avg_revision_rounds),
+                         negotiation_style    = COALESCE(?, negotiation_style),
                          last_archived_at     = COALESCE(?, last_archived_at),
                          updated_at           = ?
                        WHERE identity_id = ?""",
                     (1 if increment_collabs else 0, last_campaign_id, last_outcome,
                      reputation_score, skus_json, preferred_mode,
                      avg_delivery_quality, avg_revision_rounds,
-                     last_archived_at, now, identity_id),
+                     negotiation_style, last_archived_at, now, identity_id),
                 )
             else:
                 conn.execute(
@@ -313,12 +319,12 @@ def upsert_relationship(
                        (identity_id, total_collabs, last_campaign_id, last_outcome,
                         reputation_score, preferred_skus_json, preferred_mode,
                         avg_delivery_quality, avg_revision_rounds,
-                        last_archived_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        negotiation_style, last_archived_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (identity_id, 1 if increment_collabs else 0, last_campaign_id,
                      last_outcome, reputation_score, skus_json or "[]",
                      preferred_mode or "unknown", avg_delivery_quality,
-                     avg_revision_rounds, last_archived_at, now),
+                     avg_revision_rounds, negotiation_style, last_archived_at, now),
                 )
             return identity_id
 
@@ -473,14 +479,50 @@ def get_reusable_facts(identity_id: int) -> dict[str, Any]:
     """Identity-level facts a re-engagement skill can plausibly reuse."""
     ident = get_identity(identity_id) or {}
     rel = get_relationship(identity_id) or {}
+    negotiation_style = rel.get("negotiation_style") or "unknown"
+    preferred_mode = rel.get("preferred_mode", "unknown")
+    last_outcome = rel.get("last_outcome")
+    total_collabs = rel.get("total_collabs", 0)
+    hint = _build_personalization_hint(
+        last_outcome=last_outcome,
+        preferred_mode=preferred_mode,
+        negotiation_style=negotiation_style,
+        total_collabs=total_collabs,
+    )
     return {
         "default_shipping_address": ident.get("default_shipping_address"),
         "default_payment_method": ident.get("default_payment_method"),
         "preferred_skus": rel.get("preferred_skus", []),
-        "preferred_mode": rel.get("preferred_mode", "unknown"),
-        "last_outcome": rel.get("last_outcome"),
-        "total_collabs": rel.get("total_collabs", 0),
+        "preferred_mode": preferred_mode,
+        "negotiation_style": negotiation_style,
+        "personalization_hint": hint,
+        "last_outcome": last_outcome,
+        "total_collabs": total_collabs,
     }
+
+
+def _build_personalization_hint(
+    *,
+    last_outcome: Optional[str],
+    preferred_mode: str,
+    negotiation_style: str,
+    total_collabs: int,
+) -> str:
+    """Derive 1–2 sentence guidance for repeat-KOL outreach."""
+    if total_collabs <= 0 and not last_outcome:
+        return ""
+    parts: list[str] = []
+    if last_outcome == "success":
+        parts.append("Prior collaboration completed successfully — lead with warmth, not cold pitch.")
+    elif last_outcome:
+        parts.append(f"Prior outcome was {last_outcome} — acknowledge history briefly without over-promising.")
+    if preferred_mode and preferred_mode not in {"unknown", ""}:
+        parts.append(f"They previously preferred {preferred_mode} compensation.")
+    if negotiation_style == "hard_anchor":
+        parts.append("Expect firm rate anchors; avoid low opening counters.")
+    elif negotiation_style == "soft_anchor":
+        parts.append("They tend to negotiate flexibly once scope is clear.")
+    return " ".join(parts[:2])
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +544,9 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
     scalar_allowed = {
         "label", "product_display_name", "product_url",
         "product_unit_price", "barter_policy",
-        "paid_ceiling", "deliverable_count_per_platform", "extra_notes",
+        "paid_ceiling", "paid_target_budget", "paid_ratio_override",
+        "deliverable_count_per_platform",
+        "extra_notes",
         "brief_template_id", "color_variant_policy", "audit_standards_md",
         "test_mode_to", "contract_required", "status",
     }
@@ -857,6 +901,10 @@ _FACT_EVENT_TYPE_MAP: Final[dict[str, tuple[str, str, str]]] = {
     "offer.deliverable_count_per_platform":  ("deliverables.count_set",        "deliverables_scope",       "commerce"),
     "offer.usage_rights_discussed":          ("deliverables.usage_rights",     "deliverables_scope",       "commerce"),
     "offer.kol_paid_quote":                  ("compensation.kol_quoted",       "compensation_negotiation", "commerce"),
+    "offer.kol_quoted_amount":               ("compensation.kol_quoted",       "compensation_negotiation", "commerce"),
+    "offer.barter_attempted":                ("compensation.barter_attempted", "compensation_negotiation", "commerce"),
+    "offer.rate_requested":                  ("compensation.rate_requested",   "compensation_negotiation", "commerce"),
+    "offer.proposed_amount":                 ("compensation.proposed_amount",  "compensation_negotiation", "commerce"),
     "offer.compensation_mode":               ("compensation.mode_set",         "compensation_negotiation", "commerce"),
     "offer.agreed_terms":                    ("compensation.agreed",           "compensation_negotiation", "commerce"),
     "offer.contract_sent":                   ("contract.sent",                 "contract_signing",         "commerce"),
@@ -1874,6 +1922,8 @@ def note_rejected_draft(
     fact_path: str,
     note: Optional[str],
     decided_by: str,
+    tags: Optional[list[str]] = None,
+    suggested_fix: Optional[str] = None,
 ) -> bool:
     """Append a rejected-draft entry to an escalation's resume_context.
 
@@ -1895,6 +1945,8 @@ def note_rejected_draft(
             history.append({
                 "fact_path": fact_path,
                 "note": note or "",
+                "tags": list(tags or []),
+                "suggested_fix": suggested_fix or "",
                 "decided_by": decided_by,
                 "decided_at": _now(),
             })
@@ -2089,6 +2141,7 @@ def archive_collab(
     preferred_mode: Optional[str] = None,
     avg_revision_rounds: Optional[float] = None,
     delivery_quality: Optional[float] = None,
+    negotiation_style: Optional[str] = None,
     decided_by: str = "skill:archival-writer",
 ) -> Optional[int]:
     """Push thread-level archival facts into identity-level relationship,
@@ -2104,6 +2157,7 @@ def archive_collab(
         preferred_mode=preferred_mode,
         avg_delivery_quality=delivery_quality,
         avg_revision_rounds=avg_revision_rounds,
+        negotiation_style=negotiation_style,
         increment_collabs=True,
         last_archived_at=now,
     )

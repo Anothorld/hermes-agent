@@ -15,6 +15,41 @@ import { dialog } from '../components/dialogs/useDialog';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
 
+type ApprovalLikeRow = {
+  identity_id: number;
+  campaign_id: string;
+  fact_path: string;
+  status?: string | null;
+  opened_at: string;
+  linked_escalation_id?: number | null;
+};
+
+type RejectionTag = 'tone' | 'fact' | 'offer' | 'risk' | 'other';
+type SlaFilter = 'all' | 'at_risk' | 'breached';
+
+const REJECTION_TAGS: ReadonlyArray<{ id: RejectionTag; label: string }> = [
+  { id: 'tone', label: '语气' },
+  { id: 'fact', label: '事实错误' },
+  { id: 'offer', label: '报价/条款' },
+  { id: 'risk', label: '风险控制' },
+  { id: 'other', label: '其他' },
+];
+
+function ageMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return null;
+  return Date.now() - ts;
+}
+
+function slaLevel(iso: string | null | undefined): 'normal' | 'at_risk' | 'breached' {
+  const ms = ageMs(iso);
+  if (ms == null) return 'normal';
+  if (ms >= 2 * 60 * 60 * 1000) return 'breached';
+  if (ms >= 30 * 60 * 1000) return 'at_risk';
+  return 'normal';
+}
+
 // Escalation operator console.
 // - List view (no :id) shows open escalations with parent-id chain.
 // - Detail view (with :id) lets the operator answer + provide facts +
@@ -28,6 +63,7 @@ export function EscalationConsolePage() {
 function EscalationList() {
   const env = useEnvStore((s) => s.env);
   const [rows, setRows] = useState<EscalationRow[]>([]);
+  const [sla, setSla] = useState<SlaFilter>('all');
   const [state, setState] = useState<
     'awaiting_answer' | 'answered' | 'resolved' | 're_escalated' | 'aborted' | 'all'
   >('awaiting_answer');
@@ -114,6 +150,15 @@ function EscalationList() {
     all: '全部',
   };
 
+  const visibleRows = useMemo(() => {
+    return rows.filter((r) => {
+      if (sla === 'all') return true;
+      const level = slaLevel(r.created_at);
+      if (sla === 'at_risk') return level === 'at_risk' || level === 'breached';
+      return level === 'breached';
+    });
+  }, [rows, sla]);
+
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
@@ -126,6 +171,16 @@ function EscalationList() {
           {(Object.keys(STATE_LABELS) as Array<typeof state>).map((s) => (
             <option key={s} value={s}>{STATE_LABELS[s]}</option>
           ))}
+        </select>
+        <select
+          value={sla}
+          onChange={(e) => setSla(e.target.value as SlaFilter)}
+          className="rounded border border-slate-300 px-2 py-1 text-sm"
+          title="按超时等级筛选"
+        >
+          <option value="all">SLA 全部</option>
+          <option value="at_risk">SLA 30 分钟+</option>
+          <option value="breached">SLA 2 小时+</option>
         </select>
       </div>
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
@@ -143,7 +198,7 @@ function EscalationList() {
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => {
+          {visibleRows.map((r) => {
             const missing = extractMissingFields(r);
             return (
               <tr key={r.id} className="border-t border-slate-100 align-top hover:bg-slate-50">
@@ -183,6 +238,12 @@ function EscalationList() {
                 </td>
                 <td className="p-2">{r.parent_id ?? '—'}</td>
                 <td className="p-2 text-xs text-slate-500">
+                  {slaLevel(r.created_at) === 'at_risk' && (
+                    <span className="mr-1 rounded bg-amber-100 px-1 text-amber-800">30m+</span>
+                  )}
+                  {slaLevel(r.created_at) === 'breached' && (
+                    <span className="mr-1 rounded bg-rose-100 px-1 text-rose-800">2h+</span>
+                  )}
                   <TimeAgo iso={r.created_at} />
                 </td>
                 <td className="p-2">
@@ -203,7 +264,7 @@ function EscalationList() {
               </tr>
             );
           })}
-          {rows.length === 0 && (
+          {visibleRows.length === 0 && (
             <tr>
               <td colSpan={8} className="p-6 text-center text-sm text-slate-500">
                 没有 {STATE_LABELS[state]} 的升级。
@@ -313,6 +374,9 @@ function EscalationDetail({ id }: { id: number }) {
   const [err, setErr] = useState<unknown>(null);
   const [done, setDone] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [reasonTags, setReasonTags] = useState<RejectionTag[]>([]);
+  const [relatedApprovals, setRelatedApprovals] = useState<ApprovalLikeRow[]>([]);
+  const [lastActionAt, setLastActionAt] = useState<string | null>(null);
 
   const [inbound, setInbound] = useState<InboundEmail | null>(null);
   const [inboundLoaded, setInboundLoaded] = useState(false);
@@ -351,6 +415,26 @@ function EscalationDetail({ id }: { id: number }) {
       alive = false;
     };
   }, [id, env]);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .get<ApprovalLikeRow[]>(`/approvals?status=all&env=${env}`)
+      .then((items) => {
+        if (!alive) return;
+        const filtered = items
+          .filter((a) => a.linked_escalation_id === id)
+          .sort((a, b) => Date.parse(b.opened_at) - Date.parse(a.opened_at));
+        setRelatedApprovals(filtered);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setRelatedApprovals([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [id, env, row?.state]);
 
   const requiredFacts = useMemo<string[]>(() => {
     const ctx = (row?.resume_context ?? null) as Record<string, unknown> | null;
@@ -426,6 +510,16 @@ function EscalationDetail({ id }: { id: number }) {
         liveWarning: env === 'LIVE',
       });
       if (!ok) return;
+    } else {
+      const ok = await dialog.confirm({
+        title: '提交并恢复此目标？',
+        description: '影响：1) 本升级会被标记已处理；2) AI 将按你的答复和 facts 继续推进；3) 如需草稿审批，会在待审批页出现。',
+        confirmLabel: '提交并恢复',
+        cancelLabel: '取消',
+        variant: 'info',
+        liveWarning: env === 'LIVE',
+      });
+      if (!ok) return;
     }
     setBusy(true);
     setErr(null);
@@ -434,12 +528,14 @@ function EscalationDetail({ id }: { id: number }) {
         decision,
         operator_answer: answer,
         operator_facts: collectFacts(),
+        reason_tags: reasonTags,
         env,
       };
       if (decision === 'terminate') body.final_state = 'aborted';
       await api.patch(`/escalations/${id}`, body);
       const msg = decision === 'resume' ? '已提交并恢复' : '已终止';
       setDone(msg);
+      setLastActionAt(new Date().toISOString());
       toast.success(msg);
       refresh();
     } catch (ex) {
@@ -467,6 +563,7 @@ function EscalationDetail({ id }: { id: number }) {
         { groupKey: `escalation-preview-${id}` },
       );
       setDone('草稿生成请求已发出，30–60s 后查看待审批页面。');
+      setLastActionAt(new Date().toISOString());
     } catch (ex) {
       const conflict = parseConflictBody(ex);
       if (conflict?.error === 'draft_already_in_flight') {
@@ -517,6 +614,12 @@ function EscalationDetail({ id }: { id: number }) {
         <div>Campaign：{row.campaign_id ?? <span className="italic text-slate-500">无（identity 级 escalation）</span>}</div>
         <div>
           规则：{row.rule_id ?? '—'} · 状态：{row.state} · 创建于 <TimeAgo iso={row.created_at} />
+          {slaLevel(row.created_at) === 'at_risk' && (
+            <span className="ml-2 rounded bg-amber-100 px-1 text-xs text-amber-800">SLA 30m+</span>
+          )}
+          {slaLevel(row.created_at) === 'breached' && (
+            <span className="ml-2 rounded bg-rose-100 px-1 text-xs text-rose-800">SLA 2h+</span>
+          )}
         </div>
         <div className="mt-2 rounded bg-slate-50 p-2">
           <div className="text-xs uppercase tracking-wide text-slate-500">原因代码</div>
@@ -554,6 +657,24 @@ function EscalationDetail({ id }: { id: number }) {
             <Link to={`/escalations/${row.parent_id}`} className="hover:underline">
               #{row.parent_id}
             </Link>
+          </div>
+        )}
+        {relatedApprovals.length > 0 && (
+          <div className="mt-2 rounded border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-900">
+            <div className="font-medium">关联审批摘要</div>
+            <div className="mt-0.5">共 {relatedApprovals.length} 条（最近一条 <TimeAgo iso={relatedApprovals[0].opened_at} />）</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {relatedApprovals.slice(0, 3).map((a) => (
+                <span key={`${a.fact_path}-${a.opened_at}`} className="rounded bg-white px-1.5 py-0.5">
+                  {a.fact_path} · {a.status ?? 'unknown'}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {lastActionAt && (
+          <div className="mt-2 rounded bg-slate-100 px-2 py-1 text-xs text-slate-600">
+            最近动作：<TimeAgo iso={lastActionAt} />
           </div>
         )}
       </div>
@@ -600,6 +721,32 @@ function EscalationDetail({ id }: { id: number }) {
               placeholder="给 AI 看的自然语言答复 — 比如：把上限调到 5000；接受对方方案；要 KOL 提供地址 ..."
             />
           </label>
+          <div className="rounded border border-slate-200 bg-slate-50 p-2">
+            <div className="text-xs font-medium text-slate-700">处理标签（可选，便于后续统计）</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {REJECTION_TAGS.map((t) => {
+                const active = reasonTags.includes(t.id);
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() =>
+                      setReasonTags((prev) => (prev.includes(t.id)
+                        ? prev.filter((x) => x !== t.id)
+                        : [...prev, t.id]))
+                    }
+                    className={`rounded border px-2 py-0.5 text-xs ${
+                      active
+                        ? 'border-sky-400 bg-sky-100 text-sky-800'
+                        : 'border-slate-300 bg-white text-slate-700'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           {requiredFacts.length > 0 && (
             <div className="rounded bg-sky-50 px-2 py-1 text-xs text-sky-900">
               恢复执行需要补充以下字段：{requiredFacts.map((k) => (

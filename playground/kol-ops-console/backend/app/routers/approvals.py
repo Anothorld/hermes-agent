@@ -13,6 +13,7 @@ list re-renders correctly after a decision is written.
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -44,7 +45,10 @@ router = APIRouter(prefix="/approvals", tags=["approvals"])
 # Approvals whose decision is itself the deliverable. After approve, no
 # further agent run is needed (the bridge produced the artefact inline,
 # e.g. a Gmail draft for ``approval.reply_draft``).
-_TERMINAL_APPROVAL_FACT_PATHS: frozenset[str] = frozenset({"approval.reply_draft"})
+_TERMINAL_APPROVAL_FACT_PATHS: frozenset[str] = frozenset({
+    "approval.reply_draft",
+    "approval.style_learning_proposal",
+})
 
 _APPROVAL_RESUME_INSTRUCTIONS = (
     "You are resuming a KOL outreach campaign after a web-console approval "
@@ -72,11 +76,21 @@ def _env(env: str | None) -> str:
     return (env or get_settings().env).upper()
 
 
+class ApprovalCorrectionBody(BaseModel):
+    """Structured reject learning — forwarded to Bridge ``ApprovalCorrectionBody``."""
+
+    tags: list[str] = Field(default_factory=list, max_length=12)
+    note: Optional[str] = Field(default=None, max_length=2000)
+    suggested_fix: Optional[str] = Field(default=None, max_length=2000)
+
+
 class DecisionBody(CampaignIdNormaliserMixin):
     identity_id: int
     campaign_id: Optional[str] = None
     decided_by: str = Field(min_length=1, max_length=120)
     note: Optional[str] = Field(default=None, max_length=1000)
+    reason_tags: list[str] = Field(default_factory=list, max_length=5)
+    correction: Optional[ApprovalCorrectionBody] = None
     env: Optional[str] = None
 
 
@@ -199,13 +213,53 @@ def _to_row(raw: dict[str, Any], handle_map: dict[int, str | None]) -> dict[str,
         "identity_id": identity_id,
         "campaign_id": raw.get("campaign_id"),
         "fact_path": fact_key,
+        "status": raw.get("status") or (
+            value.get("decision") if isinstance(value, dict) else None
+        ),
         "namespace": namespace,
         "context": context,
         "opened_by": opened_by,
         "opened_at": raw.get("captured_at"),
+        "env": raw.get("env"),
         "linked_escalation_id": linked_escalation_id,
         "handle": handle_map.get(identity_id) if isinstance(identity_id, int) else None,
     }
+
+
+def _parse_iso_ts(value: Any) -> _dt.datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        dt = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt.astimezone(_dt.timezone.utc)
+
+
+def _approval_priority(row: dict[str, Any], env: str) -> tuple[int, int]:
+    """Lower score means higher priority."""
+    score = 100
+    fact_path = str(row.get("fact_path") or "")
+    opened_at = _parse_iso_ts(row.get("opened_at"))
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    if env.upper() == "LIVE":
+        score -= 30
+    if fact_path == "approval.reply_draft":
+        score -= 25
+    if row.get("linked_escalation_id") is not None:
+        score -= 15
+    if opened_at is not None:
+        age_sec = (now - opened_at).total_seconds()
+        if age_sec >= 2 * 3600:
+            score -= 20
+        elif age_sec >= 30 * 60:
+            score -= 10
+    opened_ts = int(opened_at.timestamp()) if opened_at is not None else 0
+    return score, -opened_ts
 
 
 async def _fetch_handles(
@@ -293,10 +347,11 @@ async def list_approvals(
     status_filter: str = Query("pending", alias="status"),
     env: Optional[str] = Query(None),
 ) -> list[dict[str, Any]]:
+    resolved_env = _env(env)
     if status_filter not in ("pending", "approved", "rejected", "all"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"unknown status: {status_filter}")
     try:
-        raw = await bridge.list_approvals(status=status_filter, env=_env(env))
+        raw = await bridge.list_approvals(status=status_filter, env=resolved_env)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     unique_ids = sorted({
@@ -304,7 +359,9 @@ async def list_approvals(
         if isinstance(r, dict) and isinstance(r.get("identity_id"), int)
     })
     handle_map = await _fetch_handles(bridge, unique_ids)
-    return [_to_row(r, handle_map) for r in raw if isinstance(r, dict)]
+    rows = [_to_row(r, handle_map) for r in raw if isinstance(r, dict)]
+    rows.sort(key=lambda r: _approval_priority(r, resolved_env))
+    return rows
 
 
 def _compose_approval_resume_brief(
@@ -447,6 +504,7 @@ async def approve(
             "identity_id": body.identity_id,
             "campaign_id": body.campaign_id,
             "run_id": run_id,
+            "reason_tags": body.reason_tags,
         },
     )
     return {**(out if isinstance(out, dict) else {}), "run_id": run_id}
@@ -472,15 +530,19 @@ async def reject(
     derived_escalation_id = (
         out.get("derived_escalation_id") if isinstance(out, dict) else None
     )
+    audit_payload: dict[str, Any] = {
+        "identity_id": body.identity_id,
+        "campaign_id": body.campaign_id,
+        "note": body.note,
+        "reason_tags": body.reason_tags,
+        "derived_escalation_id": derived_escalation_id,
+    }
+    if body.correction is not None:
+        audit_payload["correction"] = body.correction.model_dump(exclude_none=True)
     write_audit(
         conn, actor_user_id=user["id"], action="approval.reject",
         target=fact_path,
-        payload={
-            "identity_id": body.identity_id,
-            "campaign_id": body.campaign_id,
-            "note": body.note,
-            "derived_escalation_id": derived_escalation_id,
-        },
+        payload=audit_payload,
     )
     return out
 

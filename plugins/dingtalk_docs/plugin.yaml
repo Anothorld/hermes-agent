@@ -1,0 +1,12 @@
+name: dingtalk_docs
+version: 0.1.0
+description: "DingTalk Docs & Wiki plugin. Read document content, search docs, list wiki spaces/nodes. Auth via DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET env vars."
+author: Hermes Agent
+kind: backend
+provides_tools:
+  - dingtalk_doc_get_content
+  - dingtalk_doc_search
+  - dingtalk_wiki_list_workspaces
+  - dingtalk_wiki_list_nodes
+  - dingtalk_wiki_get_node
+  - dingtalk_doc_list_recents

@@ -54,6 +54,19 @@ def test_assert_disjoint_rejects_agreed_terms_from_fragment(bridge_pkg):
     assert any("not owned" in c for c in exc.value.conflicts)
 
 
+def test_assert_disjoint_merges_compensation_state_facts(bridge_pkg):
+    dr = _dr(bridge_pkg)
+    merged = dr.assert_disjoint({
+        "compensation_negotiation": {
+            "offer.barter_attempted": True,
+            "offer.rate_requested": True,
+            "offer.compensation_mode": "gifted",
+        },
+    })
+    assert merged["offer.barter_attempted"] is True
+    assert merged["offer.rate_requested"] is True
+
+
 def test_assert_disjoint_rejects_duplicate_key(bridge_pkg):
     dr = _dr(bridge_pkg)
     with pytest.raises(dr.FactOwnershipError) as exc:

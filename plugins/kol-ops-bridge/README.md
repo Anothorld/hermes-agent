@@ -74,13 +74,15 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-escalation \
 
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py upsert-campaign \
   --env TEST --campaign-id "TS8319 Test" \
-  --json '{"paid_ceiling": 1500}'
+  --json '{"paid_target_budget": 500, "paid_ceiling": 1500}'
 ```
 
 Partial-field `upsert-campaign --json` merges into the existing
 `campaign_config` row (only supplied columns are updated). Use canonical
-column names (`paid_ceiling`, `sku_whitelist`, …); unknown keys are
-ignored.
+column names (`paid_target_budget`, `paid_ceiling`, `sku_whitelist`, …);
+unknown keys are ignored. For KOL compensation, `paid_target_budget` and
+`paid_ceiling` both refer to the extra cash supplement on top of the gifted
+product, not the product value itself.
 
 The wrapper requires explicit `env` for mutating calls and never imports or
 opens CAL SQLite directly. Use dedicated projection commands such as
@@ -132,6 +134,11 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Reply poller idempotency probe | `cal.reply_dispatch_status` | *(GET only)* | `GET /identities/{id}/reply-dispatch-status` |
 | Gmail unmark for re-dispatch | `gmail_client.py` | `unmark-reply-handled` | `POST /gmail/unmark-reply-handled` |
 | Reply-draft envelope enrichment + atomic persist | `reply_draft.py` | `persist-reply-draft` | `POST /reply-drafts/persist` |
+| Learning exports (read-only) | `learning_store.py` | `export-*-events`, `export-fact-corrections`, … | `GET /learning/*` |
+| Learning apply (distill) | `learning_distill.py` | `apply-*-policy`, `apply-pricing-campaign` | `POST /learning/apply-*` |
+| Learning cron (autonomous) | `learning_jobs.py` | `run-learning-jobs`, `list-learning-job-runs` | `POST /learning/run-scheduled-jobs`, `GET /learning/job-runs` |
+| Reject tag vocabulary | `reject_tags.py` | *(via reject body)* | `POST /approvals/.../reject` + `correction` |
+| Sent-body edit diff | `reply_diff.py` | *(via reconcile-sent)* | `POST /gmail/reconcile-sent` |
 
 `write-facts-multi` with `source=email:<message_id>` auto-sanitizes namespaces
 when `signals` are supplied (see `classifier_facts.sanitize_classifier_namespaces`).
@@ -199,6 +206,29 @@ recommends 48h for most flow goals — set it during campaign creation
 or via `PUT /campaigns/{id}`. Notification env vars: see
 `notifier.py` (`HERMES_DINGTALK_WEBHOOK`, `HERMES_DINGTALK_SECRET`,
 `HERMES_KOL_CONSOLE_BASE_URL`).
+
+## Learning cron (autonomous)
+
+Tier-1 learning (reject/edit distill with **style proposals → Console approval**,
+pricing calibration, Gmail sent capture)
+runs **on LIVE only** without manual playground scripts. Schedule via system
+cron — see `playground/learning/CRON.md`.
+
+```cron
+# Every 15m — capture operator Gmail edits into draft_edit_learning
+*/15 * * * * cd /path/to/hermes-agent && \
+  ./.venv/bin/python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+    run-learning-jobs --suite capture --triggered-by cron:learning:capture
+
+# Daily 03:20 — distill policies + LIVE pricing promote + fact-correction audit
+20 3 * * * cd /path/to/hermes-agent && \
+  ./.venv/bin/python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+    run-learning-jobs --suite nightly --triggered-by cron:learning:nightly
+```
+
+`run-learning-jobs` rejects `--env TEST`. Audit:
+`kol_bridge_tool list-learning-job-runs --env LIVE` or `GET /learning/job-runs`.
+Disable all jobs: `KOL_LEARNING_JOBS_DISABLED=1`.
 
 ## TEST/LIVE isolation
 

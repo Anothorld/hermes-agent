@@ -30,6 +30,20 @@ email copy.
 3. Optional `kol_requested_sku`, `kol_requested_color` from classifier
 4. `thread_history` — `{from, date, body}` oldest first
 5. `flow_hint` from dispatcher
+6. `learning_hints` — passed through by the dispatcher (reject few-shot +
+   `reply_strategy` + `company_style`).
+
+## Learning hints (advisory)
+
+Read `learning_hints` per
+`../kol-reply-dispatcher/references/shared/learning-hints.md`. Apply
+`reply_strategy` / `reply_learning` / `company_style` for `product_selection`
+as advisory wording only. **Priority on conflict:** fact ownership > pricing
+engine output > escalation gates > this skill's HARD rules (SKU whitelist, no
+price talk, no internal ids) > learning hints. When
+`references/learned/product_selection.md` exists, treat it as an
+auto-promoted, advisory playbook under the same priority. Before drafting, if
+`references/learned/product_selection.md` exists, read it via `skill_view`.
 
 ## Email Style Preamble (mandatory)
 >>> include: kol-email-style-loader

@@ -42,6 +42,9 @@ persistence — this skill outputs **body content only**.
    ```
 5. Optional `operator_style_preamble` from `kol-email-style-loader`
 
+- Learning hints (reject few-shot from dispatch context):
+  `../kol-reply-dispatcher/references/shared/learning-hints.md`
+
 ## Email Style Preamble (mandatory)
 >>> include: kol-email-style-loader
 

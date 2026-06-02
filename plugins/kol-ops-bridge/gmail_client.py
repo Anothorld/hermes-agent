@@ -272,6 +272,39 @@ class GmailClient:
             raise
         return {m.thread_id for m in messages if m.thread_id}
 
+    def resolve_sent_body(
+        self,
+        *,
+        thread_id: str,
+        preferred_message_id: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Return ``(body, message_id)`` for the reconciled outbound message."""
+        if thread_id:
+            thread = self.get_thread(thread_id)
+            if thread:
+                start = 0
+                if preferred_message_id:
+                    for idx, item in enumerate(thread):
+                        if str(item.get("id") or "") == preferred_message_id:
+                            start = idx
+                            break
+                for item in reversed(thread[start:]):
+                    body = str(item.get("body") or "")
+                    mid = str(item.get("id") or "")
+                    if body.strip():
+                        return body, mid
+        if preferred_message_id:
+            try:
+                msg = self.get_message(preferred_message_id)
+                if msg.body.strip():
+                    return msg.body, msg.message_id
+            except GmailUnavailable:
+                log.warning(
+                    "gmail get %s failed during sent-body resolve",
+                    preferred_message_id,
+                )
+        return "", ""
+
 
     # -- labels --------------------------------------------------------------
 

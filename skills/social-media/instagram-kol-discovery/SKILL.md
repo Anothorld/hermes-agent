@@ -293,7 +293,11 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py ingest-confirmed-candid
     "identity.hero_post_url": "https://www.instagram.com/reel/<shortcode>/",
     "identity.hero_post_url_source": "ig_reel_pick",
     "identity.hero_post_url_discovered_at": "<iso8601>",
-    "identity.hero_post_url_discovered_url": "https://www.instagram.com/<handle>/"
+    "identity.hero_post_url_discovered_url": "https://www.instagram.com/<handle>/",
+    "identity.hero_post_note": "<one-sentence why this reel is representative>",
+    "identity.hero_post_note_source": "llm_summary",
+    "identity.hero_post_note_discovered_at": "<iso8601>",
+    "identity.hero_post_note_discovered_url": "https://www.instagram.com/reel/<shortcode>/"
   }
 }
 ```
@@ -314,6 +318,11 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py replay-ingest-buffer --
 
 Rules:
 - One handle per ingest call; never accumulate unpersisted candidates in memory.
+- If `identity.hero_post_note` is present, include its provenance triple
+  in the SAME write:
+  `identity.hero_post_note_source`,
+  `identity.hero_post_note_discovered_at`,
+  `identity.hero_post_note_discovered_url`.
 - `identity.hero_post_url` MUST be canonical `/reel/<shortcode>/` or `/p/<shortcode>/` (no `/<handle>/reel/...`, no query/fragment).
 - `identity.hero_post_url_discovered_url` MUST be the creator's own profile URL and match `identity.primary_handle`.
 - Do not confuse top-level `source` with identity fact provenance:

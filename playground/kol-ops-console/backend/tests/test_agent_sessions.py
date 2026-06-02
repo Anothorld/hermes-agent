@@ -3,7 +3,8 @@
 The endpoint feeds the global Agent Session Dock. It scans
 ``product_campaign_runs`` for one env, groups by ``session_id``
 (NULL → ``run:{run_id}`` pseudo-key), and returns groups sorted by most
-recent activity. No gateway / bridge interactions — pure DB read.
+recent activity. Open rows are lightly reconciled against gateway run
+terminal state so stale ``ended_at=NULL`` rows do not remain live forever.
 """
 
 from __future__ import annotations
@@ -64,12 +65,27 @@ def _insert(
     )
 
 
-def _build_app(conn: sqlite3.Connection) -> TestClient:
+class _GatewayStub:
+    def __init__(self, states: dict[str, dict | None] | None = None) -> None:
+        self._states = states or {}
+
+    async def get_run(self, run_id: str) -> dict | None:
+        if run_id in self._states:
+            return self._states[run_id]
+        # Default to running for unspecified IDs so existing grouping tests
+        # keep their "open session" expectation unless a test explicitly
+        # pins a terminal state.
+        return {"status": "running"}
+
+
+def _build_app(
+    conn: sqlite3.Connection, *, gateway: _GatewayStub | None = None
+) -> TestClient:
     app = FastAPI()
     app.include_router(campaigns_router.router)
     app.dependency_overrides[get_conn] = lambda: conn
     app.dependency_overrides[get_bridge] = lambda: object()
-    app.dependency_overrides[get_gateway] = lambda: object()
+    app.dependency_overrides[get_gateway] = lambda: gateway or _GatewayStub()
     app.dependency_overrides[current_user] = lambda: {
         "id": 1, "email": "t@x", "role": "owner", "is_active": 1,
     }
@@ -139,6 +155,34 @@ def test_null_session_id_becomes_run_pseudo_session() -> None:
     assert sessions[0]["session_id"] == "run:r-orphan"
     assert sessions[0]["campaign_id"] == "CID-3"
     assert sessions[0]["kinds"] == ["resume"]
+
+
+def test_agent_sessions_reconciles_terminal_open_runs() -> None:
+    conn = _seed_conn()
+    _insert(
+        conn,
+        campaign_id="CID-5",
+        env="LIVE",
+        run_id="r-failed",
+        kind="outreach",
+        session_id="kol-campaign:LIVE:CID-5",
+        started_at=_ts(3),
+        ended_at=None,
+    )
+    gw = _GatewayStub(states={"r-failed": {"status": "failed"}})
+    client = _build_app(conn, gateway=gw)
+
+    res = client.get("/campaigns/agent-sessions", params={"env": "LIVE"})
+    assert res.status_code == 200, res.text
+    session = res.json()["sessions"][0]
+    assert session["session_id"] == "kol-campaign:LIVE:CID-5"
+    assert session["open"] is False
+    assert session["runs"][0]["ended_at"] is not None
+
+    ended_at = conn.execute(
+        "SELECT ended_at FROM product_campaign_runs WHERE run_id='r-failed'"
+    ).fetchone()["ended_at"]
+    assert ended_at is not None
 
 
 # ---------------------------------------------------------------------------

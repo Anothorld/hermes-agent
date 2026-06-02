@@ -40,6 +40,15 @@ from . import dispatch_router
 from . import policies as _policies
 from . import pricing_engine
 from . import reply_draft
+from . import learning_distill
+from . import learning_jobs
+from . import learning_job_store
+from . import learning_overview
+from . import learning_promote
+from . import learning_store
+from . import reply_diff
+from . import reject_tags
+from .gmail_reconcile import run_reconcile_sent
 from .gmail_client import GmailClient, GmailUnavailable
 from .schema import FACT_NAMESPACES, GOAL_NAMES, SCHEMA_VERSION
 
@@ -234,6 +243,7 @@ class CampaignConfigUpsertBody(BaseModel):
     product_unit_price: Optional[float] = None
     barter_policy: Optional[str] = None
     paid_ceiling: Optional[float] = None
+    paid_target_budget: Optional[float] = None
     commission_band: Optional[dict[str, Any]] = None
     deliverable_platforms: Optional[list[str]] = None
     deliverable_count_per_platform: Optional[int] = None
@@ -302,11 +312,18 @@ class EscalationResolveBody(BaseModel):
     final_state: str = "resolved"
 
 
+class ApprovalCorrectionBody(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+    note: Optional[str] = None
+    suggested_fix: Optional[str] = None
+
+
 class ApprovalDecisionBody(_CampaignIdNormaliserMixin):
     identity_id: int
     campaign_id: Optional[str] = None
     decided_by: str
     note: Optional[str] = None
+    correction: Optional[ApprovalCorrectionBody] = None
     extra_facts: Optional[dict[str, Any]] = None
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
@@ -335,6 +352,10 @@ class ArchiveBody(_CampaignIdNormaliserMixin):
     preferred_skus: Optional[list[str]] = None
     preferred_mode: Optional[str] = None
     avg_revision_rounds: Optional[float] = None
+    negotiation_style: Optional[str] = Field(
+        default=None,
+        pattern="^(hard_anchor|soft_anchor|unknown)$",
+    )
     delivery_quality: Optional[float] = None
     decided_by: str = "skill:archival-writer"
 
@@ -654,6 +675,7 @@ def archive_collab(
         preferred_mode=body.preferred_mode,
         avg_revision_rounds=body.avg_revision_rounds,
         delivery_quality=body.delivery_quality,
+        negotiation_style=body.negotiation_style,
         decided_by=body.decided_by,
     )
     cal.recompute_goals(identity_id=identity_id, campaign_id=body.campaign_id)
@@ -749,6 +771,7 @@ def _parse_campaign_text(text: str) -> dict[str, Any]:
     - IG 5 / TikTok 3 / xhs 2 → deliverable_platforms + count
     - commission 12% / 抽成 12% → commission_band
     - paid ceiling 800 / 上限 800 → paid_ceiling
+    - 现金预算 / 付费预算 / target budget 500 → paid_target_budget
     - 测试收件 / test_mode_to <email>
     - 标签 / label <text>
     - 跑 <campaign_id>
@@ -769,10 +792,15 @@ def _parse_campaign_text(text: str) -> dict[str, Any]:
 
     if (h := m(r"\b(?:单价|unit\s*price)\s*[:：]?\s*\$?(\d+(?:\.\d+)?)")):
         out["product_unit_price"] = float(h.group(1))
+    if (h := m(
+        r"\b(?:paid[\s_-]*target(?:[\s_-]*budget)?|"
+        r"现金预算|付费预算|target[\s_-]*budget|cash[\s_-]*target)\s*[:：]?\s*\$?(\d+(?:\.\d+)?)"
+    )):
+        out["paid_target_budget"] = float(h.group(1))
     if (h := m(r"\b(?:paid[\s_-]*ceiling|预算上限|上限|cap)\s*[:：]?\s*\$?(\d+(?:\.\d+)?)")):
         out["paid_ceiling"] = float(h.group(1))
     elif (h := m(r"\b(?:预算|budget)\s*[:：]?\s*\$?(\d+(?:\.\d+)?)")):
-        out["paid_ceiling"] = float(h.group(1))
+        out["paid_target_budget"] = float(h.group(1))
 
     if (h := m(r"\b(?:commission|抽成|分成)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*%\s*(?:[-–~至到]\s*(\d+(?:\.\d+)?)\s*%)?")):
         lo = float(h.group(1))
@@ -1286,13 +1314,23 @@ def get_dispatch_context(
 ) -> dict[str, Any]:
     """Bundle the read snapshots ``kol-reply-dispatcher`` needs in one call.
 
-    Returns ``{goals, lanes, relationship, reusable_facts, campaign_config}``
-    for a single (identity, campaign) pair. Replaces 5 separate reads
-    with 1. ``campaign_config`` is ``None`` if the campaign row is
-    missing (caller must surface that as a routing error).
+    Returns ``{goals, lanes, relationship, reusable_facts, campaign_config,
+    campaign_facts, identity_facts, candidate}`` for a single
+    (identity, campaign) pair. Replaces 5 separate reads with 1.
+    ``campaign_config`` is ``None`` if the campaign row is missing
+    (caller must surface that as a routing error). ``campaign_facts``
+    is the latest per-campaign fact snapshot (``offer.*``, etc.) from
+    ``latest_facts_for(campaign_id=...)``.
     """
     if not cal.get_identity(identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
+    active_goals = _active_goal_names(
+        identity_id=identity_id, campaign_id=campaign_id, env=env,
+    )
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        learning_hints = learning_store.build_learning_hints(
+            conn, env=env, active_goals=active_goals,
+        )
     return {
         "identity_id": identity_id,
         "campaign_id": campaign_id,
@@ -1310,7 +1348,12 @@ def get_dispatch_context(
             "identity_id": identity_id,
             "facts": cal.get_reusable_facts(identity_id),
         },
-        "campaign_config": cal.get_campaign_config(campaign_id),
+        "learning_hints": learning_hints,
+        "campaign_config": cal.get_campaign_config(campaign_id, env=env),
+        # Latest campaign-scoped facts (offer.* negotiation state, etc.).
+        "campaign_facts": cal.latest_facts_for(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        ),
         # Per-campaign discovery evidence written by the discovery skill into
         # ``campaign_candidates.payload_json`` (reason / niche_match /
         # showcase_evidence / conversion_mechanism). ``None`` when the
@@ -1404,6 +1447,60 @@ def _mark_linked_reply_escalation_handled(
     )
 
 
+def _active_goal_names(*, identity_id: int, campaign_id: str, env: str) -> list[str]:
+    """Return goal names that are not terminal/inactive."""
+    active_statuses = {"active", "blocked", "in_progress", "unsatisfied", "paused"}
+    return [
+        g["goal"]
+        for g in cal.get_goal_state(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        )
+        if g.get("status") in active_statuses
+    ]
+
+
+def _record_draft_reject_learning(
+    *,
+    fact_path: str,
+    body: ApprovalDecisionBody,
+    approval_value: dict[str, Any],
+    linked_escalation_id: Optional[int],
+) -> Optional[int]:
+    """Persist a structured reject-learning event for downstream few-shot."""
+    if fact_path != "approval.reply_draft":
+        return None
+    correction = body.correction
+    tags = reject_tags.normalize_reject_tags(
+        correction.tags if correction else None,
+    )
+    note = (correction.note if correction and correction.note else body.note) or ""
+    suggested_fix = (correction.suggested_fix if correction else None) or ""
+    draft = approval_value.get("draft") if isinstance(approval_value.get("draft"), dict) else {}
+    agent_body = str(draft.get("body") or "")
+    goal = str(approval_value.get("primary_goal") or "")
+    child_skill = str(approval_value.get("child_skill") or "")
+    payload = {
+        "fact_path": fact_path,
+        "tags": tags,
+        "note": note,
+        "suggested_fix": suggested_fix,
+        "agent_body": agent_body,
+        "child_skill": child_skill,
+        "goal": goal,
+        "linked_escalation_id": linked_escalation_id,
+    }
+    return cal.write_event(
+        identity_id=body.identity_id,
+        campaign_id=body.campaign_id,
+        event_type="draft_rejected_learning",
+        goal=goal or None,
+        lane=str(approval_value.get("primary_lane") or "") or None,
+        actor=f"approval:{body.decided_by}",
+        payload=payload,
+        env=body.env,
+    )
+
+
 def _approve_or_reject(
     *, fact_path: str, decision: str, body: ApprovalDecisionBody
 ) -> dict[str, Any]:
@@ -1411,13 +1508,13 @@ def _approve_or_reject(
         raise HTTPException(status_code=400, detail="fact_path must start with 'approval.'")
     if not cal.get_identity(body.identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
-    previous_value = None
-    if body.campaign_id:
-        previous_value = cal.latest_facts_for(
-            identity_id=body.identity_id,
-            campaign_id=body.campaign_id,
-            env=body.env,
-        ).get(fact_path)
+    # Identity-level approvals (e.g. style_learning_proposal) use campaign_id=NULL;
+    # latest_facts_for must run even when campaign_id is omitted.
+    previous_value = cal.latest_facts_for(
+        identity_id=body.identity_id,
+        campaign_id=body.campaign_id,
+        env=body.env,
+    ).get(fact_path)
     if isinstance(previous_value, dict):
         value: dict[str, Any] = dict(previous_value)
     elif previous_value is None:
@@ -1451,6 +1548,24 @@ def _approve_or_reject(
             "gmail_draft": prior_draft,
             "idempotent_replay": True,
         }
+    # Idempotent replay: style/strategy batch already merged into policy.
+    if (
+        decision == "approved"
+        and fact_path == learning_store.STYLE_LEARNING_APPROVAL_FACT
+        and isinstance(previous_value, dict)
+        and previous_value.get("decision") == "approved"
+    ):
+        return {
+            "ok": True,
+            "decision": "approved",
+            "derived_escalation_id": None,
+            "linked_escalation_id": linked_escalation_id,
+            "handled_escalation_id": None,
+            "gmail_draft": None,
+            "learning_event_id": None,
+            "style_policy_apply": previous_value.get("style_policy_apply"),
+            "idempotent_replay": True,
+        }
     gmail_draft: dict[str, Any] | None = None
     if decision == "approved" and fact_path == "approval.reply_draft":
         gmail_draft = _create_gmail_draft_for_reply_approval(
@@ -1460,11 +1575,29 @@ def _approve_or_reject(
             env=body.env,
         )
         value["gmail_draft"] = gmail_draft
+    style_policy_apply: Optional[dict[str, Any]] = None
+    if (
+        decision == "approved"
+        and fact_path == learning_store.STYLE_LEARNING_APPROVAL_FACT
+        and isinstance(previous_value, dict)
+    ):
+        try:
+            with cal._connect() as conn:  # type: ignore[attr-defined]
+                style_policy_apply = learning_distill.apply_approved_style_proposal(
+                    conn,
+                    env=body.env,
+                    proposal=previous_value,
+                    updated_by=f"approval:{body.decided_by}",
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     value.update({"decision": decision, "decided_by": body.decided_by})
     if body.note:
         value["note"] = body.note
     if body.extra_facts:
         value.update(body.extra_facts)
+    if style_policy_apply is not None:
+        value["style_policy_apply"] = style_policy_apply
     try:
         cal.write_facts(
             identity_id=body.identity_id,
@@ -1507,7 +1640,20 @@ def _approve_or_reject(
                 decided_by=body.decided_by,
             )
     derived_escalation_id = None
+    learning_event_id: Optional[int] = None
     if decision == "rejected":
+        learning_event_id = _record_draft_reject_learning(
+            fact_path=fact_path,
+            body=body,
+            approval_value=value if isinstance(value, dict) else {},
+            linked_escalation_id=linked_escalation_id,
+        )
+        correction = body.correction
+        reject_tags_list = reject_tags.normalize_reject_tags(
+            correction.tags if correction else None,
+        )
+        reject_note = (correction.note if correction and correction.note else body.note)
+        suggested_fix = correction.suggested_fix if correction else None
         # An approval.reply_draft is always tied to an *open* escalation —
         # the operator rejecting the draft means "try again on the same
         # escalation". Opening a derived escalation here was creating an
@@ -1519,9 +1665,15 @@ def _approve_or_reject(
             cal.note_rejected_draft(
                 escalation_id=linked_escalation_id,
                 fact_path=fact_path,
-                note=body.note,
+                note=reject_note,
                 decided_by=body.decided_by,
+                tags=reject_tags_list,
+                suggested_fix=suggested_fix,
             )
+        elif fact_path == learning_store.STYLE_LEARNING_APPROVAL_FACT:
+            # Rejecting a batch style/strategy proposal must not open a KOL-facing
+            # escalation — edit events stay unconsumed for the next distill batch.
+            pass
         else:
             derived_escalation_id = cal.open_escalation(
                 identity_id=body.identity_id,
@@ -1534,11 +1686,18 @@ def _approve_or_reject(
                 ),
                 env=body.env,
             )
-    return {"ok": True, "decision": decision,
-            "derived_escalation_id": derived_escalation_id,
-            "linked_escalation_id": linked_escalation_id,
-            "handled_escalation_id": handled_escalation_id,
-            "gmail_draft": gmail_draft}
+    out: dict[str, Any] = {
+        "ok": True,
+        "decision": decision,
+        "derived_escalation_id": derived_escalation_id,
+        "linked_escalation_id": linked_escalation_id,
+        "handled_escalation_id": handled_escalation_id,
+        "learning_event_id": learning_event_id,
+        "gmail_draft": gmail_draft,
+    }
+    if style_policy_apply is not None:
+        out["style_policy_apply"] = style_policy_apply
+    return out
 
 
 def _resolve_thread_id_from_events(
@@ -1752,61 +1911,15 @@ def reconcile_sent(
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
     _require_bridge_key(x_bridge_key)
-    client = GmailClient()
-    if not client.is_available():
-        raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
     try:
-        sent_thread_ids = client.list_sent_thread_ids(
+        result = run_reconcile_sent(
+            env=body.env,
             lookback_days=body.lookback_days,
             max_results=body.max_results,
         )
     except GmailUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    reconciled: list[dict[str, Any]] = []
-    for row in cal.list_approved_reply_drafts(env=body.env):
-        gmail_draft = row.get("gmail_draft") if isinstance(row, dict) else {}
-        thread_id = gmail_draft.get("thread_id") if isinstance(gmail_draft, dict) else None
-        if not thread_id or thread_id not in sent_thread_ids:
-            continue
-        identity_id = int(row["identity_id"])
-        campaign_id = row.get("campaign_id")
-        event_id = cal.write_event(
-            identity_id=identity_id,
-            campaign_id=campaign_id,
-            event_type="outbound_sent",
-            goal="outreach",
-            lane="commerce",
-            actor="gmail:sent-reconcile",
-            payload={"thread_id": thread_id, "gmail_draft": gmail_draft},
-            env=body.env,
-        )
-        cal.write_facts(
-            identity_id=identity_id,
-            campaign_id=campaign_id,
-            namespace="offer",
-            facts={
-                "offer.outreach_sent": True,
-                "offer.outreach_sent_at": now,
-                "offer.gmail_sent_thread_id": thread_id,
-            },
-            source="gmail:sent-reconcile",
-            source_event_id=event_id,
-            env=body.env,
-        )
-        reconciled.append({
-            "identity_id": identity_id,
-            "campaign_id": campaign_id,
-            "thread_id": thread_id,
-            "event_id": event_id,
-        })
-    return {
-        "ok": True,
-        "env": body.env,
-        "sent_threads_seen": len(sent_thread_ids),
-        "reconciled_count": len(reconciled),
-        "reconciled": reconciled,
-    }
+    return {"ok": True, **result}
 
 
 _OPTIONAL_REPLY_LABELS = ("kol-outreach/pending-reply",)
@@ -2175,11 +2288,319 @@ def persist_reply_draft(
 
 
 # ---------------------------------------------------------------------------
+# Learning exports (read-only + policy publish)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/learning/fact-corrections")
+def get_fact_corrections(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    identity_id: Optional[int] = Query(default=None),
+    campaign_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, Any]:
+    """Return manual fact writes that superseded classifier email writes."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = learning_store.list_fact_corrections(
+            conn,
+            env=env,
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            limit=limit,
+        )
+    return {"env": env, "count": len(rows), "corrections": rows}
+
+
+@router.get("/learning/negotiation-history")
+def get_negotiation_history(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    campaign_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> dict[str, Any]:
+    """Aggregate compensation facts for offline pricing calibration."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = learning_store.list_negotiation_history(
+            conn, env=env, campaign_id=campaign_id, limit=limit,
+        )
+    return {"env": env, "count": len(rows), "records": rows}
+
+
+@router.get("/learning/reject-events")
+def get_reject_events(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    identity_id: Optional[int] = Query(default=None),
+    campaign_id: Optional[str] = Query(default=None),
+    goal: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Return structured draft-rejection learning events."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = learning_store.list_learning_events(
+            conn,
+            env=env,
+            event_types=("draft_rejected_learning",),
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            goal=goal,
+            limit=limit,
+        )
+    return {"env": env, "count": len(rows), "events": rows}
+
+
+@router.get("/learning/edit-events")
+def get_edit_events(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    identity_id: Optional[int] = Query(default=None),
+    campaign_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Return Gmail sent-body edit learning events."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = learning_store.list_learning_events(
+            conn,
+            env=env,
+            event_types=("draft_edit_learning",),
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            limit=limit,
+        )
+    return {"env": env, "count": len(rows), "events": rows}
+
+
+class LearningApplyBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    updated_by: str = Field(default="bridge:learning-apply", min_length=1, max_length=120)
+    limit: int = Field(default=200, ge=1, le=500)
+
+
+class EditPolicyApplyBody(LearningApplyBody):
+    scope: str = Field(default="company_style", pattern="^(company_style|user_style)$")
+    owner_user_id: Optional[int] = None
+
+
+class PricingCampaignApplyBody(BaseModel):
+    env: str = Field(default="TEST", pattern="^(TEST|LIVE)$")
+    campaign_id: str = Field(min_length=1, max_length=120)
+    paid_ratio_override: Optional[float] = Field(default=None, ge=0, le=1)
+
+
+@router.post("/learning/apply-reject-policy")
+def apply_reject_learning_policy(
+    body: LearningApplyBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        result = learning_distill.apply_reject_policy(
+            conn,
+            env=body.env,
+            updated_by=body.updated_by,
+            limit=body.limit,
+        )
+    return {"ok": True, "env": body.env, **result}
+
+
+@router.post("/learning/apply-edit-policy")
+def apply_edit_learning_policy(
+    body: EditPolicyApplyBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    try:
+        with cal._connect() as conn:  # type: ignore[attr-defined]
+            result = learning_distill.apply_edit_policy(
+                conn,
+                env=body.env,
+                scope=body.scope,
+                updated_by=body.updated_by,
+                owner_user_id=body.owner_user_id,
+                limit=body.limit,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "env": body.env, "scope": body.scope, **result}
+
+
+@router.post("/learning/apply-pricing-calibration-policy")
+def apply_pricing_calibration_policy_route(
+    body: LearningApplyBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    env = learning_jobs.require_scheduled_learning_env(body.env)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        result = learning_distill.apply_pricing_calibration_policy(
+            conn,
+            env=env,
+            updated_by=body.updated_by,
+            limit=body.limit,
+        )
+    return {"ok": True, "env": env, **result}
+
+
+@router.post("/learning/apply-pricing-campaign")
+def apply_pricing_campaign_override(
+    body: PricingCampaignApplyBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    cfg = cal.get_campaign_config(body.campaign_id, env=body.env)
+    if not cfg:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    ratio = body.paid_ratio_override
+    if ratio is None:
+        with cal._connect() as conn:  # type: ignore[attr-defined]
+            records = learning_store.list_negotiation_history(
+                conn, env=body.env, campaign_id=body.campaign_id,
+            )
+        counters: list[float] = []
+        for rec in records:
+            facts = rec.get("facts") or {}
+            counter = facts.get("offer.latest_counter_amount")
+            req = facts.get("offer.latest_requested_amount")
+            try:
+                if counter is not None and req is not None and float(req) > 0:
+                    counters.append(float(counter) / float(req))
+            except (TypeError, ValueError):
+                continue
+        ratio = round(sum(counters) / len(counters), 3) if counters else 0.55
+    cal.upsert_campaign_config(
+        campaign_id=body.campaign_id,
+        env=body.env,
+        paid_ratio_override=ratio,
+    )
+    return {
+        "ok": True,
+        "campaign_id": body.campaign_id,
+        "env": body.env,
+        "paid_ratio_override": ratio,
+    }
+
+
+class RunScheduledLearningJobsBody(BaseModel):
+    env: str = Field(
+        default="LIVE",
+        pattern="^LIVE$",
+        description="Autonomous learning is LIVE-only (production data).",
+    )
+    suite: Optional[str] = Field(
+        default=None,
+        description="capture | distill | pricing | audit | nightly | all",
+    )
+    jobs: Optional[list[str]] = Field(default=None, description="Explicit job names override suite")
+    triggered_by: str = Field(default="cron:learning", min_length=1, max_length=120)
+    limit: int = Field(default=200, ge=1, le=500)
+    lookback_days: int = Field(default=7, ge=1, le=30)
+    max_results: int = Field(default=100, ge=1, le=500)
+    min_pricing_samples: int = Field(default=3, ge=1, le=50)
+    dry_run: bool = False
+
+
+@router.post("/learning/run-scheduled-jobs")
+def run_scheduled_learning_jobs(
+    body: RunScheduledLearningJobsBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Run the autonomous learning job suite on LIVE (cron entrypoint)."""
+    _require_bridge_key(x_bridge_key)
+    try:
+        return learning_jobs.run_scheduled_jobs(
+            env=body.env,
+            triggered_by=body.triggered_by,
+            jobs=body.jobs,
+            suite=body.suite,
+            limit=body.limit,
+            lookback_days=body.lookback_days,
+            max_results=body.max_results,
+            min_pricing_samples=body.min_pricing_samples,
+            dry_run=body.dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class PromoteStrategyBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    goal: str = Field(min_length=1, max_length=120)
+    min_approvals: int = Field(default=learning_promote.DEFAULT_MIN_APPROVALS, ge=1, le=50)
+    min_age_days: int = Field(default=learning_promote.DEFAULT_MIN_AGE_DAYS, ge=0, le=365)
+    dry_run: bool = True
+    triggered_by: str = Field(
+        default="bridge:promote-strategy", min_length=1, max_length=120,
+    )
+
+
+@router.get("/learning/overview")
+def get_learning_overview(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    runs_limit: int = Query(default=25, ge=1, le=100),
+) -> dict[str, Any]:
+    """Dashboard snapshot: edit batch progress, pending proposals, job runs."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        return learning_overview.build_learning_overview(
+            conn, env=env, runs_limit=runs_limit,
+        )
+
+
+@router.post("/learning/promote-strategy")
+def promote_strategy_route(
+    body: PromoteStrategyBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Promote a stabilized reply_strategy goal section into its skill ref.
+
+    Default ``dry_run=true`` returns the proposed markdown + target path. With
+    ``dry_run=false`` it writes ``references/learned/<goal>.md`` (audited) — the
+    caller must run ``sync skills`` afterward to push to kol-orchestrator.
+    """
+    _require_bridge_key(x_bridge_key)
+    try:
+        with cal._connect() as conn:  # type: ignore[attr-defined]
+            return learning_promote.promote_strategy_to_skill(
+                conn,
+                env=body.env,
+                goal=body.goal,
+                min_approvals=body.min_approvals,
+                min_age_days=body.min_age_days,
+                dry_run=body.dry_run,
+                triggered_by=body.triggered_by,
+            )
+    except learning_promote.PromoteError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/learning/job-runs")
+def list_learning_job_runs(
+    env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
+    job_name: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None, pattern="^(ok|skipped|error|running)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Audit trail for scheduled learning jobs (newest first)."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = learning_job_store.list_runs(
+            conn,
+            env=env,
+            job_name=job_name,
+            status=status,
+            limit=limit,
+        )
+    return {"count": len(rows), "runs": rows}
+
+
+# ---------------------------------------------------------------------------
 # Policy documents (Phase E)
 # ---------------------------------------------------------------------------
 
 
-_POLICY_SCOPES = {"company_style", "user_style", "escalation_rules"}
+_POLICY_SCOPES = {
+    "company_style",
+    "user_style",
+    "escalation_rules",
+    "reply_learning",
+    "reply_strategy",
+    "pricing_calibration",
+}
 
 
 def _resolve_owner(scope: str, owner_user_id: Optional[int]) -> Optional[int]:
@@ -2196,12 +2617,15 @@ def _resolve_owner(scope: str, owner_user_id: Optional[int]) -> Optional[int]:
 def get_policy(
     scope: str,
     owner_user_id: Optional[int] = Query(default=None),
+    env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     if scope not in _POLICY_SCOPES:
         raise HTTPException(status_code=404, detail="unknown scope")
     owner = _resolve_owner(scope, owner_user_id)
     with cal._connect() as conn:  # type: ignore[attr-defined]
-        row = _policies.get_policy(conn, scope=scope, owner_user_id=owner)
+        row = _policies.get_policy(
+            conn, scope=scope, owner_user_id=owner, env=env,
+        )
     return {"policy": row}
 
 

@@ -23,6 +23,9 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
   const [audit, setAudit] = useState('');
   const [variantPolicy, setVariantPolicy] = useState('');
   const [paidCeiling, setPaidCeiling] = useState('');
+  const [compensationMode, setCompensationMode] = useState<'' | 'gifted' | 'paid' | 'commission' | 'hybrid'>('');
+  const [commissionMinPct, setCommissionMinPct] = useState('');
+  const [commissionMaxPct, setCommissionMaxPct] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -55,6 +58,29 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
         return;
       }
       payload.paid_ceiling = n;
+    }
+    if (compensationMode) payload.compensation_mode = compensationMode;
+    const needsCommission = compensationMode === 'commission' || compensationMode === 'hybrid';
+    if (needsCommission || commissionMinPct.trim() || commissionMaxPct.trim()) {
+      const min = Number(commissionMinPct);
+      const max = Number(commissionMaxPct);
+      if (!Number.isFinite(min) || !Number.isFinite(max)) {
+        setErr('commission_min_pct / commission_max_pct 必须是数字');
+        setBusy(false);
+        return;
+      }
+      if (min < 0 || max < 0 || min > 100 || max > 100) {
+        setErr('commission_min_pct / commission_max_pct 需在 0~100 之间');
+        setBusy(false);
+        return;
+      }
+      if (min > max) {
+        setErr('commission_min_pct 不能大于 commission_max_pct');
+        setBusy(false);
+        return;
+      }
+      payload.commission_min_pct = min;
+      payload.commission_max_pct = max;
     }
     const trimmedDisplay = displayName.trim();
     if (trimmedDisplay) {
@@ -170,6 +196,48 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
                 onChange={(e) => setVariantPolicy(e.target.value)}
                 placeholder="e.g. operator_selected: walnut | oak"
                 className="rounded border px-2 py-1"
+              />
+            </label>
+          </div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+            <label className="flex flex-col">
+              <span className="text-slate-500">compensation_mode</span>
+              <select
+                value={compensationMode}
+                onChange={(e) =>
+                  setCompensationMode(e.target.value as '' | 'gifted' | 'paid' | 'commission' | 'hybrid')
+                }
+                className="rounded border px-2 py-1"
+              >
+                <option value="">不修改</option>
+                <option value="gifted">gifted</option>
+                <option value="paid">paid</option>
+                <option value="commission">commission</option>
+                <option value="hybrid">hybrid</option>
+              </select>
+            </label>
+            <label className="flex flex-col">
+              <span className="text-slate-500">commission_min_pct</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={commissionMinPct}
+                onChange={(e) => setCommissionMinPct(e.target.value)}
+                className="rounded border px-2 py-1"
+                placeholder="例如 10"
+              />
+            </label>
+            <label className="flex flex-col">
+              <span className="text-slate-500">commission_max_pct</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={commissionMaxPct}
+                onChange={(e) => setCommissionMaxPct(e.target.value)}
+                className="rounded border px-2 py-1"
+                placeholder="例如 20"
               />
             </label>
           </div>

@@ -35,6 +35,14 @@ type Product = {
   default_absolute_floor: number | null;
 };
 
+type Me = {
+  id: number;
+  email: string;
+  role: 'owner' | 'operator' | 'viewer' | string;
+};
+
+const variantFilterStorageKey = (sku: string) => `koc.variantFilter.${sku}`;
+
 type CampaignRow = {
   campaign_id: string;
   env: string;
@@ -63,6 +71,29 @@ type CampaignRow = {
   gate_run_id: string | null;
   gate_state: string | null;
   gate_active: boolean;
+  outreach_counts?: {
+    discovered: number;
+    pending_review: number;
+    approved: number;
+    draft_ready: number;
+    sent: number;
+    replied: number;
+    needs_attention: number;
+  };
+  outreach_kols?: {
+    needs_attention: { identity_id: number; handle?: string | null; status: string }[];
+    replied: { identity_id: number; handle?: string | null; status: string }[];
+    sent_waiting: { identity_id: number; handle?: string | null; status: string }[];
+    draft_ready: { identity_id: number; handle?: string | null; status: string }[];
+    approved_idle: { identity_id: number; handle?: string | null; status: string }[];
+  };
+  outreach_active_ids?: number[];
+  last_activity?: {
+    label: string;
+    event_type: string | null;
+    ts: string | null;
+    identity_id: number | null;
+  } | null;
 };
 
 type KolIdent = {
@@ -252,38 +283,6 @@ function ReplyWatcherPanel({
   );
 }
 
-function KolList({
-  ids,
-  kols,
-  campaignId,
-  env,
-  emptyText = 'no KOL events yet',
-}: {
-  ids: number[];
-  kols: Record<string, KolIdent>;
-  campaignId: string;
-  env: string;
-  emptyText?: string;
-}) {
-  if (ids.length === 0) return <span className="text-xs text-slate-400">{emptyText}</span>;
-  return (
-    <ul className="flex flex-wrap gap-1 text-xs">
-      {ids.map((id) => {
-        const k = kols[String(id)];
-        const label = k?.display_name || k?.primary_handle || `#${id}`;
-        return (
-          <li key={id} className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-slate-700">
-            <Link to={kolDetailPath(id, campaignId, env)} className="hover:text-emerald-700">
-              {label}
-              {k?.platform && <span className="ml-1 text-slate-400">({k.platform})</span>}
-            </Link>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
 type ShortlistCandidate = {
   handle: string;
   platform: string | null;
@@ -295,6 +294,19 @@ type ShortlistCandidate = {
   niche_match: number | null;
   reason: string | null;
   candidate_status: string | null;
+  updated_at?: string | null;
+  selected_at?: string | null;
+  is_new_since_last_approval?: boolean;
+};
+
+type ShortlistPayload = {
+  candidates: ShortlistCandidate[];
+  snapshot_ts?: string | null;
+  counts?: {
+    pending: number;
+    already_approved: number;
+    rejected_or_archived_hidden: number;
+  };
 };
 
 function ScoreBar({ label, value }: { label: string; value: number | null }) {
@@ -331,33 +343,49 @@ function ShortlistReviewPanel({
   const [candidates, setCandidates] = useState<ShortlistCandidate[] | null>(null);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [snapshotTs, setSnapshotTs] = useState<string | null>(null);
+  const [counts, setCounts] = useState<{ pending: number; already_approved: number; rejected_or_archived_hidden: number } | null>(null);
+  const [showApproved, setShowApproved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    api
-      .get<{ candidates: ShortlistCandidate[] }>(
+  const fetchShortlist = async (showSpinner: boolean) => {
+    if (showSpinner) setRefreshing(true);
+    try {
+      const r = await api.get<ShortlistPayload>(
         `/campaigns/${encodeURIComponent(campaignId)}/shortlist?env=${env}`,
-      )
-      .then((r) => {
-        if (!alive) return;
-        setCandidates(r.candidates);
-        // Default-check only candidates that have NOT been approved yet.
-        // Re-approving an already-selected_for_outreach candidate would
-        // re-trigger draft generation for them, which is rarely what the
-        // operator wants — they're here to approve the freshly discovered
-        // rows.
-        const init: Record<string, boolean> = {};
-        for (const c of r.candidates) {
-          init[c.handle] = c.candidate_status !== 'selected_for_outreach';
+      );
+      const nextCandidates = r.candidates ?? [];
+      setCandidates(nextCandidates);
+      setSnapshotTs(r.snapshot_ts ?? null);
+      setCounts(r.counts ?? null);
+      setPicked((prev) => {
+        const next: Record<string, boolean> = {};
+        for (const c of nextCandidates) {
+          if (Object.prototype.hasOwnProperty.call(prev, c.handle)) {
+            next[c.handle] = !!prev[c.handle];
+          } else {
+            next[c.handle] = c.candidate_status !== 'selected_for_outreach';
+          }
         }
-        setPicked(init);
-      })
-      .catch((ex) => alive && setErr(errorSummary(ex)));
-    return () => {
-      alive = false;
-    };
+        return next;
+      });
+      setErr(null);
+    } catch (ex) {
+      setErr(errorSummary(ex));
+    } finally {
+      if (showSpinner) setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchShortlist(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaignId, env]);
+
+  usePollingFallback(() => {
+    void fetchShortlist(false);
+  }, 10_000);
 
   if (err)
     return (
@@ -370,15 +398,31 @@ function ShortlistReviewPanel({
   if (candidates.length === 0)
     return <div className="text-xs text-slate-400">Agent published an empty shortlist.</div>;
 
+  const pendingCandidates = candidates.filter((c) => c.candidate_status !== 'selected_for_outreach');
+  const approvedCandidates = candidates.filter((c) => c.candidate_status === 'selected_for_outreach');
   const selectedHandles = Object.entries(picked).filter(([, v]) => v).map(([k]) => k);
+  const pendingCount = counts?.pending ?? pendingCandidates.length;
+  const approvedCount = counts?.already_approved ?? approvedCandidates.length;
 
   return (
     <div className="rounded border border-emerald-200 bg-emerald-50/40 p-3">
       <div className="mb-2 flex items-center justify-between">
         <div className="text-xs font-medium text-emerald-900">
-          Shortlist review · {candidates.length} candidate{candidates.length === 1 ? '' : 's'} · select to approve
+          Shortlist review · 待审批 {pendingCount} · 已批准 {approvedCount}
+          {counts && counts.rejected_or_archived_hidden > 0 && (
+            <span className="ml-1 font-normal text-slate-500">
+              · 隐藏 {counts.rejected_or_archived_hidden}
+            </span>
+          )}
         </div>
         <div className="flex gap-2 text-xs">
+          <button
+            onClick={() => void fetchShortlist(true)}
+            disabled={refreshing}
+            className="rounded border border-slate-300 bg-white px-2 py-0.5 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+          >
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
           <button
             onClick={() => setPicked(Object.fromEntries(candidates.map((c) => [c.handle, true])))}
             className="rounded border border-slate-300 bg-white px-2 py-0.5 text-slate-600 hover:bg-slate-50"
@@ -393,8 +437,22 @@ function ShortlistReviewPanel({
           </button>
         </div>
       </div>
+      <div className="mb-2 text-[11px] text-slate-500">
+        快照时间：
+        {snapshotTs ? (
+          <TimeAgo iso={snapshotTs} prefix="@" className="ml-1" />
+        ) : (
+          <span className="ml-1 italic">unknown</span>
+        )}
+      </div>
+      {pendingCandidates.length === 0 && (
+        <div className="mb-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+          本轮暂无待审批候选，若刚执行 rediscover 请点击 Refresh。
+        </div>
+      )}
+      <div className="mb-1 text-[11px] font-medium text-slate-500">待审批（本轮）</div>
       <ul className="space-y-2">
-        {candidates.map((c) => (
+        {pendingCandidates.map((c) => (
           <li
             key={c.handle}
             className="rounded border border-emerald-100 bg-white p-2 text-xs"
@@ -443,6 +501,11 @@ function ShortlistReviewPanel({
                       pending
                     </span>
                   )}
+                  {c.is_new_since_last_approval && (
+                    <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-800">
+                      NEW
+                    </span>
+                  )}
                   {c.display_name && c.display_name !== c.handle && (
                     <span className="text-slate-500">{c.display_name}</span>
                   )}
@@ -463,11 +526,45 @@ function ShortlistReviewPanel({
                     Agent did not provide a reason for this candidate.
                   </div>
                 )}
+                {c.updated_at && (
+                  <div className="mt-1 text-[10px] text-slate-400">
+                    updated <TimeAgo iso={c.updated_at} prefix="@" className="ml-1" />
+                  </div>
+                )}
               </div>
             </label>
           </li>
         ))}
       </ul>
+      {approvedCandidates.length > 0 && (
+        <div className="mt-2">
+          <button
+            onClick={() => setShowApproved((v) => !v)}
+            className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+          >
+            {showApproved ? 'Hide approved' : `Show approved (${approvedCandidates.length})`}
+          </button>
+          {showApproved && (
+            <ul className="mt-2 space-y-2">
+              {approvedCandidates.map((c) => (
+                <li key={c.handle} className="rounded border border-slate-200 bg-slate-50 p-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-slate-700">@{c.handle}</span>
+                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-800">
+                      already approved
+                    </span>
+                    {c.selected_at && (
+                      <span className="text-[10px] text-slate-400">
+                        selected <TimeAgo iso={c.selected_at} prefix="@" className="ml-1" />
+                      </span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {approveBlockedReason && (
         <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
           {approveBlockedReason}
@@ -577,6 +674,51 @@ function CampaignCard({
   const approvedHandles = c.kol_identity_ids
     .map((id) => kols[String(id)]?.primary_handle)
     .filter((handle): handle is string => Boolean(handle));
+  const counts = c.outreach_counts ?? {
+    discovered: Math.max(0, c.kol_identity_ids.length - c.contacted_kol_ids.length),
+    pending_review: c.pending_candidate_count,
+    approved: c.candidate_count - c.pending_candidate_count,
+    draft_ready: c.contacted_kol_ids.length,
+    sent: 0,
+    replied: 0,
+    needs_attention: 0,
+  };
+  const outreachKols = c.outreach_kols ?? {
+    needs_attention: [],
+    replied: [],
+    sent_waiting: [],
+    draft_ready: [],
+    approved_idle: [],
+  };
+  const noOutreachProgress = (counts.draft_ready + counts.sent + counts.replied) === 0;
+  const contractReadyIds = Array.from(
+    new Set(
+      (outreachKols.replied ?? [])
+        .map((row) => row.identity_id)
+        .filter((iid): iid is number => Number.isInteger(iid)),
+    ),
+  );
+  const renderKolChips = (
+    rows: { identity_id: number; handle?: string | null; status: string }[],
+    emptyText: string,
+  ) => {
+    if (rows.length === 0) return <div className="text-xs text-slate-400">{emptyText}</div>;
+    return (
+      <ul className="flex flex-wrap gap-1 text-xs">
+        {rows.map((row) => {
+          const k = kols[String(row.identity_id)];
+          const label = k?.display_name || k?.primary_handle || row.handle || `#${row.identity_id}`;
+          return (
+            <li key={`${row.status}:${row.identity_id}`} className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-slate-700">
+              <Link to={kolDetailPath(row.identity_id, c.campaign_id, c.env)} className="hover:text-emerald-700">
+                {String(label).startsWith('@') ? label : `@${label}`}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  };
   return (
     <li className="space-y-2 rounded border bg-white p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -629,7 +771,7 @@ function CampaignCard({
           }
           onSubmit={(n) => onRediscover(c.campaign_id, c.env, n)}
         />
-        {c.shortlist_approved && c.contacted_kol_ids.length === 0 && approvedHandles.length > 0 && (
+        {c.shortlist_approved && noOutreachProgress && approvedHandles.length > 0 && (
           <button
             onClick={async () => {
               setRetryingDrafts(true);
@@ -666,7 +808,26 @@ function CampaignCard({
           }}
         />
       )}
-      <StageBadge stage={c.stage} />
+      <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+        <div>
+          发现 {counts.discovered} 名 · 待审批 {counts.pending_review} · 已批准 {counts.approved}
+          {' '}| 草稿 {counts.draft_ready} · 已发送 {counts.sent} · 已回复 {counts.replied}
+          {counts.needs_attention > 0 && <> · 需处理 {counts.needs_attention}</>}
+        </div>
+        <div className="mt-1 text-slate-500">
+          最近动态：
+          {c.last_activity?.label ? (
+            <>
+              <span className="ml-1 text-slate-700">{c.last_activity.label}</span>
+              {c.last_activity.ts && (
+                <TimeAgo iso={c.last_activity.ts} prefix="@" className="ml-1 text-slate-400" />
+              )}
+            </>
+          ) : (
+            <span className="ml-1 italic">暂无事件，等待下一次 bridge 更新。</span>
+          )}
+        </div>
+      </div>
       {c.event_count === 0 && c.candidate_count === 0 && c.run_state && c.run_state !== 'running' && c.run_state !== 'queued' && c.run_state !== 'waiting_for_approval' && (
         <div className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
           <div className="font-medium">Agent finished without emitting any bridge events.</div>
@@ -679,54 +840,32 @@ function CampaignCard({
           </div>
         </div>
       )}
-      <div className="grid grid-cols-1 gap-2 text-xs text-slate-600 md:grid-cols-3">
+      <div className="space-y-2">
         <div>
-          <div className="font-medium text-slate-500">sub_status</div>
-          <div>{c.sub_status ?? '—'}</div>
-        </div>
-        <div>
-          <div className="font-medium text-slate-500">last event</div>
-          <div>
-            {c.last_event_type ?? '—'}
-            {c.last_event_ts && <TimeAgo iso={c.last_event_ts} prefix="@" className="ml-1 text-slate-400" />}
-          </div>
+          <div className="mb-1 text-xs font-medium text-slate-500">需优先处理 ({counts.needs_attention})</div>
+          {renderKolChips(outreachKols.needs_attention, '当前无待处理 KOL')}
         </div>
         <div>
-          <div className="font-medium text-slate-500">events</div>
-          <div>{c.event_count} · candidates {c.candidate_count}</div>
+          <div className="mb-1 text-xs font-medium text-slate-500">已回复 / 推进中 ({counts.replied})</div>
+          {renderKolChips(outreachKols.replied, '暂无已回复 KOL')}
         </div>
-      </div>
-      <div>
-        <div className="mb-1 text-xs font-medium text-slate-500">
-          KOLs contacted ({c.contacted_kol_ids.length})
-          <span
-            className="ml-2 text-slate-400"
-            title="A KOL is 'contacted' once an initial outreach draft has been written for them"
-          >
-            ⓘ
-          </span>
-          {c.kol_identity_ids.length > c.contacted_kol_ids.length && (
-            <span className="ml-2 font-normal text-slate-400">
-              · {c.kol_identity_ids.length - c.contacted_kol_ids.length} discovered, not yet contacted
-            </span>
-          )}
+        <div>
+          <div className="mb-1 text-xs font-medium text-slate-500">已发送，等待回复 ({counts.sent})</div>
+          {renderKolChips(outreachKols.sent_waiting, '暂无已发送 KOL')}
         </div>
-        <KolList
-          ids={c.contacted_kol_ids}
-          kols={kols}
-          campaignId={c.campaign_id}
-          env={c.env}
-          emptyText="暂无已建联 KOL — 审批 shortlist 后将生成初邀草稿"
-        />
+        <div className="text-xs text-slate-500">
+          候选池：已发现 {counts.discovered} 名，待审批 {counts.pending_review} 名。
+          {counts.pending_review > 0 ? ' 请在 shortlist review 中确认本轮候选。' : ' 当前没有新的候选待审批。'}
+        </div>
       </div>
       <EditCampaignConfigPanel campaignId={c.campaign_id} env={c.env} />
-      {c.contacted_kol_ids.length > 0 && (
+      {contractReadyIds.length > 0 && (
         <div className="space-y-1">
           <div className="text-xs font-medium text-slate-500">
             Contract readiness (pre-flight before合同生成)
           </div>
           <ul className="space-y-2">
-            {c.contacted_kol_ids.map((iid) => {
+            {contractReadyIds.map((iid) => {
               const k = kols[String(iid)];
               const label = k?.primary_handle ? `@${k.primary_handle}` : k?.display_name || `#${iid}`;
               return (
@@ -751,12 +890,14 @@ function LaunchCampaignForm({
   sku,
   env,
   product,
+  canLaunch,
   onLaunched,
   onError,
 }: {
   sku: string;
   env: 'TEST' | 'LIVE';
   product: Product;
+  canLaunch: boolean;
   onLaunched: (runId: string | null, campaignId: string) => void;
   onError: (msg: string) => void;
 }) {
@@ -795,7 +936,13 @@ function LaunchCampaignForm({
   });
   const [deliverableCount, setDeliverableCount] = useState<number>(1);
   const [auditStandardsMd, setAuditStandardsMd] = useState<string>('');
+  const [compensationMode, setCompensationMode] = useState<'gifted' | 'paid' | 'commission' | 'hybrid'>('paid');
+  const [commissionMinPct, setCommissionMinPct] = useState<number | ''>('');
+  const [commissionMaxPct, setCommissionMaxPct] = useState<number | ''>('');
   const [busy, setBusy] = useState(false);
+  const [activeStep, setActiveStep] = useState<'A' | 'B' | 'C'>('A');
+  const [variantFilterKey, setVariantFilterKey] = useState<string>('');
+  const [variantFilterValue, setVariantFilterValue] = useState<string>('');
 
   // Live preview of the discovery target so the operator can tune the funnel.
   const discoveryDefault = Math.max(headcountTarget * 3, headcountTarget + 5);
@@ -822,79 +969,250 @@ function LaunchCampaignForm({
   const pickedVariantIds = product.variants
     .filter((v) => variantPicked[v.id])
     .map((v) => v.id);
+  const variantAttrKeys = Array.from(
+    new Set(
+      product.variants.flatMap((v) => Object.keys(v.attributes || {})),
+    ),
+  ).sort();
+  const variantAttrValues = variantFilterKey
+    ? Array.from(
+        new Set(
+          product.variants
+            .map((v) => (v.attributes || {})[variantFilterKey])
+            .filter((v): v is string => typeof v === 'string' && v.trim().length > 0),
+        ),
+      ).sort()
+    : [];
+  const filteredVariants = product.variants.filter((v) => {
+    if (!variantFilterKey) return true;
+    const val = (v.attributes || {})[variantFilterKey];
+    if (!val) return false;
+    if (!variantFilterValue) return true;
+    return val === variantFilterValue;
+  });
 
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(variantFilterStorageKey(sku));
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { key?: string; value?: string };
+      if (parsed?.key && variantAttrKeys.includes(parsed.key)) {
+        const key = parsed.key;
+        setVariantFilterKey(key);
+        if (
+          parsed.value
+          && product.variants.some((v) => (v.attributes || {})[key] === parsed.value)
+        ) {
+          setVariantFilterValue(parsed.value);
+        }
+      }
+    } catch {
+      // ignore malformed localStorage payloads
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sku]);
+
+  useEffect(() => {
+    if (!variantFilterKey) return;
+    if (!variantAttrKeys.includes(variantFilterKey)) {
+      setVariantFilterKey('');
+      setVariantFilterValue('');
+      return;
+    }
+    if (variantFilterValue && !variantAttrValues.includes(variantFilterValue)) {
+      setVariantFilterValue('');
+    }
+  }, [variantFilterKey, variantFilterValue, variantAttrKeys, variantAttrValues]);
+
+  useEffect(() => {
+    if (!variantFilterKey && !variantFilterValue) {
+      localStorage.removeItem(variantFilterStorageKey(sku));
+      return;
+    }
+    localStorage.setItem(
+      variantFilterStorageKey(sku),
+      JSON.stringify({ key: variantFilterKey, value: variantFilterValue }),
+    );
+  }, [sku, variantFilterKey, variantFilterValue]);
+  const isHttpUrl = (raw: string | null): boolean => {
+    if (!raw) return false;
+    try {
+      const u = new URL(raw);
+      return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  };
+  const productUrlReady = isHttpUrl(product.url);
+  const platforms = Object.entries(deliverablePlatforms)
+    .filter(([, v]) => v)
+    .map(([k]) => k);
+  const trimmedDisplayName = productDisplayName.trim();
+  const preflightBlockers: string[] = [];
+  const preflightWarnings: string[] = [];
+  if (!canLaunch) preflightBlockers.push('viewer 角色只读，不能启动 campaign');
+  if (!productUrlReady) preflightBlockers.push('product_url 必填且必须为有效 http(s) 链接');
+  if (env === 'TEST' && !testModeTo.trim()) preflightBlockers.push('TEST 模式必须填写 test_mode_to');
+  if (!productPitchMd.trim()) preflightBlockers.push('product_pitch_md 必填');
+  if (!trimmedDisplayName) preflightBlockers.push('product_display_name 必填');
+  if (trimmedDisplayName && _skuShape.test(trimmedDisplayName)) {
+    preflightBlockers.push('product_display_name 不能是 SKU/型号代码');
+  }
+  if (
+    trimmedDisplayName
+    && (trimmedDisplayName.toLowerCase() === sku.toLowerCase()
+      || trimmedDisplayName.toLowerCase() === campaignId.toLowerCase())
+  ) {
+    preflightBlockers.push('product_display_name 不能与 SKU 或 campaign_id 相同');
+  }
+  if (product.variants.length > 0 && pickedVariantIds.length === 0) {
+    preflightBlockers.push('白名单至少勾选一个 variant');
+  }
+  if (platforms.length === 0) preflightBlockers.push('deliverable_platforms 至少选择一个');
+  if (!Number.isFinite(deliverableCount) || deliverableCount < 1) {
+    preflightBlockers.push('deliverable_count_per_platform 至少为 1');
+  }
+  const needsCommission = compensationMode === 'commission' || compensationMode === 'hybrid';
+  if (needsCommission) {
+    if (commissionMinPct === '' || commissionMaxPct === '') {
+      preflightBlockers.push('commission 模式下必须填写 commission min/max %');
+    } else if (commissionMinPct > commissionMaxPct) {
+      preflightBlockers.push('commission_min_pct 不能大于 commission_max_pct');
+    }
+  }
+  if (env === 'LIVE') preflightWarnings.push('LIVE 环境会进入真实运营链路');
+  if (!auditStandardsMd.trim()) preflightWarnings.push('audit_standards_md 为空，后续审核约束可能不足');
+
+  const parseApiBody = (raw: string): unknown => {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+  const normalize422Details = (detail: unknown): string | null => {
+    if (!Array.isArray(detail)) return null;
+    const mapped = detail
+      .map((item) => {
+        if (!item || typeof item !== 'object') return '';
+        const it = item as { loc?: unknown; msg?: unknown };
+        const loc = Array.isArray(it.loc) ? it.loc.map(String).join('.') : '';
+        const msg = typeof it.msg === 'string' ? it.msg : '';
+        if (!msg) return '';
+        if (loc.includes('test_mode_to')) return `test_mode_to: ${msg}`;
+        if (loc.includes('product_display_name')) return `product_display_name: ${msg}`;
+        if (loc.includes('product_variant_ids')) return `product_variant_ids: ${msg}`;
+        if (loc.includes('deliverable_platforms')) return `deliverable_platforms: ${msg}`;
+        if (loc.includes('deliverable_count_per_platform')) return `deliverable_count_per_platform: ${msg}`;
+        return loc ? `${loc}: ${msg}` : msg;
+      })
+      .filter(Boolean);
+    return mapped.length > 0 ? mapped.join('；') : null;
+  };
+  const normalizeLaunchError = (ex: unknown): string => {
+    if (ex instanceof ApiError) {
+      const parsed = parseApiBody(ex.body) as { detail?: unknown } | null;
+      const detail = parsed?.detail;
+      if (ex.status === 400 && detail && typeof detail === 'object') {
+        const code = String((detail as { code?: unknown }).code || '');
+        if (code === 'product_url_required') {
+          return '请先在产品页补齐 product_url（有效 http(s) 链接）后再启动 campaign。';
+        }
+        if (code === 'variant_whitelist_required') {
+          return '该产品已有规格候选，必须选择至少一个白名单规格后才能启动。';
+        }
+      }
+      if (ex.status === 409) {
+        return '启动冲突：当前环境下 campaign 或 SKU 已有运行记录。可确认后 force 重试。';
+      }
+      if (ex.status === 422) {
+        const d = normalize422Details(detail);
+        return d ? `字段校验失败：${d}` : `字段校验失败：${errorSummary(ex)}`;
+      }
+      if (ex.status === 502 && detail && typeof detail === 'object') {
+        const code = String((detail as { code?: unknown }).code || '');
+        if (code === 'cal_upsert_failed') {
+          return '启动失败：CAL 写入失败（cal_upsert_failed），请稍后重试或联系值班同学。';
+        }
+      }
+    }
+    return errorSummary(ex);
+  };
+  const buildLaunchBody = (): Record<string, unknown> => {
+    const body: Record<string, unknown> = {
+      product_sku: sku,
+      product_display_name: trimmedDisplayName,
+      env,
+      budget_per_kol: budgetPerKol,
+      absolute_floor: absoluteFloor,
+      budget_total: budgetTotal,
+      headcount_target: headcountTarget,
+      product_pitch_md: productPitchMd,
+      brief_extra: briefExtra || null,
+      compensation_mode: compensationMode,
+      deliverable_platforms: platforms,
+      deliverable_count_per_platform: deliverableCount,
+    };
+    if (testModeTo.trim()) body.test_mode_to = testModeTo.trim();
+    if (discoveryTargetOverride !== '') body.discovery_target_count = discoveryTargetOverride;
+    if (pickedVariantIds.length > 0) body.product_variant_ids = pickedVariantIds;
+    if (needsCommission && commissionMinPct !== '' && commissionMaxPct !== '') {
+      body.commission_min_pct = commissionMinPct;
+      body.commission_max_pct = commissionMaxPct;
+    }
+    if (auditStandardsMd.trim()) body.audit_standards_md = auditStandardsMd.trim();
+    return body;
+  };
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (busy) return;
-    if (env === 'TEST' && !testModeTo.trim()) {
-      onError('TEST 模式必须填写 test_mode_to（接收测试邮件的地址）');
+    if (preflightBlockers.length > 0) {
+      onError(`启动前预检未通过：${preflightBlockers.join('；')}`);
       return;
     }
-    if (!productPitchMd.trim()) {
-      onError('product_pitch_md 必填：请粘贴产品的卖点 / 类别 / 受众 / 送样策略，供 KOL discovery 使用');
-      return;
+    if (env === 'LIVE') {
+      const ok = await dialog.confirm({
+        title: `确认在 LIVE 启动 ${campaignId}？`,
+        description: '将触发真实运营链路，邮件在审批后可真实发送。',
+        confirmLabel: '确认启动',
+        cancelLabel: '取消',
+        variant: 'danger',
+        liveWarning: true,
+      });
+      if (!ok) return;
     }
-    const trimmedDisplayName = productDisplayName.trim();
-    if (!trimmedDisplayName) {
-      onError('product_display_name 必填：写一个 cold-outreach 邮件里能直接用的产品名（例如 "the new media console"），避免 SKU 漏到 KOL 视野');
-      return;
-    }
-    if (_skuShape.test(trimmedDisplayName)) {
-      onError(`product_display_name "${trimmedDisplayName}" 看起来是 SKU/型号代码，请换成 KOL 能看懂的名字`);
-      return;
-    }
-    if (
-      trimmedDisplayName.toLowerCase() === sku.toLowerCase() ||
-      trimmedDisplayName.toLowerCase() === campaignId.toLowerCase()
-    ) {
-      onError('product_display_name 不能与 SKU 或 campaign_id 相同 — 这正是该字段要避免的泄漏路径');
-      return;
-    }
-    if (product.variants.length > 0 && pickedVariantIds.length === 0) {
-      onError('请至少勾选一个 variant — KOL 选品 / 合同模板需要它');
-      return;
-    }
-    const platforms = Object.entries(deliverablePlatforms)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
-    if (platforms.length === 0) {
-      onError('请至少勾选一个 deliverable platform — 合同模板要求');
-      return;
-    }
-    if (!Number.isFinite(deliverableCount) || deliverableCount < 1) {
-      onError('deliverable_count_per_platform 至少 1');
-      return;
-    }
+    const requestStart = async (force: boolean) =>
+      api.post<{ run_id?: string }>(
+        `/campaigns/${encodeURIComponent(campaignId)}/start${force ? '?force=true' : ''}`,
+        buildLaunchBody(),
+      );
     setBusy(true);
     try {
-      const body: Record<string, unknown> = {
-        product_sku: sku,
-        product_display_name: trimmedDisplayName,
-        env,
-        budget_per_kol: budgetPerKol,
-        absolute_floor: absoluteFloor,
-        budget_total: budgetTotal,
-        headcount_target: headcountTarget,
-        product_pitch_md: productPitchMd,
-        brief_extra: briefExtra || null,
-      };
-      if (testModeTo.trim()) body.test_mode_to = testModeTo.trim();
-      if (discoveryTargetOverride !== '') {
-        body.discovery_target_count = discoveryTargetOverride;
+      let r: { run_id?: string };
+      try {
+        r = await requestStart(false);
+      } catch (ex) {
+        if (ex instanceof ApiError && ex.status === 409) {
+          const ok = await dialog.confirm({
+            title: '检测到冲突，是否 force 重试？',
+            description: '同 SKU 或 campaign 已在运行中，force 会绕过去重守卫再启动一次。',
+            confirmLabel: 'force 重试',
+            cancelLabel: '取消',
+            variant: 'danger',
+            liveWarning: env === 'LIVE',
+          });
+          if (!ok) {
+            onError(normalizeLaunchError(ex));
+            return;
+          }
+          r = await requestStart(true);
+        } else {
+          throw ex;
+        }
       }
-      if (pickedVariantIds.length > 0) {
-        body.product_variant_ids = pickedVariantIds;
-      }
-      body.deliverable_platforms = platforms;
-      body.deliverable_count_per_platform = deliverableCount;
-      if (auditStandardsMd.trim()) body.audit_standards_md = auditStandardsMd.trim();
-      const r = await api.post<{ run_id?: string }>(
-        `/campaigns/${encodeURIComponent(campaignId)}/start`,
-        body,
-      );
       onLaunched(r.run_id ?? null, campaignId);
     } catch (ex) {
-      onError(String(ex));
+      onError(normalizeLaunchError(ex));
     } finally {
       setBusy(false);
     }
@@ -902,6 +1220,32 @@ function LaunchCampaignForm({
 
   return (
     <form onSubmit={submit} className="space-y-2 text-xs">
+      <div className="sticky top-0 z-10 rounded border border-slate-200 bg-slate-50 px-2 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveStep('A')}
+            className={`rounded px-2 py-1 ${activeStep === 'A' ? 'bg-emerald-600 text-white' : 'border border-slate-300 bg-white text-slate-700'}`}
+          >
+            Step A 基础与环境
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveStep('B')}
+            className={`rounded px-2 py-1 ${activeStep === 'B' ? 'bg-emerald-600 text-white' : 'border border-slate-300 bg-white text-slate-700'}`}
+          >
+            Step B 产品与白名单
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveStep('C')}
+            className={`rounded px-2 py-1 ${activeStep === 'C' ? 'bg-emerald-600 text-white' : 'border border-slate-300 bg-white text-slate-700'}`}
+          >
+            Step C 预算交付与预检
+          </button>
+        </div>
+      </div>
+      <div className={`${activeStep !== 'A' ? 'hidden' : ''} space-y-2`}>
       <div className="flex flex-wrap items-end gap-2">
         <label className="flex flex-col">
           <span className="text-slate-500">campaign_id</span>
@@ -909,7 +1253,6 @@ function LaunchCampaignForm({
             value={campaignId}
             onChange={(e) => setCampaignId(e.target.value)}
             className="rounded border px-2 py-1 font-mono"
-            required
           />
         </label>
         <label className="flex flex-col">
@@ -924,7 +1267,6 @@ function LaunchCampaignForm({
             onChange={(e) => setProductDisplayName(e.target.value)}
             placeholder='例如 "the new media console" / "POVISON Atlas sofa"'
             className="w-80 rounded border px-2 py-1"
-            required
           />
         </label>
         <label className="flex flex-col">
@@ -935,7 +1277,6 @@ function LaunchCampaignForm({
             value={budgetPerKol}
             onChange={(e) => setBudgetPerKol(Number(e.target.value))}
             className="w-24 rounded border px-2 py-1"
-            required
           />
         </label>
         <label className="flex flex-col">
@@ -946,7 +1287,6 @@ function LaunchCampaignForm({
             value={absoluteFloor}
             onChange={(e) => setAbsoluteFloor(Number(e.target.value))}
             className="w-24 rounded border px-2 py-1"
-            required
           />
         </label>
         <label className="flex flex-col">
@@ -957,7 +1297,6 @@ function LaunchCampaignForm({
             value={budgetTotal}
             onChange={(e) => setBudgetTotal(Number(e.target.value))}
             className="w-24 rounded border px-2 py-1"
-            required
           />
         </label>
         <label className="flex flex-col">
@@ -968,7 +1307,6 @@ function LaunchCampaignForm({
             value={headcountTarget}
             onChange={(e) => setHeadcountTarget(Number(e.target.value))}
             className="w-20 rounded border px-2 py-1"
-            required
           />
         </label>
         <label className="flex flex-col">
@@ -1001,16 +1339,96 @@ function LaunchCampaignForm({
           />
         </label>
       </div>
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => setActiveStep('B')}
+          className="rounded border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-100"
+        >
+          下一步：产品与白名单
+        </button>
+      </div>
+      </div>
+      <div className={`${activeStep !== 'B' ? 'hidden' : ''} space-y-2`}>
       {product.variants.length > 0 && (
         <div className="rounded border border-slate-200 p-2">
-          <div className="mb-1 text-xs font-medium text-slate-700">
-            Eligible variants <span className="text-amber-600">*</span>
+          <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-medium text-slate-700">
+            <span>
+              campaign variant whitelist <span className="text-amber-600">*</span>
+            </span>
+            <span className="text-slate-500">{pickedVariantIds.length} / {product.variants.length} selected</span>
+            <button
+              type="button"
+              onClick={() => {
+                setVariantPicked(Object.fromEntries(product.variants.map((v) => [v.id, true])));
+              }}
+              className="rounded border border-slate-300 px-2 py-0.5 text-slate-700 hover:bg-slate-100"
+            >
+              全选
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setVariantPicked(Object.fromEntries(product.variants.map((v) => [v.id, false])));
+              }}
+              className="rounded border border-slate-300 px-2 py-0.5 text-slate-700 hover:bg-slate-100"
+            >
+              清空
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setVariantPicked((prev) => {
+                  const next = { ...prev };
+                  for (const v of filteredVariants) next[v.id] = true;
+                  return next;
+                });
+              }}
+              className="rounded border border-slate-300 px-2 py-0.5 text-slate-700 hover:bg-slate-100"
+            >
+              勾选筛选结果
+            </button>
             <span className="ml-1 font-normal text-slate-400">
               (此 campaign 允许 KOL 选哪些规格 — 合同 PRODUCT_SPECS 会用到)
             </span>
           </div>
+          <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+            <label className="flex flex-col text-[11px]">
+              <span className="text-slate-500">按属性筛选 key</span>
+              <select
+                value={variantFilterKey}
+                onChange={(e) => {
+                  setVariantFilterKey(e.target.value);
+                  setVariantFilterValue('');
+                }}
+                className="rounded border px-2 py-1"
+              >
+                <option value="">全部属性</option>
+                {variantAttrKeys.map((k) => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col text-[11px]">
+              <span className="text-slate-500">按属性筛选 value</span>
+              <select
+                value={variantFilterValue}
+                onChange={(e) => setVariantFilterValue(e.target.value)}
+                disabled={!variantFilterKey}
+                className="rounded border px-2 py-1 disabled:bg-slate-100"
+              >
+                <option value="">全部值</option>
+                {variantAttrValues.map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+            </label>
+            <div className="flex items-end text-[11px] text-slate-500">
+              当前筛选命中 {filteredVariants.length} / {product.variants.length}
+            </div>
+          </div>
           <ul className="grid grid-cols-1 gap-1 md:grid-cols-2">
-            {product.variants.map((v) => (
+            {filteredVariants.map((v) => (
               <li key={v.id} className="flex items-start gap-2 text-xs">
                 <input
                   type="checkbox"
@@ -1041,9 +1459,9 @@ function LaunchCampaignForm({
       )}
       {product.variants.length === 0 && (
         <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
-          这个商品在 catalog 里还没录入 variant — 合同模板的 PRODUCT_SPECS 会留空。建议先在
+          这个商品在 catalog 里还没录入 variant — 合同模板的 PRODUCT_SPECS 会留空。请先在
           {' '}<Link to="/products" className="underline">产品列表</Link>
-          {' '}添加 variant 后再启动 campaign。
+          {' '}补齐 product_url 并解析 variant 后再启动 campaign。
         </div>
       )}
       <label className="flex flex-col">
@@ -1059,10 +1477,69 @@ function LaunchCampaignForm({
           rows={6}
           className="rounded border px-2 py-1 font-mono"
           placeholder={'例如：\n# Povison ABC 桌\n- 实木桃花心材\n- 60”餐桌\n- 适合美式 / 中古类家居博主\n- 送样策略：gifted 优先，避免现金'}
-          required
         />
       </label>
+      <div className="flex justify-between">
+        <button
+          type="button"
+          onClick={() => setActiveStep('A')}
+          className="rounded border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-100"
+        >
+          上一步：基础与环境
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveStep('C')}
+          className="rounded border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-100"
+        >
+          下一步：预算交付与预检
+        </button>
+      </div>
+      </div>
+      <div className={`${activeStep !== 'C' ? 'hidden' : ''} space-y-2`}>
       <div className="rounded border border-slate-200 p-2">
+        <div className="mb-2 text-xs font-medium text-slate-700">补偿策略（Phase 3）</div>
+        <div className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+          <label className="flex flex-col text-xs">
+            <span className="text-slate-500">compensation_mode</span>
+            <select
+              value={compensationMode}
+              onChange={(e) => setCompensationMode(e.target.value as 'gifted' | 'paid' | 'commission' | 'hybrid')}
+              className="rounded border px-2 py-1"
+            >
+              <option value="gifted">gifted</option>
+              <option value="paid">paid</option>
+              <option value="commission">commission</option>
+              <option value="hybrid">hybrid</option>
+            </select>
+          </label>
+          <label className="flex flex-col text-xs">
+            <span className="text-slate-500">commission_min_pct</span>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              disabled={!needsCommission}
+              value={commissionMinPct}
+              onChange={(e) => setCommissionMinPct(e.target.value === '' ? '' : Number(e.target.value))}
+              className="rounded border px-2 py-1 disabled:bg-slate-100"
+              placeholder={needsCommission ? '例如 10' : 'commission/hybrid 时可填'}
+            />
+          </label>
+          <label className="flex flex-col text-xs">
+            <span className="text-slate-500">commission_max_pct</span>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              disabled={!needsCommission}
+              value={commissionMaxPct}
+              onChange={(e) => setCommissionMaxPct(e.target.value === '' ? '' : Number(e.target.value))}
+              className="rounded border px-2 py-1 disabled:bg-slate-100"
+              placeholder={needsCommission ? '例如 20' : 'commission/hybrid 时可填'}
+            />
+          </label>
+        </div>
         <div className="mb-1 text-xs font-medium text-slate-700">
           交付要求 <span className="text-amber-600">*</span>
           <span className="ml-1 font-normal text-slate-400">
@@ -1096,7 +1573,6 @@ function LaunchCampaignForm({
               value={deliverableCount}
               onChange={(e) => setDeliverableCount(Number(e.target.value))}
               className="w-24 rounded border px-2 py-1"
-              required
             />
           </label>
         </div>
@@ -1126,6 +1602,21 @@ function LaunchCampaignForm({
           placeholder="例如：仅 US 区 KOL、要求英文邮件、避免与品牌 X 合作过的人..."
         />
       </label>
+      <div className="rounded border border-slate-200 bg-slate-50 px-2 py-2 text-xs">
+        <div className="font-medium text-slate-700">运行预检</div>
+        {preflightBlockers.length === 0 ? (
+          <div className="mt-1 text-emerald-700">必填校验通过，可启动。</div>
+        ) : (
+          <ul className="mt-1 list-disc pl-5 text-rose-700">
+            {preflightBlockers.map((it) => <li key={it}>{it}</li>)}
+          </ul>
+        )}
+        {preflightWarnings.length > 0 && (
+          <ul className="mt-1 list-disc pl-5 text-amber-700">
+            {preflightWarnings.map((it) => <li key={it}>{it}</li>)}
+          </ul>
+        )}
+      </div>
       <div className="flex items-center justify-between">
         <span className="text-slate-400">
           环境：<strong className={env === 'LIVE' ? 'text-red-600' : 'text-emerald-700'}>{env}</strong>
@@ -1137,11 +1628,27 @@ function LaunchCampaignForm({
         </span>
         <button
           type="submit"
-          disabled={busy}
+          disabled={busy || !canLaunch}
+          title={!canLaunch ? 'viewer 角色不可启动 campaign' : undefined}
           className="rounded bg-emerald-600 px-3 py-1 font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
         >
           {busy ? '提交中…' : `Start campaign in ${env}`}
         </button>
+      </div>
+      {!canLaunch && (
+        <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+          当前账号为 viewer，只能查看，不能启动 campaign。
+        </div>
+      )}
+      <div className="flex justify-start">
+        <button
+          type="button"
+          onClick={() => setActiveStep('B')}
+          className="rounded border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-100"
+        >
+          上一步：产品与白名单
+        </button>
+      </div>
       </div>
     </form>
   );
@@ -1150,6 +1657,7 @@ function LaunchCampaignForm({
 export function ProductDetailPage() {
   const { sku } = useParams<{ sku: string }>();
   const [p, setP] = useState<Product | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
   const [err, setErr] = useState<unknown>(null);
   const [campaigns, setCampaigns] = useState<CampaignsPayload>({ campaigns: [], kols: {} });
   const envFilter = useEnvStore((s) => s.env);
@@ -1193,6 +1701,10 @@ export function ProductDetailPage() {
   useEffect(() => {
     refreshWatcher();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    api.get<Me>('/auth/me').then(setMe).catch(() => undefined);
   }, []);
 
   usePollingFallback(refreshCampaigns, 20_000);
@@ -1424,6 +1936,7 @@ export function ProductDetailPage() {
             sku={p.sku}
             env={envFilter}
             product={p}
+            canLaunch={me?.role !== 'viewer'}
             onLaunched={(runId, campaignId) => {
               toast.success(
                 `Campaign ${campaignId} 已在 ${envFilter} 启动`,
@@ -1477,11 +1990,3 @@ export function ProductDetailPage() {
   );
 }
 
-function StageBadge({ stage }: { stage: string | null }) {
-  if (!stage) return null;
-  return (
-    <span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
-      {stage}
-    </span>
-  );
-}

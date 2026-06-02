@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -141,6 +142,7 @@ class ResolveEscalationBody(BaseModel):
     decision: str = Field(pattern="^(resume|terminate)$")
     operator_answer: str = Field(min_length=0, max_length=4000, default="")
     operator_facts: dict[str, Any] = Field(default_factory=dict)
+    reason_tags: list[str] = Field(default_factory=list, max_length=5)
     final_state: Optional[str] = None
     env: Optional[str] = Field(default=None, pattern="^(LIVE|TEST)$")
 
@@ -176,6 +178,41 @@ def _normalize_escalation_row(raw: dict[str, Any]) -> dict[str, Any]:
     if not out.get("suggested_question") and isinstance(ctx, dict):
         out["suggested_question"] = ctx.get("suggested_question")
     return out
+
+
+def _parse_iso_ts(value: Any) -> _dt.datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        dt = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt.astimezone(_dt.timezone.utc)
+
+
+def _escalation_priority(row: dict[str, Any], env: str) -> tuple[int, int]:
+    score = 100
+    reason = str(row.get("reason") or "")
+    created_at = _parse_iso_ts(row.get("created_at"))
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    if env.upper() == "LIVE":
+        score -= 30
+    if row.get("state") == "awaiting_answer":
+        score -= 20
+    if reason.startswith("discovery_floor_unmet") or reason.startswith("campaign_config_incomplete"):
+        score -= 10
+    if created_at is not None:
+        age_sec = (now - created_at).total_seconds()
+        if age_sec >= 2 * 3600:
+            score -= 20
+        elif age_sec >= 30 * 60:
+            score -= 10
+    created_ts = int(created_at.timestamp()) if created_at is not None else 0
+    return score, -created_ts
 
 
 async def _find_escalation(
@@ -311,11 +348,14 @@ async def list_escalations(
     state: Optional[str] = Query(None),
     env: Optional[str] = Query(None),
 ) -> list[dict]:
+    resolved_env = _env(env)
     try:
-        rows = await bridge.list_escalations(state=state, env=_env(env))
+        rows = await bridge.list_escalations(state=state, env=resolved_env)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    return [_normalize_escalation_row(r) for r in rows if isinstance(r, dict)]
+    normalized = [_normalize_escalation_row(r) for r in rows if isinstance(r, dict)]
+    normalized.sort(key=lambda r: _escalation_priority(r, resolved_env))
+    return normalized
 
 
 def _pick_inbound_for_escalation(
@@ -518,7 +558,11 @@ async def resolve_escalation(
     write_audit(
         conn, actor_user_id=user["id"], action="escalation.resolve",
         target=str(escalation_id),
-        payload={"decision": body.decision, "run_id": run_id},
+        payload={
+            "decision": body.decision,
+            "run_id": run_id,
+            "reason_tags": body.reason_tags,
+        },
     )
     return {**out, "run_id": run_id}
 

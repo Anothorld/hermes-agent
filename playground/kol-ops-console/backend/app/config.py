@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     # --- App ---
     env: str = "LIVE"  # default env to query when client omits it; LIVE|TEST
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    # Slow API diagnostics (dev aid). Log only when a request takes longer
+    # than this threshold; disabled by default to keep prod logs quiet.
+    slow_api_log_enabled: bool = False
+    slow_api_log_threshold_sec: float = 0.3
+    slow_api_log_paths: tuple[str, ...] = (
+        "/campaigns",
+        "/approvals",
+        "/kols",
+        "/products",
+        "/gateway-approvals",
+    )
 
 
 @lru_cache(maxsize=1)

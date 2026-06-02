@@ -100,6 +100,16 @@ def build_campaign_config_upsert_body(
         )
     if body.audit_standards_md and body.audit_standards_md.strip():
         upsert_body["audit_standards_md"] = body.audit_standards_md.strip()
+    if body.compensation_mode:
+        upsert_body["barter_policy"] = body.compensation_mode
+    if (
+        body.commission_min_pct is not None
+        and body.commission_max_pct is not None
+    ):
+        upsert_body["commission_band"] = {
+            "min": body.commission_min_pct / 100.0,
+            "max": body.commission_max_pct / 100.0,
+        }
     return upsert_body
 
 

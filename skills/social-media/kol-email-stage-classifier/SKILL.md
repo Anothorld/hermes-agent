@@ -14,6 +14,8 @@ extraction in a single LLM pass — never split across goals/stages.
 - **No side effects.** Never write CAL, never POST to the Bridge, never draft.
 - **No tool calls** that mutate state. The skill only reads its inputs and
   returns JSON.
+- Consult `references/failure-examples.md` before changing extraction rules;
+  run `playground/classifier_eval/run_eval.py` after edits.
 - Output is **machine-consumed**; downstream `kol-reply-dispatcher` parses it.
   Stable JSON shape over chatty prose.
 - Confidence required on every signal; ambiguity must be reported, not
@@ -56,13 +58,17 @@ extraction in a single LLM pass — never split across goals/stages.
    <goal_name|null>, publish: <goal_name|null>}` plus each goal's
    `missing_facts`. The dispatcher fetches this via
    `kol_bridge_tool.py get-goals --identity-id <id> --campaign-id <cid> --env TEST|LIVE`.
-5. `campaign_config_summary` — `paid_ceiling`, `commission_band`,
+5. `campaign_config_summary` — `paid_ceiling`, `paid_target_budget` (if set),
+   `commission_band`,
    `sku_whitelist`, `deliverable_count_per_platform`, `contract_required`,
    `audit_standards_md` excerpt. Used **only** as context, never to make a
    business decision; that's the dispatcher's job.
 6. `relationship_summary` (optional) — for repeat KOLs: `last_outcome`,
    `preferred_skus`, `preferred_mode`, `default_shipping_address` flag.
-7. `escalation_rules` (Phase E, optional) — parsed payload from
+7. `campaign_facts` (optional) — latest campaign-scoped fact snapshot from
+   dispatch context (`offer.barter_attempted`, `offer.rate_requested`,
+   `offer.proposed_amount`, …). Use when deciding escalation hints.
+8. `escalation_rules` (Phase E, optional) — parsed payload from
    `kol_bridge_tool.py get-parsed-escalation-rules`:
    `{ "top": {...}, "rules": [ {"id": str, "signals_match": [str],
    "severity": str, "suggested_question": str,
@@ -137,12 +143,18 @@ Use `null` for any lane with no active goal.
   `FactNamespaceError` and the dispatcher run will hard-fail.
 - Common keys (non-exhaustive):
   - identity: `identity.handle`, `identity.email`, `identity.preferred_language`,
-    `identity.contact_role`.
+    `identity.contact_role` ∈ {kol, manager, agency, assistant}.
+    When the sender self-identifies as manager/agency/rep, emit
+    `identity.contact_role` accordingly; when the KOL writes directly
+    from their own handle with no delegation cue, prefer `kol`.
   - offer: `offer.interest_signal` ∈ {confirmed, declined, needs_more_info};
     `offer.sku_locked`, `offer.color_or_variant_locked`,
     `offer.deliverable_platforms`, `offer.deliverable_count_per_platform`,
     `offer.compensation_mode` ∈ {gifted, paid, commission, hybrid},
-    `offer.kol_quoted_amount`, `offer.agreed_terms`,
+    `offer.kol_paid_quote` (pure **cash supplement** on top of gifted
+    product — not an all-in deal price; legacy alias `offer.kol_quoted_amount`
+    is accepted by CAL but prefer `offer.kol_paid_quote`),
+    `offer.agreed_terms`,
     `offer.contract_sent`, `offer.contract_signed`,
     `offer.contract_declined_reason`.
   - fulfillment: `fulfillment.address_collected`,
@@ -166,6 +178,8 @@ Common signals, append-only — emit only when evidence is in the email body:
 - `interest_positive` / `interest_negative` / `interest_unclear`
 - `asks_deliverables` / `asks_budget` / `asks_timeline`
 - `proposes_rate` / `counter_offer` / `accepts_terms`
+- `paid_only_stance` — KOL or rep explicitly rejects barter/gifting and
+  insists on paid/cash only (including after a prior barter pitch)
 - `requests_oos_sku` / `requests_color_swap`
 - `address_provided` / `address_questioned`
 - `tracking_question` / `not_received`
@@ -216,10 +230,15 @@ When the KOL is asking or vague, prefer **omitting** committed keys (or
 `email:` writes using your `signals` array.
 5. Enumerate every signal with at least 0.6 confidence; lower-confidence
    signals go into `ambiguity` instead.
-6. Set `escalation_hint.should_consider=true` if **any** of: KOL quotes >
-   `paid_ceiling`, requests SKU outside whitelist, asks to change a contract
-   core term, requests deliverables > campaign cap, claims package lost /
-   address dispute, multi-round revision overflow.
+6. Set `escalation_hint.should_consider=true` if **any** of: requests SKU
+   outside whitelist, asks to change a contract core term, requests
+   deliverables > campaign cap, claims package lost / address dispute,
+   multi-round revision overflow.
+   **Never** escalate solely because a KOL quote exceeds `paid_ceiling` —
+   the pricing engine always auto-counters down.
+   **Do not** escalate on first direct-KOL `proposes_rate` / `paid_only_stance`
+   when `campaign_facts.offer.barter_attempted` is absent — the negotiator
+   must run barter-first instead.
 7. Use `anomaly_signals` as the baseline for identity/thread/risk controls:
    - Preserve `thread_integrity.status` / `matched_by` unless the email body
      makes the baseline clearly inconsistent.
@@ -230,7 +249,10 @@ When the KOL is asking or vague, prefer **omitting** committed keys (or
 8. Promote anomaly-driven escalation hints when warranted:
    - `thread_integrity.status == "detached"` AND any of
      `gate_budget|gate_contract|gate_payout` true;
-   - `identity_integrity.status in {"delegated","unknown"}` AND any gate true;
+   - `identity_integrity.status == "unknown"` AND any gate true;
+   - `identity_integrity.status == "delegated"` AND (`gate_contract` OR
+     `gate_payout`) true — **not** for budget-only rate mail from an
+     on-scope agency rep (compensation negotiation may proceed);
    - `content_risk == "c3"` (authority/ownership handoff cues).
    In these cases set `escalation_hint.should_consider=true` and put a short,
    machine-readable reason in `escalation_hint.reason` (e.g.

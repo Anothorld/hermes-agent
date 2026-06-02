@@ -5,9 +5,10 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
@@ -26,6 +27,7 @@ from .routers import (
     gateway_approvals,
     goals,
     kols,
+    learning,
     policies,
     products,
     reply_watcher,
@@ -92,6 +94,37 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def _slow_api_probe(request: Request, call_next):
+        if not s.slow_api_log_enabled:
+            return await call_next(request)
+        path = request.url.path
+        if s.slow_api_log_paths and not any(path.startswith(p) for p in s.slow_api_log_paths):
+            return await call_next(request)
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed = time.perf_counter() - started
+            if elapsed >= s.slow_api_log_threshold_sec:
+                log.info(
+                    "slow_api method=%s path=%s status=EXCEPTION duration_ms=%.1f",
+                    request.method,
+                    path,
+                    elapsed * 1000.0,
+                )
+            raise
+        elapsed = time.perf_counter() - started
+        if elapsed >= s.slow_api_log_threshold_sec:
+            log.info(
+                "slow_api method=%s path=%s status=%s duration_ms=%.1f",
+                request.method,
+                path,
+                response.status_code,
+                elapsed * 1000.0,
+            )
+        return response
+
     @app.get("/health")
     def health() -> dict:
         return {"ok": True, "env": s.env}
@@ -106,6 +139,7 @@ def create_app() -> FastAPI:
     app.include_router(relationships.router)
     app.include_router(escalations.router)
     app.include_router(approvals.router)
+    app.include_router(learning.router)
     app.include_router(gateway_approvals.router)
     app.include_router(policies.router)
     app.include_router(reply_watcher.router)

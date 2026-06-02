@@ -333,6 +333,38 @@ def _derive_content_risk(msg: GmailMessage) -> tuple[str, dict[str, bool]]:
     }
 
 
+def resolve_autoflow_controls(
+    *,
+    content_risk: str,
+    thread_integrity: str,
+    identity_integrity: str,
+    controls: dict[str, bool],
+) -> tuple[bool, dict[str, bool]]:
+    """Return ``(allow_autoflow, updated_controls)`` for reply soft-gating."""
+    out = dict(controls)
+    allow_autoflow = True
+    if content_risk == "c3":
+        allow_autoflow = False
+    elif thread_integrity == "detached" and (
+        out["gate_budget"] or out["gate_contract"] or out["gate_payout"]
+    ):
+        allow_autoflow = False
+    elif (
+        identity_integrity == "delegated"
+        and out["gate_budget"]
+        and not (out["gate_contract"] or out["gate_payout"])
+        and thread_integrity != "detached"
+    ):
+        # Agency/manager rep discussing rates — allow compensation negotiation.
+        allow_autoflow = True
+        out["gate_budget"] = False
+    elif identity_integrity in {"delegated", "unknown"} and (
+        out["gate_budget"] or out["gate_contract"] or out["gate_payout"]
+    ):
+        allow_autoflow = False
+    return allow_autoflow, out
+
+
 def _classify_identity_integrity(
     *,
     sender_email: Optional[str],
@@ -502,17 +534,12 @@ def _match_identity(
         from_header=msg.from_addr,
         body=msg.body,
     )
-    allow_autoflow = True
-    if content_risk == "c3":
-        allow_autoflow = False
-    elif thread_integrity == "detached" and (
-        controls["gate_budget"] or controls["gate_contract"] or controls["gate_payout"]
-    ):
-        allow_autoflow = False
-    elif identity_integrity in {"delegated", "unknown"} and (
-        controls["gate_budget"] or controls["gate_contract"] or controls["gate_payout"]
-    ):
-        allow_autoflow = False
+    allow_autoflow, controls = resolve_autoflow_controls(
+        content_risk=content_risk,
+        thread_integrity=thread_integrity,
+        identity_integrity=identity_integrity,
+        controls=controls,
+    )
     risk_controls = {"allow_autoflow": allow_autoflow, **controls}
     if thread_integrity == "detached":
         reasons.append("detached_thread_heuristic_match")

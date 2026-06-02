@@ -1,267 +1,30 @@
 ---
 name: kol-reengagement-outreach
-description: Generates the FIRST outreach email draft for a REPEAT KOL ("repeat_kol" path). Reads campaign config + identity facts + relationship history (last_outcome, preferred_skus, preferred_mode, default_shipping_address) via the Bridge dispatch-context, composes a warm "back again" opening that references the prior collab and proposes the most likely next collab shape, writes draft-ready facts (`offer.outreach_draft_ready=true`, `offer.outreach_path=reengagement`) via the Bridge, and returns the draft envelope as JSON for the caller to persist. Never sends mail directly.
-trigger: Invoked by `kol-discovery-to-outreach-router` for candidates assigned `identity.outreach_path=reengagement` (i.e. `relationship_status=repeat_kol`, NOT `repeat_kol_needs_review` — those open an escalation instead). Or on demand when the user says "draft a re-engagement email to <handle>".
-tags: ["kol", "outreach", "reengagement", "repeat-collab", "draft-generator", "commerce-lane"]
+description: Warm re-engagement email for repeat KOLs (outreach path=reengagement).
+tags: ["kol", "outreach", "reengagement", "relationship"]
 ---
 
-## Goal
-Produce one warm re-engagement email that
-1. acknowledges the prior collab,
-2. proposes a concrete next collab consistent with prior mode +
-   preferred SKUs,
-3. asks ONE confirmation question (default: "shipping info same as
-   before?" if `default_shipping_address` is on file),
-and atomically records the outreach on the Bridge. No reply handling,
-no Gmail send.
+# kol-reengagement-outreach
 
-## Shared Blocks (Phase 1)
-- Runtime/draft guardrails:
-  `references/shared/runtime-draft-guardrails.md`
-- Style + creator-brief preamble order:
-  `references/shared/style-and-brief-preambles.md`
-- Greeting name resolution:
-  `references/shared/greeting-name-resolution.md`
-- Personalization post-check baseline:
-  `references/shared/personalization-check.md`
+Selected by `kol-reply-dispatcher` when `meta.path=reengagement` on the outreach goal.
 
-## Runtime Contract
-- Follow shared runtime rules in
-  `references/shared/runtime-draft-guardrails.md`.
-- **Refuses risky repeats.** If
-  `relationship.last_outcome ∈ {disputed, content_failed, aborted}`,
-  abort and return
-  `{"skipped":"needs_review","delegate_to":"escalation"}`; the router
-  is supposed to open an escalation in that case, not call this
-  skill. Defense-in-depth.
-- **Single-shot per (identity, campaign).** If
-  `offer.outreach_sent=true` already, abort with `{"skipped":"already_sent"}`.
-  If `offer.outreach_draft_ready=true` already, abort with
-  `{"skipped":"draft_already_ready"}`.
-- **No price talk in the opening.** May reference prior mode
-  ("happy to do another gifted collab" / "if commission works again
-  for you") but does NOT quote numbers.
-- **Reuses identity-level facts.** Default shipping address /
-  preferred mode / preferred SKUs are loaded from
-  `reusable_facts` and used as soft defaults the KOL can confirm in
-  one reply.
+## Relationship personalization (required read)
 
-## Inputs
-1. `identity_id` (mandatory).
-2. `campaign_id` (mandatory).
-3. `env` (`TEST` or `LIVE`, mandatory).
+Before drafting, load dispatch context and read:
 
-## Email Style Preamble (mandatory before drafting)
+- `reusable_facts.facts.personalization_hint` — 1–2 sentences from prior collabs
+  (`last_outcome`, `preferred_mode`, `negotiation_style`).
+- `learning_hints` — operator reject patterns (see
+  `kol-reply-dispatcher/references/shared/learning-hints.md`).
 
-Follow shared preamble rules in
-`references/shared/style-and-brief-preambles.md`.
+Weave hints naturally; do not repeat rejected phrasing.
 
-Re-engagement specific call inputs:
-- `goal_brief = {goal: "reengagement_outreach", missing_facts: ["offer.outreach_draft_ready"], next_action: "<one-line summary referencing prior collab>"}`
-- `current_user_id = <operator id from session>`
+## Output
 
->>> include: kol-email-style-loader
-
-## Creator Brief Preamble (mandatory before drafting)
-
-This skill still requires `[P0.1]` creator brief so the proposal
-anchors to one concrete creator-style detail.
-
->>> include: kol-creator-brief-loader
-
-## Procedure
-
-### Step 1 — Load context
-```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
-```
-
-Required signals:
-- `goals.outreach.status == "active"` (else abort `already_sent`).
-- `relationship.total_collabs >= 1` (else abort
-  `{"skipped":"not_a_repeat_kol","delegate_to":"kol-cold-outreach"}`).
-- `relationship.last_outcome ∉ {disputed, content_failed, aborted}` —
-  these MUST go through escalation; do not draft for them.
-- `identity.display_name` (from `get-identity`) — the KOL's real
-  name if it's already on file. Always **prefer** this over the
-  handle for the greeting.
-- `campaign.product_display_name` — operator-friendly product name
-  (visible anchor text or plain mention).
-- `campaign.product_url` — product page URL. When present, the
-  product mention MUST be rendered as
-  `<a href="{product_url}">{product_display_name}</a>`. When empty,
-  render plain text.
-- `reusable_facts` keys to use:
-  - `identity.default_shipping_address` (decides the confirm question).
-  - `identity.preferred_skus` (mention in proposal if present).
-  - `identity.preferred_mode` (gifted / paid / commission / hybrid).
-- `candidate.payload` (NEW) — per-campaign discovery evidence. Often
-  `null` for repeat KOLs added through the relationship-resolution
-  router rather than a fresh discovery pass; treat as optional.
-- `identity_facts` (NEW) — all identity-level facts. The 6 creator
-  brief keys (`identity.content_pillars`, `identity.signature_hooks`,
-  `identity.voice_descriptors`, `identity.hero_post_url`,
-  `identity.hero_post_note`, `identity.recommendation_reason`) back
-  the `[P0.1]` brief block and should anchor the Step 2 paragraph 2
-  product proposal.
-
-### Step 1b — Resolve the KOL's greeting name (mandatory)
-
-Use the shared algorithm in
-`references/shared/greeting-name-resolution.md`.
-If unresolved, open escalation `kol_name_unresolvable` and abort.
-
-### Step 2 — Compose the email
-Constraints:
-- Subject: warm, references continuity. Example:
-  "Round 2? <Brand> × <FirstName>" or
-  "Back with another POVISON drop for you". Plain text — no HTML in
-  the subject.
-- **Body format: HTML.** Wrap paragraphs in `<p>…</p>` and use `<br>`
-  for forced line breaks. When `campaign.product_url` is present the
-  product mention MUST be an anchor tag
-  (`<a href="{product_url}">{product_display_name}</a>`); use the URL
-  verbatim. Set `html: true` in the draft envelope (Step 4).
-- Body: 3–5 short paragraphs.
-  1. Greeting + appreciation reference to the prior collab. Use the
-     first name resolved in Step 1b: `<p>Hi {FirstName},</p>`. If
-     `last_outcome` is `success` or `success_with_revisions`, say so
-     warmly in one line.
-  2. Concrete proposal: cite up to 2 items from `preferred_skus`, or
-     "another piece similar to what worked last time" if absent.
-     When linking the proposed product, prefer the anchor form above.
-     Match prior `preferred_mode` ("happy to do gifted again" /
-     "if commission works for you again"); never escalate the mode
-     unsolicited. **Tie the proposal to one specific element of the
-     creator brief** when the brief is available — e.g., if
-     `content_pillars` includes "cozy hosting" and the proposed
-     product is the Atlas sofa, connect them in one short clause
-     ("…thinking it would slot naturally into your hosting tours").
-     This is what distinguishes a re-engagement opening from a
-     transactional reorder.
-  3. ONE confirmation question — preferably:
-     "Shipping info same as before — `<masked address one-liner>`?"
-     when `default_shipping_address` is present. Otherwise:
-     "Would you be up for it? Happy to share more if so."
-     **Mask** the address in the email: show city/country only,
-     never the full street; the address is just for the KOL to
-     confirm/correct, not for us to broadcast it.
-  4. Sign-off.
-- Allowed HTML tags: `<p>`, `<br>`, `<a href="…">`, `<strong>`,
-  `<em>`. No images, no inline styles. Anchor `href` values MUST be
-  `http://` or `https://` URLs only.
-- Do NOT ask for new deliverables/platforms here — defer to
-  `kol-deliverables-clarifier` after the reply.
-
-### Step 2c — Personalization post-check (mandatory)
-
-Follow shared baseline in
-`references/shared/personalization-check.md`.
-
-Re-engagement override for one-time regeneration instruction:
-*"Your previous draft did not reference any detail from the [P0.1]
-creator brief. Rewrite paragraph 2 (the proposal) so it ties the
-proposed product to one specific pillar, hook, or hero-post theme
-from the brief — in one short clause."*
-
-### Step 3 — Write outbound facts (single call)
-```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
-  --identity-id <identity_id> --env <TEST|LIVE> \
-  --json '{"campaign_id":"<campaign_id>",
-            "source":"skill:kol-reengagement-outreach",
-            "namespaces":{
-              "offer":    {"offer.outreach_draft_ready": true,
-                            "offer.outreach_path": "reengagement",
-                            "offer.proposed_mode": "<gifted|paid|commission|hybrid>",
-                            "offer.proposed_skus": ["sku-a","sku-b"]},
-              "identity": {"identity.last_outreach_draft_at": "<iso8601>"}
-            }}'
-```
-
-`offer.proposed_mode` and `offer.proposed_skus` are intentionally
-captured so the downstream
-`kol-product-selector` / `kol-compensation-negotiator` skills can read
-them without re-deriving from prose. Omit `offer.proposed_skus` if
-no preferred SKUs were on file.
-
-### Step 4 — Return draft envelope
-```json
-{
-  "skill": "kol-reengagement-outreach",
-  "identity_id": 42,
-  "campaign_id": "TS8319",
-  "env": "TEST",
-  "subject": "Round 2? POVISON × Becki",
-  "body": "<p>Hi Becki,</p><p>...<a href=\"https://povison.com/products/atlas-sofa\">the Atlas sofa</a>...</p>",
-  "html": true,
-  "to": "<resolved from identity.primary_email>",
-  "thread_id": null,
-  "address_confirm_asked": true,
-  "facts_written": {"offer": 4, "identity": 1},
-  "brief_status": "fresh",
-  "personalization_tokens_matched": ["cozy hosting"]
-}
-```
-
-When `brief_status == "unavailable"`, the envelope MUST include
-`low_personalization: true` and `low_personalization_reason:
-"creator_brief_unavailable"` in place of `personalization_tokens_matched`.
-
-`html: true` is mandatory whenever the body contains anchor tags so
-the bridge sends the Gmail draft with a `text/html` MIME part.
-
-`thread_id: null` because we always start a fresh thread for a fresh
-campaign — the prior collab thread is a different campaign.
-
-## Examples
-
-### Success — same mode, same SKUs, same address
-KOL `@alice`, `total_collabs=1`, `last_outcome=success`,
-`preferred_mode=gifted`, `preferred_skus=["povi-rug-04"]`,
-`default_shipping_address` present. Step 2 composes a warm 4-para
-email proposing "another piece similar to the rug from last time" +
-ONE address-confirmation question masked to "shipping to your London
-address?". Step 3 writes 4 offer facts + 1 identity fact in one call.
-
-### Failure — risky repeat
-`last_outcome="content_failed"`. Skill aborts with
-`{"skipped":"needs_review","delegate_to":"escalation"}` — the router
-should have caught this upstream and opened an escalation instead.
-
-### Failure — actually a new prospect
-`total_collabs=0`. Skill aborts with
-`{"skipped":"not_a_repeat_kol","delegate_to":"kol-cold-outreach"}`.
+Follow `kol-reply-dispatcher/references/shared/reply-envelope-contract.md` and
+persist via `persist-reply-draft` (same as other child skills).
 
 ## Pitfalls
-- Start with shared pitfalls in
-  `references/shared/runtime-draft-guardrails.md` and
-  `references/shared/personalization-check.md`.
-- Never quote prices, commission percentages, or deliverable counts
-  in the reengagement email. Continuity ≠ blanket-renewal of terms.
-- Never let a repeat-collab opening read like a transactional reorder.
-  The creator brief is what differentiates "we'd love to send another
-  rug your way" (generic) from "we'd love to send another rug your
-  way — feels like a natural fit for the slow-morning shots you've
-  been doing lately" (anchored). Paragraph 2 must tie the proposal to
-  one brief detail when `brief_status ∈ {fresh, refreshed}`.
-- Never set `brief_status: "unavailable"` to skip the personalization
-  check when the loader actually returned a brief. The loader's status
-  field is authoritative; mirror it exactly.
-- Never greet the KOL by their last name or full raw handle.
-  `Hi beckiowens,` / `Hi @beckiowens,` / `Hi Becki Owens,` are all
-  wrong; use `Hi Becki,` (first name only, resolved via Step 1b).
-- Never invent a `product_url`. If `campaign.product_url` is empty,
-  render the product mention as plain text.
-- Never set `html: false` while keeping anchor tags in `body` — the
-  draft will be sent as `text/plain` and the KOL will see raw markup.
-- Do not output the full default shipping address verbatim — mask to
-  city/country in the email body. The structured address stays in
-  `kol_identity` for downstream skills to read.
-- Do not silently bump the mode (e.g. last collab gifted, this email
-  proposing paid). Mode escalations belong to the
-  `kol-compensation-negotiator` after the reply.
-- Do not redraft if `outreach_sent=true`; abort with `already_sent`.
-  Do not redraft if `outreach_draft_ready=true`; abort with
-  `draft_already_ready`.
+
+- Do not treat repeat KOLs like cold prospects — acknowledge history briefly.
+- Do not open with pricing before scope unless `learning_hints` allow it for this goal.

@@ -73,6 +73,7 @@ TABLES: dict[str, str] = {
             preferred_mode        TEXT NOT NULL DEFAULT 'unknown',   -- gifted|paid|commission|hybrid|unknown
             avg_delivery_quality  REAL,
             avg_revision_rounds   REAL,
+            negotiation_style     TEXT,
             last_archived_at      TEXT,
             updated_at            TEXT NOT NULL
         )
@@ -86,6 +87,8 @@ TABLES: dict[str, str] = {
             product_unit_price                REAL,
             barter_policy                     TEXT,
             paid_ceiling                      REAL,
+            paid_target_budget                REAL,
+            paid_ratio_override               REAL,
             commission_band_json              TEXT NOT NULL DEFAULT '{}',
             deliverable_platforms_json        TEXT NOT NULL DEFAULT '[]',
             deliverable_count_per_platform    INTEGER,
@@ -202,7 +205,23 @@ TABLES: dict[str, str] = {
             version         INTEGER NOT NULL DEFAULT 1,
             updated_by      TEXT,
             updated_at      TEXT NOT NULL,
-            is_active       INTEGER NOT NULL DEFAULT 1
+            is_active       INTEGER NOT NULL DEFAULT 1,
+            env             TEXT
+        )
+    """,
+    "kol_learning_job_runs": """
+        CREATE TABLE IF NOT EXISTS kol_learning_job_runs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_name        TEXT NOT NULL,
+            env             TEXT,
+            status          TEXT NOT NULL,
+            triggered_by    TEXT NOT NULL,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT,
+            duration_ms     INTEGER,
+            input_json      TEXT NOT NULL DEFAULT '{}',
+            output_json     TEXT NOT NULL DEFAULT '{}',
+            error_message   TEXT
         )
     """,
 }
@@ -234,6 +253,8 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS ix_escal_state            ON kol_escalations (state, env)",
     "CREATE INDEX IF NOT EXISTS ix_escal_id_state         ON kol_escalations (identity_id, state)",
     "CREATE INDEX IF NOT EXISTS ix_policy_scope_active    ON policy_documents (scope, is_active)",
+    "CREATE INDEX IF NOT EXISTS ix_learning_job_name_ts  ON kol_learning_job_runs (job_name, started_at)",
+    "CREATE INDEX IF NOT EXISTS ix_learning_job_env_ts     ON kol_learning_job_runs (env, started_at)",
 ]
 
 

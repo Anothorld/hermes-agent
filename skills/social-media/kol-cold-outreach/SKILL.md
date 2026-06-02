@@ -126,8 +126,8 @@ Constraints:
   Plain text — no HTML in the subject. Do not always reuse the same
   template; choose a natural structure from the available facts. Allowed
   subject slots: `<Brand>` from campaign/brand context, `<handle>` from
-  `identity.primary_handle` with the leading `@` removed, `<FirstName>`
-  from Step 1b, and optional `<ProductOrCategory>` from
+  `identity.primary_handle` (render as `@<handle>` when pairing with
+  `<Brand>`, otherwise omit the `@`), and optional `<ProductOrCategory>` from
   `campaign.product_display_name` or a broad category phrase. Never use
   the `campaign_id`, SKU codes, model numbers, variant IDs, or other
   internal catalog identifiers as visible subject text. Good examples:
@@ -135,7 +135,7 @@ Constraints:
   `POVISON x dadrianca — Media Console Collab`,
   `Collab Inquiry: POVISON x jillhigginson`,
   `Collaboration Opportunity with Jazproductixns`,
-  `<Brand> x <FirstName>`, `<Brand> Collab Inquiry`, or
+  `<Brand> x @<handle>` (e.g. `POVISON x @gabbiaguayo`), `<Brand> Collab Inquiry`, or
   `<ProductOrCategory> Collab with <Brand>`. Keep it concise, ideally
   under ~70 characters when the available names make that possible.
 - **Body format: HTML.** Wrap paragraphs in `<p>…</p>` and use `<br>`
@@ -280,7 +280,9 @@ When `brief_status == "unavailable"`, the envelope MUST instead include
 so the operator review queue can surface these drafts for manual edits.
 
 The caller (router or operator) is responsible for persisting the
-draft to Gmail.
+draft into CAL as `approval.reply_draft` with `decision="pending"`.
+Gmail draft creation is approval-gated and happens only when the
+operator explicitly approves `approval.reply_draft`.
 
 ## Examples
 

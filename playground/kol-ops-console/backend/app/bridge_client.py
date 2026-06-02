@@ -307,6 +307,10 @@ class BridgeClient:
     async def reconcile_sent(self, body: dict[str, Any]) -> dict[str, Any]:
         return await self._req("POST", "/gmail/reconcile-sent", json=body)
 
+    async def promote_strategy(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Preview (dry_run) or apply promotion of a reply_strategy goal."""
+        return await self._req("POST", "/learning/promote-strategy", json=body)
+
     # --------------------------------------------------------- Escalations
     async def list_escalations(
         self, state: Optional[str] = None, env: str = "LIVE"

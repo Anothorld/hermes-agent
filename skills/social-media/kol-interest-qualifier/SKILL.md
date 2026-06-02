@@ -23,6 +23,8 @@ recording that we asked, but does NOT pre-commit interest as confirmed.
   `references/shared/style-and-brief-preambles.md`
 - Reply envelope contract:
   `references/shared/reply-envelope-contract.md`
+- Learning hints (reject few-shot from dispatch context):
+  `../kol-reply-dispatcher/references/shared/learning-hints.md`
 
 ## Runtime Contract
 - Follow shared runtime rules in
@@ -32,6 +34,11 @@ recording that we asked, but does NOT pre-commit interest as confirmed.
   the trap this skill exists to avoid.
 - **No price talk, no SKU talk, no deliverable counts.** Those are
   later goals.
+- **Collaboration mode questions:** if the KOL asks whether the collab is
+  paid/gifted, asks "what kind of collaboration?", or asks the cooperation
+  model, answer only that we usually work through product gifting / barter.
+  Do **not** mention paid, hybrid, flexibility, budget, or cash supplement
+  at this stage.
 - **Idempotent on already-confirmed.** If
   `goals.interest_qualification.status == "satisfied"`, abort
   `{"skipped":"already_qualified"}`.
@@ -50,6 +57,20 @@ recording that we asked, but does NOT pre-commit interest as confirmed.
    `{lane, current_goal, next_goal_in_lane,
    missing_facts_for_current_goal, kol_signaled_next_step}`. Used only
    for the `[P0.4]` block below.
+8. `learning_hints` — passed through by the dispatcher (reject few-shot +
+   `reply_strategy` + `company_style`).
+
+## Learning hints (advisory)
+
+Read `learning_hints` per
+`../kol-reply-dispatcher/references/shared/learning-hints.md`. Apply
+`reply_strategy` / `reply_learning` / `company_style` for
+`interest_qualification` as advisory wording/sequencing only. **Priority on
+conflict:** fact ownership > pricing engine output > escalation gates > this
+skill's HARD rules > learning hints. Hints never add facts or change the goal
+state. When `references/learned/interest_qualification.md` exists, treat it as
+an auto-promoted, advisory playbook under the same priority. Before drafting, if
+`references/learned/interest_qualification.md` exists, read it via `skill_view`.
 
 ## Email Style Preamble (mandatory before drafting)
 
@@ -149,8 +170,8 @@ Choose the single most informative question based on `inbound_excerpt`:
 
 | KOL signal | Question to ask |
 |---|---|
-| "tell me more" | "Quick context: it's a `<gifted|paid mix>` collab around `<one product line>`. Would that work for you?" |
-| "is this paid?" | "It's primarily product-gifting, with some flexibility on the comms side. Would you be open to that?" |
+| "tell me more" | "Quick context: we usually work through product gifting for this campaign around `<one product line>`. Would that be something you'd be open to?" |
+| "is this paid?" / "paid or gifted?" / "what's the collab model?" | "For this campaign, we usually work through product gifting / barter. Would you be open to that?" |
 | "what brand is this?" | One-line brand pitch + "Would that be a fit for your audience?" |
 | "I'm busy / next quarter" | "Totally understand — would `<month X>` work better, or shall we close this out?" |
 | Generic positive ("love it!") | "Glad to hear! Just to confirm — are you up for moving forward?" |
@@ -223,8 +244,8 @@ When input includes `fragment_mode: true`:
 
 ### Success — paid question
 Inbound: "Hi, thanks! Is this paid or gifted?"
-Reply: "Hi @alice — primarily product-gifting, with some flexibility
-on the comms side. Would you be open to that?"
+Reply: "Hi @alice — for this campaign, we usually work through
+product gifting / barter. Would you be open to that?"
 Facts: `offer.interest_clarify_asked=true` + `..._question=<text>`.
 
 ### Failure — already qualified
@@ -235,7 +256,8 @@ next active goal instead.
 ## Pitfalls
 - Two questions in one reply → KOL only answers the easier one and
   the lane stalls. Stick to ONE.
-- Mentioning price / SKU / deliverable counts contaminates downstream
+- Mentioning paid, hybrid, flexibility, budget, cash supplement, SKU, or
+  deliverable counts contaminates downstream
   skill scope and removes their negotiation surface.
 - Pre-committing `interest_signal=confirmed` on the basis of "love
   it!" alone — must wait for the KOL's actual confirmation reply.

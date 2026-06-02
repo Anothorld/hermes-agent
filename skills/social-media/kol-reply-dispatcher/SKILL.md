@@ -21,6 +21,8 @@ should make.
   `references/shared/fact-ownership.md`
 - Bridge endpoints (CLI names — **use this, not missing paths**):
   `references/shared/bridge-http-api-endpoints.md`
+- Runtime learning hints (reject few-shot + personalization):
+  `references/shared/learning-hints.md`
 
 ## Runtime Contract
 - Frequency: every 10 minutes via Hermes `cronjob`. Profile:
@@ -108,14 +110,23 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
   --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
 ```
 
-Response: `{goals, lanes, relationship, reusable_facts, campaign_config}`. This **replaces**
+Response: `{goals, lanes, relationship, reusable_facts, campaign_config,
+campaign_facts, identity_facts, candidate, learning_hints}`. This **replaces**
 the legacy `get-goals` + `get-relationship` + `get-reusable-facts` +
 `get-lanes` chain — do not call those individually.
+
+Pass `learning_hints` and `reusable_facts.facts.personalization_hint` through
+to every drafting child skill (see `references/shared/learning-hints.md`).
+
+Use `campaign_facts` for per-campaign negotiation state (`offer.barter_attempted`,
+`offer.rate_requested`, `offer.proposed_amount`, …). Optional narrow read:
+`get-facts --identity-id ID --campaign-id CID --env LIVE`.
 
 ### Step 2 — Run the classifier
 Invoke `kol-email-stage-classifier` with `latest_email`, `thread_history`
 (verbatim from Step 0), `anomaly_signals` (from Step 0b),
 `current_goal_state` (from Step 1's `goals`),
+`campaign_facts` (from Step 1's `campaign_facts`),
 `campaign_config_summary`, and (if applicable) `relationship_summary`
 (from Step 1's `relationship` + `reusable_facts` + `campaign_config`).
 The classifier returns the JSON shape defined in its SKILL.md.
@@ -165,7 +176,11 @@ Step 0b `anomaly_signals.risk_controls` when missing):
 2. If `allow_autoflow == true` but any `gate_* == true`:
    - Continue non-sensitive progression.
    - For sensitive goals, force human gate (no direct drafting):
-     - `gate_budget=true` blocks compensation quoting/countering.
+     - `gate_budget=true` blocks compensation quoting/countering **except**
+       when `identity_integrity.status == "delegated"` and the only gate is
+       budget (agency/manager rate discussion on-scope) — the poller already
+       clears `gate_budget` in that case; honor it and allow
+       `compensation_negotiation` to draft.
      - `gate_contract=true` blocks contract-term acceptance/changes.
      - `gate_payout=true` blocks payout method/account changes.
    - Surface this as `approval.pending_topics` entries so operators can
@@ -212,7 +227,7 @@ After Step 3 re-fetch, call the deterministic plan endpoint:
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py select-draftable-plan \
   --json '{"goals": <from dispatch_context.goals as name→row map>,
-            "facts": <dispatch_context reusable_facts merged>,
+            "facts": <merge reusable_facts.facts + campaign_facts>,
             "signals": <classifier signals>,
             "meta": {}}'
 ```
