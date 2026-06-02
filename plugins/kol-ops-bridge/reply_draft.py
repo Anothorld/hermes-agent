@@ -81,15 +81,19 @@ def build_draft_event_payload(
     primary_goal: str,
     child_skill: str,
     merged_draft: Mapping[str, Any],
+    contributing_skills: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the ``kol_reply_draft_ready`` event payload."""
-    return {
+    payload: dict[str, Any] = {
         "source_message_id": source_message_id,
         "primary_lane": primary_lane,
         "primary_goal": primary_goal,
         "child_skill": child_skill,
         "draft": dict(merged_draft),
     }
+    if contributing_skills:
+        payload["contributing_skills"] = list(contributing_skills)
+    return payload
 
 
 def build_approval_fact_value(
@@ -100,6 +104,7 @@ def build_approval_fact_value(
     child_skill: str,
     merged_draft: Mapping[str, Any],
     linked_escalation_id: Any = None,
+    contributing_skills: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the ``approval.reply_draft`` fact value (decision=pending)."""
     value: dict[str, Any] = {
@@ -110,6 +115,8 @@ def build_approval_fact_value(
         "child_skill": child_skill,
         "draft": dict(merged_draft),
     }
+    if contributing_skills:
+        value["contributing_skills"] = list(contributing_skills)
     if linked_escalation_id is not None:
         value["linked_escalation_id"] = linked_escalation_id
     return value

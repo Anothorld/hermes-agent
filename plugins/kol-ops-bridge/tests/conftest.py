@@ -28,8 +28,8 @@ def _load_package() -> types.ModuleType:
 
     for sub in ("schema", "goals", "policies", "cal", "discovery_router",
                 "confirmed_ingest", "confirmed_fact_buffer",
-                "pricing_engine", "campaign_validation", "dispatch_router",
-                "reply_draft"):
+                "pricing_engine", "campaign_validation", "classifier_facts",
+                "dispatch_router", "reply_draft"):
         spec = importlib.util.spec_from_file_location(
             f"{_PKG_NAME}.{sub}",
             _PLUGIN_ROOT / f"{sub}.py",

@@ -190,6 +190,35 @@ Do **not** set `to` or `subject` — the dispatcher fills these from the
 inbound message before persisting `approval.reply_draft` (shared:
 `references/shared/reply-envelope-contract.md`).
 
+## Fragment mode (multi-goal dispatch)
+
+When input includes `fragment_mode: true`:
+
+- Run Steps 1–2 logic only; **do not** call `write-facts-multi`.
+- **Do not** include greeting, sign-off, `to`, or `subject`.
+- Return one clarifying question as fragment (interest only — no price/SKU):
+
+```json
+{
+  "fragment_mode": true,
+  "goal": "interest_qualification",
+  "skill": "kol-interest-qualifier",
+  "fragment": "<one focused question on interest/collab mode>",
+  "proposed_facts": {
+    "offer.interest_clarify_asked": true,
+    "offer.interest_clarify_question": "<the question text>"
+  }
+}
+```
+
+- Optional identity facts when manager detected:
+  `identity.contact_role`, `identity.manager_name`, `identity.manager_email`.
+- **Never** include `offer.interest_signal` in `proposed_facts` — that
+  satisfies `interest_qualification` immediately; classifier sets
+  confirmed/declined on a later inbound.
+- `proposed_facts` keys MUST match `fact-ownership.md` for
+  `interest_qualification`.
+
 ## Examples
 
 ### Success — paid question

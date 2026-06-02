@@ -35,6 +35,7 @@ from . import campaign_validation
 from . import confirmed_ingest
 from . import confirmed_fact_buffer
 from . import discovery_router
+from . import classifier_facts
 from . import dispatch_router
 from . import policies as _policies
 from . import pricing_engine
@@ -399,6 +400,13 @@ class FactsWriteMultiBody(_CampaignIdNormaliserMixin):
     source: str = "skill"
     source_event_id: Optional[int] = None
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    signals: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Classifier signals for the same inbound turn. Required for "
+            "deterministic committed-key sanitization when source is email:…"
+        ),
+    )
 
 
 class PolicyPutBody(BaseModel):
@@ -1238,18 +1246,36 @@ def write_facts_multi(
             campaign_id = _inherit_campaign_id_from_escalation(
                 namespace="approval", facts=approval_facts,
             )
+    namespaces = body.namespaces
+    classifier_adjustments: list[str] = []
+    if classifier_facts.should_sanitize_classifier_source(body.source):
+        namespaces, classifier_adjustments = (
+            classifier_facts.sanitize_classifier_namespaces(
+                namespaces, body.signals,
+            )
+        )
+        if classifier_adjustments:
+            log.info(
+                "classifier_fact_sanitize identity_id=%s source=%s adjustments=%s",
+                identity_id,
+                body.source,
+                classifier_adjustments,
+            )
     try:
         written = cal.write_facts_multi(
             identity_id=identity_id,
             campaign_id=campaign_id,
-            namespaces=body.namespaces,
+            namespaces=namespaces,
             source=body.source,
             source_event_id=body.source_event_id,
             env=body.env,
         )
     except cal.FactNamespaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"written": written}
+    out: dict[str, Any] = {"written": written}
+    if classifier_adjustments:
+        out["classifier_sanitize"] = classifier_adjustments
+    return out
 
 
 @router.get("/identities/{identity_id}/dispatch-context")
@@ -1924,9 +1950,38 @@ def select_next_skill_route(body: SelectNextSkillBody) -> dict[str, Any]:
     return dispatch_router.select_next_skill(body.model_dump())
 
 
+class SelectDraftablePlanBody(BaseModel):
+    goals: dict[str, Any] = Field(default_factory=dict)
+    facts: dict[str, Any] = Field(default_factory=dict)
+    signals: list[dict[str, Any]] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
+    lane_filter: Optional[str] = None
+
+
+@router.post("/logic/select-draftable-plan")
+def select_draftable_plan_route(body: SelectDraftablePlanBody) -> dict[str, Any]:
+    return dispatch_router.select_draftable_plan(body.model_dump())
+
+
 class MatchEscalationRulesBody(BaseModel):
     parsed: Optional[dict[str, Any]] = None
     signals: list[Any] = Field(default_factory=list)
+
+
+class SanitizeClassifierFactsBody(BaseModel):
+    namespaces: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    signals: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.post("/logic/sanitize-classifier-facts")
+def sanitize_classifier_facts_route(
+    body: SanitizeClassifierFactsBody,
+) -> dict[str, Any]:
+    """Preview classifier committed-key rewrites (no DB write)."""
+    sanitized, adjustments = classifier_facts.sanitize_classifier_namespaces(
+        body.namespaces, body.signals,
+    )
+    return {"namespaces": sanitized, "adjustments": adjustments}
 
 
 @router.post("/logic/match-escalation-rules")
@@ -1957,6 +2012,7 @@ class PersistReplyDraftBody(BaseModel):
     child_envelope: dict[str, Any]
     latest_email: dict[str, Any]
     linked_escalation_id: Optional[int] = None
+    contributing: list[dict[str, Any]] = Field(default_factory=list)
 
 
 @router.post("/reply-drafts/persist")
@@ -1979,12 +2035,21 @@ def persist_reply_draft(
     except reply_draft.ReplyDraftError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    contributing_skills = body.contributing or [
+        {
+            "lane": body.primary_lane,
+            "goal": body.primary_goal,
+            "skill": body.child_skill,
+        }
+    ]
+
     event_payload = reply_draft.build_draft_event_payload(
         source_message_id=body.source_message_id,
         primary_lane=body.primary_lane,
         primary_goal=body.primary_goal,
         child_skill=body.child_skill,
         merged_draft=merged,
+        contributing_skills=contributing_skills,
     )
     event_id = cal.write_event(
         identity_id=body.identity_id,
@@ -2003,6 +2068,7 @@ def persist_reply_draft(
         child_skill=body.child_skill,
         merged_draft=merged,
         linked_escalation_id=body.linked_escalation_id,
+        contributing_skills=contributing_skills,
     )
     try:
         written = cal.write_facts_multi(

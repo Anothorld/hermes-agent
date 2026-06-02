@@ -225,6 +225,41 @@ a refinement run — return the new envelope only. The strategist
 block may be carried over unchanged from the prior draft if no facts
 have changed.
 
+## Fragment mode (multi-goal dispatch)
+
+When input includes `fragment_mode: true`:
+
+- Still invoke `kol-pricing-strategist` for numbers (deterministic source).
+- **Do not** call `write-facts-multi` or `open-escalation`.
+- **Do not** include greeting, sign-off, `to`, or `subject`.
+- **Branch A (gate=false):** return compensation-only fragment:
+
+```json
+{
+  "fragment_mode": true,
+  "goal": "compensation_negotiation",
+  "skill": "kol-compensation-negotiator",
+  "fragment": "<1-3 sentences: comp terms only, include proposed number when paid>",
+  "proposed_facts": {
+    "offer.compensation_mode": "gifted",
+    "offer.proposed_amount": 1050.0,
+    "offer.proposed_basis": "flat",
+    "offer.proposed_currency": "USD"
+  },
+  "branch": "A_draft",
+  "strategist": { "...full strategist JSON..." }
+}
+```
+
+- **Branch B (gate=true):** return
+  `{"fragment_mode": true, "gate": true, "reason": "<gate_reason>", "goal": "compensation_negotiation", "strategist": {...}}`.
+- Omit `proposed_amount` / basis / currency for pure gifted mode.
+- **Never** include `offer.agreed_terms` in `proposed_facts` — that
+  satisfies `compensation_negotiation` immediately; classifier sets it
+  when the KOL accepts.
+- `proposed_facts` keys MUST match `fact-ownership.md` for
+  `compensation_negotiation`.
+
 ## Examples
 
 ### Branch A — paid counter

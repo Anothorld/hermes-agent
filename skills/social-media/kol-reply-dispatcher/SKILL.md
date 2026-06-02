@@ -17,6 +17,8 @@ should make.
   `references/shared/bridge-runtime-core.md`
 - Router/dispatcher boundaries:
   `references/shared/router-dispatcher-boundaries.md`
+- Fact ownership (fragment mode):
+  `references/shared/fact-ownership.md`
 
 ## Runtime Contract
 - Frequency: every 10 minutes via Hermes `cronjob`. Profile:
@@ -125,6 +127,7 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
   --identity-id <identity_id> --env <TEST|LIVE> \
   --json '{"campaign_id":"<campaign_id>",
             "source":"email:<message_id>",
+            "signals": <classifier signals array verbatim>,
             "namespaces":{
               "offer":       {"offer.<key>": <val>, ...},
               "identity":    {"identity.<key>": <val>, ...},
@@ -133,6 +136,11 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
             }}'
 ```
 
+- **Mandatory:** pass the classifier's `signals` array in the same JSON body.
+  When `source` is `email:<message_id>`, the Bridge deterministically
+  rewrites/drops premature **committed** keys (e.g. `offer.interest_signal=confirmed`
+  on inquiry-only inbound, `offer.deliverable_platforms` → `*_proposed`) before
+  insert. The response may include `classifier_sanitize` with an audit trail.
 - Empty namespaces may be omitted; the Bridge no-ops them.
 - Each fact key MUST be dotted-prefix; the Bridge enforces this with
   `FactNamespaceError` and **rejects the whole call** before any insert if
@@ -193,209 +201,159 @@ Notes:
 - A lane that opened an escalation here **must not** also be picked
   as primary author in Step 5; it is treated as `blocked`.
 
-### Step 4 — Per-lane next-action decision
-For each lane in `{commerce, fulfillment, publish, meta}`, given the
-server-side goal_state from Step 3's re-fetch:
+### Step 4 — Draftable plan (multi-goal)
 
-| Server goal status | Lane action |
-|---|---|
-| `satisfied` | No next action; lane idle. |
-| `blocked` (has `blocking_escalation_id`) | No next action; the open escalation must resolve first. |
-| `skipped` | No next action. |
-| `aborted` | No next action; KOL is dead in this lane. |
-| `active`, no human gates triggered | Pick the child skill bound to that goal (table below). |
-| `active`, human gates triggered | Open an escalation; do NOT invoke a drafting skill. |
+After Step 3 re-fetch, call the deterministic plan endpoint:
 
-Goal → child skill:
+```
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py select-draftable-plan \
+  --json '{"goals": <from dispatch_context.goals as name→row map>,
+            "facts": <dispatch_context reusable_facts merged>,
+            "signals": <classifier signals>,
+            "meta": {}}'
+```
+
+Response: `{draftable, escalate, wait, idle, primary_contributor, ...}`.
+**`draftable`** lists every active goal with a child skill (including
+multiple goals in the same commerce lane, e.g. `product_selection` +
+`deliverables_scope`).
+
+For each row in **`escalate`**, open an escalation immediately (human
+gate). Those goals are excluded from synthesis this turn.
+
+If **`draftable`** is empty after escalations, write
+`approval.unmatched_reply` or `approval.pending_action_*` as before and
+skip to Step 6.
+
+Goal → child skill (reference):
 
 | Goal | Child skill |
 |---|---|
-| `cold_outreach` | `kol-cold-outreach` |
-| `reengagement_outreach` | `kol-reengagement-outreach` |
 | `interest_qualification` | `kol-interest-qualifier` |
 | `product_selection` | `kol-product-selector` |
 | `deliverables_scope` | `kol-deliverables-clarifier` |
 | `compensation_negotiation` | `kol-compensation-negotiator` |
 | `contract_signing` | `kol-contract-coordinator` |
-| `logistics` (`address_collected` missing) | `kol-shipping-intake` |
+| `logistics` (no address) | `kol-shipping-intake` |
 | `logistics` (post-address) | `kol-logistics-tracker` |
 | `payout_setup` | `kol-payout-method-intake` |
-| `content_production` (no `brief_sent`) | `kol-brief-sender` |
-| `content_production` (`brief_sent` true, no `draft_submitted`) | (wait; no draft yet) |
-| `content_review_and_golive` | `kol-content-reviewer` then `kol-golive-and-boost` |
+| `content_production` (no brief) | `kol-brief-sender` |
+| `content_review_and_golive` | `kol-content-reviewer` |
 | `post_collab_archival` | `kol-archival-writer` |
 
-Many of these child skills land in later Phase B sub-phases. If the chosen
-skill is not yet present, write an `approval.pending_action_<goal>` fact
-(via `write-facts-multi` from Step 3 or a follow-up call) so an operator
-can pick it up.
+### Step 5 — Parallel fragment-mode child skills
 
-### Step 5 — Lane priority and primary author selection
-1. Default priority: `commerce > fulfillment > publish > meta`.
-2. **Severity reversal:** if any `fulfillment` or `publish` action carries a
-   `severity ∈ {critical, blocking}` from the classifier's `signals` (e.g.
-   `not_received`, `address_questioned`, `rejects_revisions`,
-   `escalation_pattern_match:*`), it temporarily outranks `commerce`.
-   Additionally, if a lane is currently blocked by Step 3.25 soft-controls
-   (`allow_autoflow=false` or lane-relevant `gate_*`), treat that lane as
-   non-authorable for this turn.
-3. Pick the **highest-priority lane that is not blocked/idle** as the
-   primary lane. Invoke its child skill with the full reply context.
+For **each** row in `draftable`, invoke the bound child skill with
+`fragment_mode: true` plus the standard reply inputs:
 
-   **Mandatory inputs to every reply-side child skill:**
-   - `identity_id`, `campaign_id`, `env`, `thread_id` (as before).
-   - `inbound_excerpt` — pulled from `latest_email.body` (3–5 sentence
-     quote of what the KOL just said; if the body is already short,
-     pass it whole).
-   - `thread_history` — pass through **verbatim** from Step 0. Child
-     skills feed it into their `[P0.3] Conversation history` preamble
-     so the draft does not re-ask previously-answered questions and
-     does not echo phrasing the KOL has already seen.
-   - `flow_hint` — a small JSON object the child uses for its
-     `[P0.4] Flow guidance` preamble:
-     ```json
-     {
-       "lane": "<commerce|fulfillment|publish|meta>",
-       "current_goal": "<active goal name from server goal_state>",
-       "next_goal_in_lane": "<the next goal in that lane's typical order,
-                              or null if current_goal is terminal>",
-       "missing_facts_for_current_goal": ["<from goal_state>"],
-       "kol_signaled_next_step": <true|false>
-     }
-     ```
-     `kol_signaled_next_step` is `true` iff the classifier's `signals`
-     for this lane include an unambiguous forward-intent signal — e.g.
-     `accepts_terms`, `signs_contract`, `address_provided`,
-     `submits_draft_url`, `interest_positive` with no follow-up
-     question — that maps to the lane's `next_goal_in_lane`. The
-     child skill uses this as **guidance**, not a hard switch:
-     - when `true`, the draft naturally advances to `next_goal_in_lane`;
-     - when `false`, the draft stays on `current_goal` and either
-       answers the KOL's question or asks the one fact still missing.
-4. For non-primary lanes that have a next action, do NOT invoke their
-   skill. Instead append to the same `write-facts-multi` payload (or issue
-   one follow-up call) under `approval`:
-   ```
-   "approval.pending_topics": ["<lane>:<goal>:<one-line topic>", ...]
-   ```
+- `identity_id`, `campaign_id`, `env`, `thread_id`
+- `inbound_excerpt`, `thread_history` (verbatim Step 0)
+- `flow_hint` per goal (lane, current_goal, missing_facts, …)
 
-### Step 5.5 — Persist draft or escalation outcome
-If Step 5 invoked a child skill and the child returns a draft envelope,
-persist it before reporting success. The dispatcher itself still does not
-send mail; it creates an operator-review artifact in CAL.
+**Parallelism:** prefer `delegate_task` with one task per draftable goal
+(isolated sub-agents). If delegation is unavailable, run sequentially in
+plan order — still collect all fragments before Step 5.5.
 
-**Envelope enrichment (mandatory).** Reply-side child skills return
-content only — they do not know the recipient or subject. Before writing
-the fact, build a `<merged draft envelope>` from the child's envelope
-plus the inbound `latest_email` you already have in Step 1's
-`pending_replies` payload:
+Each child returns either:
+- `{fragment_mode: true, fragment, proposed_facts, goal, skill}` or
+- `{fragment_mode: true, gate: true, reason, goal}` → open escalation for
+  that goal; exclude from synthesis
+- `{skipped: ...}` or `{error: ...}` → log; exclude from synthesis
 
-- `to` ← `latest_email.from`
-- `subject` ← `latest_email.subject` (prefixed with `Re: ` unless it
-  already starts with `Re:` / `re:` / `RE:`)
-- `body`, `thread_id`, and any other fields keep the child's value
+Child skills **must not** write facts or open escalations in fragment
+mode. See `references/shared/fact-ownership.md`.
 
-Use `<merged draft envelope>` (not `<child draft envelope>`) in both
-writes below.
+### Step 5.5 — Merge proposed facts (single write)
 
-```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-event \
-  --identity-id <identity_id> --campaign-id "<campaign_id>" \
-  --env <TEST|LIVE> --event-type kol_reply_draft_ready \
-  --actor agent:kol-reply-dispatcher \
-  --json '{"payload":{"source_message_id":"<inbound_message_id>",
-                       "primary_lane":"<lane>",
-                       "primary_goal":"<goal>",
-                       "child_skill":"<skill>",
-                       "draft":<merged draft envelope>}}'
-```
+Collect `proposed_facts` from all successful fragments into
+`{goal: {fact_key: value}}`. The dispatcher (not the model) validates
+disjoint ownership — every key must belong to exactly one goal per
+`GOAL_OWNED_FACTS` in the Bridge.
 
-Then write one approval fact so the web console / operator queue can find
-the draft even if the agent transcript is later compacted:
+If validation fails, open escalation `fragment_fact_conflict` and skip
+drafting.
+
+Otherwise write **once**:
 
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
   --identity-id <identity_id> --env <TEST|LIVE> \
   --json '{"campaign_id":"<campaign_id>",
-            "source":"draft:<inbound_message_id>",
-            "namespaces":{"approval":{
-              "approval.reply_draft":{
-                "decision":"pending",
-                "source_message_id":"<inbound_message_id>",
-                "primary_lane":"<lane>",
-                "primary_goal":"<goal>",
-                "child_skill":"<skill>",
-                "draft":<merged draft envelope>
-              }}}}'
+            "source":"fragment-merge:<message_id>",
+            "namespaces":{"offer":{...},"identity":{...}}}'
 ```
 
-The bridge rejects an `approval.reply_draft` whose `draft` is missing
-non-empty `subject` / `body` / `to` — if write-facts-multi 400s with
-`approval.reply_draft.draft missing/empty: ...`, your enrichment step
-did not run.
+Group flat keys into namespaces (`offer.*` → `offer`, etc.). Re-fetch
+`get-dispatch-context` after the write.
 
-If the selected child skill cannot produce a draft because required facts
-are missing, open an escalation instead of returning a free-text failure.
-When the child returned `{"error":"campaign_config_incomplete","missing":[...]}`
-(or any other structured missing-fact signal), the escalation MUST forward
-that list as `resume_context.missing_config_fields` so the operator UI
-can render it as chips. Example:
+**Proposed vs committed:** deliverables-clarifier fragment mode must use
+`offer.deliverable_platforms_proposed` / `offer.deliverable_count_proposed`
+(not the committed keys that satisfy `deliverables_scope`). Never propose
+`offer.interest_signal` or `offer.agreed_terms` from fragments — classifier
+only. See `references/shared/fact-ownership.md`.
+
+### Step 5.6 — Synthesize one reply body
+
+Invoke `kol-reply-synthesizer` with ordered `fragments` from Step 5
+(non-gated, non-empty). Receive content-only `{body, thread_id}`.
+
+Build `contributing` list for persistence:
+
+```json
+[
+  {"lane": "commerce", "goal": "product_selection", "skill": "kol-product-selector"},
+  {"lane": "commerce", "goal": "deliverables_scope", "skill": "kol-deliverables-clarifier"}
+]
+```
+
+`primary_*` fields = first entry in `contributing` (highest priority).
+
+### Step 5.7 — Persist synthesized draft
+
+Use the toolized persist endpoint (enrichment + event + fact atomically):
 
 ```
-open-escalation --json '{"identity_id":...,"campaign_id":"...",
-  "goal":"<active goal>",
-  "reason":"campaign_config_incomplete_for_<lane>_reply",
-  "question_to_operator":"Campaign config is incomplete for <goal>: <fields> are empty/null. <context>",
-  "resume_context":{"missing_config_fields":["deliverable_platforms",
-                                              "deliverable_count_per_platform"],
-                     "source":"child_skill_abort",
-                     "child_skill":"<skill name>"}}'
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py persist-reply-draft \
+  --env <TEST|LIVE> \
+  --json '{
+    "identity_id": <id>,
+    "campaign_id": "<cid>",
+    "source_message_id": "<inbound_message_id>",
+    "primary_lane": "<first contributing lane>",
+    "primary_goal": "<first contributing goal>",
+    "child_skill": "kol-reply-synthesizer",
+    "child_envelope": {"body": "<synthesized body>", "thread_id": "..."},
+    "latest_email": <latest_email from pending_replies>,
+    "contributing": [ ... ]
+  }'
 ```
+
+If synthesis returns `no_fragments_to_synthesize`, open escalation instead.
+
+When a fragment skill returned `campaign_config_incomplete`, open
+escalation with `resume_context.missing_config_fields` as before.
 
 Every processed reply must end in exactly one durable outcome:
-`kol_reply_draft_ready`, `open-escalation`, or `approval.pending_action_*`.
+`kol_reply_draft_ready` (via persist-reply-draft), `open-escalation`, or
+`approval.pending_action_*`.
 
-### Step 5.6 — Refinement runs (operator-triggered regeneration)
+### Step 5.8 — Refinement runs (operator-triggered regeneration)
 When the brief is an `approval_refine` (operator clicked 优化/重新生成
 on the Approvals page), the input carries `operator_refinement_prompt`
 and the full prior `approval.reply_draft` value under
 `current_value_json`. In that mode:
 
-- Skip Steps 1–4 (no classification, no fact-write, no skill selection).
-  Re-invoke **the same** `child_skill` named in `current_value_json`.
-- Pass through the original inbound context (recover from
-  `kol_inbound_reply` events for `source_message_id` if needed) **plus**
-  the `operator_refinement_prompt` as an extra input field. If a fresh
-  `thread_history` for that thread is still available, forward it as
-  well — otherwise omit the field (child skill must tolerate its
-  absence on a refinement run). The child skill treats the prompt as a
-  hard constraint on the new draft's *content* (tone, additions,
-  removals) and must still return the same envelope shape
-  (`Step 5 — Return draft envelope`).
-- Do **not** rewrite `offer.*` or any other domain facts on a refinement
-  run — it is content-only.
-- Apply the **same envelope enrichment as Step 5.5** to the child's new
-  envelope: fill `to` and `subject` from the recovered inbound
-  `kol_inbound_reply` event (`from_addr` and `Re: <subject>`). The
-  bridge's write-time validator will reject a sparse `draft` here too.
-- Persist the result by rewriting the same `approval.reply_draft` fact
-  via `write-facts-multi`. The new value MUST keep `decision="pending"`,
-  `source_message_id`, `primary_lane`, `primary_goal`, `child_skill`,
-  and `linked_escalation_id`; set `draft` to the new **merged** envelope;
-  prepend the prior `draft` into `previous_drafts` (cap 5); and append
-  `{prompt, at, by}` to `refinement_history` (cap 5).
-- Do **not** open a new escalation, do **not** send mail, do **not**
-  create a Gmail draft. Skip Step 6.
+- Skip Steps 1–5.6 (no classification, no fragment fan-out).
+- If `contributing_skills` lists multiple contributors, re-run fragment
+  skills + synthesizer with the refinement prompt appended; otherwise
+  re-invoke the single named `child_skill` (legacy single-skill drafts).
+- Do **not** rewrite domain facts on a refinement run — content-only.
+- Persist via `persist-reply-draft` or `write-facts-multi` on
+  `approval.reply_draft` as before. Skip Step 6 label changes.
 
 ### Step 6 — Idempotency labels
-After Step 5.5 (or an escalation was opened), apply the Gmail label
-`kol-outreach/handled` to that message and remove
-`kol-outreach/pending-reply`. The Gmail label transition is the only
-state-machine for "have we processed this email"; do **not** rely on CAL
-events for re-entry detection.
-
-Use the deterministic bridge CLI command below; do **not** hand-roll
-Gmail label calls in ad-hoc Python:
+After Step 5.7 (or escalation-only outcome), apply the Gmail label
+`kol-outreach/handled` once per inbound message:
 
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py mark-reply-handled \
@@ -413,57 +371,58 @@ Return a JSON summary covering each processed reply:
     "campaign_id": "TS8319",
     "env": "TEST",
     "primary_lane": "commerce",
-    "primary_goal": "compensation_negotiation",
-    "primary_skill_invoked": "kol-compensation-negotiator",
-    "side_topics": ["fulfillment:logistics:address still pending"],
+    "primary_goal": "product_selection",
+    "primary_skill_invoked": "kol-reply-synthesizer",
+    "contributing_skills": [
+      {"lane": "commerce", "goal": "product_selection", "skill": "kol-product-selector"},
+      {"lane": "commerce", "goal": "deliverables_scope", "skill": "kol-deliverables-clarifier"}
+    ],
+    "fragments_merged": 2,
     "draft_event_written": true,
     "approval_fact_written": "approval.reply_draft",
-    "escalation_opened": null
-  },
-  ...
+    "escalations_opened": []
+  }
 ]
 ```
 
 ## Examples
 
-### Success — single-lane
-KOL replies "I'd love to collaborate, what's the budget?". Step 1 returns
-`outreach.satisfied`. Classifier emits
-`facts_extracted.offer={"offer.interest_signal":"confirmed"}`. Step 3 writes
-that one namespace via `write-facts-multi`. Server re-fetch shows
-`deliverables_scope` active in commerce. Primary author =
-`kol-deliverables-clarifier`.
+### Success — multi-goal commerce (product + deliverables)
+KOL confirms interest and asks about product + deliverables. Classifier
+writes interest facts. Plan returns `draftable`:
+`product_selection` + `deliverables_scope`. Fragment skills return two
+topic paragraphs + disjoint `proposed_facts`. Dispatcher writes facts
+once, synthesizer merges, one `approval.reply_draft` pending.
 
-### Success — multi-lane, severity reversal, single fact write
-KOL replies with both "the package never arrived" and "we should talk price
-again". Classifier emits `facts_extracted.offer={...}` plus
-`facts_extracted.fulfillment={...}` plus `signals=[{name:"not_received",
-severity:"critical"}, ...]`. Step 3's `write-facts-multi` writes BOTH
-namespaces in one call. Re-fetch shows `compensation_negotiation` active
-(commerce) and `logistics` active (fulfillment). Severity reversal →
-primary lane = fulfillment, primary skill = `kol-logistics-tracker`.
-Commerce side-topic written via a second `write-facts-multi` call:
-```
-"approval.pending_topics":
-  ["commerce:compensation_negotiation:KOL re-opened price; defer until package located"]
-```
+### Success — single-lane
+KOL replies "I'd love to collaborate, what's the budget?". Plan returns
+one draftable goal: `deliverables_scope`. Single fragment → synthesizer
+still produces one email (trivial merge).
+
+### Success — multi-lane, severity reversal
+KOL replies with "package never arrived" + price talk. Plan may return
+draftable goals in both fulfillment and commerce; severity signals still
+apply — fulfillment fragments may rank first in `contributing` order.
+Gated commerce goals go to `escalate` list instead of synthesis.
 
 ### Failure — namespace violation
-Classifier emits `compensation_mode` (no prefix). Step 3 hits
-`FactNamespaceError` on the whole call (atomic — nothing is written). Open
-escalation with reason `fact_namespace_violation`, log raw classifier
-output, skip drafting.
+Classifier emits malformed keys. Step 3 hits `FactNamespaceError`. Open
+escalation `fact_namespace_violation`, skip drafting.
+
+### Failure — fragment fact conflict
+Two fragment skills propose the same fact key. Open
+`fragment_fact_conflict` escalation.
 
 ### Failure — missing config
-`campaign_config` not in the snapshot. Step 1's `get-dispatch-context`
-returns 404. Open escalation `dispatcher_missing_context`. Do NOT proceed.
+`campaign_config` not in the snapshot. Open escalation
+`dispatcher_missing_context`. Do NOT proceed.
 
 ## Pitfalls
 - The classifier's `active_goals_by_lane` is a **hint**, not the truth.
   Always re-fetch `get-dispatch-context` after writing facts and trust the
   server.
-- Side-topics only via `approval.pending_topics` — never silently drop a
-  non-primary-lane action.
+- Side-topics for **wait** goals still via `approval.pending_topics` when
+  no fragment was produced — never silently drop a non-draftable action.
 - A reply that fits **no** active goal still needs a label transition;
   mark `kol-outreach/handled` and add an `approval.unmatched_reply` fact
   so the operator notices.

@@ -102,3 +102,44 @@ def test_outreach_path_reengagement(bridge_pkg):
         "meta": {"path": "reengagement"},
     })
     assert out["primary_skill"] == "kol-reengagement-outreach"
+
+
+def test_draftable_plan_multiple_commerce_goals(bridge_pkg):
+    out = _dr(bridge_pkg).select_draftable_plan({
+        "goals": {
+            "product_selection": _goal("active", "commerce"),
+            "deliverables_scope": _goal("active", "commerce"),
+            "compensation_negotiation": _goal("inactive", "commerce"),
+        },
+    })
+    assert len(out["draftable"]) == 2
+    goals = [r["goal"] for r in out["draftable"]]
+    assert goals == ["product_selection", "deliverables_scope"]
+    assert out["primary_contributor"]["goal"] == "product_selection"
+
+
+def test_draftable_plan_human_gate_in_escalate(bridge_pkg):
+    out = _dr(bridge_pkg).select_draftable_plan({
+        "goals": {
+            "product_selection": _goal(
+                "active", "commerce", human_gates=["sku_off_whitelist"]),
+            "deliverables_scope": _goal("active", "commerce"),
+        },
+    })
+    assert len(out["escalate"]) == 1
+    assert out["escalate"][0]["goal"] == "product_selection"
+    assert len(out["draftable"]) == 1
+    assert out["draftable"][0]["goal"] == "deliverables_scope"
+
+
+def test_draftable_plan_lane_filter(bridge_pkg):
+    out = _dr(bridge_pkg).select_draftable_plan({
+        "goals": {
+            "product_selection": _goal("active", "commerce"),
+            "logistics": _goal("active", "fulfillment"),
+        },
+        "facts": {"fulfillment.address_collected": True},
+        "lane_filter": "commerce",
+    })
+    assert len(out["draftable"]) == 1
+    assert out["draftable"][0]["lane"] == "commerce"

@@ -47,6 +47,47 @@ function PillRow({ items }: { items: Array<[string, string | null | undefined]> 
   );
 }
 
+type ContributingSkill = {
+  lane?: string;
+  goal?: string;
+  skill?: string;
+};
+
+function ContributingSkillsChips({ items }: { items: ContributingSkill[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <div className="text-[11px] font-medium text-slate-600">
+        合成主题 ({items.length})
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {items.map((row, i) => {
+          const lane = row.lane ?? '?';
+          const goal = row.goal ?? '?';
+          const skill = row.skill ?? '?';
+          const label = `${lane} · ${goal}`;
+          return (
+            <span
+              key={`${lane}-${goal}-${skill}-${i}`}
+              title={skill}
+              className="inline-flex max-w-full flex-col rounded border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] leading-tight text-violet-900"
+            >
+              <span className="font-medium">{label}</span>
+              <span className="truncate font-mono text-violet-700">{skill}</span>
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function parseContributingSkills(ctx: Ctx): ContributingSkill[] {
+  const raw = ctx.contributing_skills;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item): item is ContributingSkill => isObj(item));
+}
+
 function KeyValueTable({ ctx, skip = [] }: { ctx: Ctx; skip?: string[] }) {
   const entries = Object.entries(ctx).filter(
     ([k, v]) => !skip.includes(k) && v !== null && v !== undefined && v !== '',
@@ -265,6 +306,7 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
   const primaryLane = asString(ctx.primary_lane);
   const sourceMessageId = asString(ctx.source_message_id);
   const decision = asString(ctx.decision);
+  const contributing = parseContributingSkills(ctx);
   if (!draft) {
     return (
       <div className="text-xs italic text-slate-500">
@@ -287,6 +329,7 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
           ['decision', decision],
         ]}
       />
+      {contributing.length > 0 && <ContributingSkillsChips items={contributing} />}
       <div className="rounded border border-emerald-200 bg-white">
         <div className="border-b border-emerald-100 bg-emerald-50/60 px-3 py-2 text-xs">
           <div className="flex flex-wrap items-baseline gap-1">

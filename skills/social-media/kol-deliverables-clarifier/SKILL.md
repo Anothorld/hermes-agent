@@ -211,6 +211,35 @@ Do **not** set `to` or `subject` — the dispatcher fills these from the
 inbound message before persisting `approval.reply_draft` (shared:
 `references/shared/reply-envelope-contract.md`).
 
+## Fragment mode (multi-goal dispatch)
+
+When input includes `fragment_mode: true`:
+
+- Run Steps 1–2 logic only; **do not** call `write-facts-multi` or
+  `open-escalation`.
+- **Do not** include greeting, sign-off, `to`, or `subject`.
+- Return scope-only prose (platforms / count / usage rights — **no price**):
+
+```json
+{
+  "fragment_mode": true,
+  "goal": "deliverables_scope",
+  "skill": "kol-deliverables-clarifier",
+  "fragment": "<1-3 sentences: deliverable framework only>",
+  "proposed_facts": {
+    "offer.deliverable_platforms_proposed": ["instagram", "tiktok"],
+    "offer.deliverable_count_proposed": 1,
+    "offer.usage_rights_discussed": true
+  },
+  "branch": "A_propose | C_defer_price"
+}
+```
+
+- **Branch B (over-cap):** return
+  `{"fragment_mode": true, "gate": true, "reason": "...", "goal": "deliverables_scope"}`.
+- `proposed_facts` keys MUST match `fact-ownership.md` for
+  `deliverables_scope`.
+
 ## Examples
 
 ### Branch A

@@ -98,6 +98,52 @@ Propose:
 ### Step 4 — Envelope
 Standard reply envelope; `branch`: `A_confirm | B_propose | C_escalated`.
 
+## Fragment mode (multi-goal dispatch)
+
+When input includes `fragment_mode: true`:
+
+- Run Steps 1–2 logic only; **do not** call `write-facts-multi` or
+  `open-escalation`.
+- **Do not** include greeting, sign-off, `to`, or `subject`.
+- Return topic-only prose the synthesizer will merge:
+
+```json
+{
+  "fragment_mode": true,
+  "goal": "product_selection",
+  "skill": "kol-product-selector",
+  "fragment": "<1-3 sentences: product/variant only>",
+  "proposed_facts": {
+    "offer.proposed_skus": ["<internal variant id>"]
+  },
+  "branch": "B_propose"
+}
+```
+
+Branch A (KOL confirmed a variant) may instead return:
+
+```json
+{
+  "fragment_mode": true,
+  "goal": "product_selection",
+  "skill": "kol-product-selector",
+  "fragment": "<confirm variant only>",
+  "proposed_facts": {
+    "offer.sku_locked": "<internal variant id>",
+    "offer.color_or_variant_locked": "<human spec or null>",
+    "offer.fit_confirmed": false
+  },
+  "branch": "A_confirm"
+}
+```
+
+- **Branch C (off-policy):** return
+  `{"fragment_mode": true, "gate": true, "reason": "...", "goal": "product_selection"}`
+  — dispatcher opens escalation; no fragment.
+- `proposed_facts` keys MUST be subset of
+  `kol-reply-dispatcher/references/shared/fact-ownership.md` for
+  `product_selection`.
+
 ## Pitfalls
 - Leaking `SF8181…` or `variant 37384` into email.
 - Auto-negotiating when KOL asks for unavailable spec — escalate instead.

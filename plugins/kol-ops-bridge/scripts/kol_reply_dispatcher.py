@@ -535,15 +535,16 @@ def _match_identity(
 _DISPATCHER_INSTRUCTIONS = (
     "You are running the `kol-reply-dispatcher` skill. Read the supplied "
     "pending_replies array and dispatch context, classify the inbound reply, "
-    "persist facts via the bridge CLI, then route to the appropriate child "
-    "skill OR open an escalation per the skill's Step 3.5. If a child skill "
-    "returns a draft envelope, persist it back to CAL as a `kol_reply_draft_ready` "
-    "event and an `approval.reply_draft` fact for operator review. Do not send "
-    "mail directly. Respect each reply's `anomaly_signals` soft-control flags "
+    "persist classifier facts via the bridge CLI, then follow the skill's "
+    "multi-goal flow: `select-draftable-plan` → parallel fragment-mode child "
+    "skills (one per draftable goal) → merge disjoint `proposed_facts` with a "
+    "single `write-facts-multi` → `kol-reply-synthesizer` → "
+    "`persist-reply-draft` with `contributing` list. Open escalations for "
+    "human-gate goals and fragment `gate:true` results; do not send mail. "
+    "Respect each reply's `anomaly_signals` soft-control flags "
     "(especially allow_autoflow / gate_budget / gate_contract / gate_payout). "
-    "For Step 6 idempotency labels, use only "
-    "`kol_bridge_tool.py mark-reply-handled`; do not call Gmail label APIs "
-    "or custom scripts directly."
+    "For idempotency labels, use only `kol_bridge_tool.py mark-reply-handled`; "
+    "do not call Gmail label APIs or custom scripts directly."
 )
 
 

@@ -126,10 +126,16 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Compensation number / bounds / human-gate | `pricing_engine.py` | `compute-compensation-offer` | `POST /logic/compute-compensation-offer` |
 | Campaign-config safety-field validation | `campaign_validation.py` | `validate-campaign-config` | `POST /logic/validate-campaign-config` |
 | Per-turn lane routing (primary skill + side-topics) | `dispatch_router.py` | `select-next-skill` | `POST /logic/select-next-skill` |
+| Multi-goal draftable plan (fragment dispatch) | `dispatch_router.py` | `select-draftable-plan` | `POST /logic/select-draftable-plan` |
 | Escalation-rule matching → `escalation_hint` | `policies.match_escalation_rules` | `match-escalation-rules` | `POST /logic/match-escalation-rules` |
+| Classifier committed-key sanitize (preview) | `classifier_facts.py` | `sanitize-classifier-facts` | `POST /logic/sanitize-classifier-facts` |
 | Reply-draft envelope enrichment + atomic persist | `reply_draft.py` | `persist-reply-draft` | `POST /reply-drafts/persist` |
 
-The four `/logic/*` endpoints are pure (no DB read/write) and need no bridge
+`write-facts-multi` with `source=email:<message_id>` auto-sanitizes namespaces
+when `signals` are supplied (see `classifier_facts.sanitize_classifier_namespaces`).
+
+The `/logic/*` endpoints above (except reply-draft persist) are pure (no DB
+read/write) and need no bridge
 key. `persist-reply-draft` writes CAL (event + `approval.reply_draft` fact in
 one call, after enriching `to` / `Re:`-subject / `thread_id`) and requires the
 key like every other mutating route.

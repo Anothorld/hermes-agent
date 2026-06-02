@@ -198,6 +198,22 @@ Common signals, append-only — emit only when evidence is in the email body:
    the **email's view** in `active_goals_by_lane`; the dispatcher reconciles.
 4. Extract facts, multi-namespace, in one pass. **Skip** any field you're not
    sure about — under-extraction is fine, hallucination is not.
+
+### Committed vs proposed (HARD — goal satisfaction)
+These keys **satisfy** `goal_state` when written by the dispatcher; only emit
+them when the **latest email** shows agreement, not mere questions:
+
+| Key | Emit only when |
+|-----|----------------|
+| `offer.interest_signal=confirmed` | `interest_positive` or `accepts_terms` (≥0.6); never on `interest_unclear` / `asks_*` alone |
+| `offer.deliverable_platforms`, `offer.deliverable_count_per_platform` | KOL states agreed platforms/counts, or `accepts_terms`; if they only **ask** what you need, omit (Bridge may rewrite to `*_proposed`) |
+| `offer.usage_rights_discussed=true` | Usage rights were discussed **and** agreed or clearly accepted — not on deliverables/budget questions alone |
+| `offer.agreed_terms` | `accepts_terms` — not on `proposes_rate` / `counter_offer` alone |
+| `offer.sku_locked`, `offer.color_or_variant_locked`, `offer.fit_confirmed` | KOL **confirmed** a variant — not on `requests_oos_sku` / `requests_color_swap` alone |
+
+When the KOL is asking or vague, prefer **omitting** committed keys (or
+`offer.interest_signal=needs_more_info`). The Bridge also sanitizes
+`email:` writes using your `signals` array.
 5. Enumerate every signal with at least 0.6 confidence; lower-confidence
    signals go into `ambiguity` instead.
 6. Set `escalation_hint.should_consider=true` if **any** of: KOL quotes >

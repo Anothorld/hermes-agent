@@ -8,16 +8,22 @@ priority with a severity-reversal rule — so it lives here rather than being
 re-derived by the model each turn (which risks picking the wrong child skill
 or silently dropping a non-primary lane).
 
-Pure: no DB, no HTTP. ``select_next_skill`` consumes the server goal_state
-snapshot + classifier signals and returns the routing decision.
+Multi-goal dispatch (``select_draftable_plan``) returns **all** active
+draftable goals within the snapshot so fragment-mode child skills can run in
+parallel and a synthesizer can merge their outputs into one reply.
+
+Pure: no DB, no HTTP. ``select_next_skill`` / ``select_draftable_plan`` consume
+the server goal_state snapshot + classifier signals and return routing decisions.
 """
 
 from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Optional
 
+from .schema import GOAL_NAMES, LANES
+
 # Default lane priority (commerce wins ties).
-LANE_PRIORITY = ("commerce", "fulfillment", "publish", "meta")
+LANE_PRIORITY = LANES
 
 # Goal → child skill. ``logistics`` and ``content_production`` are
 # fact-conditional and resolved in ``_skill_for_goal``.
@@ -33,6 +39,76 @@ GOAL_SKILL: dict[str, str] = {
     "post_collab_archival": "kol-archival-writer",
 }
 
+# Fact keys each goal's fragment-mode child skill may propose (disjoint by design).
+GOAL_OWNED_FACTS: dict[str, tuple[str, ...]] = {
+    "outreach": ("offer.outreach_sent",),
+    "interest_qualification": (
+        # ``offer.interest_signal`` is classifier-only (confirmed/declined);
+        # fragment must not pre-commit interest — see interest-qualifier SKILL.
+        "offer.interest_clarify_asked",
+        "offer.interest_clarify_question",
+        "identity.contact_role",
+        "identity.manager_name",
+        "identity.manager_email",
+    ),
+    "product_selection": (
+        "offer.sku_locked",
+        "offer.color_or_variant_locked",
+        "offer.fit_confirmed",
+        "offer.sku_requested",
+        "offer.proposed_skus",
+    ),
+    "deliverables_scope": (
+        # Fragment / clarify turns use *_proposed until classifier confirms on a
+        # later inbound; committed keys satisfy goal_state — do not propose them
+        # from fragment mode before KOL agreement (see deliverables-clarifier SKILL).
+        "offer.deliverable_platforms_proposed",
+        "offer.deliverable_count_proposed",
+        "offer.usage_rights_discussed",
+        "offer.deliverable_count_per_platform_requested",
+    ),
+    "compensation_negotiation": (
+        # ``offer.agreed_terms`` is classifier-only when KOL accepts; fragment
+        # may set mode + proposed_* counter-offer but must not satisfy the goal
+        # in the same turn (see compensation-negotiator SKILL).
+        "offer.compensation_mode",
+        "offer.proposed_amount",
+        "offer.proposed_basis",
+        "offer.proposed_currency",
+        "offer.kol_paid_quote",
+    ),
+    "contract_signing": (
+        "offer.contract_sent",
+        "offer.contract_signed",
+    ),
+    "logistics": (
+        "fulfillment.address_collected",
+        "fulfillment.shipping_method",
+        "fulfillment.tracking_filled",
+        "fulfillment.delivered_confirmed",
+    ),
+    "payout_setup": ("payout.method_collected",),
+    "content_production": (
+        "offer.brief_sent",
+        "offer.draft_submitted",
+    ),
+    "content_review_and_golive": (
+        "offer.review_verdict",
+        "offer.posted_url",
+        "offer.boost_assets_status",
+    ),
+    "post_collab_archival": (
+        "approval.archival_outcome",
+        "approval.relationship_synced",
+        "approval.preferred_skus_synced",
+        "approval.preferred_mode_synced",
+        "approval.followups_pending",
+    ),
+}
+
+_GOAL_ORDER = {name: idx for idx, name in enumerate(GOAL_NAMES)}
+_LANE_ORDER = {name: idx for idx, name in enumerate(LANE_PRIORITY)}
+
 # Severity-bearing signal name → lane it escalates. ``escalation_pattern_match``
 # and any signal carrying an explicit ``lane`` are handled dynamically.
 SEVERITY_SIGNAL_LANE: dict[str, str] = {
@@ -44,6 +120,14 @@ SEVERITY_SIGNAL_LANE: dict[str, str] = {
     "content_dispute": "publish",
 }
 _CRITICAL_SEVERITIES = frozenset({"critical", "blocking"})
+
+
+class FactOwnershipError(ValueError):
+    """Raised when fragment-mode proposed facts overlap or violate ownership."""
+
+    def __init__(self, conflicts: list[str]) -> None:
+        self.conflicts = conflicts
+        super().__init__("; ".join(conflicts))
 
 
 def _present(facts: Mapping[str, Any], key: str) -> bool:
@@ -98,21 +182,140 @@ def _lane_action(goal_row: Mapping[str, Any], facts: Mapping[str, Any],
     """Map one goal_state row to a lane action."""
     status = goal_row.get("status")
     goal = goal_row.get("goal") or goal_row.get("name")
+    lane = goal_row.get("lane")
     if status in {"satisfied", "skipped", "aborted", "inactive", None}:
-        return {"action": "idle", "status": status, "goal": goal, "skill": None}
+        return {"action": "idle", "status": status, "goal": goal, "lane": lane,
+                "skill": None}
     if goal_row.get("blocking_escalation_id"):
-        return {"action": "idle", "status": "blocked", "goal": goal, "skill": None,
-                "reason": "blocking_escalation_open"}
+        return {"action": "idle", "status": "blocked", "goal": goal, "lane": lane,
+                "skill": None, "reason": "blocking_escalation_open"}
     if goal_row.get("human_gates") or goal_row.get("gates_triggered"):
-        return {"action": "escalate", "status": status, "goal": goal, "skill": None,
-                "reason": "human_gate_triggered"}
+        return {"action": "escalate", "status": status, "goal": goal, "lane": lane,
+                "skill": None, "reason": "human_gate_triggered"}
     if status == "blocked":
-        return {"action": "idle", "status": "blocked", "goal": goal, "skill": None}
+        return {"action": "idle", "status": "blocked", "goal": goal, "lane": lane,
+                "skill": None}
     skill = _skill_for_goal(goal, facts, meta)
     if skill is None:
-        return {"action": "wait", "status": status, "goal": goal, "skill": None,
-                "reason": "no_child_skill_yet"}
-    return {"action": "draft", "status": status, "goal": goal, "skill": skill}
+        return {"action": "wait", "status": status, "goal": goal, "lane": lane,
+                "skill": None, "reason": "no_child_skill_yet"}
+    return {"action": "draft", "status": status, "goal": goal, "lane": lane,
+            "skill": skill}
+
+
+def _sort_goal_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _key(row: dict[str, Any]) -> tuple[int, int]:
+        lane = row.get("lane") or "meta"
+        goal = row.get("goal") or ""
+        return (_LANE_ORDER.get(lane, 99), _GOAL_ORDER.get(goal, 99))
+
+    return sorted(actions, key=_key)
+
+
+def _build_goal_actions(
+    goals: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    meta: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return one action row per goal in the payload (not collapsed per lane)."""
+    out: list[dict[str, Any]] = []
+    for goal_name, row in goals.items():
+        row = dict(row)
+        row.setdefault("goal", goal_name)
+        lane = row.get("lane")
+        if lane not in LANE_PRIORITY:
+            continue
+        action = _lane_action(row, facts, meta)
+        out.append(action)
+    return _sort_goal_actions(out)
+
+
+def assert_disjoint(proposed_by_goal: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Merge fragment-mode proposed facts after ownership / overlap checks.
+
+    Args:
+        proposed_by_goal: ``{goal_name: {fact_key: value, ...}, ...}``.
+
+    Returns:
+        Flat merged fact dict ready for ``write-facts-multi`` namespaces.
+
+    Raises:
+        FactOwnershipError: duplicate keys or keys outside the goal's ownership set.
+    """
+    merged: dict[str, Any] = {}
+    conflicts: list[str] = []
+    for goal, facts in proposed_by_goal.items():
+        if not isinstance(facts, Mapping):
+            continue
+        allowed = set(GOAL_OWNED_FACTS.get(goal, ()))
+        if not allowed:
+            conflicts.append(f"{goal}: no GOAL_OWNED_FACTS entry")
+            continue
+        for key, val in facts.items():
+            if key in merged:
+                conflicts.append(f"{key}: proposed by multiple goals")
+            elif key not in allowed:
+                conflicts.append(f"{key}: not owned by goal {goal}")
+            else:
+                merged[key] = val
+    if conflicts:
+        raise FactOwnershipError(conflicts)
+    return merged
+
+
+def select_draftable_plan(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return all draftable goals for multi-fragment dispatch + synthesis.
+
+    Args:
+        payload: Same shape as ``select_next_skill``. Optional keys:
+            ``lane_filter`` — when set, only return draftable goals in that lane.
+
+    Returns:
+        ``{"draftable", "escalate", "wait", "idle", "primary_contributor",
+        "lane_actions", "severity_reversal_applied"}``. ``draftable`` lists
+        every goal with ``action=="draft"`` (including multiple goals in the
+        same lane). ``primary_contributor`` is the first draftable row after
+        lane+goal ordering (highest priority).
+    """
+    goals: Mapping[str, Any] = payload.get("goals") or {}
+    facts: Mapping[str, Any] = payload.get("facts") or {}
+    meta: Mapping[str, Any] = payload.get("meta") or {}
+    signals = payload.get("signals") or []
+    lane_filter = payload.get("lane_filter")
+
+    all_actions = _build_goal_actions(goals, facts, meta)
+    draftable = [a for a in all_actions if a["action"] == "draft"]
+    escalate = [a for a in all_actions if a["action"] == "escalate"]
+    wait = [a for a in all_actions if a["action"] == "wait"]
+    idle = [a for a in all_actions if a["action"] == "idle"]
+
+    if lane_filter:
+        draftable = [a for a in draftable if a.get("lane") == lane_filter]
+        escalate = [a for a in escalate if a.get("lane") == lane_filter]
+
+    severity_lanes = _severity_lanes(signals)
+    reversal = bool(severity_lanes & {a.get("lane") for a in draftable} - {"commerce"})
+
+    # Collapse to one row per lane for backward-compatible lane_actions map.
+    lane_actions: dict[str, dict[str, Any]] = {}
+    for act in all_actions:
+        lane = act.get("lane")
+        if lane not in LANE_PRIORITY:
+            continue
+        prior = lane_actions.get(lane)
+        if prior is None or (prior["action"] == "idle" and act["action"] != "idle"):
+            lane_actions[lane] = act
+
+    primary_contributor = draftable[0] if draftable else None
+    return {
+        "draftable": draftable,
+        "escalate": escalate,
+        "wait": wait,
+        "idle": idle,
+        "primary_contributor": primary_contributor,
+        "lane_actions": lane_actions,
+        "severity_reversal_applied": reversal,
+    }
 
 
 def select_next_skill(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -136,34 +339,28 @@ def select_next_skill(payload: Mapping[str, Any]) -> dict[str, Any]:
     meta: Mapping[str, Any] = payload.get("meta") or {}
     signals = payload.get("signals") or []
 
-    # Build per-lane action by walking goals; keep the first actionable goal
-    # per lane (goal_state typically exposes one active goal per lane).
+    all_actions = _build_goal_actions(goals, facts, meta)
     lane_actions: dict[str, dict[str, Any]] = {}
-    for goal_name, row in goals.items():
-        row = dict(row)
-        row.setdefault("goal", goal_name)
-        lane = row.get("lane")
+    for act in all_actions:
+        lane = act.get("lane")
         if lane not in LANE_PRIORITY:
             continue
-        action = _lane_action(row, facts, meta)
-        # An actionable lane (draft/escalate/wait) supersedes an idle one.
         prior = lane_actions.get(lane)
-        if prior is None or (prior["action"] == "idle" and action["action"] != "idle"):
-            lane_actions[lane] = action
+        if prior is None or (prior["action"] == "idle" and act["action"] != "idle"):
+            lane_actions[lane] = act
 
     severity_lanes = _severity_lanes(signals)
-    draftable = [ln for ln in LANE_PRIORITY
-                 if lane_actions.get(ln, {}).get("action") == "draft"]
+    draftable_lanes = [ln for ln in LANE_PRIORITY
+                       if lane_actions.get(ln, {}).get("action") == "draft"]
 
     primary_lane: Optional[str] = None
     reversal = False
-    # Severity reversal: a critical fulfillment/publish lane outranks commerce.
-    severe_draftable = [ln for ln in draftable if ln in severity_lanes and ln != "commerce"]
+    severe_draftable = [ln for ln in draftable_lanes if ln in severity_lanes and ln != "commerce"]
     if severe_draftable:
         primary_lane = min(severe_draftable, key=LANE_PRIORITY.index)
         reversal = True
-    elif draftable:
-        primary_lane = min(draftable, key=LANE_PRIORITY.index)
+    elif draftable_lanes:
+        primary_lane = min(draftable_lanes, key=LANE_PRIORITY.index)
 
     side_topics: list[str] = []
     for lane in LANE_PRIORITY:
@@ -185,4 +382,12 @@ def select_next_skill(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-__all__ = ["select_next_skill", "GOAL_SKILL", "LANE_PRIORITY"]
+__all__ = [
+    "select_next_skill",
+    "select_draftable_plan",
+    "assert_disjoint",
+    "FactOwnershipError",
+    "GOAL_SKILL",
+    "GOAL_OWNED_FACTS",
+    "LANE_PRIORITY",
+]

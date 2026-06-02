@@ -9,8 +9,12 @@ replace model-generated reasoning that used to live inside the KOL skills:
   (campaign intake safety-field validators).
 - ``select-next-skill``          → ``POST /logic/select-next-skill``
   (dispatcher Steps 4-5 lane routing).
+- ``select-draftable-plan``      → ``POST /logic/select-draftable-plan``
+  (multi-goal fragment dispatch plan).
 - ``match-escalation-rules``     → ``POST /logic/match-escalation-rules``
   (classifier rule matching).
+- ``sanitize-classifier-facts``  → ``POST /logic/sanitize-classifier-facts``
+  (preview Step 3 committed-key rewrites before write-facts-multi).
 - ``persist-reply-draft``        → ``POST /reply-drafts/persist``
   (dispatcher Step 5.5 envelope enrichment + atomic event/approval write).
 """
@@ -60,10 +64,24 @@ def cmd_select_next_skill(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_select_draftable_plan(args: argparse.Namespace) -> None:
+    body = parse_json_arg(args.json)
+    print_json(client_from_args(args).request(
+        "POST", "/logic/select-draftable-plan", body=body,
+    ))
+
+
 def cmd_match_escalation_rules(args: argparse.Namespace) -> None:
     body = parse_json_arg(args.json)
     print_json(client_from_args(args).request(
         "POST", "/logic/match-escalation-rules", body=body,
+    ))
+
+
+def cmd_sanitize_classifier_facts(args: argparse.Namespace) -> None:
+    body = parse_json_arg(args.json)
+    print_json(client_from_args(args).request(
+        "POST", "/logic/sanitize-classifier-facts", body=body,
     ))
 
 
@@ -118,6 +136,17 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.set_defaults(func=cmd_select_next_skill)
 
     p = sub.add_parser(
+        "select-draftable-plan",
+        help=("POST /logic/select-draftable-plan — list all draftable goals "
+              "for multi-fragment dispatch (same payload as select-next-skill)."),
+    )
+    add_common_args(p)
+    add_env_arg(p, required=False)
+    p.add_argument("--json", required=True,
+                   help="{goals, facts, signals, meta, lane_filter?} JSON or @path.")
+    p.set_defaults(func=cmd_select_draftable_plan)
+
+    p = sub.add_parser(
         "match-escalation-rules",
         help=("POST /logic/match-escalation-rules — deterministically match "
               "signals against escalation_rules; returns escalation_hint. "
@@ -128,6 +157,17 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--json", required=True,
                    help="{signals, parsed?} JSON or @path.")
     p.set_defaults(func=cmd_match_escalation_rules)
+
+    p = sub.add_parser(
+        "sanitize-classifier-facts",
+        help=("POST /logic/sanitize-classifier-facts — preview classifier "
+              "committed-key rewrites from {namespaces, signals}."),
+    )
+    add_common_args(p)
+    add_env_arg(p, required=False)
+    p.add_argument("--json", required=True,
+                   help="{namespaces, signals} JSON or @path.")
+    p.set_defaults(func=cmd_sanitize_classifier_facts)
 
     p = sub.add_parser(
         "persist-reply-draft",
