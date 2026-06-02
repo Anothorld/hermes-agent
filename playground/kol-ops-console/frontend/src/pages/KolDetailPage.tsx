@@ -2,6 +2,7 @@ import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError, Lane } from '../api';
 import { GoalProgressBar } from '../components/GoalProgressBar';
+import { goalLabel, laneLabel } from '../constants/domainLabels';
 import { FactsEditor } from '../components/FactsEditor';
 import { RepeatKolBadge } from '../components/RepeatKolBadge';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
@@ -390,8 +391,8 @@ export function KolDetailPage() {
               key={lane}
               className="rounded border border-slate-200 bg-white p-3 text-sm"
             >
-              <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">
-                {lane}
+              <div className="mb-1 text-xs uppercase tracking-wide text-slate-500" title={lane}>
+                {laneLabel(lane)}
               </div>
               {visible.length === 0 ? (
                 <div className="text-xs italic text-slate-400">空闲</div>
@@ -400,7 +401,7 @@ export function KolDetailPage() {
                   {visible.map((g) => (
                     <li key={g.goal}>
                       <div className="flex items-center gap-2">
-                        <span className="font-medium">{g.goal}</span>
+                        <span className="font-medium" title={g.goal}>{goalLabel(g.goal)}</span>
                         <span className={`rounded px-1.5 py-0.5 text-[10px] ${statusChip(g.status)}`}>
                           {STATUS_LABEL[g.status]}
                         </span>
@@ -535,6 +536,7 @@ const NS_PANEL_COLOR: Record<string, string> = {
   offer_us: 'border-slate-200 bg-slate-50',
   offer_them: 'border-emerald-200 bg-emerald-50',
   fulfillment: 'border-amber-200 bg-amber-50',
+  payout: 'border-violet-200 bg-violet-50',
   approval: 'border-rose-200 bg-rose-50',
   other: 'border-slate-200 bg-slate-50',
 };
@@ -544,13 +546,14 @@ const NS_PANEL_TITLE: Record<string, string> = {
   offer_us: '合作 · 我方动作',
   offer_them: '合作 · 对方反馈',
   fulfillment: '物流 / 交付',
+  payout: '收款',
   approval: '审批',
   other: '其他',
 };
 
-const NS_PANEL_ORDER: Array<'identity' | 'offer_us' | 'offer_them' | 'fulfillment' | 'approval' | 'other'> = [
-  'identity', 'offer_us', 'offer_them', 'fulfillment', 'approval', 'other',
-];
+const NS_PANEL_ORDER: Array<
+  'identity' | 'offer_us' | 'offer_them' | 'fulfillment' | 'payout' | 'approval' | 'other'
+> = ['identity', 'offer_us', 'offer_them', 'fulfillment', 'payout', 'approval', 'other'];
 
 const OFFER_THEM_KEYS: ReadonlySet<string> = new Set<string>([
   'offer.interest_signal',
@@ -566,7 +569,7 @@ const OFFER_THEM_KEYS: ReadonlySet<string> = new Set<string>([
 function ConfirmedFactsPanel({ facts }: { facts: Record<string, unknown> }) {
   const groups = useMemo(() => {
     const out: Record<string, Array<[string, unknown]>> = {
-      identity: [], offer_us: [], offer_them: [], fulfillment: [], approval: [], other: [],
+      identity: [], offer_us: [], offer_them: [], fulfillment: [], payout: [], approval: [], other: [],
     };
     for (const [k, v] of Object.entries(facts)) {
       const ns = k.split('.', 1)[0];
@@ -908,10 +911,10 @@ function RedraftPanel({
     }
   };
 
-  const ctaLabel = draftCreated ? '重新生成草稿' : '生成 Gmail 草稿';
+  const ctaLabel = draftCreated ? '重新生成待审批草稿' : '生成待审批草稿';
   const ctaHint = draftCreated
     ? '会写一份新的待审批草稿覆盖当前草稿；老的 Gmail 草稿如果已经发了就保留在 Gmail SENT 里，否则会被本次新草稿替换'
-    : 'kol-cold-outreach 会重新跑一次，把新草稿放进你 Gmail 草稿箱';
+    : 'kol-cold-outreach 会重新跑一次，把新草稿写入审批队列；审批通过后才会创建 Gmail 草稿';
 
   let stageHint: ReactNode = null;
   if (decision === 'approved' && !sent) {

@@ -49,6 +49,18 @@ const FACT_DICT: Record<string, DictEntry> = {
   'identity.region': { short: '地区', title: 'KOL 所在地区', kind: 'string' },
   'identity.followers': { short: '粉丝数', title: 'KOL 当前粉丝量', kind: 'number' },
   'identity.language': { short: '语言', title: 'KOL 沟通语言', kind: 'string' },
+  'identity.contact_role': {
+    short: '联系人角色',
+    title: '联系人类型：KOL 本人 / 经纪人 / 机构',
+    kind: 'enum',
+    enumOptions: [
+      { value: 'kol', label: 'KOL 本人' },
+      { value: 'manager', label: '经纪人' },
+      { value: 'agency', label: '机构' },
+    ],
+  },
+  'identity.manager_name': { short: '经纪人姓名', title: '经纪人或机构联系人姓名', kind: 'string' },
+  'identity.manager_email': { short: '经纪人邮箱', title: '经纪人或机构联系邮箱', kind: 'email' },
   'identity.last_outreach_draft_at': {
     short: '上次起稿',
     title: '上次为该 KOL 起草初邀的时间',
@@ -83,6 +95,46 @@ const FACT_DICT: Record<string, DictEntry> = {
     title: '是否已为该 KOL 起草过初邀',
     kind: 'bool',
   },
+  'offer.outreach_draft_created': {
+    short: '初邀草稿已创建',
+    title: 'Gmail 中是否已创建初邀草稿',
+    kind: 'bool',
+  },
+  'offer.gmail_draft_id': { short: 'Gmail 草稿 ID', title: 'Gmail 草稿标识', kind: 'string' },
+  'offer.gmail_thread_id': { short: 'Gmail 线程 ID', title: 'Gmail 邮件线程标识', kind: 'string' },
+  'offer.interest_clarify_asked': {
+    short: '已追问意向',
+    title: '是否已向 KOL 追问合作意向',
+    kind: 'bool',
+  },
+  'offer.interest_clarify_question': {
+    short: '意向追问',
+    title: '向 KOL 提出的意向澄清问题',
+    kind: 'string',
+  },
+  'offer.sku_requested': { short: '已询 SKU', title: 'KOL 询问或要求的产品 SKU', kind: 'string' },
+  'offer.proposed_skus': { short: '提议 SKU 列表', title: '我方提议的产品 SKU 列表', kind: 'json' },
+  'offer.deliverable_platforms_proposed': {
+    short: '提议平台',
+    title: '我方提议的交付平台（待对方确认）',
+    kind: 'json',
+  },
+  'offer.deliverable_count_proposed': {
+    short: '提议条数',
+    title: '我方提议的每平台稿件条数（待确认）',
+    kind: 'json',
+  },
+  'offer.deliverable_count_per_platform_requested': {
+    short: '对方要求条数',
+    title: 'KOL 要求的每平台稿件条数',
+    kind: 'json',
+  },
+  'offer.proposed_amount': { short: '我方还价', title: '我方提出的合作金额', kind: 'currency' },
+  'offer.proposed_basis': { short: '报价依据', title: '报价计算依据说明', kind: 'string' },
+  'offer.proposed_currency': { short: '还价币种', title: '我方还价使用的币种', kind: 'string' },
+  'offer.barter_attempted': { short: '已尝试换货', title: '是否已提出换货合作方案', kind: 'bool' },
+  'offer.rate_requested': { short: '已索要报价', title: '是否已向 KOL 索要报价', kind: 'bool' },
+  'offer.paid_hold_sent': { short: '付费暂缓说明', title: '是否已发送付费合作暂缓说明', kind: 'bool' },
   'offer.outreach_path': {
     short: '初邀类型',
     title: '初邀路径：cold / reengage',
@@ -157,6 +209,7 @@ const FACT_DICT: Record<string, DictEntry> = {
       { value: 'interested', label: '有意向' },
       { value: 'declined', label: '已拒绝' },
       { value: 'unsure', label: '不确定' },
+      { value: 'needs_more_info', label: '需更多信息' },
     ],
   },
   'offer.fit_confirmed': {
@@ -261,6 +314,39 @@ const FACT_DICT: Record<string, DictEntry> = {
   },
   'approval.request': { short: '审批请求', title: '通用审批请求', kind: 'json' },
   'approval.responded': { short: '审批结果', title: '审批结论', kind: 'json' },
+  'approval.style_learning_proposal': {
+    short: '学习提案',
+    title: '编辑学习蒸馏提案（待人工批准）',
+    kind: 'json',
+  },
+  'approval.archival_outcome': { short: '归档结果', title: '合作结束后的归档结论', kind: 'string' },
+  'approval.relationship_synced': {
+    short: '关系已同步',
+    title: '红人关系档案是否已同步',
+    kind: 'bool',
+  },
+  'approval.preferred_skus_synced': {
+    short: '偏好 SKU 已同步',
+    title: '偏好产品 SKU 是否已写入关系档案',
+    kind: 'bool',
+  },
+  'approval.preferred_mode_synced': {
+    short: '偏好模式已同步',
+    title: '偏好合作模式是否已写入关系档案',
+    kind: 'bool',
+  },
+  'approval.followups_pending': {
+    short: '待跟进事项',
+    title: '归档后待人工跟进的事项',
+    kind: 'json',
+  },
+
+  // payout.*
+  'payout.method_collected': {
+    short: '收款方式已收集',
+    title: 'KOL 收款方式是否已收集',
+    kind: 'bool',
+  },
 };
 
 export function factKeyLabel(key: string): FactLabel {

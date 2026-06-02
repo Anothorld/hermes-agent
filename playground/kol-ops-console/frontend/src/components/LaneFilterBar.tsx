@@ -6,15 +6,16 @@
  * component; parent owns selection state.
  */
 import type { Lane } from '../api';
+import { LANE_LABELS } from '../constants/domainLabels';
 
 export type LaneFilter = 'all' | Lane;
 
 const LANE_LABEL: Record<LaneFilter, string> = {
-  all: 'All',
-  commerce: 'Commerce',
-  fulfillment: 'Fulfillment',
-  publish: 'Publish',
-  meta: 'Meta',
+  all: '全部',
+  commerce: LANE_LABELS.commerce,
+  fulfillment: LANE_LABELS.fulfillment,
+  publish: LANE_LABELS.publish,
+  meta: LANE_LABELS.meta,
 };
 
 const LANE_COLOR: Record<LaneFilter, string> = {
@@ -40,7 +41,7 @@ export function LaneFilterBar({
 }: Props) {
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-xs">
-      <span className="text-slate-500">Lane:</span>
+      <span className="text-slate-500">阶段：</span>
       {(['all', 'commerce', 'fulfillment', 'publish', 'meta'] as LaneFilter[]).map(
         (l) => {
           const active = l === lane;

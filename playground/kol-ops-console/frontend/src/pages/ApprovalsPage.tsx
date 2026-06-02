@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api';
+import { api, EscalationRow } from '../api';
 import ApprovalContextCard from '../components/ApprovalContextCard';
+import ApprovalDetailPanel from '../components/ApprovalDetailPanel';
+import DraftEditDiffPanel from '../components/DraftEditDiffPanel';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
 import { TimeAgo } from '../components/inputs/TimeAgo';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
@@ -14,6 +16,22 @@ import {
   startedAtMs,
   useInflightLock,
 } from '../useInflightLock';
+import { REJECT_TAGS } from '../constants/rejectTags';
+
+type ApprovalTypeFilter = 'all' | 'reply_draft' | 'style_learning' | 'other';
+
+const TYPE_FILTER_LABEL: Record<ApprovalTypeFilter, string> = {
+  all: '全部',
+  reply_draft: '回信草稿',
+  style_learning: '学习提案',
+  other: '其他',
+};
+
+function approvalTypeOf(factPath: string): ApprovalTypeFilter {
+  if (factPath === 'approval.reply_draft') return 'reply_draft';
+  if (factPath === 'approval.style_learning_proposal') return 'style_learning';
+  return 'other';
+}
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
 
@@ -26,6 +44,8 @@ export type ApprovalRow = {
   identity_id: number;
   campaign_id: string;
   fact_path: string;
+  status?: 'pending' | 'approved' | 'rejected' | string | null;
+  env?: 'TEST' | 'LIVE' | string | null;
   namespace: 'identity' | 'offer' | 'fulfillment' | 'approval';
   context: Record<string, unknown> | null;
   opened_by: string | null;
@@ -35,6 +55,8 @@ export type ApprovalRow = {
 };
 
 type StatusFilter = 'pending' | 'approved' | 'rejected' | 'all';
+type SlaFilter = 'all' | 'at_risk' | 'breached';
+type RejectionTag = 'tone' | 'fact' | 'offer' | 'risk' | 'other';
 
 const STATUS_LABEL: Record<StatusFilter, string> = {
   pending: '待审批',
@@ -43,8 +65,54 @@ const STATUS_LABEL: Record<StatusFilter, string> = {
   all: '全部',
 };
 
+const REJECTION_TAGS: ReadonlyArray<{ id: RejectionTag; label: string }> = [
+  { id: 'tone', label: '语气' },
+  { id: 'fact', label: '事实错误' },
+  { id: 'offer', label: '报价/条款' },
+  { id: 'risk', label: '风险控制' },
+  { id: 'other', label: '其他' },
+];
+
+const SLA_LABEL: Record<SlaFilter, string> = {
+  all: '全部',
+  at_risk: '30 分钟+',
+  breached: '2 小时+',
+};
+
 const rowKey = (r: ApprovalRow) =>
   `${r.identity_id}::${r.campaign_id}::${r.fact_path}`;
+
+function rowActionKey(r: ApprovalRow): string {
+  return `${rowKey(r)}::${r.opened_at}`;
+}
+
+function ageMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return null;
+  return Date.now() - ts;
+}
+
+function slaLevel(iso: string | null | undefined): 'normal' | 'at_risk' | 'breached' {
+  const ms = ageMs(iso);
+  if (ms == null) return 'normal';
+  if (ms >= 2 * 60 * 60 * 1000) return 'breached';
+  if (ms >= 30 * 60 * 1000) return 'at_risk';
+  return 'normal';
+}
+
+function parseRejectionTags(raw: string): RejectionTag[] {
+  const seen = new Set<RejectionTag>();
+  const lower = raw.toLowerCase();
+  for (const tag of REJECTION_TAGS) {
+    const tokens = [`[${tag.id}]`, tag.id];
+    if (tokens.some((tok) => lower.includes(tok))) seen.add(tag.id);
+  }
+  for (const tag of REJECT_TAGS) {
+    if (lower.includes(tag)) seen.add(tag as RejectionTag);
+  }
+  return [...seen];
+}
 
 type PreviousDraft = {
   subject?: string | null;
@@ -71,12 +139,17 @@ export function ApprovalsPage() {
   const env = useEnvStore((s) => s.env);
   const [rows, setRows] = useState<ApprovalRow[]>([]);
   const [status, setStatus] = useState<StatusFilter>('pending');
+  const [typeFilter, setTypeFilter] = useState<ApprovalTypeFilter>('all');
+  const [sla, setSla] = useState<SlaFilter>('all');
   const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [refining, setRefining] = useState<string | null>(null);
   const [refinementText, setRefinementText] = useState('');
   const [refineHint, setRefineHint] = useState<Record<string, string>>({});
   const [historyOpen, setHistoryOpen] = useState<Record<string, boolean>>({});
+  const [lastActionAt, setLastActionAt] = useState<Record<string, string>>({});
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [escalationMap, setEscalationMap] = useState<Record<number, EscalationRow>>({});
 
   const markSeen = useUnreadStore((s) => s.markSeen);
   const refresh = useCallback(async () => {
@@ -107,6 +180,25 @@ export function ApprovalsPage() {
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    let alive = true;
+    api
+      .get<EscalationRow[]>(`/escalations?state=awaiting_answer&env=${env}`)
+      .then((list) => {
+        if (!alive) return;
+        const map: Record<number, EscalationRow> = {};
+        for (const row of list) map[row.id] = row;
+        setEscalationMap(map);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setEscalationMap({});
+      });
+    return () => {
+      alive = false;
+    };
+  }, [env]);
+
   // Live channel + slower polling fallback (gated on editor focus).
   useDataChannel({ onMatch: refresh });
   usePollingFallback(refresh, 20_000);
@@ -115,11 +207,17 @@ export function ApprovalsPage() {
     async (row: ApprovalRow, decision: 'approve' | 'reject') => {
       const isReplyDraft = row.fact_path === 'approval.reply_draft';
       let note = '';
+      let reasonTags: RejectionTag[] = [];
       if (decision === 'reject') {
+        const isStyleLearning = row.fact_path === 'approval.style_learning_proposal';
         const reason = await dialog.prompt({
           title: '驳回理由',
-          description: '请简要说明驳回原因（AI 会基于此理由调整下一版草稿）。',
-          placeholder: '例：语气太正式 / 漏掉了优惠条款 / 收件人称呼错误 ...',
+          description: isStyleLearning
+            ? '学习提案驳回不会开启升级。请说明为何不采纳本次 style/策略沉淀。'
+            : '请说明驳回原因。建议使用结构化标签（与回信驳回相同）：tone_too_salesy、premature_pricing、factual_error 等；非回信草稿可能仍会派生升级。',
+          placeholder: isStyleLearning
+            ? '例：策略段落过于笼统，需更具体的报价节奏说明 …'
+            : '[tone_too_salesy][factual_error] 例：称呼不对，且漏了运费条件 …',
           required: true,
           multiline: true,
           confirmLabel: '提交驳回',
@@ -128,14 +226,13 @@ export function ApprovalsPage() {
         });
         if (reason === null) return;
         note = reason;
+        reasonTags = parseRejectionTags(reason);
       } else {
-        // Approve confirms (especially in LIVE) since reply-draft
-        // approve immediately creates a Gmail draft.
         const ok = await dialog.confirm({
           title: isReplyDraft ? '批准并创建 Gmail 草稿？' : '批准此审批？',
           description: isReplyDraft
-            ? '批准后 AI 会在你 Gmail 草稿箱里创建一份草稿，需要你手动去 Gmail 点 Send。'
-            : '批准此项后，AI 会沿着审批通过的路径继续推进。',
+            ? '影响：1) 立即创建 Gmail draft；2) 不会自动发送；3) campaign 将继续推进到下一步。'
+            : '影响：该审批通过后会恢复对应 run，并按已批准值继续执行。',
           confirmLabel: '批准',
           cancelLabel: '取消',
           variant: 'info',
@@ -151,8 +248,10 @@ export function ApprovalsPage() {
           decided_by: 'console-user',
           env,
           note: note || undefined,
+          reason_tags: reasonTags.length ? reasonTags : undefined,
         });
         toast.success(decision === 'approve' ? '已批准' : '已驳回');
+        setLastActionAt((m) => ({ ...m, [rowActionKey(row)]: new Date().toISOString() }));
         await refresh();
       } catch (ex) {
         setErr(ex);
@@ -189,6 +288,7 @@ export function ApprovalsPage() {
         setRefinementText('');
         const hint = out?.hint ?? 'AI 正在重新生成 … 30–60s 后自动刷新。';
         setRefineHint((m) => ({ ...m, [key]: hint }));
+        setLastActionAt((m) => ({ ...m, [rowActionKey(row)]: new Date().toISOString() }));
         toast.progress('草稿生成中…', hint, { groupKey: `refine-${key}` });
         await refresh();
       } catch (ex) {
@@ -219,19 +319,111 @@ export function ApprovalsPage() {
     [refresh, env, refinementText],
   );
 
+  const visibleRows = useMemo(() => {
+    return rows.filter((r) => {
+      if (typeFilter !== 'all' && approvalTypeOf(r.fact_path) !== typeFilter) {
+        return false;
+      }
+      if (sla === 'all') return true;
+      const level = slaLevel(r.opened_at);
+      if (sla === 'at_risk') return level === 'at_risk' || level === 'breached';
+      return level === 'breached';
+    });
+  }, [rows, sla, typeFilter]);
+
   const grouped = useMemo(() => {
     const out: Record<string, ApprovalRow[]> = {};
-    for (const r of rows) {
+    for (const r of visibleRows) {
       const key = `${r.identity_id}::${r.campaign_id}`;
       (out[key] ||= []).push(r);
     }
     return out;
-  }, [rows]);
+  }, [visibleRows]);
+
+  const selectedRows = useMemo(
+    () => visibleRows.filter((r) => selected[rowActionKey(r)]),
+    [visibleRows, selected],
+  );
+
+  const toggleAllVisible = useCallback(() => {
+    const next = !visibleRows.every((r) => selected[rowActionKey(r)]);
+    setSelected((prev) => {
+      const out = { ...prev };
+      for (const r of visibleRows) {
+        if (status !== 'pending' || r.status !== 'pending') continue;
+        out[rowActionKey(r)] = next;
+      }
+      return out;
+    });
+  }, [visibleRows, selected, status]);
+
+  const batchReject = useCallback(async () => {
+    const targets = selectedRows.filter((r) => r.status === 'pending');
+    if (!targets.length) return;
+    const reason = await dialog.prompt({
+      title: `批量驳回 ${targets.length} 项`,
+      description: '仅用于低风险批量处理。请输入统一驳回原因（可附标签 [tone]/[fact]/[offer]/[risk]/[other]）。',
+      placeholder: '[fact] 例：事实未核验完成，先补资料再重提',
+      required: true,
+      multiline: true,
+      confirmLabel: '下一步',
+      variant: 'danger',
+      liveWarning: env === 'LIVE',
+    });
+    if (reason == null) return;
+    const ok = await dialog.confirm({
+      title: `确认批量驳回 ${targets.length} 项？`,
+      description: '影响：每条都会写入 reject 决策，并派生对应 escalation。建议仅在规则明确时使用。',
+      confirmLabel: '确认批量驳回',
+      cancelLabel: '取消',
+      variant: 'danger',
+      liveWarning: env === 'LIVE',
+    });
+    if (!ok) return;
+    const tags = parseRejectionTags(reason);
+    let okCount = 0;
+    for (const row of targets) {
+      try {
+        await api.post(`/approvals/${row.fact_path}/reject`, {
+          identity_id: row.identity_id,
+          campaign_id: row.campaign_id,
+          decided_by: 'console-user',
+          env,
+          note: reason,
+          reason_tags: tags.length ? tags : undefined,
+        });
+        okCount += 1;
+        setLastActionAt((m) => ({ ...m, [rowActionKey(row)]: new Date().toISOString() }));
+      } catch {
+        // Best-effort batch. Failed rows stay pending and visible.
+      }
+    }
+    setSelected({});
+    await refresh();
+    toast.success(`批量驳回完成`, `成功 ${okCount}/${targets.length}`);
+  }, [selectedRows, env, refresh]);
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-lg font-semibold">待审批</h1>
+        <div className="flex flex-wrap gap-1 rounded border border-slate-200 bg-slate-50 p-0.5 text-xs">
+          {(Object.keys(TYPE_FILTER_LABEL) as ApprovalTypeFilter[]).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTypeFilter(t)}
+              className={
+                'rounded px-2 py-0.5 ' +
+                (typeFilter === t
+                  ? 'bg-white font-medium text-slate-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900')
+              }
+            >
+              {TYPE_FILTER_LABEL[t]}
+            </button>
+          ))}
+        </div>
         <select
           value={status}
           onChange={(e) => setStatus(e.target.value as StatusFilter)}
@@ -241,13 +433,68 @@ export function ApprovalsPage() {
             <option key={s} value={s}>{STATUS_LABEL[s]}</option>
           ))}
         </select>
+        <select
+          value={sla}
+          onChange={(e) => setSla(e.target.value as SlaFilter)}
+          className="rounded border border-slate-300 px-2 py-1 text-sm"
+          title="按超时等级筛选"
+        >
+          {(Object.keys(SLA_LABEL) as SlaFilter[]).map((s) => (
+            <option key={s} value={s}>{`SLA ${SLA_LABEL[s]}`}</option>
+          ))}
+        </select>
         <button
           onClick={refresh}
           className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-50"
         >
           刷新
         </button>
+        {status === 'pending' && (
+          <>
+            <button
+              type="button"
+              onClick={toggleAllVisible}
+              className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50"
+            >
+              {visibleRows.length > 0 && visibleRows.every((r) => selected[rowActionKey(r)])
+                ? '取消全选'
+                : '全选当前'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void batchReject();
+              }}
+              disabled={!selectedRows.length || env !== 'TEST'}
+              className="rounded bg-rose-600 px-2 py-1 text-xs text-white disabled:opacity-40"
+              title={env !== 'TEST' ? '批量仅在 TEST 开放' : undefined}
+            >
+              批量驳回（TEST）
+            </button>
+          </>
+        )}
       </div>
+      {typeFilter === 'style_learning' && (
+        <div className="rounded border border-violet-300 bg-violet-50 px-3 py-2 text-sm text-violet-900">
+          <div className="font-medium">学习提案说明</div>
+          <ul className="mt-1 list-disc pl-4 text-xs leading-relaxed">
+            <li>
+              <strong>批准后</strong>写入公司邮件风格（company_style）与回信策略（reply_strategy）policy，供后续 AI 回信参考。
+            </li>
+            <li>不会直接修改技能 SKILL 文件；稳定策略的「升格」请在{' '}
+              <Link to="/learning#promote" className="underline">自主学习 → 策略反哺</Link> 操作。
+            </li>
+            <li><strong>驳回</strong>不会开启升级（escalation），可继续在「自主学习」页重新生成提案。</li>
+          </ul>
+        </div>
+      )}
+      {typeFilter === 'all' && (
+        <p className="text-xs text-slate-500">
+          学习提案由{' '}
+          <Link to="/learning" className="text-sky-700 hover:underline">自主学习</Link>{' '}
+          页在编辑批次达阈值后触发蒸馏。
+        </p>
+      )}
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
       {Object.keys(grouped).length === 0 && (
         <div className="rounded border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
@@ -267,7 +514,11 @@ export function ApprovalsPage() {
                 >
                   {handle ? `@${handle}` : `KOL #${identityId}`}
                 </Link>
-                <span className="ml-2 text-slate-500">campaign {campaignId}</span>
+                <span className="ml-2 text-slate-500">
+                  {campaignId && campaignId !== 'null'
+                    ? `campaign ${campaignId}`
+                    : '全局 / 无 campaign'}
+                </span>
               </div>
               <span className="text-xs text-slate-500">{items.length} 项待处理</span>
             </header>
@@ -282,14 +533,23 @@ export function ApprovalsPage() {
                   refining={refining}
                   refinementText={refinementText}
                   refineHintText={refineHint[rowKey(r)]}
+                  lastActionAt={lastActionAt[rowActionKey(r)]}
                   isHistoryOpen={!!historyOpen[rowKey(r)]}
+                  selected={!!selected[rowActionKey(r)]}
+                  escalation={r.linked_escalation_id != null
+                    ? escalationMap[r.linked_escalation_id]
+                    : undefined}
                   onToggleHistory={() =>
                     setHistoryOpen((m) => ({ ...m, [rowKey(r)]: !m[rowKey(r)] }))
+                  }
+                  onToggleSelected={() =>
+                    setSelected((m) => ({ ...m, [rowActionKey(r)]: !m[rowActionKey(r)] }))
                   }
                   onSetRefiningKey={(key) => setRefining(key)}
                   onChangeRefinementText={setRefinementText}
                   onSubmitRefine={submitRefine}
                   onDecide={decide}
+                  onRefresh={refresh}
                 />
               ))}
             </ul>
@@ -308,8 +568,12 @@ type ApprovalRowItemProps = {
   refining: string | null;
   refinementText: string;
   refineHintText: string | undefined;
+  lastActionAt: string | undefined;
   isHistoryOpen: boolean;
+  selected: boolean;
+  escalation?: EscalationRow;
   onToggleHistory: () => void;
+  onToggleSelected: () => void;
   onSetRefiningKey: (key: string | null) => void;
   onChangeRefinementText: (text: string) => void;
   onSubmitRefine: (
@@ -317,6 +581,7 @@ type ApprovalRowItemProps = {
     acquireLock: (runId: string | null, startedAtMsArg?: number) => void,
   ) => Promise<void>;
   onDecide: (row: ApprovalRow, decision: 'approve' | 'reject') => Promise<void>;
+  onRefresh: () => Promise<void>;
 };
 
 function ApprovalRowItem({
@@ -327,15 +592,23 @@ function ApprovalRowItem({
   refining,
   refinementText,
   refineHintText,
+  lastActionAt,
   isHistoryOpen,
+  selected,
+  escalation,
   onToggleHistory,
+  onToggleSelected,
   onSetRefiningKey,
   onChangeRefinementText,
   onSubmitRefine,
   onDecide,
+  onRefresh,
 }: ApprovalRowItemProps) {
   const k = rowKey(row);
   const isReplyDraft = row.fact_path === 'approval.reply_draft';
+  const isStyleLearning = row.fact_path === 'approval.style_learning_proposal';
+  const useStructuredPanel =
+    isReplyDraft && status === 'pending' && row.status === 'pending';
   const ctx = (row.context ?? {}) as Record<string, unknown>;
   const previousDrafts = Array.isArray(ctx.previous_drafts)
     ? (ctx.previous_drafts as PreviousDraft[])
@@ -346,6 +619,41 @@ function ApprovalRowItem({
   const refineLock = useInflightLock(
     `draft.lock.refine:${row.identity_id}:${row.campaign_id}`,
   );
+
+  type EditLearning = {
+    was_edited?: boolean;
+    edit_distance?: number;
+    normalized_agent_body?: string;
+    normalized_sent_body?: string;
+  };
+  const [editLearning, setEditLearning] = useState<EditLearning | null>(null);
+
+  useEffect(() => {
+    if (!isReplyDraft) {
+      setEditLearning(null);
+      return;
+    }
+    let alive = true;
+    const params = new URLSearchParams({
+      env,
+      identity_id: String(row.identity_id),
+      campaign_id: row.campaign_id,
+      limit: '1',
+    });
+    api
+      .get<{ events: Array<{ payload?: EditLearning }> }>(`/learning/edit-events?${params}`)
+      .then((res) => {
+        if (!alive) return;
+        setEditLearning(res.events?.[0]?.payload ?? null);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setEditLearning(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [isReplyDraft, row.identity_id, row.campaign_id, env, row.opened_at, lastActionAt]);
 
   // Release the refine lock as soon as a newer draft revision lands —
   // otherwise the "优化生成中…" banner sticks for the full 5-min TTL
@@ -364,8 +672,37 @@ function ApprovalRowItem({
   ]);
 
   return (
-    <li className="flex flex-wrap items-start gap-3 p-3 text-sm">
+    <li
+      className={
+        'flex flex-wrap items-start gap-3 p-3 text-sm ' +
+        (isStyleLearning ? 'border-l-4 border-l-violet-400 bg-violet-50/30' : '')
+      }
+    >
+      {status === 'pending' && row.status === 'pending' && (
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelected}
+          className="mt-1"
+          title="加入批量操作"
+        />
+      )}
       <FactKeyChip factKey={row.fact_path} variant="filled" />
+      {isStyleLearning && (
+        <span className="rounded bg-violet-200 px-2 py-0.5 text-[11px] font-medium text-violet-900">
+          学习提案
+        </span>
+      )}
+      {slaLevel(row.opened_at) === 'at_risk' && (
+        <span className="rounded bg-amber-100 px-2 py-0.5 text-[11px] text-amber-800">
+          SLA 30m+
+        </span>
+      )}
+      {slaLevel(row.opened_at) === 'breached' && (
+        <span className="rounded bg-rose-100 px-2 py-0.5 text-[11px] text-rose-800">
+          SLA 2h+
+        </span>
+      )}
       <TimeAgo iso={row.opened_at} prefix="提交于" className="text-[11px] text-slate-500" />
       {row.linked_escalation_id != null && (
         <Link
@@ -376,16 +713,58 @@ function ApprovalRowItem({
         </Link>
       )}
       <div className="flex w-full flex-col gap-2">
-        <ApprovalContextCard
-          factPath={row.fact_path}
-          context={row.context}
-          identityId={row.identity_id}
-          campaignId={row.campaign_id}
-          env={env}
-        />
+        {useStructuredPanel ? (
+          <ApprovalDetailPanel
+            factPath={row.fact_path}
+            context={row.context}
+            identityId={row.identity_id}
+            campaignId={row.campaign_id}
+            env={env}
+            decidedBy="console-user"
+            editLearning={editLearning}
+            approveButtonLabel="批准并创建 Gmail 草稿"
+            onApproved={() => {
+              void onRefresh();
+            }}
+            onRejected={() => {
+              void onRefresh();
+            }}
+          />
+        ) : (
+          <ApprovalContextCard
+            factPath={row.fact_path}
+            context={row.context}
+            identityId={row.identity_id}
+            campaignId={row.campaign_id}
+            env={env}
+          />
+        )}
+        {!useStructuredPanel && isReplyDraft && editLearning?.was_edited && (
+          <DraftEditDiffPanel
+            agentBody={
+              typeof ctx.draft === 'object' && ctx.draft !== null
+                ? String((ctx.draft as Record<string, unknown>).body ?? '')
+                : ''
+            }
+            editLearning={editLearning}
+          />
+        )}
+        {escalation && (
+          <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-900">
+            <div className="font-medium">升级上下文：{escalation.reason}</div>
+            {escalation.suggested_question && (
+              <div className="mt-0.5 line-clamp-2">{escalation.suggested_question}</div>
+            )}
+          </div>
+        )}
         {refineHintText && (
           <div className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
             {refineHintText}
+          </div>
+        )}
+        {lastActionAt && (
+          <div className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-600">
+            最近动作：<TimeAgo iso={lastActionAt} />
           </div>
         )}
         {refineLock.locked && (
@@ -478,14 +857,7 @@ function ApprovalRowItem({
         )}
       </div>
       <div className="flex flex-shrink-0 gap-2">
-        <button
-          disabled={busy === row.fact_path || status !== 'pending'}
-          onClick={() => onDecide(row, 'approve')}
-          className="rounded bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700 disabled:opacity-40"
-        >
-          {isReplyDraft ? '批准并创建 Gmail 草稿' : '批准'}
-        </button>
-        {isReplyDraft && status === 'pending' && (
+        {isReplyDraft && status === 'pending' && row.status === 'pending' && (
           <button
             disabled={busy === row.fact_path || refineLock.locked}
             onClick={() => {
@@ -499,13 +871,24 @@ function ApprovalRowItem({
               : '优化 / 重写'}
           </button>
         )}
-        <button
-          disabled={busy === row.fact_path || status !== 'pending'}
-          onClick={() => onDecide(row, 'reject')}
-          className="rounded bg-rose-600 px-3 py-1 text-xs text-white hover:bg-rose-700 disabled:opacity-40"
-        >
-          驳回
-        </button>
+        {!useStructuredPanel && (
+          <>
+            <button
+              disabled={busy === row.fact_path || status !== 'pending'}
+              onClick={() => onDecide(row, 'approve')}
+              className="rounded bg-emerald-600 px-3 py-1 text-xs text-white hover:bg-emerald-700 disabled:opacity-40"
+            >
+              {isReplyDraft ? '批准并创建 Gmail 草稿' : '批准'}
+            </button>
+            <button
+              disabled={busy === row.fact_path || status !== 'pending'}
+              onClick={() => onDecide(row, 'reject')}
+              className="rounded bg-rose-600 px-3 py-1 text-xs text-white hover:bg-rose-700 disabled:opacity-40"
+            >
+              驳回
+            </button>
+          </>
+        )}
       </div>
     </li>
   );

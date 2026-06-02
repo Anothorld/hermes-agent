@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { goalLabel, laneLabel, policyScopeLabel } from '../constants/domainLabels';
 import InboundEmailCard, { type InboundEmail } from './InboundEmailCard';
 
 /**
@@ -65,11 +66,11 @@ function ContributingSkillsChips({ items }: { items: ContributingSkill[] }) {
           const lane = row.lane ?? '?';
           const goal = row.goal ?? '?';
           const skill = row.skill ?? '?';
-          const label = `${lane} · ${goal}`;
+          const label = `${laneLabel(lane)} · ${goalLabel(goal)}`;
           return (
             <span
               key={`${lane}-${goal}-${skill}-${i}`}
-              title={skill}
+              title={`${lane} · ${goal} · ${skill}`}
               className="inline-flex max-w-full flex-col rounded border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] leading-tight text-violet-900"
             >
               <span className="font-medium">{label}</span>
@@ -323,10 +324,10 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
     <div className="space-y-2">
       <PillRow
         items={[
-          ['skill', childSkill],
-          ['goal', primaryGoal],
-          ['lane', primaryLane],
-          ['decision', decision],
+          ['子技能', childSkill],
+          ['阶段', primaryGoal ? goalLabel(primaryGoal) : null],
+          ['泳道', primaryLane ? laneLabel(primaryLane) : null],
+          ['路由', decision],
         ]}
       />
       {contributing.length > 0 && <ContributingSkillsChips items={contributing} />}
@@ -469,6 +470,57 @@ function LogisticsAnomalyView({ ctx }: { ctx: Ctx }) {
   );
 }
 
+function StyleLearningProposalView({ ctx }: { ctx: Ctx }) {
+  const md = asString(ctx.proposed_markdown) ?? '';
+  const styleMd = asString(ctx.proposed_style_markdown) ?? '';
+  const strategyMd = asString(ctx.proposed_strategy_markdown) ?? '';
+  const scope = asString(ctx.scope) ?? 'company_style';
+  const sampleCount = ctx.sample_count;
+  const batchThreshold = ctx.batch_threshold;
+  const llmUsed = ctx.llm_used === true;
+  const eventIds = Array.isArray(ctx.source_event_ids) ? ctx.source_event_ids : [];
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="rounded border border-violet-200 bg-violet-50 px-2 py-1 text-violet-900">
+        <div className="font-medium">编辑学习提案（批准后写入 policy，供 AI 回信参考）</div>
+        <div className="mt-0.5 text-[11px]">
+          范围：{policyScopeLabel(scope)}
+          {sampleCount != null && <> · 样本 {String(sampleCount)} 条</>}
+          {batchThreshold != null && <> · 批次阈值 {String(batchThreshold)}</>}
+          {llmUsed ? ' · LLM 蒸馏' : ' · 规则聚合'}
+          {eventIds.length > 0 && <> · 来源事件 {eventIds.length} 条</>}
+        </div>
+      </div>
+      {strategyMd ? (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-slate-700">
+            策略段落（批准后 → {policyScopeLabel('reply_strategy')}）
+          </div>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-amber-200 bg-amber-50/50 p-2 text-[11px] text-slate-800">
+            {strategyMd}
+          </pre>
+        </div>
+      ) : null}
+      {styleMd ? (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-slate-700">
+            邮件风格（批准后 → {policyScopeLabel(scope)}）
+          </div>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-800">
+            {styleMd}
+          </pre>
+        </div>
+      ) : md ? (
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-800">
+          {md}
+        </pre>
+      ) : (
+        <div className="italic text-slate-500">(无 proposed_markdown)</div>
+      )}
+    </div>
+  );
+}
+
 function GenericApprovalView({ ctx }: { ctx: Ctx }) {
   return (
     <KeyValueTable
@@ -548,6 +600,9 @@ export default function ApprovalContextCard({
       break;
     case 'approval.logistics_anomaly':
       body = <LogisticsAnomalyView ctx={context} />;
+      break;
+    case 'approval.style_learning_proposal':
+      body = <StyleLearningProposalView ctx={context} />;
       break;
     default:
       body = <GenericApprovalView ctx={context} />;
