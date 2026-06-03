@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import ContractReadinessPanel from '../components/ContractReadinessPanel';
 import EditCampaignConfigPanel from '../components/EditCampaignConfigPanel';
+import NoxCampaignOpsPanel from '../components/NoxCampaignOpsPanel';
 import { TimeAgo } from '../components/inputs/TimeAgo';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { dialog } from '../components/dialogs/useDialog';
@@ -297,6 +298,9 @@ type ShortlistCandidate = {
   updated_at?: string | null;
   selected_at?: string | null;
   is_new_since_last_approval?: boolean;
+  nox_diligence_verdict?: string | null;
+  nox_cache_month?: string | null;
+  nox_creator_id?: string | null;
 };
 
 type ShortlistPayload = {
@@ -343,6 +347,7 @@ function ShortlistReviewPanel({
   const [candidates, setCandidates] = useState<ShortlistCandidate[] | null>(null);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
+  const [noxBatchBusy, setNoxBatchBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [snapshotTs, setSnapshotTs] = useState<string | null>(null);
   const [counts, setCounts] = useState<{ pending: number; already_approved: number; rejected_or_archived_hidden: number } | null>(null);
@@ -401,8 +406,32 @@ function ShortlistReviewPanel({
   const pendingCandidates = candidates.filter((c) => c.candidate_status !== 'selected_for_outreach');
   const approvedCandidates = candidates.filter((c) => c.candidate_status === 'selected_for_outreach');
   const selectedHandles = Object.entries(picked).filter(([, v]) => v).map(([k]) => k);
+  const selectedIdentityIds = pendingCandidates
+    .filter((c) => picked[c.handle] && typeof c.identity_id === 'number')
+    .map((c) => c.identity_id as number);
   const pendingCount = counts?.pending ?? pendingCandidates.length;
   const approvedCount = counts?.already_approved ?? approvedCandidates.length;
+
+  const runNoxDiligenceBatch = async () => {
+    if (selectedIdentityIds.length === 0) {
+      setErr('所选候选缺少 identity_id，无法批量 Nox 尽调');
+      return;
+    }
+    setNoxBatchBusy(true);
+    setErr(null);
+    try {
+      const r = await api.post<{ run_id?: string }>('/kols/nox-diligence-batch', {
+        env,
+        campaign_id: campaignId,
+        identity_ids: selectedIdentityIds,
+      });
+      toast.success('Nox 批量尽调已派发', r.run_id ?? '');
+    } catch (ex) {
+      setErr(errorSummary(ex));
+    } finally {
+      setNoxBatchBusy(false);
+    }
+  };
 
   return (
     <div className="rounded border border-emerald-200 bg-emerald-50/40 p-3">
@@ -506,6 +535,19 @@ function ShortlistReviewPanel({
                       NEW
                     </span>
                   )}
+                  {c.nox_diligence_verdict && (
+                    <span
+                      className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-800"
+                      title={
+                        c.nox_cache_month
+                          ? `Nox 数据月份 ${c.nox_cache_month}`
+                          : 'Nox diligence'
+                      }
+                    >
+                      Nox: {c.nox_diligence_verdict}
+                      {c.nox_cache_month ? ` · ${c.nox_cache_month}` : ''}
+                    </span>
+                  )}
                   {c.display_name && c.display_name !== c.handle && (
                     <span className="text-slate-500">{c.display_name}</span>
                   )}
@@ -570,8 +612,21 @@ function ShortlistReviewPanel({
           {approveBlockedReason}
         </div>
       )}
-      <div className="mt-2 flex items-center justify-end gap-2">
+      <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
         <span className="text-xs text-slate-500">{selectedHandles.length} selected</span>
+        <button
+          type="button"
+          disabled={
+            noxBatchBusy
+            || selectedIdentityIds.length === 0
+            || !!approveBlockedReason
+          }
+          title="Gate A：对所选待审批候选串行 diligence-pack（同月 cache 免扣费）"
+          onClick={() => void runNoxDiligenceBatch()}
+          className="rounded border border-indigo-400 bg-white px-3 py-1 text-xs font-medium text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
+        >
+          {noxBatchBusy ? 'Nox 尽调…' : `Nox 批量尽调 (${selectedIdentityIds.length})`}
+        </button>
         <button
           disabled={
             busy
@@ -859,6 +914,7 @@ function CampaignCard({
         </div>
       </div>
       <EditCampaignConfigPanel campaignId={c.campaign_id} env={c.env} />
+      <NoxCampaignOpsPanel campaignId={c.campaign_id} env={c.env} />
       {contractReadyIds.length > 0 && (
         <div className="space-y-1">
           <div className="text-xs font-medium text-slate-500">

@@ -88,6 +88,25 @@ function extractDetail(body: string): string | null {
     if (parsed && typeof parsed === 'object') {
       const obj = parsed as Record<string, unknown>;
       if (typeof obj.detail === 'string') return obj.detail;
+      if (obj.detail && typeof obj.detail === 'object' && !Array.isArray(obj.detail)) {
+        const inner = obj.detail as Record<string, unknown>;
+        if (inner.code === 'nox_quota_disabled') {
+          return (
+            '请在本产品 campaign 中展开「编辑 campaign_config」，勾选 nox_quota_enabled 并保存，' +
+            '然后再点 Nox 批量尽调。'
+          );
+        }
+        if (inner.code === 'nox_supplement_disabled') {
+          return '请先在 campaign_config 中开启 nox_supplement_enabled 并保存，再执行 Nox 补充搜索。';
+        }
+        if (inner.code === 'nox_quota_exhausted') {
+          return (
+            'Nox 本月本地 API 预算已用尽。请打开 nox_quota_exhausted 升级或等待下月，' +
+            '再继续 LIVE 尽调 / 查邮箱 / 补搜。'
+          );
+        }
+        if (typeof inner.detail === 'string') return inner.detail;
+      }
       if (typeof obj.message === 'string') return obj.message;
       if (Array.isArray(obj.detail)) {
         return (obj.detail as unknown[])

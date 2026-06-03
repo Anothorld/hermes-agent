@@ -12,12 +12,16 @@ import { factKeyLabel } from '../components/factKeyLabel';
 import { KolArchiveDialog } from '../components/dialogs/KolArchiveDialog';
 import { UnreadDot } from '../components/UnreadDot';
 import { isRealCampaignId } from '../lib/campaignId';
-import { useEnvStore } from '../lib/store';
+import { toast, useEnvStore } from '../lib/store';
 import { useUnreadStore, isUnread } from '../lib/unread';
 import { outcomeChipClass, outcomeLabel } from '../lib/kolOutcomes';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
 import { CommunicationHistoryPanel } from '../components/CommunicationHistoryPanel';
+import NoxQuotaBanner, {
+  isNoxQuotaExhausted,
+  type NoxStatsPayload,
+} from '../components/NoxQuotaBanner';
 
 const GMAIL_DRAFTS_URL = 'https://mail.google.com/mail/u/0/#drafts';
 
@@ -414,6 +418,14 @@ export function KolDetailPage() {
       />
 
       <NoxDiligenceStrip
+        identityId={identityVal.id}
+        campaignId={campaignId}
+        env={env}
+        facts={factsVal}
+        onTriggered={refresh}
+      />
+
+      <NoxMonitorStrip
         identityId={identityVal.id}
         campaignId={campaignId}
         env={env}
@@ -1622,10 +1634,42 @@ function NoxDiligenceStrip({
 }) {
   const verdict = facts['identity.nox_diligence_verdict'];
   const cacheMonth = facts['identity.nox_cache_month'];
+  const cacheKey = facts['identity.nox_cache_key'];
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [statsHint, setStatsHint] = useState<string | null>(null);
+  const [noxStats, setNoxStats] = useState<NoxStatsPayload | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .get<{ stats?: NoxStatsPayload }>(
+        `/campaigns/${encodeURIComponent(campaignId)}/nox-stats?env=${env}`,
+      )
+      .then((r) => {
+        if (cancelled) return;
+        setNoxStats(r.stats ?? null);
+        const saved = r.stats?.cache?.saved_api_calls_estimate;
+        const rem = r.stats?.usage?.remaining_estimate;
+        if (saved != null || rem != null) {
+          setStatsHint(
+            `本月缓存节省 ${saved ?? 0} 次 · 本地预算余量 ${rem ?? '—'}`,
+          );
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, env]);
+
+  const quotaBlocked = isNoxQuotaExhausted(noxStats);
 
   const runDiligence = async () => {
+    if (quotaBlocked) {
+      setErr('Nox 本月本地预算已用尽，请先打开升级或等待下月。');
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
@@ -1644,11 +1688,21 @@ function NoxDiligenceStrip({
   return (
     <div className="rounded-lg border border-violet-200 bg-violet-50/50 p-3 text-sm">
       <div className="font-medium text-violet-900">Nox 尽调 (Gate A)</div>
+      <NoxQuotaBanner
+        campaignId={campaignId}
+        env={env}
+        stats={noxStats}
+        identityId={identityId}
+        className="mt-2"
+      />
       {typeof verdict === 'string' && verdict ? (
         <p className="mt-1 text-violet-800">
           结论: <span className="font-semibold">{verdict}</span>
           {typeof cacheMonth === 'string' && cacheMonth ? (
             <span className="ml-2 text-xs text-violet-600">数据月份 {cacheMonth}</span>
+          ) : null}
+          {typeof cacheKey === 'string' && cacheKey ? (
+            <span className="ml-1 block font-mono text-[10px] text-violet-500">{cacheKey}</span>
           ) : null}
         </p>
       ) : (
@@ -1656,11 +1710,79 @@ function NoxDiligenceStrip({
       )}
       <button
         type="button"
-        disabled={busy}
+        disabled={busy || quotaBlocked}
         onClick={() => void runDiligence()}
         className="mt-2 rounded bg-violet-700 px-3 py-1 text-xs text-white disabled:opacity-50"
       >
         {busy ? '已派发 gateway run…' : '确认尽调 (Nox)'}
+      </button>
+      {statsHint && <p className="mt-1 text-[11px] text-violet-600">{statsHint}</p>}
+      {err && <p className="mt-1 text-xs text-red-600">{err}</p>}
+    </div>
+  );
+}
+
+function NoxMonitorStrip({
+  identityId,
+  campaignId,
+  env,
+  facts,
+  onTriggered,
+}: {
+  identityId: number;
+  campaignId: string;
+  env: string;
+  facts: Record<string, unknown>;
+  onTriggered: () => void;
+}) {
+  const taskId = facts['identity.nox_monitor_task_id'];
+  const [videoUrl, setVideoUrl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const run = async () => {
+    const url = videoUrl.trim();
+    if (url.length < 10) {
+      setErr('请填写已发布视频 URL');
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.post(`/kols/${identityId}/nox-monitor`, {
+        env,
+        campaign_id: campaignId,
+        video_url: url,
+      });
+      onTriggered();
+    } catch (ex) {
+      setErr(parseApiErrorDetail(ex)?.message ?? String(ex));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-teal-200 bg-teal-50/50 p-3 text-sm">
+      <div className="font-medium text-teal-900">Nox 视频监测 (Gate C)</div>
+      {taskId != null && String(taskId) ? (
+        <p className="mt-1 text-teal-800">任务 ID: {String(taskId)}</p>
+      ) : (
+        <p className="mt-1 text-xs text-teal-700">确认发布 URL 后一次性建监测任务（不轮询 history）</p>
+      )}
+      <input
+        value={videoUrl}
+        onChange={(e) => setVideoUrl(e.target.value)}
+        placeholder="https://www.youtube.com/watch?v=..."
+        className="mt-2 w-full rounded border px-2 py-1 text-xs"
+      />
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void run()}
+        className="mt-2 rounded bg-teal-700 px-3 py-1 text-xs text-white disabled:opacity-50"
+      >
+        {busy ? '派发中…' : '启用 Nox 监测'}
       </button>
       {err && <p className="mt-1 text-xs text-red-600">{err}</p>}
     </div>
@@ -1794,6 +1916,25 @@ function EmailPanel({
     return { kind: 'idle' };
   });
   const [draft, setDraft] = useState<string>('');
+  const [noxStats, setNoxStats] = useState<NoxStatsPayload | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .get<{ stats?: NoxStatsPayload }>(
+        `/campaigns/${encodeURIComponent(campaignId)}/nox-stats?env=${env}`,
+      )
+      .then((r) => {
+        if (!cancelled) setNoxStats(r.stats ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, env]);
+
+  const quotaBlocked = isNoxQuotaExhausted(noxStats);
+
   // Tick once per second while a discover run is "running" so the
   // "已等待 Xs" countdown updates without re-creating the timer on
   // every render.
@@ -1845,22 +1986,40 @@ function EmailPanel({
   const submitting = phase.kind === 'submitting';
 
   const discover = async () => {
+    if (quotaBlocked) {
+      setPhase({
+        kind: 'error',
+        action: 'discover',
+        code: 'nox_quota_exhausted',
+        message: 'Nox 本月本地预算已用尽，请先打开升级。',
+      });
+      return;
+    }
     setPhase({ kind: 'submitting', action: 'discover' });
     try {
-      const r = await api.post<{ run_id: string | null; started_at: string }>(
-        `/kols/${identityId}/discover-email`,
-        { env, campaign_id: campaignId },
-      );
+      const r = await api.post<{
+        run_id?: string | null;
+        started_at?: string;
+        gate_b?: boolean;
+        skipped_browser_discover?: boolean;
+        email?: string;
+      }>(`/kols/${identityId}/discover-email`, { env, campaign_id: campaignId });
+      if (r.skipped_browser_discover && r.email) {
+        toast.success('Nox Gate B 已写入邮箱', r.email);
+        setPhase({ kind: 'idle' });
+        onChanged();
+        return;
+      }
       const startedAt = Date.now();
       const cooldownUntil = startedAt + DISCOVER_INFLIGHT_DISPLAY_MS;
       writeDiscoverCooldown(identityId, env, {
-        runId: r.run_id,
+        runId: r.run_id ?? null,
         startedAt,
         cooldownUntil,
       });
       setPhase({
         kind: 'discover_running',
-        runId: r.run_id,
+        runId: r.run_id ?? null,
         startedAt,
         cooldownUntil,
       });
@@ -1951,9 +2110,16 @@ function EmailPanel({
         </div>
         <span className="text-xs text-rose-700">
           @{handle} 没有 <span className="font-mono">primary_email</span>，
-          {' '}cold-outreach 不会为他生成草稿。
+          {' '}cold-outreach 不会为他生成草稿。LIVE + Nox 开启时，「搜索邮箱」会先跑 Gate B。
         </span>
       </div>
+      <NoxQuotaBanner
+        campaignId={campaignId}
+        env={env}
+        stats={noxStats}
+        identityId={identityId}
+        className="mt-2"
+      />
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {(() => {
@@ -1970,7 +2136,43 @@ function EmailPanel({
             ? '派单中…'
             : isRunning
             ? `搜索中… 已等待 ${elapsedSec}s`
-            : '🔍 全网搜索邮箱';
+            : '🔍 Nox + 全网搜索邮箱';
+          const noxContacts = async () => {
+            if (quotaBlocked) {
+              setPhase({
+                kind: 'error',
+                action: 'discover',
+                code: 'nox_quota_exhausted',
+                message: 'Nox 本月本地预算已用尽。',
+              });
+              return;
+            }
+            setPhase({ kind: 'submitting', action: 'discover' });
+            try {
+              const r = await api.post<{
+                skipped?: boolean;
+                email_found?: boolean;
+                email?: string;
+              }>(`/kols/${identityId}/nox-contacts`, { env, campaign_id: campaignId });
+              setPhase({ kind: 'idle' });
+              if (r.email_found && r.email) {
+                toast.success('Nox 已找到邮箱', r.email);
+              }
+              onChanged();
+            } catch (ex) {
+              const detail = parseApiErrorDetail(ex);
+              if (detail?.code === 'already_has_email') {
+                onChanged();
+                return;
+              }
+              setPhase({
+                kind: 'error',
+                action: 'discover',
+                code: detail?.code ?? null,
+                message: detail?.message ?? String(ex),
+              });
+            }
+          };
           const title = isRunning
             ? (
               `Gmail 搜索 agent 正在跑，run_id=${phase.runId ?? '?'}。`
@@ -1979,23 +2181,34 @@ function EmailPanel({
             )
             : '派一个 agent run 去公网搜索 KOL 邮箱（link-in-bio / 个人站 / 媒体包），30–120s 后结果写回 CAL';
           return (
-            <button
-              type="button"
-              onClick={discover}
-              disabled={isBusy}
-              title={title}
-              className={
-                'flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium transition '
-                + (isBusy
-                  ? 'cursor-not-allowed bg-sky-200 text-sky-700'
-                  : 'bg-sky-600 text-white hover:bg-sky-700')
-              }
-            >
-              {isRunning && (
-                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-sky-500 border-r-transparent" />
-              )}
-              <span>{label}</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => void noxContacts()}
+                disabled={isBusy || quotaBlocked}
+                title="仅 Gate B：Nox contacts（同步 CLI，不跑浏览器）"
+                className="rounded bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+              >
+                仅 Nox 查邮箱
+              </button>
+              <button
+                type="button"
+                onClick={discover}
+                disabled={isBusy || quotaBlocked}
+                title={title}
+                className={
+                  'flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium transition '
+                  + (isBusy
+                    ? 'cursor-not-allowed bg-sky-200 text-sky-700'
+                    : 'bg-sky-600 text-white hover:bg-sky-700')
+                }
+              >
+                {isRunning && (
+                  <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-sky-500 border-r-transparent" />
+                )}
+                <span>{label}</span>
+              </button>
+            </>
           );
         })()}
 

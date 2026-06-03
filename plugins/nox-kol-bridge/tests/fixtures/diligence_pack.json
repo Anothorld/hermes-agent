@@ -1,0 +1,27 @@
+{
+  "profile": {
+    "success": true,
+    "data": {
+      "creator_id": "nox_test_creator_001",
+      "creator_name": "Test Creator",
+      "followers": 50000,
+      "engagement_rate": 0.042,
+      "country": "US",
+      "benchmark_rank": 0.72
+    }
+  },
+  "audience": {
+    "success": true,
+    "data": {
+      "creator_id": "nox_test_creator_001",
+      "authenticity_status": "healthy"
+    }
+  },
+  "content": {
+    "success": true,
+    "data": {
+      "creator_id": "nox_test_creator_001",
+      "engagement_rate": 0.042
+    }
+  }
+}

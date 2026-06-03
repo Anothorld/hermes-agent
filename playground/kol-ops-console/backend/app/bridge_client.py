@@ -149,8 +149,18 @@ class BridgeClient:
             "PUT", f"/campaigns/{campaign_id}", json=body, retry=1,
         )
 
-    async def get_campaign(self, campaign_id: str) -> dict[str, Any]:
-        return await self._req("GET", f"/campaigns/{campaign_id}")
+    async def get_campaign(
+        self,
+        campaign_id: str,
+        *,
+        env: str | None = None,
+    ) -> dict[str, Any]:
+        params = {"env": env} if env else None
+        return await self._req(
+            "GET",
+            f"/campaigns/{campaign_id}",
+            params=params,
+        )
 
     async def parse_campaign_intent(
         self, text: str, env: str = "LIVE"

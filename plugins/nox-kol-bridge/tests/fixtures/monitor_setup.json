@@ -1,0 +1,10 @@
+{
+  "create": {
+    "success": true,
+    "data": { "project_id": "proj_test_001" }
+  },
+  "add_task": {
+    "success": true,
+    "data": { "task_id": "task_test_001" }
+  }
+}

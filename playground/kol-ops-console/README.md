@@ -1,5 +1,12 @@
 # KOL Ops Console — learning UI
 
+**架构与目录（开发/Agent 必读）**
+
+- 总览：[ARCHITECTURE.md](ARCHITECTURE.md)
+- 各系统功能指引：[docs/README.md](docs/README.md)
+- 后端 API 对照：`backend/app/routers/README.md`
+- 前端页面/组件对照：`frontend/src/pages/README.md`、`frontend/src/components/README.md`
+
 ## 操作员快速上手（约 3 分钟）
 
 1. **日常**：在 **待审批** 处理 AI 回信草稿（批准 / 结构化驳回）。

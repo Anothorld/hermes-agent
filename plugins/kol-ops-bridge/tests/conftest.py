@@ -26,7 +26,7 @@ def _load_package() -> types.ModuleType:
     pkg.__path__ = [str(_PLUGIN_ROOT)]
     sys.modules[_PKG_NAME] = pkg
 
-    for sub in ("schema", "goals", "policies", "cal", "discovery_router",
+    for sub in ("schema", "campaign_nox_integration", "goals", "policies", "cal", "discovery_router",
                 "confirmed_ingest", "confirmed_fact_buffer",
                 "pricing_engine", "campaign_validation", "classifier_facts",
                 "dispatch_router", "reply_draft", "reject_tags", "reply_diff",

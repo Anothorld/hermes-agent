@@ -59,9 +59,11 @@ def test_validate_nox_config_fields(bridge_pkg):
             "audit_standards_md": "x" * 50,
             "nox_quota_enabled": True,
             "nox_monthly_budget": 1800,
+            "nox_cache_timezone": "Asia/Shanghai",
         },
         campaign_id="POVISON-TS-8319",
         sku_regex=cv.DEFAULT_SKU_REGEX,
     )
     assert out["status"] == "ok"
     assert out["normalized"]["nox_monthly_budget"] == 1800
+    assert out["normalized"]["nox_cache_timezone"] == "Asia/Shanghai"

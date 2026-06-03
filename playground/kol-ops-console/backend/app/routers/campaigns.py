@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
@@ -34,6 +34,18 @@ from ..campaign_config_sync import (
 from ..campaign_locks import campaign_lock
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
+from ..nox_dispatch import dispatch_nox_contacts_batch
+from ..nox_gate import (
+    extract_campaign_config,
+    materialize_campaign_config_file,
+    require_nox_supplement_enabled,
+)
+from ..nox_helpers import enrich_shortlist_with_nox
+from ..nox_quota import (
+    assert_nox_quota_available,
+    fetch_campaign_nox_stats,
+    open_nox_quota_escalation,
+)
 from ..discovery_gate import (
     REDISCOVERY_INSTRUCTIONS,
     _count_uncontacted_candidates,
@@ -891,15 +903,31 @@ class NoxSupplementBody(BaseModel):
         default_factory=lambda: ["youtube"],
         description="Platforms to search (one API call each, quota capped).",
     )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Search keywords passed to kol-nox-discovery / creator-search body.",
+    )
+    page_size: int = Field(default=10, ge=1, le=50)
+
+    @field_validator("platforms")
+    @classmethod
+    def cap_platforms(cls, platforms: list[str]) -> list[str]:
+        if len(platforms) > 2:
+            raise ValueError("At most 2 platforms per supplement run")
+        cleaned = [p.strip().lower() for p in platforms if p.strip()]
+        if not cleaned:
+            raise ValueError("platforms must not be empty")
+        return cleaned
 
 
 _NOX_SUPPLEMENT_INSTRUCTIONS = (
     "You are running `kol-nox-discovery` (Nox supplement search only).\n"
     f"- Repo root: {_REPO_ROOT}\n"
     f"- Nox CLI: python {_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py\n"
-    "1. `skill_view(name='kol-nox-discovery')` — max 1 page per platform.\n"
-    "2. Present results; do NOT auto-ingest. Operator selects rows.\n"
-    "3. Do NOT run during Launch Step 3.\n"
+    "1. LIVE: `--campaign-config-file` on every `nox_kol_tool.py` call.\n"
+    "2. `skill_view(name='kol-nox-discovery')` — max 1 page per platform.\n"
+    "3. Present results; do NOT auto-ingest. Operator selects rows.\n"
+    "4. Do NOT run during Launch Step 3.\n"
 )
 
 
@@ -907,18 +935,35 @@ _NOX_SUPPLEMENT_INSTRUCTIONS = (
 async def nox_supplement(
     campaign_id: str,
     body: NoxSupplementBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
     gateway: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict[str, Any]:
     """Manual Nox supplement search (not Launch discovery)."""
     ensure_gateway_bridge_key()
+    cfg_path = ""
+    if body.env.upper() == "LIVE":
+        cfg = await require_nox_supplement_enabled(bridge, campaign_id, env=body.env)
+        await assert_nox_quota_available(bridge, campaign_id, env=body.env)
+        cfg_path = materialize_campaign_config_file(
+            campaign_id,
+            cfg,
+            allowed_gates=("supplement_search",),
+        )
+    kw_line = ",".join(body.keywords) if body.keywords else ""
     brief = "\n".join([
         "# kol_nox_supplement",
         f"campaign_id: {campaign_id}",
         f"mode: {body.env}",
         f"platforms: {','.join(body.platforms)}",
+        f"keywords: {kw_line}",
+        f"page_size: {body.page_size}",
+        f"campaign_config_file: {cfg_path}",
         f"requested_by: {user['email']}",
+        "",
+        "Use creator-search --gate supplement_search once per platform (max 1 page).",
+        "Pass keywords in JSON body when calling nox_kol_tool.py creator-search.",
     ])
     try:
         run = await gateway.start_run(
@@ -944,7 +989,12 @@ async def nox_supplement(
         actor_user_id=user["id"],
         action="campaign.nox.supplement",
         target=campaign_id,
-        payload={"platforms": body.platforms, "run_id": run_id},
+        payload={
+            "platforms": body.platforms,
+            "keywords": body.keywords,
+            "page_size": body.page_size,
+            "run_id": run_id,
+        },
     )
     return {"ok": True, "run_id": run_id, "campaign_id": campaign_id}
 
@@ -2321,6 +2371,12 @@ async def get_shortlist(
         "already_approved": sum(1 for c in candidates if c.get("candidate_status") == "selected_for_outreach"),
         "rejected_or_archived_hidden": hidden_count,
     }
+    await enrich_shortlist_with_nox(
+        bridge,
+        candidates,
+        campaign_id=campaign_id,
+        env=env,
+    )
     return {
         "campaign_id": campaign_id,
         "snapshot_ts": snapshot_ts,
@@ -2367,8 +2423,64 @@ def _compose_approval_brief(
         "- During this run, do NOT create Gmail drafts. Only persist `approval.reply_draft` with `decision=pending`.",
         "- Gmail drafts are created only after explicit ApprovalsPage approve of `approval.reply_draft`.",
         "- Record progress/events through the bridge CLI so the console can show what happened.",
+        "",
+        "## Nox contacts (Gate B)",
+        "If `campaign_config.nox_quota_enabled` is true, for each approved identity "
+        "without `primary_email`, run `nox_kol_tool.py contacts --gate pre_outreach_confirm` "
+        "with `--campaign-config-file` before browser email-discovery.",
     ])
     return "\n".join(lines)
+
+
+@router.get("/{campaign_id}/nox-stats")
+async def campaign_nox_stats(
+    campaign_id: str,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    env: str = Query("LIVE", pattern="^(LIVE|TEST)$"),
+) -> dict[str, Any]:
+    """Local Nox cache/ledger stats (+ supplement usage when campaign known)."""
+    _ = user
+    try:
+        stats = await fetch_campaign_nox_stats(bridge, campaign_id, env=env)
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {"ok": True, "campaign_id": campaign_id, "stats": stats}
+
+
+class NoxQuotaEscalationBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    identity_id: int | None = None
+
+
+@router.post("/{campaign_id}/nox-quota-escalation")
+async def open_nox_quota_escalation_route(
+    campaign_id: str,
+    body: NoxQuotaEscalationBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """Open ``nox_quota_exhausted`` escalation when local monthly budget is zero."""
+    env = body.env
+    try:
+        out = await open_nox_quota_escalation(
+            bridge,
+            campaign_id=campaign_id,
+            env=env,
+            identity_id=body.identity_id,
+            actor_email=user["email"],
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    write_audit(
+        conn,
+        actor_user_id=user["id"],
+        action="campaign.nox.quota_escalation",
+        target=campaign_id,
+        payload={"env": env, "identity_id": body.identity_id, "escalation_id": out.get("escalation_id")},
+    )
+    return {"ok": True, "campaign_id": campaign_id, **out}
 
 
 def _recover_test_mode_to(
@@ -2616,15 +2728,31 @@ async def approve_shortlist(
                 session_id=f"kol-campaign:{body.env}:{campaign_id}",
                 dedup_key=dedup_key,
             )
+        nox_contacts_batch = await dispatch_nox_contacts_batch(
+            bridge=bridge,
+            gateway=gateway,
+            conn=conn,
+            campaign_id=campaign_id,
+            env=body.env,
+            identity_ids=identity_ids,
+            actor_user_id=user["id"],
+            actor_email=user["email"],
+        )
         write_audit(
             conn, actor_user_id=user["id"],
             action="campaign.approve_shortlist",
             target=campaign_id,
             payload={**payload, "selected_handles": body.selected_handles,
-                     "run_id": new_run_id, "event_ids": event_ids},
+                     "run_id": new_run_id, "event_ids": event_ids,
+                     "nox_contacts_batch": nox_contacts_batch},
         )
-        return {**out, "run_id": new_run_id,
-                "approved_count": len(identity_ids), "event_ids": event_ids}
+        return {
+            **out,
+            "run_id": new_run_id,
+            "approved_count": len(identity_ids),
+            "event_ids": event_ids,
+            "nox_contacts_batch": nox_contacts_batch,
+        }
 
 
 class RedraftOutreachBody(BaseModel):
@@ -3235,6 +3363,11 @@ class PatchCampaignConfigBody(BaseModel):
     commission_min_pct: float | None = Field(default=None, ge=0, le=100)
     commission_max_pct: float | None = Field(default=None, ge=0, le=100)
     contract_required: bool | None = None
+    nox_quota_enabled: bool | None = None
+    nox_monthly_budget: int | None = Field(default=None, ge=0, le=2000)
+    nox_supplement_enabled: bool | None = None
+    nox_supplement_max_calls: int | None = Field(default=None, ge=0, le=200)
+    nox_cache_enabled: bool | None = None
     env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
 
     @model_validator(mode="after")

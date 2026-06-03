@@ -275,6 +275,14 @@ class CampaignConfigUpsertBody(BaseModel):
     followup_intervals: Optional[dict[str, Any]] = None
     contract_required: Optional[bool] = None
     status: Optional[str] = None
+    nox_quota_enabled: Optional[bool] = None
+    nox_monthly_budget: Optional[int] = Field(default=None, ge=0, le=2000)
+    nox_supplement_enabled: Optional[bool] = None
+    nox_supplement_max_calls: Optional[int] = Field(default=None, ge=0, le=200)
+    nox_cache_enabled: Optional[bool] = None
+    nox_cache_retain_months: Optional[int] = Field(default=None, ge=0, le=120)
+    nox_cache_timezone: Optional[str] = Field(default=None, max_length=64)
+    nox_diligence_dimensions: Optional[list[str]] = None
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 

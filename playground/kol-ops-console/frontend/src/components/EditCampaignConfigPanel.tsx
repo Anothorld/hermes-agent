@@ -27,6 +27,11 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
   const [commissionMinPct, setCommissionMinPct] = useState('');
   const [commissionMaxPct, setCommissionMaxPct] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [noxQuota, setNoxQuota] = useState<boolean | null>(null);
+  const [noxBudget, setNoxBudget] = useState('');
+  const [noxSupplement, setNoxSupplement] = useState<boolean | null>(null);
+  const [noxSupplementMax, setNoxSupplementMax] = useState('');
+  const [noxCacheTz, setNoxCacheTz] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -100,6 +105,30 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
         return;
       }
       payload.product_display_name = trimmedDisplay;
+    }
+    if (noxQuota !== null) payload.nox_quota_enabled = noxQuota;
+    if (noxBudget.trim()) {
+      const b = Number(noxBudget);
+      if (!Number.isFinite(b) || b < 0 || b > 2000) {
+        setErr('nox_monthly_budget 需在 0–2000');
+        setBusy(false);
+        return;
+      }
+      payload.nox_monthly_budget = b;
+    }
+    if (noxSupplement !== null) payload.nox_supplement_enabled = noxSupplement;
+    if (noxSupplementMax.trim()) {
+      const s = Number(noxSupplementMax);
+      if (!Number.isFinite(s) || s < 0 || s > 200) {
+        setErr('nox_supplement_max_calls 需在 0–200');
+        setBusy(false);
+        return;
+      }
+      payload.nox_supplement_max_calls = s;
+    }
+    const tz = noxCacheTz.trim();
+    if (tz) {
+      payload.nox_cache_timezone = tz;
     }
     if (Object.keys(payload).length <= 1) {
       setErr('请至少修改一个字段');
@@ -240,6 +269,62 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
                 placeholder="例如 20"
               />
             </label>
+          </div>
+          <div className="rounded border border-violet-100 bg-violet-50/50 p-2">
+            <div className="text-[11px] font-medium text-violet-900">NoxInfluencer 集成</div>
+            <div className="mt-2 flex flex-wrap gap-4">
+              <label className="inline-flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={noxQuota === true}
+                  onChange={(e) => setNoxQuota(e.target.checked ? true : null)}
+                />
+                nox_quota_enabled
+              </label>
+              <label className="inline-flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={noxSupplement === true}
+                  onChange={(e) => setNoxSupplement(e.target.checked ? true : null)}
+                />
+                nox_supplement_enabled
+              </label>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <label className="flex flex-col">
+                <span className="text-slate-500">nox_monthly_budget</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={2000}
+                  value={noxBudget}
+                  onChange={(e) => setNoxBudget(e.target.value)}
+                  placeholder="1800"
+                  className="rounded border px-2 py-1"
+                />
+              </label>
+              <label className="flex flex-col">
+                <span className="text-slate-500">nox_supplement_max_calls</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={200}
+                  value={noxSupplementMax}
+                  onChange={(e) => setNoxSupplementMax(e.target.value)}
+                  placeholder="30"
+                  className="rounded border px-2 py-1"
+                />
+              </label>
+              <label className="flex flex-col col-span-2">
+                <span className="text-slate-500">nox_cache_timezone</span>
+                <input
+                  value={noxCacheTz}
+                  onChange={(e) => setNoxCacheTz(e.target.value)}
+                  placeholder="Asia/Shanghai"
+                  className="rounded border px-2 py-1"
+                />
+              </label>
+            </div>
           </div>
           <label className="flex flex-col">
             <span className="text-slate-500">

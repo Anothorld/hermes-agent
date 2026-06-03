@@ -1,5 +1,7 @@
 # Frontend — KOL Ops Console
 
+架构：[../ARCHITECTURE.md](../ARCHITECTURE.md) · 页面路由对照：[src/pages/README.md](src/pages/README.md) · 组件簇：[src/components/README.md](src/components/README.md)
+
 Vite + React 19 + TypeScript + Tailwind v4 SPA. Single WebSocket to backend
 `/ws` for live updates.
 

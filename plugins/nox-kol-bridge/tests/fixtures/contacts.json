@@ -1,0 +1,8 @@
+{
+  "success": true,
+  "data": {
+    "creator_id": "nox_test_creator_001",
+    "email": "creator@example.test",
+    "email_quality": 1
+  }
+}

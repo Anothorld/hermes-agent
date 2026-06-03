@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "nox_search_item_1",
+        "nickname": "Cycling Pro",
+        "followers": 45000,
+        "country": "US"
+      }
+    ],
+    "page_num": 1,
+    "total_page": 1
+  }
+}

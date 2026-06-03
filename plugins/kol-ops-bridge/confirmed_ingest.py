@@ -34,6 +34,14 @@ _DISCOVERY_BASE_KEYS: Final[tuple[str, ...]] = (
     "identity.email_discovered_at",
     "identity.email_discovered_url",
     "identity.email_discovery_tier",
+    "identity.nox_creator_id",
+    "identity.nox_diligence_verdict",
+    "identity.nox_diligence_at",
+    "identity.nox_cache_month",
+    "identity.nox_cache_key",
+    "identity.nox_contacts_cached_month",
+    "identity.nox_monitor_project_id",
+    "identity.nox_monitor_task_id",
 )
 
 _PROVENANCE_BASES: Final[tuple[str, ...]] = tuple(

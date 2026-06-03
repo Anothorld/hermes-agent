@@ -18,7 +18,10 @@ from ..campaign_id_norm import CampaignIdNormaliserMixin, norm_campaign_id
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
+from ..nox_contacts_sync import attempt_gate_b_contacts
 from ..nox_gate import materialize_campaign_config_file, require_nox_quota_enabled
+from ..nox_helpers import dedup_identity_ids_by_nox_creator
+from ..nox_quota import assert_nox_quota_available, raise_quota_exhausted
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
     get_inflight_run,
@@ -405,6 +408,11 @@ _DISCOVER_EMAIL_INSTRUCTIONS = (
     "1. Read the identity row. If `primary_email` is already non-empty,\n"
     "   stop immediately and report `{skipped: \"already_has_email\"}`.\n"
     "   Do NOT overwrite an existing email under any circumstance.\n"
+    "1b. Gate B (Nox contacts) may already have run on the Console server\n"
+    "    before this gateway run (`gate_b_attempted: true` in brief). If not,\n"
+    "    and `campaign_config.nox_quota_enabled` with creator id or channel URL,\n"
+    "    run `nox_kol_tool.py contacts --gate pre_outreach_confirm` first.\n"
+    "    On email hit, stop — do not run browser discovery.\n"
     "2. Invoke the `kol-email-discovery` skill with the supplied\n"
     "   identity_id, env, and campaign_id. The skill resolves the\n"
     "   email from public web sources (link-in-bio, personal site,\n"
@@ -426,6 +434,8 @@ def _compose_discover_email_brief(
     env: str,
     campaign_id: str | None,
     actor_email: str,
+    gate_b_attempted: bool = False,
+    campaign_config_file: str = "",
 ) -> str:
     lines = [
         "# kol_email_discovery",
@@ -437,6 +447,10 @@ def _compose_discover_email_brief(
         lines.append(f"handle: {handle}")
     if campaign_id:
         lines.append(f"campaign_id: {campaign_id}")
+    if gate_b_attempted:
+        lines.append("gate_b_attempted: true")
+    if campaign_config_file:
+        lines.append(f"campaign_config_file: {campaign_config_file}")
     lines.extend([
         "",
         "# required_next_step",
@@ -519,6 +533,63 @@ async def discover_email(
             },
         )
 
+    gate_b_attempted = False
+    cfg_path = ""
+    if body.campaign_id and env.upper() == "LIVE":
+        facts_resp = None
+        try:
+            facts_resp = await bridge.read_facts(
+                identity_id,
+                campaign_id=body.campaign_id,
+                env=env,
+            )
+        except BridgeError:
+            facts_resp = None
+        gate_b = await attempt_gate_b_contacts(
+            bridge,
+            identity_id=identity_id,
+            ident=ident,
+            campaign_id=body.campaign_id,
+            env=env,
+            actor_email=user["email"],
+            facts_resp=facts_resp,
+        )
+        if gate_b.get("quota_exhausted"):
+            raise_quota_exhausted(campaign_id=body.campaign_id, env=env)
+        if gate_b.get("email_found"):
+            write_audit(
+                conn,
+                actor_user_id=user["id"],
+                action="kol.email.discover_gate_b",
+                target=str(identity_id),
+                payload={
+                    "env": env,
+                    "campaign_id": body.campaign_id,
+                    "email": gate_b.get("email"),
+                    "cache_hit": gate_b.get("cache_hit"),
+                },
+            )
+            return {
+                "ok": True,
+                "gate_b": True,
+                "skipped_browser_discover": True,
+                "email": gate_b.get("email"),
+                "identity_id": identity_id,
+            }
+        if gate_b.get("gate_b"):
+            gate_b_attempted = True
+            try:
+                cfg = await require_nox_quota_enabled(
+                    bridge, body.campaign_id, env=env,
+                )
+                cfg_path = materialize_campaign_config_file(
+                    body.campaign_id,
+                    cfg,
+                    allowed_gates=("pre_outreach_confirm",),
+                )
+            except HTTPException:
+                cfg_path = ""
+
     ensure_gateway_bridge_key()
     handle = ident.get("primary_handle")
     brief = _compose_discover_email_brief(
@@ -527,6 +598,8 @@ async def discover_email(
         env=env,
         campaign_id=body.campaign_id,
         actor_email=user["email"],
+        gate_b_attempted=gate_b_attempted,
+        campaign_config_file=cfg_path,
     )
     try:
         run = await gateway.start_run(
@@ -591,8 +664,20 @@ _NOX_DILIGENCE_INSTRUCTIONS = (
     "2. LIVE: pass `--campaign-config-file <path>` on every `nox_kol_tool.py` call.\n"
     "3. Use `diligence-pack --gate shortlist_confirm` only.\n"
     "4. If `cache_hit`, report zero API calls and hydrate facts from summary.\n"
-    "5. Do NOT run supplement search or monitor setup in this run.\n"
+    "5. Pass `--audit-campaign-id` and `--audit-identity-id` on gated calls for CAL events.\n"
+    "6. Do NOT run supplement search or monitor setup in this run.\n"
 )
+
+
+class NoxDiligenceBatchBody(CampaignIdNormaliserMixin):
+    env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    campaign_id: str = Field(min_length=1)
+    identity_ids: list[int] = Field(min_length=1, max_length=50)
+
+
+class NoxContactsBody(CampaignIdNormaliserMixin):
+    env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    campaign_id: str | None = None
 
 
 @router.post("/{identity_id}/nox-diligence")
@@ -621,7 +706,12 @@ async def nox_diligence(
                 {"code": "campaign_id_required", "detail": "campaign_id required for LIVE Nox diligence"},
             )
         cfg = await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
-        cfg_path = materialize_campaign_config_file(body.campaign_id, cfg)
+        await assert_nox_quota_available(bridge, body.campaign_id, env=env)
+        cfg_path = materialize_campaign_config_file(
+            body.campaign_id,
+            cfg,
+            allowed_gates=("shortlist_confirm",),
+        )
 
     dedup_key = f"nox-diligence:{env}:{identity_id}"
     inflight = get_inflight_run(conn, dedup_key=dedup_key)
@@ -671,6 +761,181 @@ async def nox_diligence(
     return {"ok": True, "run_id": run_id, "identity_id": identity_id}
 
 
+@router.post("/nox-diligence-batch")
+async def nox_diligence_batch(
+    body: NoxDiligenceBatchBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    gateway: Annotated[GatewayClient, Depends(get_gateway)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict:
+    """Gate A batch: one gateway run, agent processes identity_ids serially."""
+    env = body.env
+    ids = list(dict.fromkeys(body.identity_ids))
+    dropped_dupes: list[int] = []
+    if env.upper() == "LIVE" and ids:
+        ids, dropped_dupes = await dedup_identity_ids_by_nox_creator(
+            bridge,
+            ids,
+            campaign_id=body.campaign_id,
+            env=env,
+        )
+    if not ids:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            {
+                "code": "nox_diligence_batch_empty",
+                "detail": "all identity_ids deduplicated by nox_creator_id",
+                "dropped_identity_ids": dropped_dupes,
+            },
+        )
+    cfg_path = ""
+    if env.upper() == "LIVE":
+        cfg = await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
+        await assert_nox_quota_available(bridge, body.campaign_id, env=env)
+        cfg_path = materialize_campaign_config_file(
+            body.campaign_id,
+            cfg,
+            allowed_gates=("shortlist_confirm",),
+        )
+    dedup_key = f"nox-diligence-batch:{env}:{body.campaign_id}"
+    inflight = get_inflight_run(conn, dedup_key=dedup_key)
+    if inflight is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"code": "nox_diligence_batch_inflight", "run_id": inflight.get("run_id")},
+        )
+    ensure_gateway_bridge_key()
+    brief = "\n".join([
+        "# kol_nox_diligence_batch",
+        f"campaign_id: {body.campaign_id}",
+        f"mode: {env}",
+        f"campaign_config_file: {cfg_path}",
+        f"identity_ids: {','.join(str(i) for i in ids)}",
+        f"requested_by: {user['email']}",
+        f"dropped_duplicate_creator_ids: {','.join(str(i) for i in dropped_dupes)}",
+        "",
+        "Process each identity_id in order. Same-month cache_hit → skip API.",
+        "Do not re-query the same nox_creator_id in one batch.",
+    ])
+    try:
+        run = await gateway.start_run(
+            input=brief,
+            instructions=_NOX_DILIGENCE_INSTRUCTIONS,
+            session_id=f"kol-nox-diligence-batch:{env}:{body.campaign_id}",
+        )
+    except GatewayError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    run_id = run.get("run_id") if isinstance(run, dict) else None
+    if isinstance(run_id, str) and run_id:
+        register_run(
+            conn,
+            campaign_id=body.campaign_id,
+            env=env,
+            run_id=run_id,
+            kind="draft",
+            session_id=f"kol-nox-diligence-batch:{env}:{body.campaign_id}",
+            dedup_key=dedup_key,
+        )
+    write_audit(
+        conn,
+        actor_user_id=user["id"],
+        action="kol.nox.diligence_batch",
+        target=body.campaign_id,
+        payload={
+            "identity_ids": ids,
+            "dropped_identity_ids": dropped_dupes,
+            "run_id": run_id,
+        },
+    )
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "identity_ids": ids,
+        "dropped_identity_ids": dropped_dupes,
+    }
+
+
+@router.post("/{identity_id}/nox-contacts")
+async def nox_contacts(
+    identity_id: int,
+    body: NoxContactsBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict:
+    """Gate B: deterministic Nox contacts (``nox_kol_tool.py``) before browser discovery."""
+    env = body.env
+    try:
+        ident = await bridge.get_identity(identity_id)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if not ident:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "identity not found")
+    if str(ident.get("primary_email") or "").strip():
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "already_has_email",
+            "primary_email": ident.get("primary_email"),
+        }
+    if env.upper() == "LIVE" and not body.campaign_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            {"code": "campaign_id_required", "detail": "campaign_id required for LIVE Nox contacts"},
+        )
+    if env.upper() == "LIVE" and body.campaign_id:
+        await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
+        await assert_nox_quota_available(bridge, body.campaign_id, env=env)
+
+    facts_resp = None
+    if body.campaign_id:
+        try:
+            facts_resp = await bridge.read_facts(
+                identity_id,
+                campaign_id=body.campaign_id,
+                env=env,
+            )
+        except BridgeError:
+            facts_resp = None
+
+    gate_b: dict[str, Any] = {"skipped": True, "reason": "no_campaign_id"}
+    if body.campaign_id:
+        gate_b = await attempt_gate_b_contacts(
+            bridge,
+            identity_id=identity_id,
+            ident=ident,
+            campaign_id=body.campaign_id,
+            env=env,
+            actor_email=user["email"],
+            facts_resp=facts_resp,
+        )
+    if gate_b.get("quota_exhausted"):
+        raise_quota_exhausted(campaign_id=body.campaign_id or "", env=env)
+
+    write_audit(
+        conn,
+        actor_user_id=user["id"],
+        action="kol.nox.contacts",
+        target=str(identity_id),
+        payload={"env": env, "campaign_id": body.campaign_id, "gate_b": gate_b},
+    )
+    if gate_b.get("email_found"):
+        return {
+            "ok": True,
+            "identity_id": identity_id,
+            "email_found": True,
+            "email": gate_b.get("email"),
+            "cache_hit": gate_b.get("cache_hit"),
+        }
+    return {
+        "ok": True,
+        "identity_id": identity_id,
+        "email_found": False,
+        "gate_b": gate_b,
+    }
+
+
 class NoxMonitorBody(CampaignIdNormaliserMixin):
     env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
     campaign_id: str | None = None
@@ -706,7 +971,11 @@ async def nox_monitor(
                 {"code": "campaign_id_required", "detail": "campaign_id required for LIVE Nox monitor"},
             )
         cfg = await require_nox_quota_enabled(bridge, body.campaign_id, env=body.env)
-        cfg_path = materialize_campaign_config_file(body.campaign_id, cfg)
+        cfg_path = materialize_campaign_config_file(
+            body.campaign_id,
+            cfg,
+            allowed_gates=("post_publish_confirm",),
+        )
     brief = "\n".join([
         "# kol_nox_monitor",
         f"identity_id: {identity_id}",

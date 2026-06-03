@@ -51,6 +51,13 @@ def _normalize_primary_email(value: Optional[str]) -> Optional[str]:
         )
     return s.lower()
 
+from .campaign_nox_integration import (
+    encode_nox_integration,
+    flatten_nox_into_config,
+    merge_nox_integration,
+    parse_nox_integration_json,
+    pick_nox_fields,
+)
 from .goals import GOALS, Context, all_goals
 from .schema import FACT_NAMESPACES, GOAL_NAMES, recreate_all
 
@@ -129,6 +136,7 @@ def _bootstrap(path: Path) -> None:
         )
         _ensure_column(conn, "campaign_config", "paid_target_budget", "REAL")
         _ensure_column(conn, "campaign_config", "paid_ratio_override", "REAL")
+        _ensure_column(conn, "campaign_config", "nox_integration_json", "TEXT")
         _ensure_column(conn, "kol_relationship", "negotiation_style", "TEXT")
         _ensure_column(conn, "policy_documents", "env", "TEXT")
         for ddl in VIEWS.values():
@@ -559,7 +567,10 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
                 (campaign_id,),
             ).fetchone()
             sets, vals = [], []
+            nox_updates = pick_nox_fields(fields)
             for k, v in fields.items():
+                if k in nox_updates:
+                    continue
                 if k in json_cols and v is not None:
                     sets.append(f"{json_cols[k]} = ?")
                     vals.append(_j(v))
@@ -568,6 +579,19 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
                         v = 1 if v else 0
                     sets.append(f"{k} = ?")
                     vals.append(v)
+            if nox_updates:
+                existing_blob: dict[str, Any] = {}
+                if row:
+                    cur = conn.execute(
+                        "SELECT nox_integration_json FROM campaign_config "
+                        "WHERE campaign_id=?",
+                        (campaign_id,),
+                    ).fetchone()
+                    if cur is not None:
+                        existing_blob = parse_nox_integration_json(cur[0])
+                merged = merge_nox_integration(existing_blob, nox_updates)
+                sets.append("nox_integration_json = ?")
+                vals.append(encode_nox_integration(merged))
             if row:
                 sets.append("env = ?")
                 vals.append(env)
@@ -651,7 +675,7 @@ def get_campaign_config(campaign_id: str, *, env: Optional[str] = None) -> Optio
     out["variant_candidates"] = _jl(out.pop("variant_candidates_json", "[]"), [])
     out["followup_intervals"] = _jl(out.pop("followup_intervals_json", "{}"), {})
     out["contract_required"] = bool(out.get("contract_required", 1))
-    return out
+    return flatten_nox_into_config(out)
 
 
 def upsert_candidate(

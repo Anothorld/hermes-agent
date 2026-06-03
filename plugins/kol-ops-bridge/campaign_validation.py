@@ -266,6 +266,7 @@ _NOX_BOOL_KEYS = frozenset({"nox_quota_enabled", "nox_supplement_enabled", "nox_
 _NOX_INT_KEYS = frozenset(
     {"nox_monthly_budget", "nox_supplement_max_calls", "nox_cache_retain_months"}
 )
+_NOX_STR_KEYS = frozenset({"nox_cache_timezone"})
 
 
 def _check_nox_config(v: _Verdict, c: Mapping[str, Any]) -> None:
@@ -294,6 +295,14 @@ def _check_nox_config(v: _Verdict, c: Mapping[str, Any]) -> None:
             v.fail(key, "must be <= 2000 (plan quota ceiling)")
             continue
         v.normalized[key] = ival
+    for key in _NOX_STR_KEYS:
+        val = c.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, str) or not val.strip():
+            v.fail(key, "must be a non-empty string")
+        else:
+            v.normalized[key] = val.strip()
     dims = c.get("nox_diligence_dimensions")
     if dims is not None:
         if not isinstance(dims, list) or not dims:

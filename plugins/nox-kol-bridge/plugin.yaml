@@ -1,0 +1,9 @@
+name: nox-kol-bridge
+version: 0.1.0
+description: "NoxInfluencer CLI wrapper with monthly quota gate and response cache for KOL ops."
+author: kol-ops
+kind: backend
+requires_bins:
+  - noxinfluencer
+requires_env:
+  - NOXINFLUENCER_API_KEY
