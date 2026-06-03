@@ -42,6 +42,10 @@ export function KolKanbanPage() {
   const showRaw = usePrefsStore((s) => s.showRawFactKeys);
   const campaignId = useCampaignStore((s) => s.currentCampaignId);
   const setCampaignId = useCampaignStore((s) => s.setCampaignId);
+  // Prefer URL on first paint so deep links fetch immediately (persist
+  // rehydration can lag and previously caused a blank-then-slow reload).
+  const urlCampaignId = search.get('campaign_id') ?? '';
+  const effectiveCampaignId = urlCampaignId || campaignId;
 
   // Deep-link sync: URL ?campaign_id= wins on first load (so a copied
   // link still works), then the store takes over.
@@ -51,8 +55,7 @@ export function KolKanbanPage() {
     else if (!fromUrl && campaignId) {
       setSearch({ campaign_id: campaignId }, { replace: true });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [search, campaignId, setCampaignId, setSearch]);
 
   const [data, setData] = useState<EnrichedSnapshot[]>([]);
   const [counts, setCounts] = useState<{
@@ -63,7 +66,7 @@ export function KolKanbanPage() {
   }>({ pending_approvals: 0, open_escalations: 0 });
   const seenApprovalsGlobal = useUnreadStore((s) => s.seen['approvals.global']);
   const seenEscalationsGlobal = useUnreadStore(
-    (s) => s.seen[`escalations.global.${campaignId}`],
+    (s) => s.seen[`escalations.global.${effectiveCampaignId}`],
   );
   const seenByScope = useUnreadStore((s) => s.seen);
   const [err, setErr] = useState<unknown>(null);
@@ -80,7 +83,7 @@ export function KolKanbanPage() {
     const requestId = latestRequestRef.current + 1;
     latestRequestRef.current = requestId;
     setRefreshing(true);
-    if (!campaignId) {
+    if (!effectiveCampaignId) {
       setData([]);
       setErr(null);
       setRefreshing(false);
@@ -88,7 +91,7 @@ export function KolKanbanPage() {
     }
     try {
       const r = await api.get<LanesResponse>(
-        `/campaigns/${encodeURIComponent(campaignId)}/lanes?env=${env}`,
+        `/campaigns/${encodeURIComponent(effectiveCampaignId)}/lanes?env=${env}`,
       );
       if (requestId !== latestRequestRef.current) return;
       setData(r.lanes as EnrichedSnapshot[]);
@@ -108,7 +111,7 @@ export function KolKanbanPage() {
     } finally {
       if (requestId === latestRequestRef.current) setRefreshing(false);
     }
-  }, [campaignId, env]);
+  }, [effectiveCampaignId, env]);
 
   useEffect(() => {
     refresh();
@@ -242,7 +245,7 @@ export function KolKanbanPage() {
 
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
 
-      {!campaignId && (
+      {!effectiveCampaignId && (
         <div className="rounded border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
           请在导航栏选择一个 campaign 来加载看板。
           <Link to="/products" className="ml-2 font-medium text-emerald-700 hover:underline">
@@ -251,6 +254,27 @@ export function KolKanbanPage() {
         </div>
       )}
 
+      {effectiveCampaignId && refreshing && data.length === 0 && !err && (
+        <div className="rounded border border-slate-200 bg-white p-4 text-sm text-slate-600">
+          正在加载 KOL 看板…
+          <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+            {visibleColumns.map(({ goal }) => (
+              <div
+                key={goal}
+                className="min-w-[15rem] flex-1 animate-pulse rounded border border-slate-100 bg-slate-50 p-2"
+              >
+                <div className="mb-2 h-3 w-24 rounded bg-slate-200" />
+                <div className="space-y-2">
+                  <div className="h-14 rounded bg-slate-200/70" />
+                  <div className="h-14 rounded bg-slate-200/50" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {effectiveCampaignId && !(refreshing && data.length === 0 && !err) && (
       <div className="flex gap-2">
         <div className="min-w-0 flex-1 overflow-x-auto pb-2">
           <div
@@ -273,7 +297,7 @@ export function KolKanbanPage() {
                     <KanbanCard
                       key={k.identity_id}
                       row={k}
-                      campaignId={campaignId}
+                      campaignId={effectiveCampaignId}
                       env={env}
                       open={openMissing === k.identity_id}
                       onToggleMissing={() =>
@@ -301,7 +325,7 @@ export function KolKanbanPage() {
               {doneItems.map((k) => (
                 <li key={k.identity_id}>
                   <Link
-                    to={`/kols/${k.identity_id}?campaign_id=${encodeURIComponent(campaignId)}`}
+                    to={`/kols/${k.identity_id}?campaign_id=${encodeURIComponent(effectiveCampaignId)}`}
                     className="block break-words rounded bg-slate-100 px-2 py-1 text-sm text-slate-600 hover:bg-slate-200"
                     title={k.candidate_status || 'archived'}
                   >
@@ -319,6 +343,7 @@ export function KolKanbanPage() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

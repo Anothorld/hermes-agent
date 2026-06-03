@@ -210,13 +210,15 @@ function EscalationList() {
                 <td className="p-2">
                   {isRealCampaignId(r.campaign_id) ? (
                     <Link to={`/kols/${r.identity_id}${campaignIdQueryFirst(r.campaign_id)}`}>
-                      {r.identity_id}
+                      {r.handle ? `@${r.handle}` : r.identity_id}
                     </Link>
                   ) : (
                     // identity-scoped escalation (e.g. contact_email_not_found):
                     // no campaign context exists, so don't build a link that
                     // would carry ``?campaign_id=null`` into KolDetailPage.
-                    <span className="text-slate-700">{r.identity_id}</span>
+                    <span className="text-slate-700">
+                      {r.handle ? `@${r.handle}` : r.identity_id}
+                    </span>
                   )}
                 </td>
                 <td className="p-2">{r.campaign_id ?? '—'}</td>
@@ -605,10 +607,12 @@ function EscalationDetail({ id }: { id: number }) {
               to={`/kols/${row.identity_id}${campaignIdQueryFirst(row.campaign_id)}`}
               className="text-sky-700 hover:underline"
             >
-              {row.identity_id}
+              {row.handle ? `@${row.handle}` : row.identity_id}
             </Link>
           ) : (
-            <span className="text-slate-700">{row.identity_id}</span>
+            <span className="text-slate-700">
+              {row.handle ? `@${row.handle}` : row.identity_id}
+            </span>
           )}
         </div>
         <div>Campaign：{row.campaign_id ?? <span className="italic text-slate-500">无（identity 级 escalation）</span>}</div>
