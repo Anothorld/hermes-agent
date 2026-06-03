@@ -107,6 +107,10 @@ _LAUNCH_INSTRUCTIONS = (
     "   raw candidates (which is set to 2-4x `headcount_target`).\n"
     "   Do NOT use the `mcp_chrome_devtools_*` family — those are flaky\n"
     "   here; stick to `browser_*`.\n"
+    "   Nox API discovery is NOT part of Launch — do not run\n"
+    "   `nox_kol_tool.py` or `kol-nox-discovery` during Step 3. If the\n"
+    "   operator needs YouTube/TikTok supplement pool, they trigger\n"
+    "   Console「Nox 补搜」after the Instagram floor is met.\n"
     "\n"
     "   ITERATION CONTRACT — HARD QUANTITY FLOOR (read carefully):\n"
     "   - `discovery_target_count` is a HARD FLOOR on persisted candidates,\n"
@@ -213,6 +217,13 @@ _APPROVAL_INSTRUCTIONS = (
     "   open an escalation and do not draft for that KOL.\n"
     "4. ENRICHMENT (before any draft skill). For each approved identity\n"
     "   whose `primary_email` (from get-identity) is empty or null:\n"
+    "   a0) If `campaign_config.nox_quota_enabled` is true, run\n"
+    "       `kol-nox-diligence` contacts path first:\n"
+    "       `python plugins/nox-kol-bridge/scripts/nox_kol_tool.py contacts`\n"
+    "       `--env <env> --gate pre_outreach_confirm --nox-creator-id <id>`\n"
+    "       (or platform+url). On hit with email_quality>=1, persist email\n"
+    "       via `upsert-identity` + `identity.email_source=noxinfluencer_api`.\n"
+    "       Skip browser email-discovery when email is now present.\n"
     "   a) invoke `kol-email-discovery` with identity_id, env, campaign_id.\n"
     "      The skill returns `{found: true, email, source, tier, ...}` on\n"
     "      hit (and has already persisted `primary_email` + provenance\n"
@@ -872,6 +883,70 @@ class RediscoverBody(BaseModel):
         "whatever is already persisted in CAL.",
     )
     env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
+
+
+class NoxSupplementBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    platforms: list[str] = Field(
+        default_factory=lambda: ["youtube"],
+        description="Platforms to search (one API call each, quota capped).",
+    )
+
+
+_NOX_SUPPLEMENT_INSTRUCTIONS = (
+    "You are running `kol-nox-discovery` (Nox supplement search only).\n"
+    f"- Repo root: {_REPO_ROOT}\n"
+    f"- Nox CLI: python {_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py\n"
+    "1. `skill_view(name='kol-nox-discovery')` — max 1 page per platform.\n"
+    "2. Present results; do NOT auto-ingest. Operator selects rows.\n"
+    "3. Do NOT run during Launch Step 3.\n"
+)
+
+
+@router.post("/{campaign_id}/nox-supplement")
+async def nox_supplement(
+    campaign_id: str,
+    body: NoxSupplementBody,
+    gateway: Annotated[GatewayClient, Depends(get_gateway)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """Manual Nox supplement search (not Launch discovery)."""
+    ensure_gateway_bridge_key()
+    brief = "\n".join([
+        "# kol_nox_supplement",
+        f"campaign_id: {campaign_id}",
+        f"mode: {body.env}",
+        f"platforms: {','.join(body.platforms)}",
+        f"requested_by: {user['email']}",
+    ])
+    try:
+        run = await gateway.start_run(
+            input=brief,
+            instructions=_NOX_SUPPLEMENT_INSTRUCTIONS,
+            session_id=f"kol-nox-supplement:{body.env}:{campaign_id}",
+        )
+    except GatewayError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    run_id = run.get("run_id") if isinstance(run, dict) else None
+    if isinstance(run_id, str) and run_id:
+        register_run(
+            conn,
+            campaign_id=campaign_id,
+            env=body.env,
+            run_id=run_id,
+            kind="draft",
+            session_id=f"kol-nox-supplement:{body.env}:{campaign_id}",
+            dedup_key=f"nox-supplement:{body.env}:{campaign_id}",
+        )
+    write_audit(
+        conn,
+        actor_user_id=user["id"],
+        action="campaign.nox.supplement",
+        target=campaign_id,
+        payload={"platforms": body.platforms, "run_id": run_id},
+    )
+    return {"ok": True, "run_id": run_id, "campaign_id": campaign_id}
 
 
 async def _campaign_run_in_flight(
@@ -2182,10 +2257,9 @@ async def get_shortlist(
     before approval.
     """
     try:
-        out = await bridge.get_shortlist(campaign_id, env)
+        raw_candidates = await bridge.list_candidate_handles(campaign_id, env=env)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    raw_candidates = out.get("candidates", []) if isinstance(out, dict) else []
     hidden_count = 0
     snapshot_ts: str | None = None
     visible_rows: list[dict[str, Any]] = []
@@ -2211,20 +2285,13 @@ async def get_shortlist(
     candidates: list[dict[str, Any]] = []
     for row in visible_rows:
         identity_id = row.get("identity_id")
-        ident: dict[str, Any] = {}
-        if isinstance(identity_id, int):
-            try:
-                ident = await bridge.get_identity(identity_id)
-            except BridgeError:
-                ident = {}
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         score = row.get("discovery_score")
         score_pct = round(score * 100) if isinstance(score, (int, float)) else None
         candidate_status = row.get("candidate_status")
         updated_at = row.get("updated_at") if isinstance(row.get("updated_at"), str) else None
         handle = (
-            ident.get("primary_handle")
-            or row.get("primary_handle")
+            row.get("handle")
             or payload.get("handle")
             or (f"id{identity_id}" if identity_id is not None else "unknown")
         )
@@ -2236,9 +2303,9 @@ async def get_shortlist(
                 is_new_since_last_approval = True
         candidates.append({
             "handle": str(handle).lstrip("@"),
-            "platform": ident.get("platform") or row.get("platform"),
+            "platform": row.get("platform"),
             "identity_id": identity_id if isinstance(identity_id, int) else None,
-            "display_name": ident.get("display_name"),
+            "display_name": row.get("display_name"),
             "audience_fit": payload.get("audience_fit") or payload.get("final_fit") or score_pct,
             "brand_safety": payload.get("brand_safety"),
             "engagement_quality": payload.get("engagement_quality") or payload.get("showcase_score"),
@@ -2840,6 +2907,261 @@ async def redraft_outreach(
                 "identity_id": identity_id,
                 "env": env,
                 "run_id": new_run_id,
+                "prior_decision": prior_decision,
+                "discard_existing_approved_draft": body.discard_existing_approved_draft,
+            },
+        )
+        return {
+            "run_id": new_run_id,
+            "identity_id": identity_id,
+            "campaign_id": campaign_id,
+            "env": env,
+            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        }
+
+
+class FollowupDraftBody(BaseModel):
+    """Body for ``POST /campaigns/{cid}/identities/{iid}/followup-draft``."""
+
+    env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    topic: str = Field(min_length=1, max_length=2000)
+    discard_existing_approved_draft: bool = False
+
+
+_FOLLOWUP_DRAFT_INSTRUCTIONS = (
+    "You are drafting a PROACTIVE operator-topic follow-up for one KOL.\n"
+    "This is NOT the inbound-reply dispatcher loop. Hard rules:\n"
+    f"- Repo root for file tools is {_REPO_ROOT}.\n"
+    "- Read the brief's operator_topic and treat it as the primary intent.\n"
+    "- Invoke the `kol-proactive-followup` skill by reading its SKILL.md\n"
+    "  and following its Procedure (bridge CLI for CAL only).\n"
+    "- Persist via `kol_bridge_tool.py persist-reply-draft` with\n"
+    "  decision=pending, child_skill=kol-proactive-followup,\n"
+    "  primary_lane=meta, primary_goal=proactive_followup.\n"
+    "- Embed operator_topic inside the draft object (child_envelope).\n"
+    "- Set a real Gmail thread_id on the draft envelope.\n"
+    "- Do NOT create Gmail drafts. Do NOT send mail.\n"
+    "- Do NOT write offer.outreach_sent or other domain facts.\n"
+    "- Do NOT embed quoted prior mail in body (approve adds Gmail quote).\n"
+    "- In TEST mode, route draft `to` to campaign_config.test_mode_to."
+)
+
+
+def _compose_followup_brief(
+    *,
+    campaign_id: str,
+    env: str,
+    identity_id: int,
+    handle: str | None,
+    actor_email: str,
+    operator_topic: str,
+    test_mode_to: str | None,
+) -> str:
+    lines = [
+        "# campaign_followup_draft",
+        f"campaign_id: {campaign_id}",
+        f"mode: {env}",
+        f"requested_by: {actor_email}",
+        f"test_mode_to: {test_mode_to or ''}",
+        f"identity_id: {identity_id}",
+    ]
+    if handle:
+        lines.append(f"handle: {handle}")
+    lines.extend([
+        "",
+        "# operator_topic",
+        operator_topic.strip(),
+        "",
+        "# required_next_step",
+        (
+            "Run kol-proactive-followup for this single identity. "
+            "Overwrite any prior approval.reply_draft for this "
+            "(identity, campaign) with a fresh pending draft. "
+            "Report when approval.reply_draft is readable with decision=pending."
+        ),
+        "",
+        "## Runtime contract",
+        f"- Use {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
+        "- Every CLI call MUST pass --env matching `mode` above.",
+    ])
+    return "\n".join(lines)
+
+
+@router.post("/{campaign_id}/identities/{identity_id}/followup-draft")
+async def followup_draft(
+    campaign_id: str,
+    identity_id: int,
+    body: FollowupDraftBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    gateway: GatewayClient = Depends(get_gateway),
+) -> dict:
+    """Generate a proactive follow-up pending draft from an operator topic.
+
+    Requires ``offer.outreach_sent=true``. Lands in ``approval.reply_draft``
+    for the normal Approvals flow (Gmail draft only after approve).
+    """
+    env = body.env
+    lock = await campaign_lock(env, campaign_id)
+    async with lock:
+        in_flight, current_run_id, current_state = await _campaign_run_in_flight(
+            conn, gateway, campaign_id=campaign_id, env=env,
+        )
+        if in_flight:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "campaign_run_in_flight",
+                    "message": (
+                        "another agent run is still active for this "
+                        "campaign — wait for it to finish before "
+                        "starting a follow-up draft"
+                    ),
+                    "run_id": current_run_id,
+                    "run_state": current_state,
+                },
+            )
+
+        dedup_key = f"followup:{env}:{campaign_id}:{identity_id}"
+        inflight_self = get_inflight_run(conn, dedup_key=dedup_key)
+        if inflight_self is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "followup_inflight",
+                    "message": (
+                        f"a follow-up draft for this KOL was triggered in the "
+                        f"last {INFLIGHT_TTL_SECONDS}s — wait for the new "
+                        f"draft to appear (typically 30–60s) before re-triggering"
+                    ),
+                    "run_id": inflight_self.get("run_id"),
+                    "started_at": inflight_self.get("started_at"),
+                },
+            )
+
+        await assert_campaign_config_complete(bridge, campaign_id)
+
+        try:
+            ident = await bridge.get_identity(identity_id)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        if not ident:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "identity not found")
+
+        primary_email = ident.get("primary_email") if isinstance(ident, dict) else None
+        if not (isinstance(primary_email, str) and primary_email.strip()):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "primary_email is required before generating a follow-up draft",
+            )
+
+        try:
+            facts_resp = await bridge.read_facts(
+                identity_id, campaign_id=campaign_id, env=env,
+            )
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        facts = facts_resp.get("facts") if isinstance(facts_resp, dict) else {}
+        facts = facts if isinstance(facts, dict) else {}
+
+        if not facts.get("offer.outreach_sent"):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "outreach_not_sent",
+                    "message": (
+                        "initial outreach has not been sent yet "
+                        "(offer.outreach_sent is false). Use redraft-outreach "
+                        "or wait until the first email is sent before a "
+                        "proactive follow-up."
+                    ),
+                },
+            )
+
+        prior_reply_draft = facts.get("approval.reply_draft")
+        prior_decision = None
+        if isinstance(prior_reply_draft, dict):
+            prior_decision = prior_reply_draft.get("decision")
+        if prior_decision == "pending":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "pending_draft_exists",
+                    "message": (
+                        "a pending approval.reply_draft already exists — "
+                        "approve or reject it on the Approvals page before "
+                        "generating another follow-up draft"
+                    ),
+                },
+            )
+        if prior_decision == "approved" and not body.discard_existing_approved_draft:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "approved_draft_exists",
+                    "message": (
+                        "a previously approved Gmail draft exists for this "
+                        "KOL. Re-generating will orphan that Gmail draft. "
+                        "Confirm with discard_existing_approved_draft=true."
+                    ),
+                    "gmail_draft_id": facts.get("offer.gmail_draft_id"),
+                    "gmail_thread_id": facts.get("offer.gmail_thread_id"),
+                },
+            )
+
+        campaign_row = conn.execute(
+            "SELECT sku, test_mode_to FROM product_campaigns "
+            "WHERE campaign_id=? AND env=?",
+            (campaign_id, env),
+        ).fetchone()
+        test_mode_to = campaign_row["test_mode_to"] if campaign_row else None
+        if env == "TEST" and not test_mode_to:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "test_mode_to missing for TEST campaign",
+            )
+
+        ensure_gateway_bridge_key()
+        handle = ident.get("primary_handle") if isinstance(ident, dict) else None
+        brief = _compose_followup_brief(
+            campaign_id=campaign_id,
+            env=env,
+            identity_id=identity_id,
+            handle=handle if isinstance(handle, str) else None,
+            actor_email=user["email"],
+            operator_topic=body.topic,
+            test_mode_to=test_mode_to,
+        )
+        try:
+            run = await gateway.start_run(
+                input=brief,
+                instructions=_FOLLOWUP_DRAFT_INSTRUCTIONS,
+                session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+            )
+        except GatewayError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        new_run_id = run.get("run_id") if isinstance(run, dict) else None
+        if isinstance(new_run_id, str) and new_run_id:
+            register_run(
+                conn,
+                campaign_id=campaign_id,
+                env=env,
+                run_id=new_run_id,
+                kind="followup",
+                session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+                dedup_key=dedup_key,
+            )
+        write_audit(
+            conn,
+            actor_user_id=user["id"],
+            action="campaign.followup_draft",
+            target=campaign_id,
+            payload={
+                "identity_id": identity_id,
+                "env": env,
+                "run_id": new_run_id,
+                "topic": body.topic,
                 "prior_decision": prior_decision,
                 "discard_existing_approved_draft": body.discard_existing_approved_draft,
             },

@@ -31,7 +31,10 @@ class BridgeClient:
         self._base = s.bridge_base.rstrip("/")
         bridge_key = resolve_bridge_key(s)
         self._headers = {"X-Bridge-Key": bridge_key} if bridge_key else {}
-        self._client = httpx.AsyncClient(timeout=s.bridge_timeout_sec)
+        self._client = httpx.AsyncClient(
+            timeout=s.bridge_timeout_sec,
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -42,6 +45,7 @@ class BridgeClient:
         params: Optional[dict[str, Any]] = None,
         json: Optional[dict[str, Any]] = None,
         retry: int = 0,
+        operator_user_id: Optional[int] = None,
     ) -> Any:
         # ``retry`` retries ONLY on transient transport errors (httpx.HTTPError:
         # connect, timeout, read failures). HTTP 4xx/5xx response codes are
@@ -49,11 +53,19 @@ class BridgeClient:
         # and risks side effects on non-idempotent POSTs. Opt-in per-call so
         # only known-idempotent writes (PUT) and reads can ask for it.
         url = f"{self._base}{path}"
+        headers = dict(self._headers)
+        if operator_user_id is not None and operator_user_id > 0:
+            headers["X-KOC-Operator-User-Id"] = str(operator_user_id)
+        # Brief Hermes/bridge restarts and SQLite lock waits surface as
+        # httpx transport errors. Idempotent GETs retry by default so the
+        # console does not 502 on a single blip while the UI auto-refreshes.
+        if retry == 0 and method.upper() in {"GET", "HEAD"}:
+            retry = 2
         attempts = retry + 1
         for i in range(attempts):
             try:
                 r = await self._client.request(
-                    method, url, params=params, json=json, headers=self._headers
+                    method, url, params=params, json=json, headers=headers
                 )
                 break
             except httpx.HTTPError as exc:
@@ -163,6 +175,21 @@ class BridgeClient:
             "GET", f"/campaigns/{campaign_id}/candidates", params={"env": env}
         )
         return out.get("candidates", []) if isinstance(out, dict) else []
+
+    async def list_candidate_handles(
+        self, campaign_id: str, env: str = "LIVE"
+    ) -> list[dict[str, Any]]:
+        """Candidates joined to identity handle/platform (one bridge round-trip)."""
+        out = await self._req(
+            "GET",
+            f"/campaigns/{campaign_id}/candidate-handles",
+            params={"env": env},
+        )
+        if isinstance(out, dict):
+            items = out.get("items")
+            if isinstance(items, list):
+                return items
+        return []
 
     async def upsert_candidate(
         self, campaign_id: str, body: dict[str, Any]
@@ -291,21 +318,49 @@ class BridgeClient:
         return out.get("approvals", []) if isinstance(out, dict) else []
 
     async def approve(
-        self, fact_path: str, body: dict[str, Any]
+        self,
+        fact_path: str,
+        body: dict[str, Any],
+        *,
+        operator_user_id: Optional[int] = None,
     ) -> dict[str, Any]:
         return await self._req(
-            "POST", f"/approvals/{fact_path}/approve", json=body
+            "POST",
+            f"/approvals/{fact_path}/approve",
+            json=body,
+            operator_user_id=operator_user_id,
         )
 
     async def reject(
-        self, fact_path: str, body: dict[str, Any]
+        self,
+        fact_path: str,
+        body: dict[str, Any],
+        *,
+        operator_user_id: Optional[int] = None,
     ) -> dict[str, Any]:
         return await self._req(
-            "POST", f"/approvals/{fact_path}/reject", json=body
+            "POST",
+            f"/approvals/{fact_path}/reject",
+            json=body,
+            operator_user_id=operator_user_id,
         )
 
     async def reconcile_sent(self, body: dict[str, Any]) -> dict[str, Any]:
         return await self._req("POST", "/gmail/reconcile-sent", json=body)
+
+    async def takeover_mailbox(
+        self,
+        identity_id: int,
+        body: dict[str, Any],
+        *,
+        operator_user_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST",
+            f"/identities/{identity_id}/mailbox/takeover",
+            json=body,
+            operator_user_id=operator_user_id,
+        )
 
     async def promote_strategy(self, body: dict[str, Any]) -> dict[str, Any]:
         """Preview (dry_run) or apply promotion of a reply_strategy goal."""
@@ -366,6 +421,22 @@ class BridgeClient:
             "GET", f"/identities/{identity_id}/timeline", params=params
         )
         return list(out.get("events") or [])
+
+    async def get_email_conversation(
+        self,
+        identity_id: int,
+        campaign_id: str,
+        env: str = "LIVE",
+        *,
+        operator_user_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Gmail sent/received messages (no drafts) for communication history UI."""
+        return await self._req(
+            "GET",
+            f"/identities/{identity_id}/email-conversation",
+            params={"campaign_id": campaign_id, "env": env},
+            operator_user_id=operator_user_id,
+        )
 
     # ---------------------------------------------- Drafts / replies (dead)
     # Phase A retired the kol_drafts / kol_replies persistence; the related

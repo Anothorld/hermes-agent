@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import json
 import sqlite3
@@ -301,18 +302,26 @@ async def _get_identity_map(
     identity_ids: set[int],
 ) -> dict[str, dict[str, Any]]:
     """Fetch identities by id; tolerate missing rows so campaigns still render."""
-    out: dict[str, dict[str, Any]] = {}
-    for iid in sorted(identity_ids):
-        try:
-            ident = await bridge.get_identity(iid)
-        except BridgeError:
-            continue
-        out[str(iid)] = {
+    sem = asyncio.Semaphore(12)
+
+    async def _one(iid: int) -> tuple[int, dict[str, Any] | None]:
+        async with sem:
+            try:
+                ident = await bridge.get_identity(iid)
+            except BridgeError:
+                return iid, None
+        return iid, {
             "id": iid,
             "display_name": ident.get("display_name"),
             "primary_handle": ident.get("primary_handle"),
             "platform": ident.get("platform"),
         }
+
+    results = await asyncio.gather(*(_one(iid) for iid in sorted(identity_ids)))
+    out: dict[str, dict[str, Any]] = {}
+    for iid, ident in results:
+        if ident is not None:
+            out[str(iid)] = ident
     return out
 
 
@@ -833,19 +842,29 @@ async def list_product_campaigns(
     except BridgeError:
         events = []
 
-    needed_ids: set[int] = set()
-    campaigns: list[dict] = []
-    for r in rows:
+    async def _enrich_campaign(r: sqlite3.Row) -> dict[str, Any]:
         summary = _summarize_events(events, campaign_id=r["campaign_id"])
-        try:
-            candidates = await bridge.list_candidates(r["campaign_id"], env=e)
-        except BridgeError:
-            candidates = []
-        try:
-            lane_payload = await bridge.get_lanes(r["campaign_id"], env=e)
-            lane_items = lane_payload.get("items", []) if isinstance(lane_payload, dict) else []
-        except BridgeError:
-            lane_items = []
+
+        async def _load_candidates() -> list[dict[str, Any]]:
+            try:
+                return await bridge.list_candidates(r["campaign_id"], env=e)
+            except BridgeError:
+                return []
+
+        async def _load_lane_items() -> list[dict[str, Any]]:
+            try:
+                lane_payload = await bridge.get_lanes(r["campaign_id"], env=e)
+            except BridgeError:
+                return []
+            if isinstance(lane_payload, dict):
+                items = lane_payload.get("items", [])
+                return items if isinstance(items, list) else []
+            return []
+
+        candidates, lane_items = await asyncio.gather(
+            _load_candidates(),
+            _load_lane_items(),
+        )
         visible_candidates = [
             c for c in candidates if c.get("candidate_status") not in {"rejected", "archived"}
         ]
@@ -866,52 +885,52 @@ async def list_product_campaigns(
         ]
         active_ids = [iid for iid in outreach.get("outreach_active_ids", []) if isinstance(iid, int)]
         kol_identity_ids = list(dict.fromkeys([*summary["kol_identity_ids"], *candidate_ids, *lane_ids]))
-        needed_ids.update(kol_identity_ids)
-        needed_ids.update(active_ids)
         gw = run_state_map.get(r["campaign_id"], {})
-        # ``pending`` = visible candidates the operator has NOT yet approved
-        # (anything except selected_for_outreach). Used by the UI so a
-        # rediscover-added candidate still triggers the "Review candidates"
-        # button after an earlier round was already approved.
         pending_count = sum(
             1 for c in visible_candidates
             if c.get("candidate_status") != "selected_for_outreach"
         )
         target_floor = r["target_floor"]
-        campaigns.append({
-            "campaign_id": r["campaign_id"],
-            "env": r["env"],
-            "run_id": r["run_id"],
-            "status": r["status"],
-            "started_at": r["started_at"],
-            "started_by_user_id": r["started_by_user_id"],
-            "run_state": gw.get("run_state"),
-            "run_error": gw.get("run_error"),
-            # Discovery-purpose run state. ``gate_active=true`` means the
-            # quantity gate is still tracking a live rediscover/auto-retry
-            # run; the UI uses this to disable Approve so an operator
-            # can't truncate the pool mid-discovery.
-            "gate_run_id": gw.get("gate_run_id"),
-            "gate_state": gw.get("gate_state"),
-            "gate_active": bool(gw.get("gate_active")),
-            **summary,
-            **outreach,
-            "kol_identity_ids": kol_identity_ids,
-            "contacted_kol_ids": list(dict.fromkeys([*summary.get("contacted_kol_ids", []), *active_ids])),
-            "candidate_count": len(visible_candidates),
-            "pending_candidate_count": pending_count,
-            "shortlist_ready": summary["shortlist_ready"] or bool(visible_candidates),
-            "shortlist_approved": summary["shortlist_approved"] or selected_count > 0,
-            "target_floor": target_floor,
-            "baseline_candidate_count": r["baseline_candidate_count"],
-            "retry_count": r["retry_count"],
-            "floor_unmet_reason": r["floor_unmet_reason"],
-            "current_candidate_count": len(visible_candidates),
-            "floor_progress": (
-                None if target_floor is None
-                else f"{len(visible_candidates)}/{target_floor}"
-            ),
-        })
+        return {
+            "needed_ids": set(kol_identity_ids) | set(active_ids),
+            "campaign": {
+                "campaign_id": r["campaign_id"],
+                "env": r["env"],
+                "run_id": r["run_id"],
+                "status": r["status"],
+                "started_at": r["started_at"],
+                "started_by_user_id": r["started_by_user_id"],
+                "run_state": gw.get("run_state"),
+                "run_error": gw.get("run_error"),
+                "gate_run_id": gw.get("gate_run_id"),
+                "gate_state": gw.get("gate_state"),
+                "gate_active": bool(gw.get("gate_active")),
+                **summary,
+                **outreach,
+                "kol_identity_ids": kol_identity_ids,
+                "contacted_kol_ids": list(dict.fromkeys([*summary.get("contacted_kol_ids", []), *active_ids])),
+                "candidate_count": len(visible_candidates),
+                "pending_candidate_count": pending_count,
+                "shortlist_ready": summary["shortlist_ready"] or bool(visible_candidates),
+                "shortlist_approved": summary["shortlist_approved"] or selected_count > 0,
+                "target_floor": target_floor,
+                "baseline_candidate_count": r["baseline_candidate_count"],
+                "retry_count": r["retry_count"],
+                "floor_unmet_reason": r["floor_unmet_reason"],
+                "current_candidate_count": len(visible_candidates),
+                "floor_progress": (
+                    None if target_floor is None
+                    else f"{len(visible_candidates)}/{target_floor}"
+                ),
+            },
+        }
+
+    enriched = await asyncio.gather(*(_enrich_campaign(r) for r in rows))
+    needed_ids: set[int] = set()
+    campaigns: list[dict] = []
+    for item in enriched:
+        needed_ids.update(item["needed_ids"])
+        campaigns.append(item["campaign"])
 
     kols = await _get_identity_map(bridge, needed_ids) if needed_ids else {}
     for c in campaigns:

@@ -24,6 +24,8 @@ export class ApiError extends Error {
   }
 }
 
+const TRANSIENT_GET_STATUSES = new Set([502, 503, 504]);
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers = new Headers(init.headers);
@@ -31,7 +33,24 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  const method = (init.method || 'GET').toUpperCase();
+  const maxAttempts =
+    method === 'GET' || method === 'HEAD' ? 3 : 1;
+  let res: Response | null = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+    if (
+      res.ok
+      || attempt + 1 >= maxAttempts
+      || !TRANSIENT_GET_STATUSES.has(res.status)
+    ) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+  }
+  if (!res) {
+    throw new ApiError(0, 'no response');
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     if (res.status === 401) {
@@ -57,6 +76,7 @@ export const api = {
     request<T>(p, { method: 'PUT', body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(p: string, body?: unknown) =>
     request<T>(p, { method: 'PATCH', body: body ? JSON.stringify(body) : undefined }),
+  delete: <T>(p: string) => request<T>(p, { method: 'DELETE' }),
 };
 
 // ---------- SSE helper ----------

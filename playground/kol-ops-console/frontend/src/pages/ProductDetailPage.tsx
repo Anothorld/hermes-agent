@@ -385,7 +385,7 @@ function ShortlistReviewPanel({
 
   usePollingFallback(() => {
     void fetchShortlist(false);
-  }, 10_000);
+  }, 20_000);
 
   if (err)
     return (
@@ -1687,15 +1687,25 @@ export function ProductDetailPage() {
 
   useEffect(() => {
     if (!sku) return;
-    api
-      .get<Product>(`/products/${encodeURIComponent(sku)}`)
-      .then(setP)
-      .catch((e) => setErr(e));
-  }, [sku]);
-
-  useEffect(() => {
-    refreshCampaigns();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let cancelled = false;
+    void Promise.all([
+      api.get<Product>(`/products/${encodeURIComponent(sku)}`),
+      api.get<CampaignsPayload>(
+        `/products/${encodeURIComponent(sku)}/campaigns?env=${envFilter}`,
+      ),
+    ])
+      .then(([product, payload]) => {
+        if (cancelled) return;
+        setP(product);
+        setCampaigns(payload);
+        setErr(null);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [sku, envFilter]);
 
   useEffect(() => {
@@ -1707,7 +1717,7 @@ export function ProductDetailPage() {
     api.get<Me>('/auth/me').then(setMe).catch(() => undefined);
   }, []);
 
-  usePollingFallback(refreshCampaigns, 20_000);
+  usePollingFallback(refreshCampaigns, 25_000);
   usePollingFallback(refreshWatcher, 30_000);
 
   const mutateWatcher = async (action: 'start' | 'stop' | 'restart') => {

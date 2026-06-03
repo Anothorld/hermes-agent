@@ -722,12 +722,14 @@ def list_candidate_handles(campaign_id: str, *, env: str = "LIVE") -> list[dict[
             """SELECT c.id                  AS candidate_id,
                       c.identity_id         AS identity_id,
                       i.primary_handle      AS handle,
+                      i.display_name        AS display_name,
                       i.platform            AS platform,
                       c.source              AS source,
                       c.discovery_score     AS discovery_score,
                       c.relationship_status AS relationship_status,
                       c.candidate_status    AS candidate_status,
                       c.review_reason       AS review_reason,
+                      c.selected_at         AS selected_at,
                       c.payload_json        AS payload_json,
                       c.created_at          AS created_at,
                       c.updated_at          AS updated_at
@@ -957,6 +959,7 @@ _DISCOVERY_ALLOWED_SOURCES: Final[set[str]] = {
     "ig_profile_and_reels",
     "ig_reel_pick",
     "llm_summary",
+    "noxinfluencer_api",
 }
 
 _DISCOVERY_BASE_KEYS_REQUIRING_TRIPLE: Final[set[str]] = {
@@ -1672,6 +1675,15 @@ def reply_dispatch_status(
                       AND fact_key='approval.reply_draft'""",
                 (identity_id, campaign_id, env),
             ).fetchone()
+            mismatch_esc = conn.execute(
+                """SELECT id FROM kol_escalations
+                    WHERE identity_id=? AND campaign_id=? AND env=?
+                      AND reason='inbound_mailbox_mismatch'
+                      AND state='awaiting_answer'
+                      AND json_extract(resume_context_json,'$.source_message_id')=?
+                    LIMIT 1""",
+                (identity_id, campaign_id, env, message_id),
+            ).fetchone()
         has_pending_draft = False
         if fact_row:
             val = _jl(fact_row["fact_value"], {})
@@ -1679,14 +1691,21 @@ def reply_dispatch_status(
                 has_pending_draft = val.get("decision") == "pending"
         has_draft_ready = draft_ready is not None
         has_inbound = inbound is not None
+        has_mailbox_mismatch_esc = mismatch_esc is not None
         return {
             "message_id": message_id,
             "has_inbound_event": has_inbound,
             "has_draft_ready_event": has_draft_ready,
             "has_pending_reply_draft": has_pending_draft,
-            "should_skip_poller": bool(has_draft_ready or has_pending_draft),
+            "has_mailbox_mismatch_escalation": has_mailbox_mismatch_esc,
+            "should_skip_poller": bool(
+                has_draft_ready or has_pending_draft or has_mailbox_mismatch_esc
+            ),
             "should_retry_gateway_only": bool(
-                has_inbound and not has_draft_ready and not has_pending_draft
+                has_inbound
+                and not has_draft_ready
+                and not has_pending_draft
+                and not has_mailbox_mismatch_esc
             ),
         }
 
