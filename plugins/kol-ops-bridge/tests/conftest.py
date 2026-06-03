@@ -33,6 +33,12 @@ def _load_package() -> types.ModuleType:
                 "learning_store", "learning_llm", "learning_distill", "learning_jobs",
                 "learning_job_store", "learning_promote", "learning_overview",
                 "gmail_reconcile",
+                "gmail_client",
+                "gmail_credentials",
+                "gmail_console",
+                "mailbox_resolver",
+                "mailbox_escalation",
+                "email_conversation",
                 "classifier_eval_runner"):
         spec = importlib.util.spec_from_file_location(
             f"{_PKG_NAME}.{sub}",

@@ -128,8 +128,11 @@ _REFINE_DRAFT_INSTRUCTIONS = (
     "  refinement is in the brief under `operator_refinement_prompt`.\n"
     "- Re-invoke the SAME `child_skill` named in the fact with the original\n"
     "  pending-reply payload (recover from kol_inbound_reply events for\n"
-    "  source_message_id) PLUS the operator_refinement_prompt as an extra\n"
-    "  input field. The skill must treat the prompt as a hard constraint on\n"
+    "  source_message_id when present) PLUS the operator_refinement_prompt\n"
+    "  as an extra input field. For `child_skill=kol-proactive-followup`,\n"
+    "  there may be no inbound event — use `draft.operator_topic`,\n"
+    "  `get-timeline`, and `get-dispatch-context` instead. The skill must\n"
+    "  treat the refinement prompt as a hard constraint on\n"
     "  draft content (tone, additions, removals). Do NOT rewrite offer.*\n"
     "  or other domain facts; a refinement run is content-only.\n"
     "- Do NOT open a new escalation, do NOT change `decision` (must remain\n"
@@ -481,10 +484,28 @@ async def approve(
     payload = body.model_dump(exclude_none=True)
     env = _env(payload.get("env"))
     payload["env"] = env
+    payload["operator_user_id"] = user["id"]
+    payload["operator_email"] = user["email"]
     if body.campaign_id and fact_path not in _TERMINAL_APPROVAL_FACT_PATHS:
         ensure_gateway_bridge_key()
+    if fact_path == "approval.reply_draft":
+        from ..gmail_store import get_connection
+
+        conn_db = conn
+        if not get_connection(conn_db, user["id"], active_only=True):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                {
+                    "code": "gmail_not_connected",
+                    "message": (
+                        "Connect your Gmail account in Settings before approving reply drafts"
+                    ),
+                },
+            )
     try:
-        out = await bridge.approve(fact_path, payload)
+        out = await bridge.approve(
+            fact_path, payload, operator_user_id=int(user["id"]),
+        )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     run_id = await _start_approval_resume_run(

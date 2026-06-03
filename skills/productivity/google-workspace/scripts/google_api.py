@@ -47,6 +47,14 @@ HERMES_HOME = get_hermes_home()
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
 
+
+def _active_token_path() -> Path:
+    """Honor per-operator credentials when subprocess sets GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE."""
+    override = os.environ.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return TOKEN_PATH
+
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
@@ -67,7 +75,7 @@ def _normalize_authorized_user_payload(payload: dict) -> dict:
 
 
 def _ensure_authenticated():
-    if not TOKEN_PATH.exists():
+    if not _active_token_path().exists():
         print("Not authenticated. Run the setup script first:", file=sys.stderr)
         print(f"  python {Path(__file__).parent / 'setup.py'}", file=sys.stderr)
         sys.exit(1)
@@ -75,7 +83,7 @@ def _ensure_authenticated():
 
 def _stored_token_scopes() -> list[str]:
     try:
-        data = json.loads(TOKEN_PATH.read_text())
+        data = json.loads(_active_token_path().read_text())
     except Exception:
         return list(SCOPES)
     scopes = data.get("scopes")
@@ -93,7 +101,7 @@ def _gws_binary() -> str | None:
 
 def _gws_env() -> dict[str, str]:
     env = os.environ.copy()
-    env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(TOKEN_PATH)
+    env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(_active_token_path())
     return env
 
 
@@ -246,10 +254,11 @@ def get_credentials():
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
 
-    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), _stored_token_scopes())
+    token_path = _active_token_path()
+    creds = Credentials.from_authorized_user_file(str(token_path), _stored_token_scopes())
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        TOKEN_PATH.write_text(
+        token_path.write_text(
             json.dumps(
                 _normalize_authorized_user_payload(json.loads(creds.to_json())),
                 indent=2,
@@ -419,8 +428,11 @@ def gmail_thread(args):
         out.append({
             "id": msg.get("id", ""),
             "from": headers.get("From", ""),
+            "to": headers.get("To", ""),
+            "subject": headers.get("Subject", ""),
             "date": headers.get("Date", ""),
             "body": _extract_message_body(msg),
+            "labels": list(msg.get("labelIds") or []),
         })
     print(json.dumps(out, indent=2, ensure_ascii=False))
 

@@ -57,6 +57,8 @@ if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
 from gmail_client import GmailClient, GmailMessage, GmailUnavailable  # noqa: E402
+from gmail_console import list_operator_gmail_clients  # noqa: E402
+from mailbox_escalation import ensure_mailbox_mismatch_escalation  # noqa: E402
 
 # scripts/ dir already on sys.path indirectly via this file's location; add
 # explicitly so _cal_client resolves.
@@ -136,6 +138,63 @@ def _register_console_run(
             conn.close()
     except sqlite3.Error as exc:
         log.warning("console run-registry insert skipped: %s", exc)
+
+
+def _console_db_connect() -> sqlite3.Connection | None:
+    try:
+        if not _CONSOLE_DB_PATH.exists():
+            return None
+        return sqlite3.connect(
+            str(_CONSOLE_DB_PATH), timeout=5.0, isolation_level=None
+        )
+    except sqlite3.Error:
+        return None
+
+
+def _global_message_seen(*, env: str, message_id: str) -> bool:
+    conn = _console_db_connect()
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM gmail_poller_global_seen WHERE env=? AND message_id=? LIMIT 1",
+            (env, message_id),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error as exc:
+        log.warning("global seen lookup skipped: %s", exc)
+        return False
+    finally:
+        conn.close()
+
+
+def _record_global_message_seen(
+    *, env: str, message_id: str, mailbox_user_id: int
+) -> None:
+    conn = _console_db_connect()
+    if conn is None:
+        return
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute(
+            """INSERT OR IGNORE INTO gmail_poller_global_seen
+                    (env, message_id, mailbox_user_id, seen_at)
+                VALUES (?,?,?,?)""",
+            (env, message_id, int(mailbox_user_id), now),
+        )
+        conn.execute(
+            """INSERT INTO gmail_poller_watermarks (user_id, last_message_id, updated_at)
+                VALUES (?,?,?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    last_message_id=excluded.last_message_id,
+                    updated_at=excluded.updated_at""",
+            (int(mailbox_user_id), message_id, now),
+        )
+    except sqlite3.Error as exc:
+        log.warning("global seen / watermark write skipped: %s", exc)
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------- watermark
@@ -656,6 +715,8 @@ def _pending_reply_payload(
     msg: GmailMessage,
     matched: IdentityMatch,
     env: str,
+    mailbox_user_id: int = 0,
+    mailbox_email: str = "",
 ) -> dict[str, Any]:
     identity_id = matched.identity_id
     campaign_id = matched.campaign_id
@@ -683,6 +744,8 @@ def _pending_reply_payload(
             "body": _clip_text(msg.body),
         },
         "thread_history": thread_history,
+        "detected_mailbox_user_id": mailbox_user_id or None,
+        "detected_mailbox_email": mailbox_email or None,
         "anomaly_signals": {
             "thread_integrity": {
                 "status": matched.thread_integrity,
@@ -697,6 +760,12 @@ def _pending_reply_payload(
             },
             "content_risk": matched.content_risk,
             "risk_controls": matched.risk_controls,
+            **_mailbox_mismatch_signal(
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                env=env,
+                detected_mailbox_email=mailbox_email,
+            ),
         },
         "dispatch_context": context,
     }
@@ -705,7 +774,84 @@ def _pending_reply_payload(
 ProcessStatus = Literal["dispatched", "skipped", "retry"]
 
 
-def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> ProcessStatus:
+def _mailbox_mismatch_signal(
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    env: str,
+    detected_mailbox_email: str,
+) -> dict[str, Any]:
+    if not campaign_id or not detected_mailbox_email:
+        return {}
+    try:
+        facts = _BRIDGE.request(
+            "GET",
+            f"/facts/{identity_id}",
+            params={"campaign_id": campaign_id, "env": env},
+        )
+    except SystemExit:
+        return {}
+    if not isinstance(facts, dict):
+        return {}
+    bound = str(facts.get("offer.gmail_mailbox_email") or "").strip().lower()
+    if not bound or bound == detected_mailbox_email.lower():
+        return {}
+    return {
+        "mailbox_mismatch": True,
+        "bound_mailbox_email": bound,
+        "detected_mailbox_email": detected_mailbox_email.lower(),
+        "allow_autoflow": False,
+    }
+
+
+def _handle_mailbox_mismatch(
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    env: str,
+    msg: GmailMessage,
+    mailbox_email: str,
+    mismatch: dict[str, Any],
+) -> bool:
+    """Open deterministic escalation and block auto-dispatch when True."""
+    if not mismatch.get("mailbox_mismatch") or not campaign_id:
+        return False
+    bound = str(mismatch.get("bound_mailbox_email") or "")
+    detected = str(mismatch.get("detected_mailbox_email") or mailbox_email or "")
+    if not bound or not detected:
+        return False
+    try:
+        esc_id = ensure_mailbox_mismatch_escalation(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=env,
+            message_id=msg.message_id,
+            thread_id=msg.thread_id,
+            bound_mailbox_email=bound,
+            detected_mailbox_email=detected,
+        )
+        log.warning(
+            "[mailbox_mismatch] msg=%s identity=%s bound=%s detected=%s escalation=%s",
+            msg.message_id,
+            identity_id,
+            bound,
+            detected,
+            esc_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("mailbox mismatch escalation failed msg=%s: %s", msg.message_id, exc)
+        return False
+    return True
+
+
+def _process_message(
+    msg: GmailMessage,
+    env: str,
+    *,
+    client: GmailClient,
+    mailbox_user_id: int = 0,
+    mailbox_email: str = "",
+) -> ProcessStatus:
     """Return whether the message was dispatched, skipped, or should retry."""
     matched = _match_identity(msg, env=env)
     if not matched:
@@ -737,6 +883,12 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
         isinstance(dispatch_status, dict)
         and dispatch_status.get("should_retry_gateway_only")
     )
+    mismatch = _mailbox_mismatch_signal(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        detected_mailbox_email=mailbox_email,
+    )
 
     event_body = {
         "identity_id": identity_id,
@@ -759,6 +911,8 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
             # diagnostic surface.
             "body": _clip_text(msg.body, 8000),
             "date": msg.date,
+            "detected_mailbox_user_id": mailbox_user_id or None,
+            "detected_mailbox_email": mailbox_email or None,
             "anomaly_signals": {
                 "thread_integrity": {
                     "status": matched.thread_integrity,
@@ -772,7 +926,11 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
                     "reasons": matched.reasons,
                 },
                 "content_risk": matched.content_risk,
-                "risk_controls": matched.risk_controls,
+                "risk_controls": {
+                    **matched.risk_controls,
+                    **({"allow_autoflow": False} if mismatch.get("mailbox_mismatch") else {}),
+                },
+                **mismatch,
             },
         },
     }
@@ -789,6 +947,16 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
             identity_id,
         )
 
+    if _handle_mailbox_mismatch(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        msg=msg,
+        mailbox_email=mailbox_email,
+        mismatch=mismatch,
+    ):
+        return "skipped"
+
     session_id = f"kol-reply:{env}:{identity_id}:{msg.message_id}"
     input_text = json.dumps({
         "pending_replies": [
@@ -797,6 +965,8 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
                 msg=msg,
                 matched=matched,
                 env=env,
+                mailbox_user_id=mailbox_user_id,
+                mailbox_email=mailbox_email,
             )
         ],
     }, indent=2, ensure_ascii=False)
@@ -871,42 +1041,63 @@ def _state_lock(*, blocking: bool = True) -> Iterator[None]:
 
 
 def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int]:
-    client = GmailClient()
-    if not client.is_available():
+    mailboxes = list_operator_gmail_clients()
+    if not mailboxes:
         raise GmailUnavailable("Gmail token / google_api.py unavailable")
 
     with _state_lock():
         state = _load_state()
-        seen: set[str] = set(state.get(f"seen_{env}", []))
-
-        query = f"in:inbox newer_than:{int(lookback_days)}d -from:me"
-        messages = client.search(query=query, max_results=max_results)
-
         matched = 0
         skipped = 0
         retry = 0
-        for stub in messages:
-            if stub.message_id in seen:
-                continue
-            try:
-                full = client.get_message(stub.message_id)
-            except GmailUnavailable as exc:
-                log.warning("gmail get %s failed: %s", stub.message_id, exc)
-                continue
-            status = _process_message(full, env=env, client=client)
-            if status == "dispatched":
-                matched += 1
-                seen.add(full.message_id)
-            elif status == "skipped":
-                skipped += 1
-                seen.add(full.message_id)
-            else:
-                retry += 1
-
-        state[f"seen_{env}"] = sorted(seen)[-2000:]
+        scanned = 0
+        query = f"in:inbox newer_than:{int(lookback_days)}d -from:me"
+        for mb in mailboxes:
+            seen_key = f"seen_{env}_{mb.user_id}"
+            seen: set[str] = set(state.get(seen_key, []))
+            messages = mb.client.search(query=query, max_results=max_results)
+            scanned += len(messages)
+            for stub in messages:
+                if stub.message_id in seen:
+                    continue
+                if _global_message_seen(env=env, message_id=stub.message_id):
+                    seen.add(stub.message_id)
+                    continue
+                try:
+                    full = mb.client.get_message(stub.message_id)
+                except GmailUnavailable as exc:
+                    log.warning("gmail get %s failed: %s", stub.message_id, exc)
+                    continue
+                status = _process_message(
+                    full,
+                    env=env,
+                    client=mb.client,
+                    mailbox_user_id=mb.user_id,
+                    mailbox_email=mb.google_email,
+                )
+                if status in ("dispatched", "skipped"):
+                    seen.add(full.message_id)
+                    _record_global_message_seen(
+                        env=env,
+                        message_id=full.message_id,
+                        mailbox_user_id=mb.user_id,
+                    )
+                if status == "dispatched":
+                    matched += 1
+                elif status == "skipped":
+                    skipped += 1
+                else:
+                    retry += 1
+            state[seen_key] = sorted(seen)[-2000:]
         state[f"last_run_{env}"] = int(time.time())
         _save_state(state)
-        return {"matched": matched, "skipped": skipped, "retry": retry, "scanned": len(messages)}
+        return {
+            "matched": matched,
+            "skipped": skipped,
+            "retry": retry,
+            "scanned": scanned,
+            "mailboxes": len(mailboxes),
+        }
 
 
 def main(argv: Optional[list[str]] = None) -> int:

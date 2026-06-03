@@ -11,7 +11,7 @@ from . import learning_distill
 from . import learning_job_store as job_store
 from . import learning_store
 from .gmail_client import GmailUnavailable
-from .gmail_reconcile import run_reconcile_sent
+from .gmail_reconcile import run_reconcile_all_mailboxes
 
 log = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ def _execute_job(
     if job_name == JOB_RECONCILE_SENT:
         if dry_run:
             return {"dry_run": True, "note": "would call Gmail reconcile"}
-        return run_reconcile_sent(
+        return run_reconcile_all_mailboxes(
             env=env, lookback_days=lookback_days, max_results=max_results,
         )
 

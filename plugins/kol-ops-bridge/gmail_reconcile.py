@@ -7,10 +7,34 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import cal
+from . import mailbox_resolver
 from . import reply_diff
 from .gmail_client import GmailClient, GmailUnavailable
+from .gmail_console import list_operator_gmail_clients
 
 log = logging.getLogger(__name__)
+
+
+def _draft_owned_by_mailbox(
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    env: str,
+    mailbox_user_id: Optional[int],
+) -> bool:
+    """True when this draft should be reconciled against the given mailbox."""
+    if mailbox_user_id is None:
+        return True
+    if not campaign_id:
+        return mailbox_user_id == 0
+    binding = mailbox_resolver.read_binding(
+        identity_id=identity_id,
+        campaign_id=str(campaign_id),
+        env=env,
+    )
+    if binding is None:
+        return mailbox_user_id == 0
+    return binding.user_id == mailbox_user_id
 
 
 def run_reconcile_sent(
@@ -19,6 +43,7 @@ def run_reconcile_sent(
     lookback_days: int = 7,
     max_results: int = 100,
     client: Optional[GmailClient] = None,
+    mailbox_user_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Reconcile approved reply drafts that appear in Gmail SENT.
 
@@ -43,6 +68,13 @@ def run_reconcile_sent(
             continue
         identity_id = int(row["identity_id"])
         campaign_id = row.get("campaign_id")
+        if not _draft_owned_by_mailbox(
+            identity_id=identity_id,
+            campaign_id=str(campaign_id) if campaign_id else None,
+            env=env,
+            mailbox_user_id=mailbox_user_id,
+        ):
+            continue
         approval_value = row.get("value") if isinstance(row.get("value"), dict) else {}
         draft_obj = approval_value.get("draft") if isinstance(approval_value.get("draft"), dict) else {}
         agent_body = str(draft_obj.get("body") or "")
@@ -106,6 +138,38 @@ def run_reconcile_sent(
             source_event_id=event_id,
             env=env,
         )
+        if (
+            campaign_id
+            and mailbox_user_id is not None
+            and mailbox_user_id > 0
+            and mailbox_resolver.read_binding(
+                identity_id=identity_id,
+                campaign_id=str(campaign_id),
+                env=env,
+            )
+            is None
+        ):
+            profile_email = ""
+            try:
+                profile_email = gmail.get_profile_email() or ""
+            except GmailUnavailable:
+                pass
+            try:
+                mailbox_resolver.bind_mailbox(
+                    identity_id=identity_id,
+                    campaign_id=str(campaign_id),
+                    env=env,
+                    operator_user_id=int(mailbox_user_id),
+                    operator_email=profile_email,
+                    source="gmail:sent-reconcile",
+                )
+            except mailbox_resolver.MailboxError as exc:
+                log.warning(
+                    "sent-reconcile bind skipped identity=%s campaign=%s: %s",
+                    identity_id,
+                    campaign_id,
+                    exc,
+                )
         reconciled.append({
             "identity_id": identity_id,
             "campaign_id": campaign_id,
@@ -119,4 +183,36 @@ def run_reconcile_sent(
         "reconciled_count": len(reconciled),
         "edit_learning_count": edit_learning_count,
         "reconciled": reconciled,
+    }
+
+
+def run_reconcile_all_mailboxes(
+    *,
+    env: str,
+    lookback_days: int = 7,
+    max_results: int = 100,
+) -> dict[str, Any]:
+    """Run sent reconciliation once per connected operator mailbox."""
+    mailboxes = list_operator_gmail_clients()
+    if not mailboxes:
+        raise GmailUnavailable("no operator Gmail connections available")
+    per_mailbox: list[dict[str, Any]] = []
+    total_reconciled = 0
+    for mb in mailboxes:
+        summary = run_reconcile_sent(
+            env=env,
+            lookback_days=lookback_days,
+            max_results=max_results,
+            client=mb.client,
+            mailbox_user_id=mb.user_id,
+        )
+        summary["mailbox_user_id"] = mb.user_id
+        summary["mailbox_email"] = mb.google_email
+        per_mailbox.append(summary)
+        total_reconciled += int(summary.get("reconciled_count") or 0)
+    return {
+        "env": env,
+        "mailbox_count": len(per_mailbox),
+        "reconciled_count": total_reconciled,
+        "mailboxes": per_mailbox,
     }

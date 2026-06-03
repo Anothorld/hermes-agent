@@ -1,130 +1,132 @@
-import { FormEvent, useEffect, useState } from 'react';
-import { api } from '../api';
-import { ErrorAlert } from '../components/feedback/ErrorAlert';
-import { dialog } from '../components/dialogs/useDialog';
-import { toast, useEnvStore, usePrefsStore } from '../lib/store';
-import { errorSummary } from '../lib/errors';
+import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { api, API_BASE } from '../api';
+import { getToken } from '../api';
 
-type Me = { id: number; email: string; role: string };
+type GoogleStatus = {
+  connected: boolean;
+  google_email?: string | null;
+  connected_at?: string | null;
+  scopes?: string[];
+};
 
 export function SettingsPage() {
-  const [me, setMe] = useState<Me | null>(null);
-  const [form, setForm] = useState({ email: '', password: '', role: 'operator' });
-  const [err, setErr] = useState<unknown>(null);
-  const env = useEnvStore((s) => s.env);
-  const showRaw = usePrefsStore((s) => s.showRawFactKeys);
-  const setShowRaw = usePrefsStore((s) => s.setShowRawFactKeys);
+  const [search] = useSearchParams();
+  const [status, setStatus] = useState<GoogleStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    api.get<Me>('/auth/me').then(setMe).catch(() => undefined);
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await api.get<GoogleStatus>('/auth/google/status');
+      setStatus(r);
+    } catch {
+      setStatus({ connected: false });
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const create = async (e: FormEvent) => {
-    e.preventDefault();
-    setErr(null);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const g = search.get('google');
+    if (g === 'connected') {
+      setMsg('Gmail 已连接。');
+      refresh();
+    } else if (g === 'error') {
+      setMsg(`Gmail 连接失败：${search.get('reason') || 'unknown'}`);
+    }
+  }, [search, refresh]);
+
+  const connect = async () => {
+    setBusy(true);
+    setMsg(null);
     try {
-      await api.post('/auth/users', form);
-      toast.success(`已创建用户 ${form.email}`);
-      setForm({ email: '', password: '', role: 'operator' });
+      const r = await api.get<{ auth_url: string }>('/auth/google/start');
+      window.location.href = r.auth_url;
     } catch (ex) {
-      setErr(ex);
-      toast.error('创建失败', errorSummary(ex));
+      setMsg(String(ex));
+      setBusy(false);
     }
   };
 
-  const wipe = async () => {
-    const ok = await dialog.confirm({
-      title: '清除 TEST 环境的全部 CAL 数据？',
-      description: '此操作不可恢复，仅在 TEST 环境生效（LIVE 数据不受影响）。',
-      confirmLabel: '确认清除',
-      cancelLabel: '取消',
-      variant: 'danger',
-    });
-    if (!ok) return;
+  const disconnect = async () => {
+    setBusy(true);
+    setMsg(null);
     try {
-      const r = await api.post<Record<string, number>>('/admin/wipe-test');
-      toast.success('已清除 TEST 数据', JSON.stringify(r));
+      await api.delete('/auth/google');
+      await refresh();
+      setMsg('已断开 Gmail。');
     } catch (ex) {
-      setErr(ex);
-      toast.error('清除失败', errorSummary(ex));
+      setMsg(String(ex));
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <div className="space-y-6">
-      <section className="rounded border bg-white p-3">
-        <h2 className="mb-2 font-medium">登录身份</h2>
-        {me ? (
-          <div className="text-sm">
-            {me.email} · 角色 = {me.role}
+    <div className="mx-auto max-w-lg space-y-6">
+      <h1 className="text-lg font-semibold">设置</h1>
+
+      <section className="rounded border border-slate-200 bg-white p-4">
+        <h2 className="text-sm font-medium text-slate-800">Gmail 账号</h2>
+        <p className="mt-1 text-xs text-slate-600">
+          每位操作员连接自己的 Gmail。本 campaign 首次发信的操作员将成为该 KOL 的邮箱负责人。
+        </p>
+
+        {loading ? (
+          <p className="mt-3 text-sm text-slate-500">加载中…</p>
+        ) : status?.connected ? (
+          <div className="mt-3 space-y-2 text-sm">
+            <div>
+              <span className="text-slate-500">已连接：</span>
+              <span className="font-mono text-slate-900">{status.google_email}</span>
+            </div>
+            {status.connected_at && (
+              <div className="text-xs text-slate-500">连接于 {status.connected_at}</div>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={disconnect}
+              className="rounded border border-rose-300 bg-rose-50 px-3 py-1.5 text-sm text-rose-800 hover:bg-rose-100 disabled:opacity-50"
+            >
+              断开连接
+            </button>
           </div>
         ) : (
-          <div className="text-sm text-slate-500">加载中…</div>
+          <div className="mt-3">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={connect}
+              className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
+            >
+              连接 Gmail
+            </button>
+          </div>
         )}
-      </section>
 
-      <section className="rounded border bg-white p-3">
-        <h2 className="mb-2 font-medium">偏好</h2>
-        <label className="flex items-center gap-2 text-sm text-slate-700">
-          <input
-            type="checkbox"
-            checked={showRaw}
-            onChange={(e) => setShowRaw(e.target.checked)}
-            className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-          />
-          <span>开发者模式：在字段标签旁显示原始 fact_path</span>
-        </label>
-        <p className="mt-1 text-xs text-slate-500">
-          默认关闭。开启后看板和详情页里的字段名旁会同时显示 namespace.key 原始名，方便排查后端问题。
+        {msg && (
+          <p className="mt-2 text-xs text-slate-700">{msg}</p>
+        )}
+
+        <p className="mt-3 text-[10px] text-slate-400">
+          OAuth 回调地址需在 Google Cloud Console 中注册为：
+          {' '}
+          <span className="font-mono">{API_BASE}/auth/google/callback</span>
         </p>
       </section>
 
-      {me?.role === 'owner' && (
-        <>
-          <section className="rounded border bg-white p-3">
-            <h2 className="mb-2 font-medium">创建用户</h2>
-            <form onSubmit={create} className="grid grid-cols-4 gap-2 text-sm">
-              <input
-                placeholder="邮箱"
-                type="email"
-                value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
-                className="rounded border px-2 py-1"
-                required
-              />
-              <input
-                placeholder="密码（≥8 位）"
-                type="password"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                className="rounded border px-2 py-1"
-                required
-              />
-              <select
-                value={form.role}
-                onChange={(e) => setForm({ ...form, role: e.target.value })}
-                className="rounded border px-2 py-1"
-              >
-                <option value="owner">owner（管理员）</option>
-                <option value="operator">operator（操作员）</option>
-                <option value="viewer">viewer（只读）</option>
-              </select>
-              <button className="rounded bg-emerald-600 px-3 py-1 text-white">创建</button>
-            </form>
-          </section>
-
-          <section className="rounded border border-red-200 bg-red-50 p-3">
-            <h2 className="mb-2 font-medium text-red-800">危险区域</h2>
-            <p className="mb-2 text-xs text-red-700">
-              当前 env = <strong>{env}</strong>。下方按钮只会清除 TEST 数据，与 LIVE 无关。
-            </p>
-            <button onClick={wipe} className="rounded bg-red-600 px-3 py-1 text-white">
-              清除 TEST 环境的全部 CAL 数据
-            </button>
-          </section>
-        </>
-      )}
-      {!!err && <ErrorAlert error={err} />}
+      <section className="rounded border border-slate-100 bg-slate-50 p-3 text-xs text-slate-600">
+        <div>API: {API_BASE}</div>
+        <div>登录态: {getToken() ? '已登录' : '未登录'}</div>
+      </section>
     </div>
   );
 }

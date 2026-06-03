@@ -100,6 +100,33 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_cid ON product_campaign_runs(campaign_id, env, started_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_dedup ON product_campaign_runs(dedup_key, started_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_env_started ON product_campaign_runs(env, started_at DESC)",
+    """CREATE TABLE IF NOT EXISTS gmail_connections (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id),
+        google_email TEXT NOT NULL,
+        token_encrypted TEXT NOT NULL,
+        scopes_json TEXT NOT NULL,
+        connected_at TEXT NOT NULL,
+        revoked_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS gmail_oauth_pending (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id),
+        state TEXT NOT NULL,
+        code_verifier TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS gmail_poller_watermarks (
+        user_id INTEGER PRIMARY KEY,
+        last_message_id TEXT,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS gmail_poller_global_seen (
+        env TEXT NOT NULL CHECK (env IN ('LIVE','TEST')),
+        message_id TEXT NOT NULL,
+        mailbox_user_id INTEGER,
+        seen_at TEXT NOT NULL,
+        PRIMARY KEY (env, message_id)
+    )""",
 ]
 
 
@@ -159,6 +186,7 @@ def init_db() -> None:
         product_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(products)")
         }
+        _migrate_gmail_tables(conn)
         for col, ddl in (
             ("pitch_md", "TEXT"),
             ("selling_points", "TEXT"),
@@ -171,6 +199,40 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col} {ddl}")
     finally:
         conn.close()
+
+
+def _migrate_gmail_tables(conn: sqlite3.Connection) -> None:
+    """Ensure gmail_* tables exist on legacy DBs."""
+    for ddl in (
+        """CREATE TABLE IF NOT EXISTS gmail_connections (
+            user_id INTEGER PRIMARY KEY,
+            google_email TEXT NOT NULL,
+            token_encrypted TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            connected_at TEXT NOT NULL,
+            revoked_at TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS gmail_oauth_pending (
+            user_id INTEGER PRIMARY KEY,
+            state TEXT NOT NULL,
+            code_verifier TEXT NOT NULL,
+            redirect_uri TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS gmail_poller_watermarks (
+            user_id INTEGER PRIMARY KEY,
+            last_message_id TEXT,
+            updated_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS gmail_poller_global_seen (
+            env TEXT NOT NULL CHECK (env IN ('LIVE','TEST')),
+            message_id TEXT NOT NULL,
+            mailbox_user_id INTEGER,
+            seen_at TEXT NOT NULL,
+            PRIMARY KEY (env, message_id)
+        )""",
+    ):
+        conn.execute(ddl)
 
 
 def _migrate_product_campaign_runs(conn: sqlite3.Connection) -> None:

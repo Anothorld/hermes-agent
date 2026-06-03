@@ -102,6 +102,22 @@ Treat these as baseline controls:
 - `gate_*` flags indicate sensitive dimensions requiring human gate even when
   the rest of the flow can continue.
 
+When `anomaly_signals.mailbox_mismatch` is true, the KOL reply landed in a
+**different operator Gmail inbox** than the campaign's bound outbound mailbox
+(`bound_mailbox_email` vs `detected_mailbox_email`). The **poller already
+writes the inbound event, opens escalation `inbound_mailbox_mismatch`, and
+skips auto-dispatch** — your on-demand run should treat this as
+escalation-only: resolve the mailbox mismatch with the operator before
+drafting.
+
+If you see `mailbox_mismatch` without an open escalation (legacy replay),
+open escalation `inbound_mailbox_mismatch` with both emails in
+`resume_context` and **do not** auto-draft.
+
+Each `pending_replies[i]` item also carries `detected_mailbox_user_id` and
+`detected_mailbox_email` (the inbox that received this message). Pass these
+through to Step 6 label calls.
+
 ### Step 1 — Fetch dispatch context (one call)
 For each `pending_replies[i]`, fetch the bundled context:
 
@@ -372,13 +388,20 @@ and the full prior `approval.reply_draft` value under
 
 ### Step 6 — Idempotency labels
 After Step 5.7 (or escalation-only outcome), apply the Gmail label
-`kol-outreach/handled` once per inbound message:
+`kol-outreach/handled` once per inbound message using the **same operator
+inbox** that received the reply:
 
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py mark-reply-handled \
   --env <TEST|LIVE> \
-  --message-id "<inbound_message_id>"
+  --message-id "<inbound_message_id>" \
+  --identity-id <identity_id> \
+  --campaign-id "<campaign_id>" \
+  --detected-mailbox-user-id <detected_mailbox_user_id>
 ```
+
+`--detected-mailbox-user-id` and `--campaign-id` are required whenever
+multi-operator Gmail is enabled so labels apply on the correct account.
 
 ### Step 7 — Final report
 Return a JSON summary covering each processed reply:
@@ -443,6 +466,7 @@ Two fragment skills propose the same fact key. Open
 | `select-draftable-plan` / `persist-reply-draft` HTTP **404** | Stop. Escalate `bridge_stale_or_down`. **Do not** `import dispatch_router`, run plugin loaders, or use `execute_code` for routing. |
 | `skill_view` file not found | Use only files listed in `available_files` or `bridge-http-api-endpoints.md`. |
 | `mark-reply-handled` **503** on handled label | Escalate `gmail_label_error`. Pending-reply missing is OK (Bridge skips it). |
+| `anomaly_signals.mailbox_mismatch` | Open escalation `inbound_mailbox_mismatch` before drafting; include both mailbox emails. |
 | `FactNamespaceError` on write | Escalate `fact_namespace_violation`; do not munge keys. |
 | Fragment `assert_disjoint` conflict | Escalate `fragment_fact_conflict`. |
 

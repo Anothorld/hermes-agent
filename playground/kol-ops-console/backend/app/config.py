@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     )
 
     # --- JWT ---
+    gmail_token_secret: str = Field(
+        default="",
+        description=(
+            "Dedicated secret for encrypting Gmail OAuth tokens at rest. "
+            "Falls back to jwt_secret when unset. Prefer rotating this "
+            "independently of JWT signing keys."
+        ),
+    )
     jwt_secret: str = Field(default="dev-only-change-me", min_length=16)
     jwt_alg: str = "HS256"
     jwt_ttl_sec: int = 60 * 60 * 8  # 8 hours
@@ -52,6 +60,23 @@ class Settings(BaseSettings):
     # --- App ---
     env: str = "LIVE"  # default env to query when client omits it; LIVE|TEST
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    # Google OAuth for per-operator Gmail (Desktop app or Web client JSON).
+    google_client_secret_path: Path | None = Field(
+        default=None,
+        description="Path to Google OAuth client_secret JSON; falls back to HERMES_HOME or cert/",
+    )
+    google_oauth_redirect_uri: str = Field(
+        default="http://localhost:8765/auth/google/callback",
+        description="Must match a redirect URI registered in Google Cloud Console.",
+    )
+    gmail_tokens_dir: Path = Field(
+        default=Path("~/.hermes/kol-ops/gmail_tokens").expanduser(),
+        description="Per-user token files consumed by kol-ops-bridge GmailClient.",
+    )
+    internal_api_key: str = Field(
+        default="",
+        description="Shared secret for /internal/* (poller, bridge). Falls back to bridge_key.",
+    )
     # Slow API diagnostics (dev aid). Log only when a request takes longer
     # than this threshold; disabled by default to keep prod logs quiet.
     slow_api_log_enabled: bool = False

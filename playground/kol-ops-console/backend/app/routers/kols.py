@@ -14,10 +14,11 @@ from pydantic import BaseModel, EmailStr, Field
 from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
 from ..bridge_runtime import ensure_gateway_bridge_key
-from ..campaign_id_norm import CampaignIdNormaliserMixin
+from ..campaign_id_norm import CampaignIdNormaliserMixin, norm_campaign_id
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
+from ..nox_gate import materialize_campaign_config_file, require_nox_quota_enabled
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
     get_inflight_run,
@@ -85,11 +86,118 @@ async def get_timeline(
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
     _: Annotated[dict, Depends(current_user)],
     env: str | None = Query(None),
+    campaign_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
 ) -> dict:
+    resolved_env = _env(env)
     try:
-        return await bridge.get_timeline(identity_id, _env(env))
+        events = await bridge.get_timeline(
+            identity_id,
+            env=resolved_env,
+            campaign_id=campaign_id,
+            limit=limit,
+        )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return {
+        "identity_id": identity_id,
+        "campaign_id": campaign_id,
+        "env": resolved_env,
+        "events": events,
+    }
+
+
+@router.get("/{identity_id}/communication-history")
+async def get_communication_history(
+    identity_id: int,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(current_user)],
+    campaign_id: str = Query(..., min_length=1),
+    env: str | None = Query(None),
+) -> dict:
+    """Gmail sent/received email rows for the KOL detail communication panel."""
+    resolved_cid = norm_campaign_id(campaign_id)
+    if not resolved_cid:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            {
+                "code": "invalid_campaign_id",
+                "message": "campaign_id is required and must not be a null/undefined sentinel",
+            },
+        )
+    resolved_env = _env(env)
+    try:
+        return await bridge.get_email_conversation(
+            identity_id,
+            resolved_cid,
+            env=resolved_env,
+            operator_user_id=int(user["id"]),
+        )
+    except BridgeError as exc:
+        if exc.status == 403:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, exc.detail) from exc
+        if exc.status == 409:
+            raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+class TakeoverMailboxBody(BaseModel):
+    campaign_id: str = Field(min_length=1)
+    env: str | None = None
+
+
+@router.post("/{identity_id}/takeover-mailbox")
+async def takeover_mailbox(
+    identity_id: int,
+    body: TakeoverMailboxBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+) -> dict:
+    """Reassign campaign Gmail mailbox to the current operator."""
+    from ..gmail_store import get_connection
+
+    if not get_connection(conn, user["id"], active_only=True):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "code": "gmail_not_connected",
+                "message": "Connect Gmail in Settings before taking over a mailbox",
+            },
+        )
+    resolved_cid = norm_campaign_id(body.campaign_id)
+    if not resolved_cid:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            {"code": "invalid_campaign_id", "message": "campaign_id is required"},
+        )
+    resolved_env = _env(body.env)
+    try:
+        out = await bridge.takeover_mailbox(
+            identity_id,
+            {
+                "campaign_id": resolved_cid,
+                "env": resolved_env,
+                "operator_user_id": user["id"],
+                "operator_email": user["email"],
+                "requester_role": user["role"],
+            },
+            operator_user_id=int(user["id"]),
+        )
+    except BridgeError as exc:
+        if exc.status == 403:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, exc.detail) from exc
+        if exc.status == 409:
+            raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    write_audit(
+        conn,
+        actor_user_id=user["id"],
+        action="kol.mailbox.takeover",
+        target=str(identity_id),
+        payload={"campaign_id": resolved_cid, "env": resolved_env},
+    )
+    return out
 
 
 class NoteBody(BaseModel):
@@ -456,6 +564,174 @@ async def discover_email(
         "identity_id": identity_id,
         "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Nox API gates (quota + monthly cache via nox_kol_tool.py)
+# ---------------------------------------------------------------------------
+
+
+class NoxDiligenceBody(CampaignIdNormaliserMixin):
+    env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    campaign_id: str | None = None
+
+
+_NOX_DILIGENCE_INSTRUCTIONS = (
+    "You are running `kol-nox-diligence` for ONE KOL at Console request.\n"
+    "\n"
+    "## Runtime contract\n"
+    f"- Repo root: {_REPO_ROOT}\n"
+    "- Nox CLI entry:\n"
+    f"    python {_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py\n"
+    "- CAL writes:\n"
+    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py\n"
+    "\n"
+    "## Pipeline\n"
+    "1. `skill_view(name='kol-nox-diligence')` and follow Procedure.\n"
+    "2. LIVE: pass `--campaign-config-file <path>` on every `nox_kol_tool.py` call.\n"
+    "3. Use `diligence-pack --gate shortlist_confirm` only.\n"
+    "4. If `cache_hit`, report zero API calls and hydrate facts from summary.\n"
+    "5. Do NOT run supplement search or monitor setup in this run.\n"
+)
+
+
+@router.post("/{identity_id}/nox-diligence")
+async def nox_diligence(
+    identity_id: int,
+    body: NoxDiligenceBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    gateway: Annotated[GatewayClient, Depends(get_gateway)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict:
+    """Gate A: Nox shortlist diligence for one identity."""
+    env = body.env
+    try:
+        ident = await bridge.get_identity(identity_id)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if not ident:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "identity not found")
+
+    cfg_path = ""
+    if env.upper() == "LIVE":
+        if not body.campaign_id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                {"code": "campaign_id_required", "detail": "campaign_id required for LIVE Nox diligence"},
+            )
+        cfg = await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
+        cfg_path = materialize_campaign_config_file(body.campaign_id, cfg)
+
+    dedup_key = f"nox-diligence:{env}:{identity_id}"
+    inflight = get_inflight_run(conn, dedup_key=dedup_key)
+    if inflight is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"code": "nox_diligence_inflight", "run_id": inflight.get("run_id")},
+        )
+
+    ensure_gateway_bridge_key()
+    brief = "\n".join([
+        "# kol_nox_diligence",
+        f"identity_id: {identity_id}",
+        f"mode: {env}",
+        f"campaign_id: {body.campaign_id or ''}",
+        f"campaign_config_file: {cfg_path}",
+        f"requested_by: {user['email']}",
+        "",
+        "Run kol-nox-diligence for this identity only.",
+    ])
+    try:
+        run = await gateway.start_run(
+            input=brief,
+            instructions=_NOX_DILIGENCE_INSTRUCTIONS,
+            session_id=f"kol-nox-diligence:{env}:{identity_id}",
+        )
+    except GatewayError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    run_id = run.get("run_id") if isinstance(run, dict) else None
+    if isinstance(run_id, str) and run_id and body.campaign_id:
+        register_run(
+            conn,
+            campaign_id=body.campaign_id,
+            env=env,
+            run_id=run_id,
+            kind="draft",
+            session_id=f"kol-nox-diligence:{env}:{identity_id}",
+            dedup_key=dedup_key,
+        )
+    write_audit(
+        conn,
+        actor_user_id=user["id"],
+        action="kol.nox.diligence",
+        target=str(identity_id),
+        payload={"env": env, "campaign_id": body.campaign_id, "run_id": run_id},
+    )
+    return {"ok": True, "run_id": run_id, "identity_id": identity_id}
+
+
+class NoxMonitorBody(CampaignIdNormaliserMixin):
+    env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
+    campaign_id: str | None = None
+    video_url: str = Field(min_length=10)
+
+
+_NOX_MONITOR_INSTRUCTIONS = (
+    "You are running `kol-nox-monitor` for ONE published video URL.\n"
+    f"- Repo root: {_REPO_ROOT}\n"
+    f"- Nox: python {_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py\n"
+    "1. LIVE: `--campaign-config-file` on all `nox_kol_tool.py` calls.\n"
+    "2. `skill_view(name='kol-nox-monitor')` — dry-run then `--force` after confirm.\n"
+    "3. No monitor history polling.\n"
+)
+
+
+@router.post("/{identity_id}/nox-monitor")
+async def nox_monitor(
+    identity_id: int,
+    body: NoxMonitorBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    gateway: Annotated[GatewayClient, Depends(get_gateway)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict:
+    """Gate C: register video in Nox monitor (one-shot)."""
+    ensure_gateway_bridge_key()
+    cfg_path = ""
+    if body.env.upper() == "LIVE":
+        if not body.campaign_id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                {"code": "campaign_id_required", "detail": "campaign_id required for LIVE Nox monitor"},
+            )
+        cfg = await require_nox_quota_enabled(bridge, body.campaign_id, env=body.env)
+        cfg_path = materialize_campaign_config_file(body.campaign_id, cfg)
+    brief = "\n".join([
+        "# kol_nox_monitor",
+        f"identity_id: {identity_id}",
+        f"video_url: {body.video_url}",
+        f"mode: {body.env}",
+        f"campaign_id: {body.campaign_id or ''}",
+        f"campaign_config_file: {cfg_path}",
+    ])
+    try:
+        run = await gateway.start_run(
+            input=brief,
+            instructions=_NOX_MONITOR_INSTRUCTIONS,
+            session_id=f"kol-nox-monitor:{body.env}:{identity_id}",
+        )
+    except GatewayError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    run_id = run.get("run_id") if isinstance(run, dict) else None
+    write_audit(
+        conn,
+        actor_user_id=user["id"],
+        action="kol.nox.monitor",
+        target=str(identity_id),
+        payload={"video_url": body.video_url, "run_id": run_id},
+    )
+    return {"ok": True, "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------

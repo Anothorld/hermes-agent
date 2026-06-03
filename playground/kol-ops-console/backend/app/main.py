@@ -15,10 +15,13 @@ from .config import get_settings
 from .db import _connect, init_db
 from .deps import shutdown_bridge, shutdown_gateway
 from .gateway_approval_watcher import watcher as approval_watcher
+from .gmail_store import migrate_legacy_global_token
 from .routers import (
     admin,
     approvals,
     auth,
+    google_auth,
+    internal,
     campaigns,
     candidates,
     escalations,
@@ -68,6 +71,15 @@ def _ensure_owner() -> None:
 async def _lifespan(app: FastAPI):
     init_db()
     _ensure_owner()
+    conn = _connect(get_settings().db_path)
+    try:
+        owner = conn.execute(
+            "SELECT id FROM users WHERE role='owner' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if owner:
+            migrate_legacy_global_token(conn, int(owner["id"]))
+    finally:
+        conn.close()
     await approval_watcher.start(get_settings())
     yield
     await approval_watcher.stop()
@@ -130,6 +142,8 @@ def create_app() -> FastAPI:
         return {"ok": True, "env": s.env}
 
     app.include_router(auth.router)
+    app.include_router(google_auth.router)
+    app.include_router(internal.router)
     app.include_router(products.router)
     app.include_router(kols.router)
     app.include_router(campaigns.router)

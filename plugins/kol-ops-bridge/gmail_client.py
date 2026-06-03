@@ -98,10 +98,14 @@ class GmailClient:
         *,
         python_executable: Optional[str] = None,
         google_api_path: Optional[Path] = None,
+        credentials_path: Optional[Path] = None,
         timeout_sec: float = 30.0,
     ) -> None:
         self._python = python_executable or sys.executable
         self._script = google_api_path or _GOOGLE_API_PY
+        self._credentials_path = (
+            Path(credentials_path).expanduser() if credentials_path else None
+        )
         self._timeout = timeout_sec
         # Lazily-loaded Gmail label name -> id cache. Invalidated only when
         # ``modify_labels`` discovers a name that's missing from the cache.
@@ -112,10 +116,12 @@ class GmailClient:
 
     def is_available(self) -> bool:
         """True iff token + script are present (we can attempt a call)."""
-        return _TOKEN_PATH.exists() and self._script.exists()
+        return self.token_path.exists() and self._script.exists()
 
     @property
     def token_path(self) -> Path:
+        if self._credentials_path is not None:
+            return self._credentials_path
         return _TOKEN_PATH
 
     # -- write ---------------------------------------------------------------
@@ -265,8 +271,11 @@ class GmailClient:
             out.append({
                 "id": str(item.get("id", "")),
                 "from": str(item.get("from", "")),
+                "to": str(item.get("to", "")),
+                "subject": str(item.get("subject", "")),
                 "date": str(item.get("date", "")),
                 "body": str(item.get("body", "")),
+                "labels": list(item.get("labels") or []),
             })
         return out
 
@@ -442,10 +451,13 @@ class GmailClient:
     def _invoke(self, args: list[str]) -> Any:
         if not self.is_available():
             raise GmailUnavailable(
-                f"google_token.json missing at {_TOKEN_PATH} — run "
-                f"`python {self._script.parent / 'setup.py'}` first."
+                f"google_token.json missing at {self.token_path} — connect Gmail in "
+                f"KOL Ops Console settings or run "
+                f"`python {self._script.parent / 'setup.py'}`."
             )
         cmd = [self._python, str(self._script), *args]
+        env = os.environ.copy()
+        env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(self.token_path)
         try:
             result = subprocess.run(
                 cmd,
@@ -453,6 +465,7 @@ class GmailClient:
                 text=True,
                 timeout=self._timeout,
                 check=False,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             raise GmailUnavailable(f"gmail call timed out: {exc}") from exc

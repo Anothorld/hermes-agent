@@ -17,8 +17,85 @@ import { useUnreadStore, isUnread } from '../lib/unread';
 import { outcomeChipClass, outcomeLabel } from '../lib/kolOutcomes';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
+import { CommunicationHistoryPanel } from '../components/CommunicationHistoryPanel';
 
 const GMAIL_DRAFTS_URL = 'https://mail.google.com/mail/u/0/#drafts';
+
+function CampaignMailboxBanner({
+  identityId,
+  campaignId,
+  env,
+  facts,
+  onChanged,
+}: {
+  identityId: number;
+  campaignId: string;
+  env: string;
+  facts: Record<string, unknown>;
+  onChanged: () => void;
+}) {
+  const mailboxEmail =
+    typeof facts['offer.gmail_mailbox_email'] === 'string'
+      ? (facts['offer.gmail_mailbox_email'] as string)
+      : null;
+  const threadsStale = facts['offer.gmail_threads_stale_after_takeover'] === true;
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const takeover = async () => {
+    if (
+      !window.confirm(
+        '将本 campaign 的发件 Gmail 接管为你的账号？请确认已与当前负责人沟通。',
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.post(`/kols/${identityId}/takeover-mailbox`, {
+        campaign_id: campaignId,
+        env,
+      });
+      onChanged();
+    } catch (ex) {
+      const msg = ex instanceof ApiError && ex.status === 403
+        ? '仅 owner 可将已绑定的 campaign 邮箱接管给其他操作员。'
+        : (ex instanceof Error ? ex.message : String(ex));
+      setErr(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+      {mailboxEmail ? (
+        <span>
+          Campaign 发件邮箱：<span className="font-medium">{mailboxEmail}</span>
+        </span>
+      ) : (
+        <span className="text-slate-500">
+          尚未绑定发件邮箱（首次审批回复草稿时将绑定你的 Gmail）
+        </span>
+      )}
+      {threadsStale && (
+        <span className="text-amber-700">
+          邮箱已接管 — 旧 Gmail 线程可能不可读，请在新邮箱 reconcile 或重发。
+        </span>
+      )}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void takeover()}
+        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] hover:bg-slate-100 disabled:opacity-50"
+      >
+        {busy ? '处理中…' : '接管邮箱'}
+      </button>
+      {err && <span className="text-rose-600">{err}</span>}
+    </div>
+  );
+}
 
 type GoalStatus = 'inactive' | 'active' | 'satisfied' | 'blocked' | 'skipped' | 'aborted';
 
@@ -319,6 +396,31 @@ export function KolDetailPage() {
 
       <OutreachTimelinePanel facts={factsVal} />
 
+      {isRealCampaignId(campaignId) && (
+        <CampaignMailboxBanner
+          identityId={identityVal.id}
+          campaignId={campaignId}
+          env={env}
+          facts={factsVal}
+          onChanged={refresh}
+        />
+      )}
+
+      <CommunicationHistoryPanel
+        identityId={identityVal.id}
+        campaignId={campaignId}
+        env={env}
+        reloadAt={lastRefreshedAt}
+      />
+
+      <NoxDiligenceStrip
+        identityId={identityVal.id}
+        campaignId={campaignId}
+        env={env}
+        facts={factsVal}
+        onTriggered={refresh}
+      />
+
       <EmailPanel
         identityId={identityVal.id}
         handle={identityVal.primary_handle}
@@ -337,6 +439,15 @@ export function KolDetailPage() {
       />
 
       <RedraftPanel
+        campaignId={campaignId}
+        identityId={identityVal.id}
+        env={env}
+        facts={factsVal}
+        primaryEmail={identityVal.primary_email}
+        onTriggered={refresh}
+      />
+
+      <ProactiveFollowupPanel
         campaignId={campaignId}
         identityId={identityVal.id}
         env={env}
@@ -1127,6 +1238,431 @@ function RedraftPanel({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+type FollowupPhase =
+  | { kind: 'idle' }
+  | { kind: 'expanded' }
+  | { kind: 'submitting' }
+  | {
+      kind: 'running';
+      runId: string | null;
+      startedAt: number;
+      cooldownUntil: number;
+    }
+  | { kind: 'confirm_discard'; previousDraftId: string | null }
+  | { kind: 'error'; code: string | null; message: string };
+
+const FOLLOWUP_INFLIGHT_DISPLAY_MS = 120_000;
+
+function followupCooldownStorageKey(campaignId: string, identityId: number, env: string) {
+  return `koc.followup_cooldown:${env}:${campaignId}:${identityId}`;
+}
+
+function readFollowupCooldown(
+  campaignId: string,
+  identityId: number,
+  env: string,
+): { runId: string | null; startedAt: number; cooldownUntil: number } | null {
+  try {
+    const raw = sessionStorage.getItem(followupCooldownStorageKey(campaignId, identityId, env));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      runId?: string | null;
+      startedAt?: number;
+      cooldownUntil?: number;
+    };
+    if (
+      typeof parsed.cooldownUntil !== 'number'
+      || parsed.cooldownUntil <= Date.now()
+    ) {
+      sessionStorage.removeItem(followupCooldownStorageKey(campaignId, identityId, env));
+      return null;
+    }
+    return {
+      runId: parsed.runId ?? null,
+      startedAt: parsed.startedAt ?? Date.now(),
+      cooldownUntil: parsed.cooldownUntil,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeFollowupCooldown(
+  campaignId: string,
+  identityId: number,
+  env: string,
+  payload: { runId: string | null; startedAt: number; cooldownUntil: number },
+) {
+  try {
+    sessionStorage.setItem(
+      followupCooldownStorageKey(campaignId, identityId, env),
+      JSON.stringify(payload),
+    );
+  } catch {
+    // best-effort
+  }
+}
+
+function clearFollowupCooldown(campaignId: string, identityId: number, env: string) {
+  try {
+    sessionStorage.removeItem(followupCooldownStorageKey(campaignId, identityId, env));
+  } catch {
+    // ignore
+  }
+}
+
+/** Operator-topic proactive follow-up (independent of inbound reply loop). */
+function ProactiveFollowupPanel({
+  campaignId,
+  identityId,
+  env,
+  facts,
+  primaryEmail,
+  onTriggered,
+}: {
+  campaignId: string;
+  identityId: number;
+  env: 'TEST' | 'LIVE';
+  facts: Record<string, unknown>;
+  primaryEmail: string | null;
+  onTriggered: () => void;
+}) {
+  const outreachSent = Boolean(facts['offer.outreach_sent']);
+  if (!outreachSent) return null;
+
+  const hasEmail = Boolean(primaryEmail && primaryEmail.trim());
+  const replyDraft = facts['approval.reply_draft'];
+  const decision =
+    replyDraft && typeof replyDraft === 'object'
+      ? (replyDraft as { decision?: string }).decision || null
+      : null;
+  const gmailDraftId =
+    typeof facts['offer.gmail_draft_id'] === 'string'
+      ? (facts['offer.gmail_draft_id'] as string)
+      : null;
+
+  const [topic, setTopic] = useState('');
+  const [phase, setPhase] = useState<FollowupPhase>(() => {
+    const cd = readFollowupCooldown(campaignId, identityId, env);
+    if (cd) {
+      return {
+        kind: 'running',
+        runId: cd.runId,
+        startedAt: cd.startedAt,
+        cooldownUntil: cd.cooldownUntil,
+      };
+    }
+    return { kind: 'idle' };
+  });
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    if (phase.kind !== 'running') return;
+    const tick = setInterval(() => forceTick((n) => (n + 1) & 0xffff), 1000);
+    return () => clearInterval(tick);
+  }, [phase.kind]);
+
+  useEffect(() => {
+    if (phase.kind !== 'running') return;
+    const remaining = phase.cooldownUntil - Date.now();
+    if (remaining <= 0) {
+      clearFollowupCooldown(campaignId, identityId, env);
+      setPhase({ kind: 'idle' });
+      return;
+    }
+    const t = setTimeout(() => {
+      clearFollowupCooldown(campaignId, identityId, env);
+      setPhase((p) =>
+        p.kind === 'running' && p.startedAt === phase.startedAt
+          ? { kind: 'idle' }
+          : p,
+      );
+    }, remaining);
+    return () => clearTimeout(t);
+  }, [phase, campaignId, identityId, env]);
+
+  const submit = async (discardApprovedDraft: boolean) => {
+    const trimmed = topic.trim();
+    if (!trimmed) return;
+    setPhase({ kind: 'submitting' });
+    try {
+      const r = await api.post<{ run_id: string | null; started_at: string }>(
+        `/campaigns/${encodeURIComponent(campaignId)}/identities/${identityId}/followup-draft`,
+        { env, topic: trimmed, discard_existing_approved_draft: discardApprovedDraft },
+      );
+      const startedAt = Date.now();
+      const cooldownUntil = startedAt + FOLLOWUP_INFLIGHT_DISPLAY_MS;
+      writeFollowupCooldown(campaignId, identityId, env, {
+        runId: r.run_id,
+        startedAt,
+        cooldownUntil,
+      });
+      setPhase({ kind: 'running', runId: r.run_id, startedAt, cooldownUntil });
+      setTopic('');
+      onTriggered();
+    } catch (ex) {
+      const detail = parseApiErrorDetail(ex);
+      const code = detail?.code ?? null;
+      if (code === 'followup_inflight') {
+        const startedAt = detail?.started_at
+          ? Date.parse(detail.started_at)
+          : Date.now();
+        const safeStart = Number.isNaN(startedAt) ? Date.now() : startedAt;
+        const cooldownUntil = safeStart + FOLLOWUP_INFLIGHT_DISPLAY_MS;
+        writeFollowupCooldown(campaignId, identityId, env, {
+          runId: detail?.run_id ?? null,
+          startedAt: safeStart,
+          cooldownUntil,
+        });
+        setPhase({
+          kind: 'running',
+          runId: detail?.run_id ?? null,
+          startedAt: safeStart,
+          cooldownUntil,
+        });
+        return;
+      }
+      if (code === 'approved_draft_exists') {
+        setPhase({
+          kind: 'confirm_discard',
+          previousDraftId: detail?.gmail_draft_id ?? null,
+        });
+        return;
+      }
+      setPhase({
+        kind: 'error',
+        code,
+        message: detail?.message ?? String(ex),
+      });
+    }
+  };
+
+  const isBusy = phase.kind === 'submitting' || phase.kind === 'running';
+  const isPendingApproval = decision === 'pending';
+  const expanded = phase.kind === 'expanded' || phase.kind === 'submitting';
+  const elapsedSec =
+    phase.kind === 'running'
+      ? Math.max(0, Math.floor((Date.now() - phase.startedAt) / 1000))
+      : 0;
+
+  return (
+    <div className="rounded border border-violet-200 bg-violet-50/40 p-3">
+      <div className="text-xs font-medium uppercase tracking-wide text-violet-800">
+        主动跟进
+      </div>
+      <p className="mt-1 text-xs text-slate-600">
+        按你输入的主题起草一封跟进信（不依赖 KOL 刚回信）。生成后进入待审批，通过后才进 Gmail 草稿箱。
+      </p>
+
+      {phase.kind === 'running' && (
+        <div className="mt-2 rounded bg-violet-100 px-2 py-1 text-xs text-violet-900" role="status">
+          生成中… 已等待 {elapsedSec}s（run_id=
+          {phase.runId ? phase.runId.slice(0, 8) : '?'}…）
+        </div>
+      )}
+
+      {!expanded && phase.kind !== 'running' && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={isBusy || !hasEmail || isPendingApproval}
+            title={
+              !hasEmail
+                ? '需要先填入 KOL 邮箱'
+                : isPendingApproval
+                ? '已有待审批草稿，请先去 Approvals 处理'
+                : '输入跟进主题并生成草稿'
+            }
+            onClick={() => setPhase({ kind: 'expanded' })}
+            className={
+              'rounded px-3 py-1.5 text-sm font-medium transition '
+              + (!hasEmail || isPendingApproval
+                ? 'cursor-not-allowed bg-slate-200 text-slate-500'
+                : 'bg-violet-600 text-white hover:bg-violet-700')
+            }
+          >
+            写跟进主题…
+          </button>
+          {isPendingApproval && (
+            <Link
+              to={`/approvals?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityId}&env=${env}`}
+              className="text-sm text-sky-700 underline-offset-2 hover:underline"
+            >
+              去审批待处理草稿 →
+            </Link>
+          )}
+        </div>
+      )}
+
+      {expanded && (
+        <div className="mt-3 space-y-2">
+          <label className="block text-xs font-medium text-slate-700" htmlFor="followup-topic">
+            跟进主题
+          </label>
+          <textarea
+            id="followup-topic"
+            rows={3}
+            value={topic}
+            onChange={(e) => setTopic(e.target.value)}
+            disabled={isBusy}
+            placeholder="例如：催对方确认拍摄时间 / 报价后 gentle nudge / 确认收货地址"
+            className="w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 placeholder:text-slate-400"
+          />
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={isBusy || !topic.trim() || !hasEmail}
+              onClick={() => submit(false)}
+              className={
+                'rounded px-3 py-1.5 text-sm font-medium '
+                + (isBusy || !topic.trim()
+                  ? 'cursor-not-allowed bg-violet-200 text-violet-800'
+                  : 'bg-violet-600 text-white hover:bg-violet-700')
+              }
+            >
+              {phase.kind === 'submitting' ? '派单中…' : '生成跟进草稿'}
+            </button>
+            <button
+              type="button"
+              disabled={isBusy}
+              onClick={() => {
+                setPhase({ kind: 'idle' });
+                setTopic('');
+              }}
+              className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase.kind === 'confirm_discard' && (
+        <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          <div className="font-medium">已有审批通过的 Gmail 草稿，仍要生成新的跟进草稿？</div>
+          <p className="mt-1">
+            旧草稿
+            {phase.previousDraftId ? (
+              <> (<span className="font-mono">{phase.previousDraftId}</span>)</>
+            ) : null}
+            {' '}不会自动删除，请避免重复发送。
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              onClick={() => submit(true)}
+              className="rounded bg-rose-600 px-3 py-1 text-xs font-medium text-white hover:bg-rose-700"
+            >
+              继续生成
+            </button>
+            <button
+              type="button"
+              onClick={() => setPhase({ kind: 'idle' })}
+              className="rounded border border-slate-300 bg-white px-3 py-1 text-xs"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase.kind === 'error' && (
+        <div className="mt-3 rounded border border-rose-300 bg-rose-50 p-2 text-xs text-rose-900">
+          <div className="font-medium">
+            {phase.code === 'pending_draft_exists'
+              ? '已有待审批草稿'
+              : phase.code === 'followup_inflight'
+              ? '另一次生成正在进行'
+              : '生成失败'}
+          </div>
+          <p className="mt-0.5 break-words">{phase.message}</p>
+          <button
+            type="button"
+            onClick={() => setPhase({ kind: 'idle' })}
+            className="mt-1 text-[10px] underline"
+          >
+            关闭
+          </button>
+        </div>
+      )}
+
+      {phase.kind === 'running' && (
+        <Link
+          to={`/approvals?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityId}&env=${env}`}
+          className="mt-2 inline-block text-xs text-sky-700 underline-offset-2 hover:underline"
+        >
+          生成完成后去待审批查看 →
+        </Link>
+      )}
+
+      {gmailDraftId && phase.kind === 'idle' && (
+        <p className="mt-1 text-[10px] text-slate-400">
+          当前 Gmail draft: {gmailDraftId.slice(0, 12)}…
+        </p>
+      )}
+    </div>
+  );
+}
+
+function NoxDiligenceStrip({
+  identityId,
+  campaignId,
+  env,
+  facts,
+  onTriggered,
+}: {
+  identityId: number;
+  campaignId: string;
+  env: string;
+  facts: Record<string, unknown>;
+  onTriggered: () => void;
+}) {
+  const verdict = facts['identity.nox_diligence_verdict'];
+  const cacheMonth = facts['identity.nox_cache_month'];
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const runDiligence = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.post(`/kols/${identityId}/nox-diligence`, {
+        env,
+        campaign_id: campaignId,
+      });
+      onTriggered();
+    } catch (ex) {
+      setErr(parseApiErrorDetail(ex)?.message ?? String(ex));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-violet-200 bg-violet-50/50 p-3 text-sm">
+      <div className="font-medium text-violet-900">Nox 尽调 (Gate A)</div>
+      {typeof verdict === 'string' && verdict ? (
+        <p className="mt-1 text-violet-800">
+          结论: <span className="font-semibold">{verdict}</span>
+          {typeof cacheMonth === 'string' && cacheMonth ? (
+            <span className="ml-2 text-xs text-violet-600">数据月份 {cacheMonth}</span>
+          ) : null}
+        </p>
+      ) : (
+        <p className="mt-1 text-xs text-violet-700">尚未运行 Nox 短名单尽调</p>
+      )}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void runDiligence()}
+        className="mt-2 rounded bg-violet-700 px-3 py-1 text-xs text-white disabled:opacity-50"
+      >
+        {busy ? '已派发 gateway run…' : '确认尽调 (Nox)'}
+      </button>
+      {err && <p className="mt-1 text-xs text-red-600">{err}</p>}
     </div>
   );
 }

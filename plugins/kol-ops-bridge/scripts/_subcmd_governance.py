@@ -79,6 +79,10 @@ def _approval_decision(args: argparse.Namespace, *, kind: str) -> None:
         body.setdefault("campaign_id", args.campaign_id)
     if args.decided_by:
         body.setdefault("decided_by", args.decided_by)
+    if args.operator_user_id is not None:
+        body.setdefault("operator_user_id", args.operator_user_id)
+    if args.operator_email:
+        body.setdefault("operator_email", args.operator_email)
     if args.note:
         body.setdefault("note", args.note)
     require_keys(body, "identity_id", "decided_by")
@@ -107,26 +111,40 @@ def cmd_reconcile_sent(args: argparse.Namespace) -> None:
 
 
 def cmd_mark_reply_handled(args: argparse.Namespace) -> None:
+    body: dict[str, object] = {
+        "env": args.env,
+        "message_id": args.message_id,
+        "handled_label": args.handled_label,
+        "pending_label": args.pending_label,
+    }
+    if args.identity_id is not None:
+        body["identity_id"] = args.identity_id
+    if args.campaign_id:
+        body["campaign_id"] = args.campaign_id
+    if args.detected_mailbox_user_id is not None:
+        body["detected_mailbox_user_id"] = args.detected_mailbox_user_id
     print_json(client_from_args(args).request(
         "POST", "/gmail/mark-reply-handled",
-        body={
-            "env": args.env,
-            "message_id": args.message_id,
-            "handled_label": args.handled_label,
-            "pending_label": args.pending_label,
-        },
+        body=body,
     ))
 
 
 def cmd_unmark_reply_handled(args: argparse.Namespace) -> None:
+    body: dict[str, object] = {
+        "env": args.env,
+        "message_id": args.message_id,
+        "handled_label": args.handled_label,
+        "pending_label": args.pending_label,
+    }
+    if args.identity_id is not None:
+        body["identity_id"] = args.identity_id
+    if args.campaign_id:
+        body["campaign_id"] = args.campaign_id
+    if args.detected_mailbox_user_id is not None:
+        body["detected_mailbox_user_id"] = args.detected_mailbox_user_id
     print_json(client_from_args(args).request(
         "POST", "/gmail/unmark-reply-handled",
-        body={
-            "env": args.env,
-            "message_id": args.message_id,
-            "handled_label": args.handled_label,
-            "pending_label": args.pending_label,
-        },
+        body=body,
     ))
 
 
@@ -240,7 +258,16 @@ def register(sub: "argparse._SubParsersAction") -> None:
                        help="Must start with 'approval.' (e.g. 'approval.shortlist').")
         p.add_argument("--identity-id", type=int)
         p.add_argument("--campaign-id")
-        p.add_argument("--decided-by", help="e.g. 'web:alice@x', 'agent'")
+        p.add_argument("--decided-by", help="e.g. 'web:alice@x', 'cli:alice@x', 'agent'")
+        p.add_argument(
+            "--operator-user-id",
+            type=int,
+            help="Console users.id for Gmail mailbox binding (approve reply_draft).",
+        )
+        p.add_argument(
+            "--operator-email",
+            help="Resolve operator via Console when user_id unknown (approve reply_draft).",
+        )
         p.add_argument("--note")
         p.add_argument("--json", help="Full ApprovalDecisionBody as JSON or @path "
                                       "(use for --extra-facts nested data)")
@@ -265,6 +292,12 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p)
     p.add_argument("--message-id", required=True,
                    help="Gmail message id to mark handled.")
+    p.add_argument("--identity-id", type=int, default=None,
+                   help="KOL identity id (for mailbox resolution).")
+    p.add_argument("--campaign-id", default=None,
+                   help="Campaign id (for mailbox resolution).")
+    p.add_argument("--detected-mailbox-user-id", type=int, default=None,
+                   help="Console users.id of the inbox that received the reply.")
     p.add_argument(
         "--handled-label",
         default="kol-outreach/handled",
@@ -286,6 +319,12 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p)
     p.add_argument("--message-id", required=True,
                    help="Gmail message id to unmark.")
+    p.add_argument("--identity-id", type=int, default=None,
+                   help="KOL identity id (for mailbox resolution).")
+    p.add_argument("--campaign-id", default=None,
+                   help="Campaign id (for mailbox resolution).")
+    p.add_argument("--detected-mailbox-user-id", type=int, default=None,
+                   help="Console users.id of the inbox that received the reply.")
     p.add_argument(
         "--handled-label",
         default="kol-outreach/handled",
