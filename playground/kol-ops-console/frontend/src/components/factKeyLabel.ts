@@ -87,6 +87,101 @@ const FACT_DICT: Record<string, DictEntry> = {
   'identity.linktree_url': { short: 'Link-in-bio', title: 'Linktree / Beacons / bio.link / lnk.bio / solo.to', kind: 'url' },
   'identity.personal_site_url': { short: '个人站', title: '个人网站 / 工作室站点', kind: 'url' },
 
+  'identity.nox_creator_id': {
+    short: 'Nox 达人 ID',
+    title: 'NoxInfluencer 平台内的达人唯一标识',
+    kind: 'string',
+  },
+  'identity.nox_diligence_verdict': {
+    short: 'Nox 尽调结论',
+    title: 'Gate A 短名单尽调的四档建议（high_priority 等）',
+    kind: 'enum',
+    enumOptions: [
+      { value: 'high_priority', label: '优先合作' },
+      { value: 'viable_with_risks', label: '可行（有风险）' },
+      { value: 'needs_manual_review', label: '需人工复核' },
+      { value: 'not_priority', label: '不建议优先' },
+    ],
+  },
+  'identity.nox_diligence_at': {
+    short: 'Nox 尽调时间',
+    title: '最近一次 Nox 短名单尽调完成时间',
+    kind: 'datetime',
+  },
+  'identity.nox_cache_month': {
+    short: 'Nox 数据月份',
+    title: '尽调缓存所属自然月（同月重复尽调可命中缓存）',
+    kind: 'string',
+  },
+  'identity.nox_cache_key': {
+    short: 'Nox 缓存键',
+    title: '系统内部缓存标识（报告类型|达人ID|维度|语言）',
+    kind: 'string',
+  },
+  'identity.nox_score': {
+    short: 'Nox 综合分',
+    title: 'Nox 尽调：评分综合分（overall）',
+    kind: 'number',
+  },
+  'identity.nox_score_breakdown': {
+    short: 'Nox 评分明细',
+    title: 'Nox 尽调：评分分项 JSON（看板自动汇总展示，勿手改）',
+    kind: 'string',
+  },
+  'identity.nox_engagement_rate': {
+    short: 'Nox 互动率',
+    title: 'Nox 尽调：内容互动率',
+    kind: 'number',
+  },
+  'identity.nox_avg_views': {
+    short: 'Nox 平均播放',
+    title: 'Nox 尽调：平均播放量',
+    kind: 'number',
+  },
+  'identity.nox_top_region': {
+    short: 'Nox 主要地区',
+    title: 'Nox 尽调：受众主要国家/地区分布',
+    kind: 'string',
+  },
+  'identity.nox_audience_authenticity': {
+    short: 'Nox 受众真实度',
+    title: 'Nox 尽调：受众真实性评分',
+    kind: 'number',
+  },
+  'identity.nox_audience_quality_score': {
+    short: 'Nox 受众质量',
+    title: 'Nox 尽调：受众质量分',
+    kind: 'number',
+  },
+  'identity.nox_gender_skew': {
+    short: 'Nox 性别分布',
+    title: 'Nox 尽调：受众性别占比',
+    kind: 'string',
+  },
+  'identity.nox_audience_interests_top': {
+    short: 'Nox 受众兴趣',
+    title: 'Nox 尽调：受众兴趣标签 Top',
+    kind: 'string',
+  },
+  'identity.follower_count': {
+    short: '粉丝数',
+    title: '粉丝量（可能来自历史导入或发现）',
+    kind: 'string',
+  },
+  'identity.nox_creator_name': { short: 'Nox 名称', title: 'Nox 达人显示名', kind: 'string' },
+  'identity.nox_followers': { short: 'Nox 粉丝', title: 'Nox 尽调：粉丝数', kind: 'number' },
+  'identity.nox_country': { short: 'Nox 国家', title: 'Nox 尽调：国家/地区代码', kind: 'string' },
+  'identity.nox_platform': { short: 'Nox 平台', title: 'Nox 尽调：主平台', kind: 'string' },
+  'identity.nox_benchmark_rank': { short: 'Nox 排名', title: 'Nox 尽调：表现百分位/排名', kind: 'number' },
+  'identity.nox_channel_url': { short: 'Nox 频道', title: 'Nox 尽调：频道 URL', kind: 'url' },
+  'identity.nox_dispute_count': { short: 'Nox 争议', title: 'Nox 合作争议次数', kind: 'number' },
+  'identity.nox_cache_hit': { short: 'Nox 缓存命中', title: '上次尽调是否命中本月缓存', kind: 'bool' },
+  'identity.nox_api_calls_last': { short: 'Nox API 次数', title: '上次尽调消耗的 API 次数', kind: 'number' },
+  'identity.nox_diligence_dimensions': { short: '尽调维度', title: 'diligence-pack 拉取的维度', kind: 'string' },
+  'identity.nox_diligence_lang': { short: '报告语言', title: 'Nox 报告语言代码', kind: 'string' },
+  'identity.nox_email_quality': { short: '邮箱质量', title: 'Nox contacts 邮箱质量', kind: 'string' },
+  'identity.nox_contacts_at': { short: 'Nox 查邮时间', title: 'Gate B contacts 完成时间', kind: 'datetime' },
+
   // offer.* — 我方动作 (we_did)
   'offer.outreach_sent': { short: '已发初邀', title: '我们是否已发出初邀邮件', kind: 'bool' },
   'offer.outreach_sent_at': { short: '初邀时间', title: '我们发出初邀的时间', kind: 'datetime' },

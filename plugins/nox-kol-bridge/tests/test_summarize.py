@@ -34,3 +34,56 @@ def test_summarize_maps_avg_views_and_engagement():
     assert out["avg_views"] == 1000
     assert out["engagement_rate"] == 0.05
     assert out["highlights"]["audience_authenticity"] == "healthy"
+
+
+def test_summarize_unwraps_audience_authenticity_object():
+    bundle = {
+        "profile": {"success": True, "data": {"creator_id": "x"}},
+        "audience": {
+            "success": True,
+            "data": {
+                "audience_authenticity": {
+                    "value": 0.838,
+                    "status": 4,
+                    "ratio_min": 0.7,
+                    "ratio_max": 0.9,
+                },
+                "audience_quality": {"value": 72, "status": 3},
+            },
+        },
+        "content": {"success": True, "data": {}},
+    }
+    out = summarize_diligence_pack(bundle)
+    assert out["audience_authenticity"] == 0.838
+    assert out["audience_quality_score"] == 72
+
+
+def test_summarize_unwraps_nox_score_object():
+    bundle = {
+        "profile": {
+            "success": True,
+            "data": {
+                "creator_id": "x",
+                "nox_score": {
+                    "overall": 68,
+                    "growth": 70,
+                    "creativity": 65,
+                    "audience": 72,
+                    "engagement": 60,
+                    "credibility": 71,
+                },
+            },
+        },
+        "audience": {"success": True, "data": {}},
+        "content": {"success": True, "data": {}},
+    }
+    out = summarize_diligence_pack(bundle)
+    assert out["nox_score"] == 68
+    assert out["nox_score_breakdown"] == {
+        "overall": 68,
+        "growth": 70,
+        "creativity": 65,
+        "audience": 72,
+        "engagement": 60,
+        "credibility": 71,
+    }

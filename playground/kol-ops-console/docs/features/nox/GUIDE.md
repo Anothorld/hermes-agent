@@ -10,7 +10,7 @@
 |------|------|
 | 产品详情 shortlist | `ProductDetailPage`（批量尽调） |
 | 活动配置区 | `NoxCampaignOpsPanel.tsx` |
-| KOL 详情 | `KolDetailPage`（diligence/contacts 等） |
+| KOL 详情 | `KolDetailPage` + `NoxDiligencePanel`（尽调结论中文标签、缓存键可展开说明） |
 
 ## 关键文件
 
@@ -27,7 +27,7 @@
 |------|----------|
 | 活动补充 | `POST /campaigns/{id}/nox/supplement` |
 | 统计 | `GET /campaigns/{id}/nox/stats` |
-| KOL 尽调 | `POST /kols/{id}/nox/diligence` 等 |
+| KOL 尽调 | `POST /kols/{id}/nox-diligence`（同步 CLI + 全量 fact 沉淀）；`nox_diligence_sync.py` |
 
 ## 关联模块
 
@@ -49,6 +49,9 @@
 - Agent **不要**把 `--campaign-config-file` 传给 `kol_bridge_tool.py`；
   该参数仅用于 `nox_kol_tool.py` 的 LIVE gated 子命令。
 - 没有 `cache-lookup` 子命令；查缓存请重跑 `diligence-pack`（`cache_hit: true`）。
+- Instagram 的 `diligence-pack` **profile 不含粉丝数**；Console 用 `avg_views ÷ view_per_followers` 推算并写入 `identity.followers`（`identity.nox_followers_source=inferred_views_ratio`）。与 `creator search` 的 `followers` 字段一致量级。
+- Nox 受众指标（如 `audience_authenticity`、`audience_quality`）常为 `{ value, status, ... }` 对象；`summarize.py` 与前端 `noxValueFormat.ts` 会取出 `value` 再展示为百分比（如 **84%**）。旧事实若仍是整段 JSON，看板也会在前端解包；重新尽调可写回标量。
+- `nox_score` 常为 `{ overall, growth, creativity, audience, engagement, credibility }`；入库写 `identity.nox_score`（综合分）+ `identity.nox_score_breakdown`（JSON 分项）；看板展示 **综合 · 增长 · 创意 · 受众 · 互动 · 可信** 六项（含 0）。仅旧数据只有综合分时，需重新尽调以补充分项。
 - Console 调 `cache-stats` **不要**传 `--env`（该子命令无 LIVE/TEST 分支；配额读本地 ledger）。
 - Console `nox_gate.extract_campaign_config` 必须识别 bridge 返回的**扁平**
   `GET /campaigns/{id}` 行（勿只读嵌套 `campaign_config` 键）。

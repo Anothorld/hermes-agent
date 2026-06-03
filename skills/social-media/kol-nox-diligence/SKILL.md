@@ -100,19 +100,22 @@ TikTok/Instagram: do **not** add `--include-cooperation` unless operator asked.
 
 ### 4 — Persist CAL facts
 
-From `normalized_summary`, write via bridge:
+**Console path (preferred):** `POST /kols/{id}/nox-diligence` runs
+`diligence-pack` synchronously and writes **all** mapped `identity.nox_*`
+facts (plus canonical `identity.followers` / `identity.region`) via the
+backend hydrator. Operators do not wait for a gateway run.
+
+**Manual / agent path:** map `normalized_summary` with
+`internal.diligence_facts.identity_facts_from_diligence` or write:
 
 ```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
-  --identity-id <id> --campaign-id <cid> --env <env> --json @/tmp/nox_facts.json
+  --identity-id <id> --env <env> --json @/tmp/nox_facts.json
 ```
 
-Include at minimum:
-
-- `identity.nox_creator_id`
-- `identity.nox_diligence_verdict` (four-level string from summary)
-- `identity.nox_diligence_at` (ISO8601 UTC)
-- `identity.nox_cache_month` (from tool output)
+Use `campaign_id=null` (identity-level facts). Include at minimum the
+keys produced by `identity_facts_from_diligence` (verdict, cache month,
+engagement, audience regions, etc.).
 
 ### 5 — Report
 

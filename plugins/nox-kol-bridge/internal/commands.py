@@ -277,7 +277,7 @@ def _creator_read(
         fix = cli_runner.load_fixture("diligence_pack.json")
         return fix.get(dimension) or fix.get("profile", fix)
 
-    need_detail = dimension in ("audience", "content", "cooperation")
+    need_detail = dimension in ("profile", "audience", "content", "cooperation")
     frag = build_creator_read_args(
         dimension,
         creator_id=creator_id,

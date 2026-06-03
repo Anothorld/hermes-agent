@@ -102,6 +102,11 @@ same gated subcommand (`cache_hit: true`, `api_calls: 0`).
 
 CAL writes still go through `kol-ops-bridge` / `kol_bridge_tool.py`.
 
+**Console Gate A/B** call `nox_kol_tool.py` synchronously and hydrate facts via
+`internal/diligence_facts.py` (`identity_facts_from_diligence` /
+`identity_facts_from_contacts`) — operators see categorized Nox metrics on the
+KOL detail dashboard without relying on gateway agents to hand-write keys.
+
 ## LIVE campaign gates
 
 `diligence-pack`, `contacts`, `creator-search`, and `monitor-setup` require

@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-import datetime as _dt
 import re
+import sys
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from .bridge_client import BridgeClient, BridgeError
+
+_NOX_BRIDGE = Path(__file__).resolve().parents[4] / "plugins" / "nox-kol-bridge"
+if str(_NOX_BRIDGE) not in sys.path:
+    sys.path.insert(0, str(_NOX_BRIDGE))
+
+from internal.diligence_facts import identity_facts_from_contacts  # noqa: E402
 from .nox_gate import _nox_quota_is_enabled, extract_campaign_config, materialize_campaign_config_file
 from .nox_quota import fetch_campaign_nox_stats, quota_exhausted_from_stats
 from .nox_tool_runner import run_nox_tool
@@ -83,20 +90,10 @@ async def persist_nox_contact_email(
             "env": env,
         },
     )
-    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
-    summary = contacts_result.get("normalized_summary") or {}
-    month = summary.get("identity.nox_contacts_cached_month") or contacts_result.get(
-        "cache_month",
+    facts = identity_facts_from_contacts(
+        contacts_result,
+        email=normalized,
     )
-    facts: dict[str, Any] = {
-        "identity.email": normalized,
-        "identity.email_source": "noxinfluencer_api",
-        "identity.email_discovered_at": now_iso,
-    }
-    if month:
-        facts["identity.nox_cache_month"] = month
-    if summary.get("email_quality"):
-        facts["identity.nox_email_quality"] = summary["email_quality"]
     try:
         await bridge.write_facts(
             identity_id,
@@ -105,7 +102,7 @@ async def persist_nox_contact_email(
                 "facts": facts,
                 "source": f"web-gate-b:{actor_email}",
                 "env": env,
-                "campaign_id": campaign_id,
+                "campaign_id": None,
             },
         )
     except BridgeError:

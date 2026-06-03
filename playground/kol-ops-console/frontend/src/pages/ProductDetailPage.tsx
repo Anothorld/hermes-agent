@@ -425,7 +425,12 @@ function ShortlistReviewPanel({
         campaign_id: campaignId,
         identity_ids: selectedIdentityIds,
       });
-      toast.success('Nox 批量尽调已派发', r.run_id ?? '');
+      const n = r.processed_count ?? r.processed?.length ?? 0;
+      const errN = r.error_count ?? r.errors?.length ?? 0;
+      toast.success(
+        'Nox 批量尽调完成',
+        `成功 ${n} 人${errN ? ` · 失败 ${errN}` : ''}`,
+      );
     } catch (ex) {
       setErr(errorSummary(ex));
     } finally {

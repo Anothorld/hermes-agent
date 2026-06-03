@@ -20,7 +20,7 @@
 |------|------------|
 | `ApprovalDetailPanel`, `ApprovalContextCard`, `ApprovalActionBar`, `RejectCorrectionModal`, `DraftEditDiffPanel` | [approvals](../../../docs/features/approvals/GUIDE.md) |
 | `LearningWorkflowStepper`, `StrategyPromotionPanel` | [learning](../../../docs/features/learning/GUIDE.md) |
-| `LaneFilterBar`, `GoalProgressBar`, `FactsEditor` | [kols](../../../docs/features/kols/GUIDE.md) |
+| `LaneFilterBar`, `GoalProgressBar`, `FactsEditor`, `KolProfileDashboard`, `KolNoxInsightsBoard`, `NoxDiligencePanel` | [kols](../../../docs/features/kols/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md) |
 | `EditCampaignConfigPanel`, `NoxCampaignOpsPanel`, `ContractReadinessPanel` | [campaigns](../../../docs/features/campaigns/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md) |
 | `CommunicationHistoryPanel` | [gmail](../../../docs/features/gmail/GUIDE.md) |
 | `AgentTranscriptPanel` | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |

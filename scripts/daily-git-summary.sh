@@ -1,47 +1,40 @@
-#!/usr/bin/env bash
-# daily-git-summary.sh — Collect previous day's git commits (raw data for agent summarization)
-# Output: raw commit data + stats to stdout
-# Called by Hermes cron job, then agent generates Chinese summary
+#!/bin/bash
+# daily-git-summary.sh — Collect yesterday's git commits (Beijing time)
+# Output: pipe-separated lines: hash|author|date|message
 
 set -euo pipefail
 
-REPO_DIR="/Users/arnold/agent_prj/hermes-agent"
+# Beijing time (UTC+8)
+TZ_OFFSET="Asia/Shanghai"
 
-# Calculate yesterday's date in Asia/Shanghai
-YESTERDAY=$(TZ=Asia/Shanghai date -v-1d +%Y-%m-%d 2>/dev/null || TZ=Asia/Shanghai date -d "yesterday" +%Y-%m-%d)
-TODAY=$(TZ=Asia/Shanghai date +%Y-%m-%d)
+# Calculate yesterday in Beijing time
+if date --version &>/dev/null 2>&1; then
+    # GNU date (Linux)
+    YESTERDAY=$(TZ="$TZ_OFFSET" date -d 'yesterday' '+%Y-%m-%d')
+    SINCE="${YESTERDAY} 00:00:00"
+    UNTIL="${YESTERDAY} 23:59:59"
+else
+    # BSD date (macOS)
+    YESTERDAY=$(TZ="$TZ_OFFSET" date -v-1d '+%Y-%m-%d')
+    SINCE="${YESTERDAY} 00:00:00"
+    UNTIL="${YESTERDAY} 23:59:59"
+fi
 
-cd "$REPO_DIR"
+# Try to find a git repo — prefer workdir, fall back to the project
+REPO_DIR="${1:-.}"
 
-# Get commits from yesterday (Beijing time)
-COMMITS=$(TZ=Asia/Shanghai git log --format="%h|%an|%ad|%s" --date=format:"%Y-%m-%d %H:%M" \
-  --after="${YESTERDAY} 00:00" --before="${TODAY} 00:00" --all 2>/dev/null || true)
+if [ ! -d "$REPO_DIR/.git" ]; then
+    REPO_DIR="/Users/arnold/agent_prj/hermes-agent"
+fi
+
+# Collect commits
+COMMITS=$(git -C "$REPO_DIR" log --all \
+    --since="$SINCE" \
+    --until="$UNTIL" \
+    --format="%H|%an|%ai|%s" 2>/dev/null || true)
 
 if [ -z "$COMMITS" ]; then
-    echo "DATE=${YESTERDAY}"
-    echo "COMMITS=0"
-    exit 0
+    echo "NO_COMMITS"
+else
+    echo "$COMMITS"
 fi
-
-COMMIT_COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
-
-echo "DATE=${YESTERDAY}"
-echo "COMMITS=${COMMIT_COUNT}"
-echo "---COMMITS---"
-echo "$COMMITS"
-echo "---STATS---"
-
-# Aggregate stats
-TZ=Asia/Shanghai git log --oneline --shortstat --after="${YESTERDAY} 00:00" --before="${TODAY} 00:00" --all 2>/dev/null | grep -E "file changed|files changed" | awk '{files+=$1; inserted+=$4; deleted+=$6} END {print files " files changed, " inserted " insertions(+), " deleted " deletions(-)"}'
-
-echo "---CHANGED_FILES---"
-# Get the diff stat between first and last commit of the day
-FIRST_HASH=$(TZ=Asia/Shanghai git log --reverse --format="%H" --after="${YESTERDAY} 00:00" --before="${TODAY} 00:00" --all | head -1)
-LAST_HASH=$(TZ=Asia/Shanghai git log --format="%H" --after="${YESTERDAY} 00:00" --before="${TODAY} 00:00" --all | head -1)
-if [ -n "$FIRST_HASH" ] && [ -n "$LAST_HASH" ]; then
-    TZ=Asia/Shanghai git diff --stat "${FIRST_HASH}^..${LAST_HASH}" 2>/dev/null || echo "(无法获取变更文件列表)"
-fi
-
-echo "---DIFF_DETAILS---"
-# Get detailed diff for key files (truncated)
-TZ=Asia/Shanghai git diff "${FIRST_HASH}^..${LAST_HASH}" --stat-width=120 2>/dev/null | tail -5 || true

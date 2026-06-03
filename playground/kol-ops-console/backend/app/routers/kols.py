@@ -19,6 +19,7 @@ from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
 from ..nox_contacts_sync import attempt_gate_b_contacts
+from ..nox_diligence_sync import attempt_gate_a_diligence
 from ..nox_gate import materialize_campaign_config_file, require_nox_quota_enabled
 from ..nox_helpers import dedup_identity_ids_by_nox_creator
 from ..nox_quota import assert_nox_quota_available, raise_quota_exhausted
@@ -649,26 +650,6 @@ class NoxDiligenceBody(CampaignIdNormaliserMixin):
     campaign_id: str | None = None
 
 
-_NOX_DILIGENCE_INSTRUCTIONS = (
-    "You are running `kol-nox-diligence` for ONE KOL at Console request.\n"
-    "\n"
-    "## Runtime contract\n"
-    f"- Repo root: {_REPO_ROOT}\n"
-    "- Nox CLI entry:\n"
-    f"    python {_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py\n"
-    "- CAL writes:\n"
-    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py\n"
-    "\n"
-    "## Pipeline\n"
-    "1. `skill_view(name='kol-nox-diligence')` and follow Procedure.\n"
-    "2. LIVE: pass `--campaign-config-file <path>` on every `nox_kol_tool.py` call.\n"
-    "3. Use `diligence-pack --gate shortlist_confirm` only.\n"
-    "4. If `cache_hit`, report zero API calls and hydrate facts from summary.\n"
-    "5. Pass `--audit-campaign-id` and `--audit-identity-id` on gated calls for CAL events.\n"
-    "6. Do NOT run supplement search or monitor setup in this run.\n"
-)
-
-
 class NoxDiligenceBatchBody(CampaignIdNormaliserMixin):
     env: str = Field(default="LIVE", pattern="^(LIVE|TEST)$")
     campaign_id: str = Field(min_length=1)
@@ -689,7 +670,7 @@ async def nox_diligence(
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict:
-    """Gate A: Nox shortlist diligence for one identity."""
+    """Gate A: synchronous Nox diligence-pack + deterministic CAL fact hydration."""
     env = body.env
     try:
         ident = await bridge.get_identity(identity_id)
@@ -698,78 +679,85 @@ async def nox_diligence(
     if not ident:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "identity not found")
 
-    cfg_path = ""
     if env.upper() == "LIVE":
         if not body.campaign_id:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 {"code": "campaign_id_required", "detail": "campaign_id required for LIVE Nox diligence"},
             )
-        cfg = await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
-        await assert_nox_quota_available(bridge, body.campaign_id, env=env)
-        cfg_path = materialize_campaign_config_file(
-            body.campaign_id,
-            cfg,
-            allowed_gates=("shortlist_confirm",),
-        )
+        await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
 
-    dedup_key = f"nox-diligence:{env}:{identity_id}"
-    inflight = get_inflight_run(conn, dedup_key=dedup_key)
-    if inflight is not None:
+    campaign_id = body.campaign_id or ""
+    facts_resp = None
+    if campaign_id:
+        try:
+            facts_resp = await bridge.read_facts(
+                identity_id,
+                campaign_id=campaign_id,
+                env=env,
+            )
+        except BridgeError:
+            facts_resp = None
+
+    result = await attempt_gate_a_diligence(
+        bridge,
+        identity_id=identity_id,
+        ident=ident,
+        campaign_id=campaign_id or "TEST",
+        env=env,
+        actor_email=user["email"],
+        facts_resp=facts_resp,
+    )
+    if result.get("quota_exhausted"):
+        raise_quota_exhausted(campaign_id=campaign_id or None, env=env)
+    if result.get("skipped"):
+        reason = result.get("reason") or "diligence_skipped"
+        if reason == "nox_quota_disabled":
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                {"code": "nox_quota_disabled", "detail": result.get("detail") or reason},
+            )
         raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            {"code": "nox_diligence_inflight", "run_id": inflight.get("run_id")},
+            status.HTTP_400_BAD_REQUEST,
+            {"code": reason, "detail": result.get("detail") or reason},
         )
 
-    ensure_gateway_bridge_key()
-    brief = "\n".join([
-        "# kol_nox_diligence",
-        f"identity_id: {identity_id}",
-        f"mode: {env}",
-        f"campaign_id: {body.campaign_id or ''}",
-        f"campaign_config_file: {cfg_path}",
-        f"requested_by: {user['email']}",
-        "",
-        "Run kol-nox-diligence for this identity only.",
-    ])
-    try:
-        run = await gateway.start_run(
-            input=brief,
-            instructions=_NOX_DILIGENCE_INSTRUCTIONS,
-            session_id=f"kol-nox-diligence:{env}:{identity_id}",
-        )
-    except GatewayError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    run_id = run.get("run_id") if isinstance(run, dict) else None
-    if isinstance(run_id, str) and run_id and body.campaign_id:
-        register_run(
-            conn,
-            campaign_id=body.campaign_id,
-            env=env,
-            run_id=run_id,
-            kind="draft",
-            session_id=f"kol-nox-diligence:{env}:{identity_id}",
-            dedup_key=dedup_key,
-        )
     write_audit(
         conn,
         actor_user_id=user["id"],
         action="kol.nox.diligence",
         target=str(identity_id),
-        payload={"env": env, "campaign_id": body.campaign_id, "run_id": run_id},
+        payload={
+            "env": env,
+            "campaign_id": body.campaign_id,
+            "sync": True,
+            "cache_hit": result.get("cache_hit"),
+            "facts_written": result.get("facts_written"),
+            "verdict": result.get("verdict"),
+        },
     )
-    return {"ok": True, "run_id": run_id, "identity_id": identity_id}
+    return {
+        "ok": True,
+        "identity_id": identity_id,
+        "sync": True,
+        "cache_hit": result.get("cache_hit"),
+        "cache_month": result.get("cache_month"),
+        "api_calls": result.get("api_calls"),
+        "facts_written": result.get("facts_written"),
+        "fact_keys": result.get("fact_keys"),
+        "verdict": result.get("verdict"),
+    }
 
 
 @router.post("/nox-diligence-batch")
 async def nox_diligence_batch(
     body: NoxDiligenceBatchBody,
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
-    gateway: Annotated[GatewayClient, Depends(get_gateway)],
+    _: Annotated[GatewayClient, Depends(get_gateway)],
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict:
-    """Gate A batch: one gateway run, agent processes identity_ids serially."""
+    """Gate A batch: serial synchronous diligence-pack per identity."""
     env = body.env
     ids = list(dict.fromkeys(body.identity_ids))
     dropped_dupes: list[int] = []
@@ -789,54 +777,53 @@ async def nox_diligence_batch(
                 "dropped_identity_ids": dropped_dupes,
             },
         )
-    cfg_path = ""
     if env.upper() == "LIVE":
-        cfg = await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
+        await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
         await assert_nox_quota_available(bridge, body.campaign_id, env=env)
-        cfg_path = materialize_campaign_config_file(
-            body.campaign_id,
-            cfg,
-            allowed_gates=("shortlist_confirm",),
-        )
-    dedup_key = f"nox-diligence-batch:{env}:{body.campaign_id}"
-    inflight = get_inflight_run(conn, dedup_key=dedup_key)
-    if inflight is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            {"code": "nox_diligence_batch_inflight", "run_id": inflight.get("run_id")},
-        )
-    ensure_gateway_bridge_key()
-    brief = "\n".join([
-        "# kol_nox_diligence_batch",
-        f"campaign_id: {body.campaign_id}",
-        f"mode: {env}",
-        f"campaign_config_file: {cfg_path}",
-        f"identity_ids: {','.join(str(i) for i in ids)}",
-        f"requested_by: {user['email']}",
-        f"dropped_duplicate_creator_ids: {','.join(str(i) for i in dropped_dupes)}",
-        "",
-        "Process each identity_id in order. Same-month cache_hit → skip API.",
-        "Do not re-query the same nox_creator_id in one batch.",
-    ])
-    try:
-        run = await gateway.start_run(
-            input=brief,
-            instructions=_NOX_DILIGENCE_INSTRUCTIONS,
-            session_id=f"kol-nox-diligence-batch:{env}:{body.campaign_id}",
-        )
-    except GatewayError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    run_id = run.get("run_id") if isinstance(run, dict) else None
-    if isinstance(run_id, str) and run_id:
-        register_run(
-            conn,
+
+    processed: list[dict] = []
+    errors: list[dict] = []
+    for iid in ids:
+        try:
+            ident = await bridge.get_identity(iid)
+        except BridgeError as exc:
+            errors.append({"identity_id": iid, "error": str(exc)})
+            continue
+        if not ident:
+            errors.append({"identity_id": iid, "error": "not_found"})
+            continue
+        facts_resp = None
+        try:
+            facts_resp = await bridge.read_facts(
+                iid, campaign_id=body.campaign_id, env=env,
+            )
+        except BridgeError:
+            facts_resp = None
+        result = await attempt_gate_a_diligence(
+            bridge,
+            identity_id=iid,
+            ident=ident,
             campaign_id=body.campaign_id,
             env=env,
-            run_id=run_id,
-            kind="draft",
-            session_id=f"kol-nox-diligence-batch:{env}:{body.campaign_id}",
-            dedup_key=dedup_key,
+            actor_email=user["email"],
+            facts_resp=facts_resp,
         )
+        if result.get("quota_exhausted"):
+            raise_quota_exhausted(campaign_id=body.campaign_id, env=env)
+        if result.get("skipped") or not result.get("ok"):
+            errors.append({
+                "identity_id": iid,
+                "reason": result.get("reason"),
+                "detail": result.get("detail"),
+            })
+            continue
+        processed.append({
+            "identity_id": iid,
+            "verdict": result.get("verdict"),
+            "cache_hit": result.get("cache_hit"),
+            "facts_written": result.get("facts_written"),
+        })
+
     write_audit(
         conn,
         actor_user_id=user["id"],
@@ -845,14 +832,20 @@ async def nox_diligence_batch(
         payload={
             "identity_ids": ids,
             "dropped_identity_ids": dropped_dupes,
-            "run_id": run_id,
+            "processed": processed,
+            "errors": errors,
+            "sync": True,
         },
     )
     return {
         "ok": True,
-        "run_id": run_id,
+        "sync": True,
         "identity_ids": ids,
         "dropped_identity_ids": dropped_dupes,
+        "processed": processed,
+        "errors": errors,
+        "processed_count": len(processed),
+        "error_count": len(errors),
     }
 
 
