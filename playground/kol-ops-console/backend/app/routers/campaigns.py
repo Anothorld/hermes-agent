@@ -68,7 +68,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[5])
 _KOL_ORCHESTRATOR_SESSIONS = Path.home() / ".hermes/profiles/kol-orchestrator/sessions"
 _KOL_ORCHESTRATOR_STATE_DB = Path.home() / ".hermes/profiles/kol-orchestrator/state.db"
 _MAX_TRANSCRIPT_CHARS = 4000
-_LANES_CACHE_TTL_SECONDS = 8.0
+_LANES_CACHE_TTL_SECONDS = 3.0
 _LANES_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 
 # Structured system prompt for the launch agent run.  Listed values are

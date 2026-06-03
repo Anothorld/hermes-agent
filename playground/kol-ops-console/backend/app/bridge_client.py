@@ -320,74 +320,12 @@ class BridgeClient:
 
     # ----------------------------------------------------------- Approvals
     async def list_approvals(
-        self,
-        status: str = "pending",
-        env: str = "LIVE",
-        *,
-        identity_id: Optional[int] = None,
-        campaign_id: Optional[str] = None,
+        self, status: str = "pending", env: str = "LIVE"
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"status": status, "env": env}
-        if identity_id is not None:
-            params["identity_id"] = identity_id
-        if campaign_id:
-            params["campaign_id"] = campaign_id
-        out = await self._req("GET", "/approvals", params=params)
+        out = await self._req(
+            "GET", "/approvals", params={"status": status, "env": env}
+        )
         return out.get("approvals", []) if isinstance(out, dict) else []
-
-    async def batch_facts_subset(
-        self,
-        *,
-        campaign_id: str,
-        identity_ids: list[int],
-        env: str,
-        fact_keys: list[str],
-    ) -> dict[str, dict[str, Any]]:
-        out = await self._req(
-            "POST",
-            "/facts/batch-subset",
-            json={
-                "campaign_id": campaign_id,
-                "identity_ids": identity_ids,
-                "env": env,
-                "fact_keys": fact_keys,
-            },
-        )
-        raw = out.get("by_identity") if isinstance(out, dict) else {}
-        if not isinstance(raw, dict):
-            return {}
-        parsed: dict[int, dict[str, Any]] = {}
-        for key, facts in raw.items():
-            try:
-                iid = int(key)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(facts, dict):
-                parsed[iid] = facts
-        return parsed
-
-    async def batch_identity_briefs(
-        self, identity_ids: list[int]
-    ) -> dict[int, dict[str, Any]]:
-        if not identity_ids:
-            return {}
-        out = await self._req(
-            "POST",
-            "/identities/briefs",
-            json={"identity_ids": identity_ids},
-        )
-        raw = out.get("identities") if isinstance(out, dict) else {}
-        if not isinstance(raw, dict):
-            return {}
-        parsed: dict[int, dict[str, Any]] = {}
-        for key, brief in raw.items():
-            try:
-                iid = int(key)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(brief, dict):
-                parsed[iid] = brief
-        return parsed
 
     async def approve(
         self,
@@ -440,20 +378,11 @@ class BridgeClient:
 
     # --------------------------------------------------------- Escalations
     async def list_escalations(
-        self,
-        state: Optional[str] = None,
-        env: str = "LIVE",
-        *,
-        identity_id: Optional[int] = None,
-        campaign_id: Optional[str] = None,
+        self, state: Optional[str] = None, env: str = "LIVE"
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"env": env}
         if state:
             params["state"] = state
-        if identity_id is not None:
-            params["identity_id"] = identity_id
-        if campaign_id:
-            params["campaign_id"] = campaign_id
         out = await self._req("GET", "/escalations", params=params)
         return out.get("escalations", []) if isinstance(out, dict) else []
 

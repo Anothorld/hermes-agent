@@ -87,37 +87,17 @@ def _event_matches_product(
     return event_sku == product_sku
 
 
-def _commerce_goal_from_item(item: dict[str, Any]) -> str | None:
-    goals = item.get("goals")
-    if isinstance(goals, dict):
-        commerce = goals.get("commerce")
-        if isinstance(commerce, dict):
-            goal = commerce.get("goal")
-            return str(goal) if goal else None
-    lanes = item.get("lanes")
-    if not isinstance(lanes, dict):
-        return None
-    commerce_states = lanes.get("commerce")
-    if not isinstance(commerce_states, list) or not commerce_states:
-        return None
-    active = next(
-        (s for s in commerce_states if isinstance(s, dict) and s.get("status") in {"active", "blocked"}),
-        None,
-    )
-    if active:
-        return str(active.get("goal")) if active.get("goal") else None
-    satisfied = [s for s in commerce_states if isinstance(s, dict) and s.get("status") == "satisfied"]
-    if satisfied:
-        return str(satisfied[-1].get("goal")) if satisfied[-1].get("goal") else None
-    return None
-
-
 def _classify_lane_item(item: dict[str, Any]) -> str:
     """Classify one lane item into an operator-facing outreach bucket."""
     if int(item.get("open_escalation_count") or 0) > 0 or item.get("reply_draft_state") == "pending":
         return "needs_attention"
     signal = str(item.get("interest_signal") or "").strip().lower()
-    commerce_goal = _commerce_goal_from_item(item)
+    commerce_goal = None
+    goals = item.get("goals")
+    if isinstance(goals, dict):
+        commerce = goals.get("commerce")
+        if isinstance(commerce, dict):
+            commerce_goal = commerce.get("goal")
     if signal == "declined":
         return "declined"
     if signal in {"confirmed", "interested"}:
@@ -321,21 +301,27 @@ async def _get_identity_map(
     bridge: BridgeClient,
     identity_ids: set[int],
 ) -> dict[str, dict[str, Any]]:
-    """Fetch identities by id in one bridge round-trip."""
-    if not identity_ids:
-        return {}
-    try:
-        briefs = await bridge.batch_identity_briefs(sorted(identity_ids))
-    except BridgeError:
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for iid, brief in briefs.items():
-        out[str(iid)] = {
+    """Fetch identities by id; tolerate missing rows so campaigns still render."""
+    sem = asyncio.Semaphore(12)
+
+    async def _one(iid: int) -> tuple[int, dict[str, Any] | None]:
+        async with sem:
+            try:
+                ident = await bridge.get_identity(iid)
+            except BridgeError:
+                return iid, None
+        return iid, {
             "id": iid,
-            "display_name": brief.get("display_name"),
-            "primary_handle": brief.get("primary_handle"),
-            "platform": brief.get("platform"),
+            "display_name": ident.get("display_name"),
+            "primary_handle": ident.get("primary_handle"),
+            "platform": ident.get("platform"),
         }
+
+    results = await asyncio.gather(*(_one(iid) for iid in sorted(identity_ids)))
+    out: dict[str, dict[str, Any]] = {}
+    for iid, ident in results:
+        if ident is not None:
+            out[str(iid)] = ident
     return out
 
 
@@ -859,20 +845,33 @@ async def list_product_campaigns(
     async def _enrich_campaign(r: sqlite3.Row) -> dict[str, Any]:
         summary = _summarize_events(events, campaign_id=r["campaign_id"])
 
-        try:
-            lane_payload = await bridge.get_lanes(r["campaign_id"], env=e)
-        except BridgeError:
-            lane_payload = {}
-        lane_items = []
-        if isinstance(lane_payload, dict):
-            raw_items = lane_payload.get("items", [])
-            if isinstance(raw_items, list):
-                lane_items = raw_items
+        async def _load_candidates() -> list[dict[str, Any]]:
+            try:
+                return await bridge.list_candidates(r["campaign_id"], env=e)
+            except BridgeError:
+                return []
+
+        async def _load_lane_items() -> list[dict[str, Any]]:
+            try:
+                lane_payload = await bridge.get_lanes(r["campaign_id"], env=e)
+            except BridgeError:
+                return []
+            if isinstance(lane_payload, dict):
+                items = lane_payload.get("items", [])
+                return items if isinstance(items, list) else []
+            return []
+
+        candidates, lane_items = await asyncio.gather(
+            _load_candidates(),
+            _load_lane_items(),
+        )
+        visible_candidates = [
+            c for c in candidates if c.get("candidate_status") not in {"rejected", "archived"}
+        ]
         visible_lane_items = [
             it for it in lane_items
             if isinstance(it, dict) and it.get("candidate_status") not in {"rejected", "archived"}
         ]
-        visible_candidates = visible_lane_items
         outreach = _summarize_outreach(visible_lane_items)
         selected_count = sum(
             1 for c in visible_candidates

@@ -756,12 +756,9 @@ def list_candidate_handles(campaign_id: str, *, env: str = "LIVE") -> list[dict[
                       c.selected_at         AS selected_at,
                       c.payload_json        AS payload_json,
                       c.created_at          AS created_at,
-                      c.updated_at          AS updated_at,
-                      r.total_collabs       AS total_collabs,
-                      r.last_outcome        AS last_outcome
+                      c.updated_at          AS updated_at
                  FROM campaign_candidates c
             LEFT JOIN kol_identity i ON i.id = c.identity_id
-            LEFT JOIN kol_relationship r ON r.identity_id = c.identity_id
                 WHERE c.campaign_id=? AND c.env=?
              ORDER BY c.id""",
             (campaign_id, env),
@@ -1550,44 +1547,22 @@ def _recompute_goals_inner(
     return n
 
 
-# Fact keys the Web kanban reads per card (subset of latest_facts_for).
-KANBAN_FACT_KEYS: Final[tuple[str, ...]] = (
-    "offer.outreach_sent_at",
-    "offer.interest_signal",
-    "offer.outreach_draft_created",
-    "offer.gmail_draft_id",
-    "offer.gmail_thread_id",
-    "offer.outreach_sent",
-    "approval.reply_draft",
-)
-
-SHORTLIST_NOX_FACT_KEYS: Final[tuple[str, ...]] = (
-    "identity.nox_diligence_verdict",
-    "identity.nox_cache_month",
-    "identity.nox_creator_id",
-)
-
-
-def _decode_fact_value(v: Any) -> Any:
-    if not isinstance(v, str):
-        return v
-    try:
-        return json.loads(v)
-    except Exception:  # noqa: BLE001
-        return v
-
-
-def _build_goal_state_list(by_name: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+def get_goal_state(*, identity_id: int, campaign_id: str, env: str = "LIVE") -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT goal, status, lane, missing_facts_json, blocking_escalation_id,
+                      updated_at
+                 FROM kol_goal_state
+                WHERE identity_id=? AND campaign_id=? AND env=?""",
+            (identity_id, campaign_id, env),
+        ).fetchall()
+    by_name = {r["goal"]: r for r in rows}
+    out = []
     for name in GOAL_NAMES:
         r = by_name.get(name)
         if not r:
-            out.append({
-                "goal": name,
-                "status": "inactive",
-                "lane": GOALS[name].lane,
-                "missing_facts": list(GOALS[name].required_facts),
-            })
+            out.append({"goal": name, "status": "inactive", "lane": GOALS[name].lane,
+                        "missing_facts": list(GOALS[name].required_facts)})
             continue
         out.append({
             "goal": r["goal"],
@@ -1600,179 +1575,12 @@ def _build_goal_state_list(by_name: Mapping[str, Mapping[str, Any]]) -> list[dic
     return out
 
 
-def _goal_states_to_lanes_view(state_list: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    out: dict[str, list[dict[str, Any]]] = {
-        "commerce": [],
-        "fulfillment": [],
-        "publish": [],
-        "meta": [],
-    }
+def get_lanes_view(*, identity_id: int, campaign_id: str, env: str = "LIVE") -> dict[str, list[dict[str, Any]]]:
+    state_list = get_goal_state(identity_id=identity_id, campaign_id=campaign_id, env=env)
+    out: dict[str, list[dict[str, Any]]] = {"commerce": [], "fulfillment": [], "publish": [], "meta": []}
     for s in state_list:
         out.setdefault(s["lane"], []).append(s)
     return out
-
-
-def get_goal_state(*, identity_id: int, campaign_id: str, env: str = "LIVE") -> list[dict[str, Any]]:
-    with _connect() as conn:
-        rows = conn.execute(
-            """SELECT goal, status, lane, missing_facts_json, blocking_escalation_id,
-                      updated_at
-                 FROM kol_goal_state
-                WHERE identity_id=? AND campaign_id=? AND env=?""",
-            (identity_id, campaign_id, env),
-        ).fetchall()
-    return _build_goal_state_list({r["goal"]: r for r in rows})
-
-
-def get_lanes_view(*, identity_id: int, campaign_id: str, env: str = "LIVE") -> dict[str, list[dict[str, Any]]]:
-    return _goal_states_to_lanes_view(
-        get_goal_state(identity_id=identity_id, campaign_id=campaign_id, env=env),
-    )
-
-
-def batch_relationship_summaries(
-    identity_ids: Iterable[int],
-) -> dict[int, dict[str, Any]]:
-    """Lightweight relationship rows for list views (no collab_history)."""
-    ids = [int(i) for i in identity_ids if i is not None]
-    if not ids:
-        return {}
-    placeholders = ",".join("?" * len(ids))
-
-    def _do() -> dict[int, dict[str, Any]]:
-        with _connect() as conn:
-            rows = conn.execute(
-                f"SELECT * FROM kol_relationship WHERE identity_id IN ({placeholders})",
-                ids,
-            ).fetchall()
-        out: dict[int, dict[str, Any]] = {}
-        for r in rows:
-            d = dict(r)
-            d["preferred_skus"] = _jl(d.pop("preferred_skus_json", "[]"), [])
-            out[int(d["identity_id"])] = d
-        return out
-
-    return _safe("batch_relationship_summaries", _do) or {}
-
-
-def batch_latest_facts_subset(
-    *,
-    campaign_id: str,
-    identity_ids: Iterable[int],
-    env: str = "LIVE",
-    fact_keys: Iterable[str],
-) -> dict[int, dict[str, Any]]:
-    """Latest values for ``fact_keys`` across many identities (one campaign)."""
-    ids = [int(i) for i in identity_ids if i is not None]
-    if not ids:
-        return {}
-    keys = [str(k) for k in fact_keys if k]
-    if not keys:
-        return {i: {} for i in ids}
-    id_ph = ",".join("?" * len(ids))
-    key_ph = ",".join("?" * len(keys))
-
-    def _do() -> dict[int, dict[str, Any]]:
-        with _connect() as conn:
-            ident_rows = conn.execute(
-                f"""SELECT identity_id, fact_key, fact_value FROM kol_facts_latest
-                     WHERE identity_id IN ({id_ph}) AND campaign_id IS NULL AND env=?
-                       AND fact_key IN ({key_ph})""",
-                (*ids, env, *keys),
-            ).fetchall()
-            camp_rows = conn.execute(
-                f"""SELECT identity_id, fact_key, fact_value FROM kol_facts_latest
-                     WHERE identity_id IN ({id_ph}) AND campaign_id=? AND env=?
-                       AND fact_key IN ({key_ph})""",
-                (*ids, campaign_id, env, *keys),
-            ).fetchall()
-        out: dict[int, dict[str, Any]] = {i: {} for i in ids}
-        for r in ident_rows:
-            out[int(r["identity_id"])][r["fact_key"]] = _decode_fact_value(r["fact_value"])
-        for r in camp_rows:
-            out[int(r["identity_id"])][r["fact_key"]] = _decode_fact_value(r["fact_value"])
-        return out
-
-    return _safe("batch_latest_facts_subset", _do) or {}
-
-
-def batch_kanban_facts(
-    *,
-    campaign_id: str,
-    identity_ids: Iterable[int],
-    env: str = "LIVE",
-) -> dict[int, dict[str, Any]]:
-    """Latest fact subset for many identities in one campaign (kanban cards)."""
-    return batch_latest_facts_subset(
-        campaign_id=campaign_id,
-        identity_ids=identity_ids,
-        env=env,
-        fact_keys=KANBAN_FACT_KEYS,
-    )
-
-
-def batch_identity_briefs(identity_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
-    """Minimal identity rows for list UIs (handle / display_name / platform)."""
-    ids = [int(i) for i in identity_ids if i is not None]
-    if not ids:
-        return {}
-
-    def _do() -> dict[int, dict[str, Any]]:
-        placeholders = ",".join("?" * len(ids))
-        with _connect() as conn:
-            rows = conn.execute(
-                f"""SELECT id, primary_handle, display_name, platform
-                      FROM kol_identity WHERE id IN ({placeholders})""",
-                ids,
-            ).fetchall()
-        out: dict[int, dict[str, Any]] = {}
-        for r in rows:
-            handle = r["primary_handle"]
-            if isinstance(handle, str):
-                handle = handle.strip().lstrip("@") or None
-            out[int(r["id"])] = {
-                "id": int(r["id"]),
-                "primary_handle": handle,
-                "display_name": r["display_name"],
-                "platform": r["platform"],
-            }
-        return out
-
-    return _safe("batch_identity_briefs", _do) or {}
-
-
-def batch_lanes_views_for_campaign(
-    campaign_id: str,
-    *,
-    env: str = "LIVE",
-    identity_ids: Iterable[int],
-) -> dict[int, dict[str, list[dict[str, Any]]]]:
-    """All per-identity lane snapshots for one campaign in a single query."""
-    ids = [int(i) for i in identity_ids if i is not None]
-    if not ids:
-        return {}
-
-    def _do() -> dict[int, dict[str, list[dict[str, Any]]]]:
-        with _connect() as conn:
-            rows = conn.execute(
-                """SELECT identity_id, goal, status, lane, missing_facts_json,
-                          blocking_escalation_id, updated_at
-                     FROM kol_goal_state
-                    WHERE campaign_id=? AND env=?""",
-                (campaign_id, env),
-            ).fetchall()
-        grouped: dict[int, dict[str, Mapping[str, Any]]] = {}
-        for r in rows:
-            iid = int(r["identity_id"])
-            if iid not in ids:
-                continue
-            grouped.setdefault(iid, {})[r["goal"]] = r
-        return {
-            iid: _goal_states_to_lanes_view(_build_goal_state_list(grouped.get(iid, {})))
-            for iid in ids
-        }
-
-    return _safe("batch_lanes_views_for_campaign", _do) or {}
 
 
 # ---------------------------------------------------------------------------
@@ -2228,39 +2036,20 @@ def get_escalation(escalation_id: int) -> Optional[dict[str, Any]]:
     return d
 
 
-def list_escalations(
-    *,
-    state: Optional[str] = None,
-    env: str = "LIVE",
-    identity_id: Optional[int] = None,
-    campaign_id: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    where = ["e.env = ?"]
-    args: list[Any] = [env]
-    if state:
-        where.append("e.state = ?")
-        args.append(state)
-    if identity_id is not None:
-        where.append("e.identity_id = ?")
-        args.append(int(identity_id))
-    if campaign_id:
-        where.append("e.campaign_id = ?")
-        args.append(campaign_id)
-    sql = (
-        "SELECT e.*, i.primary_handle AS primary_handle "
-        "FROM kol_escalations e "
-        "LEFT JOIN kol_identity i ON i.id = e.identity_id "
-        f"WHERE {' AND '.join(where)} ORDER BY e.id DESC"
-    )
+def list_escalations(*, state: Optional[str] = None, env: str = "LIVE") -> list[dict[str, Any]]:
     with _connect() as conn:
-        rows = conn.execute(sql, args).fetchall()
+        if state:
+            rows = conn.execute(
+                "SELECT * FROM kol_escalations WHERE state=? AND env=? ORDER BY id DESC",
+                (state, env),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM kol_escalations WHERE env=? ORDER BY id DESC", (env,)
+            ).fetchall()
     out = []
     for r in rows:
         d = dict(r)
-        handle = d.get("primary_handle")
-        if isinstance(handle, str):
-            handle = handle.strip().lstrip("@") or None
-        d["handle"] = handle
         d["resume_context"] = _jl(d.pop("resume_context_json", "{}"), {})
         d["operator_facts"] = _jl(d.pop("operator_facts_json", None), None)
         out.append(d)
@@ -2272,45 +2061,7 @@ def list_escalations(
 # ---------------------------------------------------------------------------
 
 
-def _approval_handle_from_row(row: Mapping[str, Any]) -> Optional[str]:
-    handle = row.get("primary_handle")
-    if not isinstance(handle, str):
-        return None
-    handle = handle.strip().lstrip("@")
-    return handle or None
-
-
-def _approval_rows_query(
-    *,
-    env: str,
-    identity_id: Optional[int] = None,
-    campaign_id: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    where = ["f.fact_namespace = 'approval'", "f.env = ?"]
-    args: list[Any] = [env]
-    if identity_id is not None:
-        where.append("f.identity_id = ?")
-        args.append(int(identity_id))
-    if campaign_id:
-        where.append("f.campaign_id = ?")
-        args.append(campaign_id)
-    sql = (
-        "SELECT f.identity_id, f.campaign_id, f.fact_key, f.fact_value, "
-        "f.captured_at, i.primary_handle "
-        "FROM kol_facts_latest f "
-        "LEFT JOIN kol_identity i ON i.id = f.identity_id "
-        f"WHERE {' AND '.join(where)} ORDER BY f.id DESC"
-    )
-    with _connect() as conn:
-        return [dict(r) for r in conn.execute(sql, args).fetchall()]
-
-
-def list_pending_approvals(
-    *,
-    env: str = "LIVE",
-    identity_id: Optional[int] = None,
-    campaign_id: Optional[str] = None,
-) -> list[dict[str, Any]]:
+def list_pending_approvals(*, env: str = "LIVE") -> list[dict[str, Any]]:
     """Return latest ``approval.*`` facts that actually need an operator
     decision. A fact is "pending" only when its value is a JSON object
     with no ``decision`` field set yet (or set to ``"pending"``).
@@ -2320,10 +2071,15 @@ def list_pending_approvals(
     skill 3e) are skill-internal markers consumed by downstream skills,
     not items requiring a console decision, so they are excluded here.
     """
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM kol_facts_latest
+                WHERE fact_namespace='approval' AND env=?
+                ORDER BY id DESC""",
+            (env,),
+        ).fetchall()
     out = []
-    for r in _approval_rows_query(
-        env=env, identity_id=identity_id, campaign_id=campaign_id,
-    ):
+    for r in rows:
         val = _jl(r["fact_value"], None)
         if not isinstance(val, dict):
             continue
@@ -2335,17 +2091,12 @@ def list_pending_approvals(
                 "fact_key": r["fact_key"],
                 "value": val,
                 "captured_at": r["captured_at"],
-                "handle": _approval_handle_from_row(r),
             })
     return out
 
 
 def list_decided_approvals(
-    *,
-    status: str,
-    env: str = "LIVE",
-    identity_id: Optional[int] = None,
-    campaign_id: Optional[str] = None,
+    *, status: str, env: str = "LIVE"
 ) -> list[dict[str, Any]]:
     """Return decided ``approval.*`` facts whose ``value.decision``
     matches ``status``. ``status`` must be one of ``approved`` /
@@ -2354,10 +2105,15 @@ def list_decided_approvals(
     """
     if status not in ("approved", "rejected", "all"):
         raise ValueError(f"unknown status: {status!r}")
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM kol_facts_latest
+                WHERE fact_namespace='approval' AND env=?
+                ORDER BY id DESC""",
+            (env,),
+        ).fetchall()
     out: list[dict[str, Any]] = []
-    for r in _approval_rows_query(
-        env=env, identity_id=identity_id, campaign_id=campaign_id,
-    ):
+    for r in rows:
         val = _jl(r["fact_value"], None)
         if not isinstance(val, dict):
             continue
@@ -2373,7 +2129,6 @@ def list_decided_approvals(
             "fact_key": r["fact_key"],
             "value": val,
             "captured_at": r["captured_at"],
-            "handle": _approval_handle_from_row(r),
         })
     return out
 

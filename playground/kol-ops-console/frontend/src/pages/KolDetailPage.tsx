@@ -208,13 +208,9 @@ export function KolDetailPage() {
       api.get<GoalsResponse>(
         `/identities/${identityId}/goals?campaign_id=${encodeURIComponent(campaignId)}&env=${env}`,
       ),
-      api.get<EscalationLite[]>(
-        `/escalations?state=awaiting_answer&env=${env}`
-        + `&identity_id=${identityId}&campaign_id=${encodeURIComponent(campaignId)}`,
-      ),
+      api.get<EscalationLite[]>(`/escalations?state=awaiting_answer&env=${env}`),
       api.get<Array<{ identity_id?: number; campaign_id?: string; opened_at?: string | null }>>(
-        `/approvals?env=${env}&status=pending`
-        + `&identity_id=${identityId}&campaign_id=${encodeURIComponent(campaignId)}`,
+        `/approvals?env=${env}`,
       ),
       api.get<{ facts: Record<string, unknown> }>(
         `/facts/${identityId}?campaign_id=${encodeURIComponent(campaignId)}&env=${env}`,
@@ -224,7 +220,9 @@ export function KolDetailPage() {
     setGoals(pickSettled(goalsR));
     let escLatest: string | null = null;
     if (escR.status === 'fulfilled') {
-      const mine = escR.value || [];
+      const mine = (escR.value || []).filter(
+        (e) => (e as unknown as { identity_id?: number }).identity_id === identityId,
+      );
       setEscalations({ status: 'ok', data: mine, error: null });
       for (const e of mine) {
         if (e.created_at && (!escLatest || e.created_at > escLatest)) {
@@ -239,8 +237,9 @@ export function KolDetailPage() {
     let apprLatest: string | null = null;
     let apprCount = 0;
     if (apprR.status === 'fulfilled') {
-      apprCount = (apprR.value || []).length;
       for (const a of apprR.value || []) {
+        if (a.identity_id !== identityId || a.campaign_id !== campaignId) continue;
+        apprCount += 1;
         if (a.opened_at && (!apprLatest || a.opened_at > apprLatest)) {
           apprLatest = a.opened_at;
         }

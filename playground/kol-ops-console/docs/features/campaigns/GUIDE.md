@@ -26,10 +26,9 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/campaigns/parse`, `/campaigns/start` | 创建/启动 |
-| GET | `/campaigns/{id}/lanes` | 看板泳道数据（Bridge 批量读 CAL；Console 约 8s 缓存） |
+| GET | `/campaigns/{id}/lanes` | 看板泳道数据 |
 | GET/PATCH | `/campaigns/{id}/config` | 活动配置 |
-| GET/POST | `/campaigns/{id}/candidates/*` | 发现池（GET 使用 handle JOIN，含 `total_collabs`） |
-| GET | `/campaigns/{id}/shortlist` | 短名单（Nox 字段批量读 facts） |
+| GET/POST | `/campaigns/{id}/candidates/*` | 发现池 |
 | GET | `/campaigns/{id}/agent-stream` | SSE  transcript |
 | POST | `/reply-watcher/*` | Gmail 回复轮询 |
 
