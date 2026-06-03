@@ -1,0 +1,161 @@
+"""Tests for local-chrome tab pool (canonical internal module)."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+
+def _load_tab_pool_module():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "internal"
+        / "tab_pool.py"
+    )
+    spec = importlib.util.spec_from_file_location("tab_pool_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def tab_pool(monkeypatch):
+    monkeypatch.delenv("LOCAL_CHROME_TAB_POOL", raising=False)
+    module = _load_tab_pool_module()
+    module._task_tabs.clear()
+    return module
+
+
+def test_is_enabled_default_on(tab_pool):
+    assert tab_pool.is_enabled() is True
+
+
+def test_is_enabled_can_disable(tab_pool, monkeypatch):
+    monkeypatch.setenv("LOCAL_CHROME_TAB_POOL", "0")
+    assert tab_pool.is_enabled() is False
+
+
+def test_normalize_task_id_strips_sidecar_suffix(tab_pool):
+    assert tab_pool.normalize_task_id("abc::local") == "abc"
+    assert tab_pool.normalize_task_id("abc") == "abc"
+    assert tab_pool.normalize_task_id(None) == "default"
+
+
+def test_acquire_creates_tab(tab_pool, monkeypatch):
+    calls = []
+
+    def fake_http_json(url, *, method="GET", timeout=10.0):
+        calls.append((url, method))
+        if url.endswith("/json/version"):
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/ABC"}
+        if "/json/new" in url:
+            return {
+                "id": "TAB1",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/TAB1",
+            }
+        if "/json/close/" in url:
+            return {"success": True}
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(tab_pool, "_http_json", fake_http_json)
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+
+    info = tab_pool.acquire("task-abc")
+    assert info["target_id"] == "TAB1"
+    assert info["cdp_url"].endswith("/devtools/page/TAB1")
+
+    again = tab_pool.acquire("task-abc")
+    assert again == info
+    assert sum(1 for url, method in calls if method == "PUT") == 1
+
+
+def test_acquire_closes_orphan_when_race_lost(tab_pool, monkeypatch):
+    closed = []
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: closed.append(tid))
+
+    def fake_create_and_race():
+        info = {"target_id": "ORPHAN", "cdp_url": "ws://127.0.0.1/devtools/page/ORPHAN"}
+        tab_pool._task_tabs["task-race"] = {
+            "target_id": "WINNER",
+            "cdp_url": "ws://127.0.0.1/devtools/page/WINNER",
+        }
+        return info
+
+    monkeypatch.setattr(tab_pool, "_create_tab", fake_create_and_race)
+    tab_pool._task_tabs.clear()
+
+    info = tab_pool.acquire("task-race")
+    assert info["target_id"] == "WINNER"
+    assert closed == ["ORPHAN"]
+
+
+def test_release_closes_tab(tab_pool, monkeypatch):
+    closed = []
+
+    def fake_http_json(url, *, method="GET", timeout=10.0):
+        if "/json/new" in url:
+            return {
+                "id": "TAB9",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/TAB9",
+            }
+        if "/json/close/TAB9" in url:
+            closed.append(url)
+            return {"success": True}
+        if url.endswith("/json/version"):
+            return {"webSocketDebuggerUrl": "ws://x"}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(tab_pool, "_http_json", fake_http_json)
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+
+    tab_pool.acquire("task-x")
+    assert tab_pool.release("task-x") is True
+    assert closed
+    assert tab_pool.release("task-x") is False
+
+
+def test_release_normalizes_sidecar_task_id(tab_pool, monkeypatch):
+    tab_pool._task_tabs["task-y"] = {
+        "target_id": "T1",
+        "cdp_url": "ws://127.0.0.1:9222/devtools/page/T1",
+    }
+    closed = []
+
+    def fake_http_json(url, *, method="GET", timeout=10.0):
+        if "/json/close/T1" in url:
+            closed.append(url)
+            return {"success": True}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(tab_pool, "_http_json", fake_http_json)
+    assert tab_pool.release("task-y::local") is True
+    assert closed
+
+
+def test_ensure_chrome_autostarts(tab_pool, monkeypatch, tmp_path):
+    script = tmp_path / "start-debug-chrome.sh"
+    script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    probes = iter([False, False, True])
+
+    def fake_probe():
+        return next(probes)
+
+    runs = []
+
+    def fake_run(cmd, **kwargs):
+        runs.append(cmd)
+        return mock.Mock(returncode=0, stderr="")
+
+    monkeypatch.setattr(tab_pool, "probe_chrome", fake_probe)
+    monkeypatch.setattr(tab_pool, "_launcher_script", lambda: script)
+    monkeypatch.setattr(tab_pool.subprocess, "run", fake_run)
+
+    tab_pool.ensure_chrome_running()
+    assert runs and runs[0][0] == "bash"
+    assert str(script) in runs[0][1]

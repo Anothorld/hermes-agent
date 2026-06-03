@@ -6,6 +6,7 @@
 #
 # Usage:
 #   ./start-debug-chrome.sh                # start (or reuse) debug Chrome + write env file + self-check
+#   ./start-debug-chrome.sh ensure         # alias for start (used by tab_pool.py autostart)
 #   ./start-debug-chrome.sh status         # report port, env file presence, exit IP
 #   ./start-debug-chrome.sh stop           # kill the debug Chrome, remove env file
 #   ./start-debug-chrome.sh restart        # stop + start
@@ -308,7 +309,7 @@ cmd_clean() {
 
 mode="${1:-start}"
 case "$mode" in
-  start)   cmd_start ;;
+  start|ensure) cmd_start ;;
   status)  cmd_status ;;
   stop)    cmd_stop ;;
   restart) cmd_stop; cmd_start ;;
