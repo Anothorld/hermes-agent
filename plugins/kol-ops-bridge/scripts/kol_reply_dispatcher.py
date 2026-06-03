@@ -674,6 +674,7 @@ def _pending_reply_payload(
             "thread_id": msg.thread_id,
             "from": msg.from_addr,
             "to": msg.to,
+            "cc": msg.cc,
             "subject": msg.subject,
             "date": msg.date,
             "in_reply_to": msg.in_reply_to,
@@ -748,6 +749,8 @@ def _process_message(msg: GmailMessage, env: str, *, client: GmailClient) -> Pro
             "thread_id": msg.thread_id,
             "in_reply_to": msg.in_reply_to,
             "from_addr": msg.from_addr,
+            "to": msg.to,
+            "cc": msg.cc,
             "subject": msg.subject,
             "snippet": msg.snippet,
             # Persist the (clipped) body so the operator console can render

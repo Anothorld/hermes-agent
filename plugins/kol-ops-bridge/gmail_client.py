@@ -81,6 +81,7 @@ class GmailMessage:
     thread_id: str
     from_addr: str
     to: str
+    cc: str
     subject: str
     snippet: str
     in_reply_to: Optional[str]
@@ -105,6 +106,7 @@ class GmailClient:
         # Lazily-loaded Gmail label name -> id cache. Invalidated only when
         # ``modify_labels`` discovers a name that's missing from the cache.
         self._label_cache: Optional[dict[str, str]] = None
+        self._profile_email_cache: Optional[str] = None
 
     # -- availability --------------------------------------------------------
 
@@ -188,6 +190,7 @@ class GmailClient:
                     thread_id=str(item.get("threadId", "")),
                     from_addr=str(item.get("from", "")),
                     to=str(item.get("to", "")),
+                    cc="",
                     subject=str(item.get("subject", "")),
                     snippet=str(item.get("snippet", "")),
                     in_reply_to=None,  # not present in list output
@@ -210,6 +213,7 @@ class GmailClient:
             thread_id=str(payload.get("threadId", "")),
             from_addr=str(headers.get("From", "")),
             to=str(headers.get("To", "")),
+            cc=str(headers.get("Cc", "")),
             subject=str(headers.get("Subject", "")),
             snippet=str(payload.get("snippet", "")),
             in_reply_to=(headers.get("In-Reply-To") or None),
@@ -217,6 +221,21 @@ class GmailClient:
             date=str(headers.get("Date", "")),
             body=str(payload.get("body", "")),
         )
+
+    def get_profile_email(self) -> Optional[str]:
+        """Return the authenticated Gmail account address (cached)."""
+        if self._profile_email_cache:
+            return self._profile_email_cache
+        try:
+            payload = self._invoke(["gmail", "profile"])
+        except GmailUnavailable:
+            return None
+        if isinstance(payload, dict):
+            email = str(payload.get("emailAddress") or "").strip().lower()
+            if email:
+                self._profile_email_cache = email
+                return email
+        return None
 
     def get_thread(self, thread_id: str) -> list[dict]:
         """Return the lean conversation list for a Gmail thread.

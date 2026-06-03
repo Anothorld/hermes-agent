@@ -336,6 +336,20 @@ def gmail_search(args):
 
 
 
+def gmail_profile(args):
+    if _gws_binary():
+        profile = _run_gws(
+            ["gmail", "users", "getProfile"],
+            params={"userId": "me"},
+        )
+    else:
+        service = build_service("gmail", "v1")
+        profile = service.users().getProfile(userId="me").execute()
+    print(json.dumps({
+        "emailAddress": profile.get("emailAddress", ""),
+    }, indent=2, ensure_ascii=False))
+
+
 def gmail_get(args):
     if _gws_binary():
         msg = _run_gws(
@@ -1251,6 +1265,9 @@ def main():
     p = gmail_sub.add_parser("get")
     p.add_argument("message_id")
     p.set_defaults(func=gmail_get)
+
+    p = gmail_sub.add_parser("profile")
+    p.set_defaults(func=gmail_profile)
 
     p = gmail_sub.add_parser("thread")
     p.add_argument("thread_id")

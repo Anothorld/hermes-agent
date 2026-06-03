@@ -50,6 +50,7 @@ from . import reply_diff
 from . import reject_tags
 from .gmail_reconcile import run_reconcile_sent
 from .gmail_client import GmailClient, GmailUnavailable
+from . import gmail_reply_envelope
 from .schema import FACT_NAMESPACES, GOAL_NAMES, SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
@@ -1863,13 +1864,53 @@ def _create_gmail_draft_for_reply_approval(
     client = GmailClient()
     if not client.is_available():
         raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    cc_addr = str(draft.get("cc") or "").strip() or None
+    html_body = bool(draft.get("html"))
+    source_msg_id = raw_source_msg or None
+    if source_msg_id:
+        try:
+            inbound = client.get_message(source_msg_id)
+        except GmailUnavailable as exc:
+            log.warning(
+                "reply_draft inbound fetch failed identity=%s msg=%s: %s",
+                identity_id,
+                source_msg_id,
+                exc,
+            )
+            inbound = None
+        if inbound is not None:
+            if not cc_addr:
+                self_email = client.get_profile_email()
+                self_emails: set[str] = set()
+                if self_email:
+                    self_emails.add(self_email)
+                extra_self = os.environ.get("KOL_OPS_GMAIL_REPLY_SELF", "")
+                for part in extra_self.split(","):
+                    email = gmail_reply_envelope.extract_email(part.strip())
+                    if email:
+                        self_emails.add(email)
+                cc_addr = gmail_reply_envelope.compute_reply_all_cc(
+                    inbound_from=inbound.from_addr,
+                    inbound_to=inbound.to,
+                    inbound_cc=inbound.cc,
+                    reply_to=to_addr,
+                    self_emails=self_emails,
+                ) or None
+            if not gmail_reply_envelope.body_has_quoted_reply(body):
+                body = gmail_reply_envelope.append_quoted_reply(
+                    body=body,
+                    quoted_from=inbound.from_addr,
+                    quoted_date=inbound.date,
+                    quoted_body=inbound.body,
+                    html=html_body,
+                )
     try:
         result = client.create_draft(
             to=to_addr,
             subject=subject,
             body=body,
-            cc=str(draft.get("cc") or "") or None,
-            html=bool(draft.get("html")),
+            cc=cc_addr,
+            html=html_body,
             thread_id=resolved_thread_id,
             attachments=attachment_paths or None,
         )
