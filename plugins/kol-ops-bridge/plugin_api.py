@@ -1256,7 +1256,17 @@ def get_lanes(
     (per-item ``pending_approval_*`` / ``open_escalation_*`` /
     ``reply_draft_state`` fields).
     """
-    candidates = cal.list_candidates(campaign_id, env=env)
+    candidates = cal.list_candidate_handles(campaign_id, env=env)
+    identity_ids = [int(c["identity_id"]) for c in candidates if c.get("identity_id")]
+
+    # Batch DB reads: one query per resource type instead of 4×N per KOL.
+    relationships = cal.batch_relationship_summaries(identity_ids)
+    facts_by_id = cal.batch_kanban_facts(
+        campaign_id=campaign_id, identity_ids=identity_ids, env=env,
+    )
+    lanes_by_id = cal.batch_lanes_views_for_campaign(
+        campaign_id, env=env, identity_ids=identity_ids,
+    )
 
     # Single sweep over the campaign-scoped queues so per-card lookup
     # is O(1) and we avoid N+1 bridge calls. The kanban refreshes every
@@ -1291,17 +1301,13 @@ def get_lanes(
     for c in candidates:
         if not c.get("identity_id"):
             continue
-        ident = cal.get_identity(c["identity_id"]) or {}
-        rel = cal.get_relationship(c["identity_id"]) or {}
-        # Pull a handful of fact values the Web kanban renders on the
-        # card itself (sent-time chip, interest-signal badge) so the FE
-        # doesn't have to fan out N extra /facts requests.
-        facts = cal.latest_facts_for(
-            identity_id=c["identity_id"],
-            campaign_id=campaign_id, env=env,
-        )
+        iid = int(c["identity_id"])
+        rel = relationships.get(iid) or {}
+        facts = facts_by_id.get(iid) or {}
+        handle = c.get("handle")
+        if isinstance(handle, str):
+            handle = handle.strip().lstrip("@") or None
 
-        iid = c["identity_id"]
         appr_rows = approvals_by_id.get(iid, [])
         appr_latest = max(
             (r.get("captured_at") for r in appr_rows if r.get("captured_at")),
@@ -1315,16 +1321,13 @@ def get_lanes(
 
         items.append({
             "identity_id": iid,
-            "handle": ident.get("primary_handle") or f"id{iid}",
+            "handle": handle or f"id{iid}",
             "candidate_status": c["candidate_status"],
             "relationship_status": c["relationship_status"],
             "repeat_count": int(rel.get("total_collabs") or 0),
             "last_outcome": rel.get("last_outcome"),
             "archived": c["candidate_status"] in ("archived", "rejected"),
-            "lanes": cal.get_lanes_view(
-                identity_id=iid,
-                campaign_id=campaign_id, env=env,
-            ),
+            "lanes": lanes_by_id.get(iid, {}),
             "outreach_sent_at": facts.get("offer.outreach_sent_at"),
             "interest_signal": facts.get("offer.interest_signal"),
             # Tri-state we expose so the FE can distinguish "approved
@@ -1588,6 +1591,42 @@ def read_facts(
     )}
 
 
+class BatchFactsSubsetBody(_CampaignIdNormaliserMixin):
+    """Batch-read latest fact keys for many identities in one campaign."""
+
+    identity_ids: list[int] = Field(min_length=1, max_length=500)
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    fact_keys: list[str] = Field(default_factory=list, max_length=32)
+
+
+class BatchIdentityIdsBody(BaseModel):
+    identity_ids: list[int] = Field(min_length=1, max_length=2000)
+
+
+@router.post("/facts/batch-subset")
+def batch_facts_subset(body: BatchFactsSubsetBody) -> dict[str, Any]:
+    """Return ``{by_identity: {identity_id: {fact_key: value}}}`` for list UIs."""
+    keys = tuple(body.fact_keys) if body.fact_keys else cal.KANBAN_FACT_KEYS
+    by_id = cal.batch_latest_facts_subset(
+        campaign_id=body.campaign_id,
+        identity_ids=body.identity_ids,
+        env=body.env,
+        fact_keys=keys,
+    )
+    return {"by_identity": {str(iid): facts for iid, facts in by_id.items()}}
+
+
+@router.post("/identities/briefs")
+def batch_identity_briefs(body: BatchIdentityIdsBody) -> dict[str, Any]:
+    """Minimal identity cards keyed by stringified id (console list enrichment)."""
+    by_id = cal.batch_identity_briefs(body.identity_ids)
+    return {
+        "identities": {
+            str(iid): brief for iid, brief in by_id.items()
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Approvals (cross-cutting view of approval.* facts)
 # ---------------------------------------------------------------------------
@@ -1600,10 +1639,23 @@ def list_approvals(
         pattern="^(pending|approved|rejected|all)$",
     ),
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    identity_id: Optional[int] = Query(default=None, ge=1),
+    campaign_id: Annotated[Optional[str], Depends(_campaign_id_query_optional_dep)] = None,
 ) -> dict[str, Any]:
     if status == "pending":
-        return {"approvals": cal.list_pending_approvals(env=env)}
-    return {"approvals": cal.list_decided_approvals(status=status, env=env)}
+        return {
+            "approvals": cal.list_pending_approvals(
+                env=env, identity_id=identity_id, campaign_id=campaign_id,
+            ),
+        }
+    return {
+        "approvals": cal.list_decided_approvals(
+            status=status,
+            env=env,
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+        ),
+    }
 
 
 def _linked_escalation_id(value: Mapping[str, Any]) -> Optional[int]:
@@ -2343,8 +2395,17 @@ def unmark_reply_handled(
 def list_escalations(
     state: Optional[str] = Query(default=None),
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    identity_id: Optional[int] = Query(default=None, ge=1),
+    campaign_id: Annotated[Optional[str], Depends(_campaign_id_query_optional_dep)] = None,
 ) -> dict[str, Any]:
-    return {"escalations": cal.list_escalations(state=state, env=env)}
+    return {
+        "escalations": cal.list_escalations(
+            state=state,
+            env=env,
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+        ),
+    }
 
 
 @router.get("/escalations/{escalation_id}")

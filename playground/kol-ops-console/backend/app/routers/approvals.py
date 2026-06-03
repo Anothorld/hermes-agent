@@ -12,7 +12,6 @@ list re-renders correctly after a decision is written.
 
 from __future__ import annotations
 
-import asyncio
 import datetime as _dt
 import json
 from pathlib import Path
@@ -212,6 +211,9 @@ def _to_row(raw: dict[str, Any], handle_map: dict[int, str | None]) -> dict[str,
         opened_by = None
         linked_escalation_id = None
     identity_id = raw.get("identity_id")
+    handle = raw.get("handle")
+    if handle is None and isinstance(identity_id, int):
+        handle = handle_map.get(identity_id)
     return {
         "identity_id": identity_id,
         "campaign_id": raw.get("campaign_id"),
@@ -225,7 +227,7 @@ def _to_row(raw: dict[str, Any], handle_map: dict[int, str | None]) -> dict[str,
         "opened_at": raw.get("captured_at"),
         "env": raw.get("env"),
         "linked_escalation_id": linked_escalation_id,
-        "handle": handle_map.get(identity_id) if isinstance(identity_id, int) else None,
+        "handle": handle if isinstance(handle, str) else None,
     }
 
 
@@ -263,26 +265,6 @@ def _approval_priority(row: dict[str, Any], env: str) -> tuple[int, int]:
             score -= 10
     opened_ts = int(opened_at.timestamp()) if opened_at is not None else 0
     return score, -opened_ts
-
-
-async def _fetch_handles(
-    bridge: BridgeClient, identity_ids: list[int]
-) -> dict[int, str | None]:
-    if not identity_ids:
-        return {}
-
-    async def _one(iid: int) -> tuple[int, str | None]:
-        try:
-            ident = await bridge.get_identity(iid)
-        except BridgeError:
-            return iid, None
-        if not isinstance(ident, dict):
-            return iid, None
-        handle = ident.get("primary_handle") or ident.get("handle")
-        return iid, str(handle).lstrip("@") if handle else None
-
-    pairs = await asyncio.gather(*(_one(i) for i in identity_ids))
-    return {iid: handle for iid, handle in pairs}
 
 
 def _shape_inbound(ev: dict[str, Any]) -> dict[str, Any]:
@@ -349,20 +331,22 @@ async def list_approvals(
     _: Annotated[dict, Depends(current_user)],
     status_filter: str = Query("pending", alias="status"),
     env: Optional[str] = Query(None),
+    identity_id: Optional[int] = Query(None, ge=1),
+    campaign_id: Optional[str] = Query(None),
 ) -> list[dict[str, Any]]:
     resolved_env = _env(env)
     if status_filter not in ("pending", "approved", "rejected", "all"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"unknown status: {status_filter}")
     try:
-        raw = await bridge.list_approvals(status=status_filter, env=resolved_env)
+        raw = await bridge.list_approvals(
+            status=status_filter,
+            env=resolved_env,
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+        )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    unique_ids = sorted({
-        r["identity_id"] for r in raw
-        if isinstance(r, dict) and isinstance(r.get("identity_id"), int)
-    })
-    handle_map = await _fetch_handles(bridge, unique_ids)
-    rows = [_to_row(r, handle_map) for r in raw if isinstance(r, dict)]
+    rows = [_to_row(r, {}) for r in raw if isinstance(r, dict)]
     rows.sort(key=lambda r: _approval_priority(r, resolved_env))
     return rows
 

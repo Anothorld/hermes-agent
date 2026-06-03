@@ -347,10 +347,17 @@ async def list_escalations(
     _: Annotated[dict, Depends(current_user)],
     state: Optional[str] = Query(None),
     env: Optional[str] = Query(None),
+    identity_id: Optional[int] = Query(None, ge=1),
+    campaign_id: Optional[str] = Query(None),
 ) -> list[dict]:
     resolved_env = _env(env)
     try:
-        rows = await bridge.list_escalations(state=state, env=resolved_env)
+        rows = await bridge.list_escalations(
+            state=state,
+            env=resolved_env,
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+        )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     normalized = [_normalize_escalation_row(r) for r in rows if isinstance(r, dict)]

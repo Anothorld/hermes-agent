@@ -41,6 +41,28 @@ class SetCandidateStatusBody(BaseModel):
     env: Optional[str] = None
 
 
+def _shape_candidate_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Map bridge candidate+handle row to ``CampaignCandidatesPage`` shape."""
+    cs = str(row.get("candidate_status") or "")
+    if cs == "selected_for_outreach":
+        status = "selected"
+    elif cs in {"rejected", "archived"}:
+        status = "rejected"
+    else:
+        status = "pending"
+    return {
+        "identity_id": row.get("identity_id"),
+        "handle": row.get("handle"),
+        "discovery_score": row.get("discovery_score"),
+        "discovery_source": row.get("source"),
+        "relationship_status": row.get("relationship_status"),
+        "total_collabs": int(row.get("total_collabs") or 0),
+        "last_outcome": row.get("last_outcome"),
+        "status": status,
+        "notes": row.get("review_reason"),
+    }
+
+
 @router.get("")
 async def list_candidates(
     campaign_id: str,
@@ -49,9 +71,10 @@ async def list_candidates(
     env: Optional[str] = Query(None),
 ) -> list[dict[str, Any]]:
     try:
-        return await bridge.list_candidates(campaign_id, env=_env(env))
+        rows = await bridge.list_candidate_handles(campaign_id, env=_env(env))
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return [_shape_candidate_row(r) for r in rows if isinstance(r, dict)]
 
 
 @router.post("")

@@ -4,7 +4,6 @@ import { api, ApiError, Lane } from '../api';
 import { GoalProgressBar } from '../components/GoalProgressBar';
 import { goalLabel, laneLabel } from '../constants/domainLabels';
 import { FactsEditor } from '../components/FactsEditor';
-import { RepeatKolBadge } from '../components/RepeatKolBadge';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
 import { TimeAgo } from '../components/inputs/TimeAgo';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
@@ -14,10 +13,11 @@ import { UnreadDot } from '../components/UnreadDot';
 import { isRealCampaignId } from '../lib/campaignId';
 import { toast, useEnvStore } from '../lib/store';
 import { useUnreadStore, isUnread } from '../lib/unread';
-import { outcomeChipClass, outcomeLabel } from '../lib/kolOutcomes';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
 import { CommunicationHistoryPanel } from '../components/CommunicationHistoryPanel';
+import { KolProfileDashboard } from '../components/KolProfileDashboard';
+import { NoxDiligencePanel } from '../components/NoxDiligencePanel';
 import NoxQuotaBanner, {
   isNoxQuotaExhausted,
   type NoxStatsPayload,
@@ -122,6 +122,8 @@ type IdentityResponse = {
   display_name?: string | null;
   primary_email: string | null;
   creator_type?: string | null;
+  region?: string | null;
+  language?: string | null;
   env: string;
   repeat_count?: number;
   last_outcome?: string | null;
@@ -208,9 +210,13 @@ export function KolDetailPage() {
       api.get<GoalsResponse>(
         `/identities/${identityId}/goals?campaign_id=${encodeURIComponent(campaignId)}&env=${env}`,
       ),
-      api.get<EscalationLite[]>(`/escalations?state=awaiting_answer&env=${env}`),
+      api.get<EscalationLite[]>(
+        `/escalations?state=awaiting_answer&env=${env}`
+        + `&identity_id=${identityId}&campaign_id=${encodeURIComponent(campaignId)}`,
+      ),
       api.get<Array<{ identity_id?: number; campaign_id?: string; opened_at?: string | null }>>(
-        `/approvals?env=${env}`,
+        `/approvals?env=${env}&status=pending`
+        + `&identity_id=${identityId}&campaign_id=${encodeURIComponent(campaignId)}`,
       ),
       api.get<{ facts: Record<string, unknown> }>(
         `/facts/${identityId}?campaign_id=${encodeURIComponent(campaignId)}&env=${env}`,
@@ -220,9 +226,7 @@ export function KolDetailPage() {
     setGoals(pickSettled(goalsR));
     let escLatest: string | null = null;
     if (escR.status === 'fulfilled') {
-      const mine = (escR.value || []).filter(
-        (e) => (e as unknown as { identity_id?: number }).identity_id === identityId,
-      );
+      const mine = escR.value || [];
       setEscalations({ status: 'ok', data: mine, error: null });
       for (const e of mine) {
         if (e.created_at && (!escLatest || e.created_at > escLatest)) {
@@ -237,9 +241,8 @@ export function KolDetailPage() {
     let apprLatest: string | null = null;
     let apprCount = 0;
     if (apprR.status === 'fulfilled') {
+      apprCount = (apprR.value || []).length;
       for (const a of apprR.value || []) {
-        if (a.identity_id !== identityId || a.campaign_id !== campaignId) continue;
-        apprCount += 1;
         if (a.opened_at && (!apprLatest || a.opened_at > apprLatest)) {
           apprLatest = a.opened_at;
         }
@@ -321,7 +324,6 @@ export function KolDetailPage() {
     .filter((g) => g.status === 'satisfied')
     .map((g) => g.goal);
   const allMissing = goalsVal.goals.flatMap((g) => g.missing_facts ?? []);
-  const displayHandle = identityVal.primary_handle || identityVal.display_name || `kol#${identityVal.id}`;
 
   const partialErrors: string[] = [];
   if (escalations.status === 'error' && escalations.error) partialErrors.push('escalations');
@@ -329,49 +331,13 @@ export function KolDetailPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-lg font-semibold">
-          @{displayHandle}
-          <RepeatKolBadge
-            count={identityVal.repeat_count || 0}
-            lastOutcome={identityVal.last_outcome ?? null}
-          />
-        </h1>
-        <div className="text-xs text-slate-500">
-          {identityVal.primary_email || <span className="italic">无邮箱</span>} · {identityVal.env}
-        </div>
-        {lastRefreshedAt > 0 && (
-          <TimeAgo
-            iso={lastRefreshedAt}
-            prefix="刷新于"
-            className="text-[10px] text-slate-400"
-          />
-        )}
-        {identityVal.last_outcome && (
-          <span
-            className={`rounded border px-1.5 py-0.5 text-[11px] ${outcomeChipClass(identityVal.last_outcome)}`}
-            title={`上次归档结果：${identityVal.last_outcome}`}
-          >
-            {outcomeLabel(identityVal.last_outcome)}
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setArchiveOpen(true)}
-            className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-700 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700"
-            title="归档此 KOL（含『竞品-不合作』等原因）"
-          >
-            归档此 KOL
-          </button>
-          <Link
-            to={`/kols/${identityVal.id}/relationship`}
-            className="text-xs text-sky-700 hover:underline"
-          >
-            历史 & 复用事实 →
-          </Link>
-        </div>
-      </div>
+      <KolProfileDashboard
+        identity={identityVal}
+        campaignId={campaignId}
+        facts={factsVal}
+        lastRefreshedAt={lastRefreshedAt}
+        onArchive={() => setArchiveOpen(true)}
+      />
 
       <KolArchiveDialog
         open={archiveOpen}
@@ -417,7 +383,7 @@ export function KolDetailPage() {
         reloadAt={lastRefreshedAt}
       />
 
-      <NoxDiligenceStrip
+      <NoxDiligencePanel
         identityId={identityVal.id}
         campaignId={campaignId}
         env={env}

@@ -10,14 +10,14 @@
 |------|------|
 | `/kols` | `KolKanbanPage.tsx`（默认首页 `/` 重定向至此） |
 | `/kols/archive` | `KolArchivePage.tsx` |
-| `/kols/:id` | `KolDetailPage.tsx` |
+| `/kols/:id` | `KolDetailPage.tsx`（`KolProfileDashboard` + `NoxDiligencePanel`） |
 | `/kols/:id/relationship` | `KolRelationshipPage.tsx` |
 
 ## 关键文件
 
 | 层 | 文件 |
 |----|------|
-| FE | 上表 pages；`LaneFilterBar`, `GoalProgressBar`, `FactsEditor`, `CommunicationHistoryPanel` |
+| FE | 上表 pages；`KolProfileDashboard`, `NoxDiligencePanel`, `KolNoxInsightsBoard`, `LaneFilterBar`, `GoalProgressBar`, `FactsEditor`, `CommunicationHistoryPanel` |
 | BE | `routers/kols.py`, `facts.py`, `goals.py`, `relationships.py` |
 | 标签 | `components/factKeyLabel.ts`, `constants/domainLabels.ts` |
 
@@ -30,6 +30,17 @@
 | GET | `/identities/{id}/goals` | 目标/泳道进度 |
 | GET | `/kols/{id}/communication-history` | 绑定邮箱线程 |
 | POST | `/kols/{id}/discover`, `/email/*`, `/nox/*` | 发现/邮件/Nox |
+
+## 列表性能（看板 / 审批 / 详情）
+
+| 场景 | 优化要点 |
+|------|----------|
+| 看板 `GET /campaigns/{id}/lanes` | Bridge 批量读 CAL（固定几次查询）；Console ~8s 缓存；深链 `?campaign_id=` 优先首屏 |
+| 待审批 `GET /approvals` | Bridge JOIN `kol_identity` 带 `handle`；支持 `identity_id` + `campaign_id` 过滤 |
+| 升级 `GET /escalations` | 支持同上过滤；列表 JOIN `handle` |
+| KOL 详情 | 审批/升级请求带 `identity_id` + `campaign_id`，不再拉全表 |
+| 产品短名单 / 多活动 | Nox 字段 `POST /facts/batch-subset`；产品页每活动只调一次 `lanes`；身份卡片 `POST /identities/briefs` |
+| 候选人池 | `list_candidate_handles` + relationship JOIN，一次返回 handle/合作次数 |
 
 ## 关联模块
 
