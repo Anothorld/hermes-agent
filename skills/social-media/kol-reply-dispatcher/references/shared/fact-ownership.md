@@ -30,6 +30,13 @@ only when the KOL has confirmed a single variant in this turn (Branch A).
 keys only; the classifier promotes to committed on a later inbound when
 the KOL agrees. Writing committed keys from a fragment would incorrectly
 satisfy the goal in the same turn.
+
+**`campaign_config` vs `offer` (do not confuse shapes):** `upsert-campaign`
+stores `deliverable_count_per_platform` as one **integer** for the whole
+campaign (same count on every platform in `deliverable_platforms`). During
+negotiation, `offer.deliverable_count_proposed` / `offer.deliverable_count_per_platform`
+may be ints or per-platform maps — never copy those dicts into
+`kol_bridge_tool.py upsert-campaign` JSON. See `docs/kol-campaign-config-upsert.md`.
 | `compensation_negotiation` | `offer.compensation_mode`, `offer.proposed_amount`, `offer.proposed_basis`, `offer.proposed_currency`, `offer.kol_paid_quote`, `offer.barter_attempted`, `offer.rate_requested`, `offer.paid_hold_sent` (not `offer.agreed_terms` — classifier only on KOL accept; `paid_hold_sent` is legacy-compatible with `rate_requested`) |
 | `contract_signing` | `offer.contract_sent`, `offer.contract_signed` |
 

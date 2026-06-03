@@ -4,6 +4,10 @@ Use **`kol_bridge_tool.py`** only — never `curl` ad hoc, never `import dispatc
 never `execute_code` for routing. Base URL: `HERMES_KOL_OPS_BRIDGE_BASE`
 (default `http://127.0.0.1:8080/api/plugins/kol-ops-bridge`).
 
+**`--env`:** pass **`LIVE`** for production KOL data or **`TEST`** for sandbox —
+not `prod` / `production` (CLI accepts those aliases and normalizes to `LIVE`).
+Every read/write that touches CAL must include explicit `--env`; there is no default.
+
 ## Reads (GET)
 
 | Purpose | CLI | HTTP |
@@ -82,7 +86,7 @@ For `select-draftable-plan`, merge facts as:
 | Persist draft | `persist-reply-draft --json '{...}'` | `POST /reply-drafts/persist` |
 | Open escalation | `open-escalation --json '{reason,...}'` | `POST /escalations` |
 | Reject draft | `reject --fact-path approval.reply_draft --json '{..., correction:{tags,note,suggested_fix}}'` | `POST /approvals/{fact_path}/reject` |
-| Unmark (reprocess) | `unmark-reply-handled --message-id MID` | `POST /gmail/unmark-reply-handled` |
+| Unmark (reprocess) | `unmark-reply-handled --message-id MID --identity-id ID --campaign-id CID --detected-mailbox-user-id UID` | `POST /gmail/unmark-reply-handled` |
 
 `write-facts-multi` with `source=email:<message_id>` must include classifier **`signals`**
 (same turn) so the Bridge can sanitize premature committed keys.
@@ -90,5 +94,7 @@ For `select-draftable-plan`, merge facts as:
 `persist-reply-draft` with multiple `contributing` entries: set
 `child_skill` to `kol-reply-synthesizer` (Bridge defaults this if omitted).
 
-`mark-reply-handled`: `kol-outreach/pending-reply` is optional in Gmail; missing label
+`mark-reply-handled`: pass `--identity-id`, `--campaign-id`, and
+`--detected-mailbox-user-id` so labels apply on the operator inbox that
+received the reply. `kol-outreach/pending-reply` is optional in Gmail; missing label
 does not fail the call (handled label is still applied).

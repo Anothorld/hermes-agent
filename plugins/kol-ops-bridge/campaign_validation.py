@@ -101,6 +101,7 @@ def validate_campaign_config(
     _check_platforms(v, candidate)
     _check_counts(v, candidate)
     _check_audit(v, candidate)
+    _check_nox_config(v, candidate)
 
     if v.missing:
         return {"status": "incomplete", "missing": sorted(set(v.missing)),
@@ -195,25 +196,115 @@ def _check_platforms(v: _Verdict, c: Mapping[str, Any]) -> None:
     v.normalized["deliverable_platforms"] = platforms
 
 
+def normalize_deliverable_count_per_platform(value: Any) -> Optional[int]:
+    """Coerce ``campaign_config.deliverable_count_per_platform`` to a scalar int.
+
+    Storage (CAL ``campaign_config`` row + ``upsert-campaign``) is a single
+  INTEGER applied uniformly to every entry in ``deliverable_platforms``. Do
+    not confuse with ``offer.deliverable_count_per_platform`` conversation
+    facts, which may be per-platform maps during negotiation.
+
+    Args:
+        value: Raw candidate from intake JSON.
+
+    Returns:
+        Positive int, or ``None`` when ``value`` is blank.
+
+    Raises:
+        ValueError: Non-uniform per-platform map, invalid type, or non-positive.
+    """
+    if _is_blank(value):
+        return None
+    if isinstance(value, bool):
+        raise ValueError("deliverable_count_per_platform must be a positive int, not a boolean")
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError("deliverable_count_per_platform must be a positive int")
+        return value
+    if isinstance(value, dict):
+        if not value:
+            raise ValueError("deliverable_count_per_platform map must not be empty")
+        nums: list[int] = []
+        for platform, n in value.items():
+            if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+                raise ValueError(
+                    f"deliverable_count_per_platform[{platform!r}]: "
+                    "count must be a positive int"
+                )
+            nums.append(n)
+        unique = set(nums)
+        if len(unique) != 1:
+            raise ValueError(
+                "deliverable_count_per_platform must be a single integer for "
+                "campaign_config (same count on every platform in "
+                "deliverable_platforms), not a per-platform map with differing "
+                f"values; got {value!r}. Use the minimum shared count or open an "
+                "escalation if platforms truly need different counts."
+            )
+        return nums[0]
+    raise ValueError(
+        "deliverable_count_per_platform must be a positive int "
+        "(e.g. 1), not a per-platform dict — that shape is only for "
+        "offer.* negotiation facts, not campaign_config upserts"
+    )
+
+
 def _check_counts(v: _Verdict, c: Mapping[str, Any]) -> None:
     counts = c.get("deliverable_count_per_platform")
     if _is_blank(counts):
         return
-    if isinstance(counts, int):
-        if counts <= 0:
-            v.fail("deliverable_count_per_platform", "must be a positive int")
-            return
-        v.normalized["deliverable_count_per_platform"] = counts
+    try:
+        normalized = normalize_deliverable_count_per_platform(counts)
+    except ValueError as exc:
+        v.fail("deliverable_count_per_platform", str(exc))
         return
-    if isinstance(counts, dict):
-        for platform, n in counts.items():
-            if not isinstance(n, int) or n <= 0:
-                v.fail("deliverable_count_per_platform",
-                       f"{platform}: count must be a positive int")
-                return
-        v.normalized["deliverable_count_per_platform"] = counts
-        return
-    v.fail("deliverable_count_per_platform", "must be a positive int or platform->int map")
+    if normalized is not None:
+        v.normalized["deliverable_count_per_platform"] = normalized
+
+
+_NOX_BOOL_KEYS = frozenset({"nox_quota_enabled", "nox_supplement_enabled", "nox_cache_enabled"})
+_NOX_INT_KEYS = frozenset(
+    {"nox_monthly_budget", "nox_supplement_max_calls", "nox_cache_retain_months"}
+)
+
+
+def _check_nox_config(v: _Verdict, c: Mapping[str, Any]) -> None:
+    """Optional Nox integration knobs on ``campaign_config``."""
+    for key in _NOX_BOOL_KEYS:
+        val = c.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, bool):
+            v.fail(key, "must be boolean")
+        else:
+            v.normalized[key] = val
+    for key in _NOX_INT_KEYS:
+        val = c.get(key)
+        if val is None:
+            continue
+        try:
+            ival = int(val)
+        except (TypeError, ValueError):
+            v.fail(key, "must be integer")
+            continue
+        if ival < 0:
+            v.fail(key, "must be >= 0")
+            continue
+        if key == "nox_monthly_budget" and ival > 2000:
+            v.fail(key, "must be <= 2000 (plan quota ceiling)")
+            continue
+        v.normalized[key] = ival
+    dims = c.get("nox_diligence_dimensions")
+    if dims is not None:
+        if not isinstance(dims, list) or not dims:
+            v.fail("nox_diligence_dimensions", "must be a non-empty list")
+        else:
+            allowed = {"profile", "audience", "content", "cooperation"}
+            bad = [d for d in dims if d not in allowed]
+            if bad:
+                v.fail("nox_diligence_dimensions", f"unknown dimensions: {bad}")
+            else:
+                v.normalized["nox_diligence_dimensions"] = dims
 
 
 def _check_audit(v: _Verdict, c: Mapping[str, Any]) -> None:
@@ -226,4 +317,9 @@ def _check_audit(v: _Verdict, c: Mapping[str, Any]) -> None:
     v.normalized["audit_standards_md"] = md.strip()
 
 
-__all__ = ["validate_campaign_config", "DEFAULT_SKU_REGEX", "REQUIRED_FIELDS"]
+__all__ = [
+    "validate_campaign_config",
+    "normalize_deliverable_count_per_platform",
+    "DEFAULT_SKU_REGEX",
+    "REQUIRED_FIELDS",
+]

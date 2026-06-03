@@ -48,8 +48,15 @@ from . import learning_promote
 from . import learning_store
 from . import reply_diff
 from . import reject_tags
-from .gmail_reconcile import run_reconcile_sent
+from .gmail_reconcile import run_reconcile_all_mailboxes, run_reconcile_sent
+from . import email_conversation
+from . import mailbox_resolver
 from .gmail_client import GmailClient, GmailUnavailable
+from .gmail_console import (
+    default_operator_user_id,
+    multi_operator_gmail_enabled,
+    resolve_console_user_id,
+)
 from . import gmail_reply_envelope
 from .schema import FACT_NAMESPACES, GOAL_NAMES, SCHEMA_VERSION
 
@@ -248,6 +255,16 @@ class CampaignConfigUpsertBody(BaseModel):
     commission_band: Optional[dict[str, Any]] = None
     deliverable_platforms: Optional[list[str]] = None
     deliverable_count_per_platform: Optional[int] = None
+
+    @field_validator("deliverable_count_per_platform", mode="before")
+    @classmethod
+    def _normalize_deliverable_count_per_platform(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        try:
+            return campaign_validation.normalize_deliverable_count_per_platform(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
     extra_notes: Optional[str] = None
     brief_template_id: Optional[str] = None
     sku_whitelist: Optional[list[str]] = None
@@ -323,9 +340,23 @@ class ApprovalDecisionBody(_CampaignIdNormaliserMixin):
     identity_id: int
     campaign_id: Optional[str] = None
     decided_by: str
+    operator_user_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="KOL Ops Console users.id for Gmail mailbox binding",
+    )
+    operator_email: Optional[str] = None
     note: Optional[str] = None
     correction: Optional[ApprovalCorrectionBody] = None
     extra_facts: Optional[dict[str, Any]] = None
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+class MailboxTakeoverBody(_CampaignIdNormaliserMixin):
+    campaign_id: str
+    operator_user_id: int = Field(ge=1)
+    operator_email: Optional[str] = None
+    requester_role: str = Field(default="operator", min_length=1, max_length=32)
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 
@@ -335,9 +366,12 @@ class ReconcileSentBody(BaseModel):
     max_results: int = Field(default=100, ge=1, le=500)
 
 
-class MarkReplyHandledBody(BaseModel):
+class MarkReplyHandledBody(_CampaignIdNormaliserMixin):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
     message_id: str = Field(min_length=1, max_length=256)
+    identity_id: Optional[int] = Field(default=None, ge=1)
+    campaign_id: Optional[str] = None
+    detected_mailbox_user_id: Optional[int] = Field(default=None, ge=0)
     handled_label: str = Field(default="kol-outreach/handled", min_length=1, max_length=120)
     pending_label: str = Field(default="kol-outreach/pending-reply", min_length=1, max_length=120)
 
@@ -607,6 +641,148 @@ def get_identity_timeline(
             campaign_id=campaign_id,
             limit=limit,
         ),
+    }
+
+
+def _operator_user_id_header(
+    x_koc_operator_user_id: Optional[int] = Header(
+        default=None, alias="X-KOC-Operator-User-Id",
+    ),
+) -> Optional[int]:
+    if x_koc_operator_user_id is None or x_koc_operator_user_id < 1:
+        return None
+    return int(x_koc_operator_user_id)
+
+
+def _mailbox_http_error(exc: mailbox_resolver.MailboxError) -> HTTPException:
+    detail: dict[str, Any] = {
+        "code": exc.code,
+        "message": exc.message,
+    }
+    if isinstance(exc, mailbox_resolver.MailboxAccessDeniedError):
+        binding = getattr(exc, "bound_email", None)
+        if binding:
+            detail["mailbox_email"] = binding
+    return HTTPException(status_code=exc.status_code, detail=detail)
+
+
+def _gmail_client_for_inbound_labels(body: MarkReplyHandledBody) -> GmailClient:
+    """Resolve the operator mailbox that owns the inbound Gmail message."""
+    if multi_operator_gmail_enabled():
+        missing = []
+        if body.identity_id is None:
+            missing.append("identity_id")
+        if not body.campaign_id:
+            missing.append("campaign_id")
+        if body.detected_mailbox_user_id is None:
+            missing.append("detected_mailbox_user_id")
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "mailbox_context_required",
+                    "message": (
+                        "multi-operator Gmail requires "
+                        + ", ".join(missing)
+                        + " on mark-reply-handled / unmark-reply-handled"
+                    ),
+                },
+            )
+    if body.identity_id is not None and body.campaign_id:
+        try:
+            return mailbox_resolver.resolve_for_inbound_gmail(
+                identity_id=body.identity_id,
+                campaign_id=body.campaign_id,
+                env=body.env,
+                detected_mailbox_user_id=body.detected_mailbox_user_id,
+            )
+        except mailbox_resolver.MailboxError as exc:
+            raise _mailbox_http_error(exc) from exc
+    if body.detected_mailbox_user_id is not None and body.detected_mailbox_user_id >= 0:
+        client = mailbox_resolver.client_for_user(
+            body.detected_mailbox_user_id if body.detected_mailbox_user_id > 0 else None,
+        )
+        if not client.is_available():
+            raise HTTPException(
+                status_code=503,
+                detail="gmail token or google_api.py unavailable for detected mailbox",
+            )
+        return client
+    client = GmailClient()
+    if not client.is_available():
+        raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    return client
+
+
+@router.get("/identities/{identity_id}/email-conversation")
+def get_email_conversation(
+    identity_id: int,
+    campaign_id: Annotated[str, Depends(_campaign_id_query_required_dep)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    operator_user_id: Annotated[Optional[int], Depends(_operator_user_id_header)] = None,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Gmail sent/received messages for the KOL detail communication panel.
+
+    Outbound rows are limited to messages in the Gmail ``SENT`` label (final
+    sends). Draft composer state is excluded.
+    """
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    try:
+        resolved = mailbox_resolver.resolve_for_read(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=env,
+            operator_user_id=operator_user_id,
+        )
+    except mailbox_resolver.MailboxError as exc:
+        raise _mailbox_http_error(exc) from exc
+    binding_payload = None
+    if resolved.binding:
+        binding_payload = {
+            "user_id": resolved.binding.user_id,
+            "email": resolved.binding.email,
+            "bound_at": resolved.binding.bound_at,
+        }
+    return email_conversation.build_email_conversation_safe(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        client=resolved.client,
+        mailbox_binding=binding_payload,
+    )
+
+
+@router.post("/identities/{identity_id}/mailbox/takeover")
+def takeover_campaign_mailbox(
+    identity_id: int,
+    body: MailboxTakeoverBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    try:
+        binding = mailbox_resolver.takeover_mailbox(
+            identity_id=identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+            new_operator_user_id=body.operator_user_id,
+            operator_email=str(body.operator_email or ""),
+            source=f"web:takeover:{body.operator_user_id}",
+            requester_role=str(body.requester_role or "operator"),
+        )
+    except mailbox_resolver.MailboxError as exc:
+        raise _mailbox_http_error(exc) from exc
+    return {
+        "ok": True,
+        "mailbox": {
+            "user_id": binding.user_id,
+            "email": binding.email,
+            "bound_at": binding.bound_at,
+        },
     }
 
 
@@ -1460,6 +1636,25 @@ def _active_goal_names(*, identity_id: int, campaign_id: str, env: str) -> list[
     ]
 
 
+def _coalesce_operator_user_id(body: ApprovalDecisionBody) -> Optional[int]:
+    """Resolve Console ``users.id`` for approve from body, env, or ``decided_by`` email."""
+    if body.operator_user_id is not None and body.operator_user_id >= 1:
+        return int(body.operator_user_id)
+    default_uid = default_operator_user_id()
+    if default_uid is not None:
+        return default_uid
+    if body.operator_email:
+        resolved = resolve_console_user_id(email=body.operator_email)
+        if resolved is not None:
+            return resolved
+    decided = (body.decided_by or "").strip()
+    if decided.startswith(("web:", "cli:")) and "@" in decided:
+        email = decided.split(":", 1)[1].strip()
+        if email:
+            return resolve_console_user_id(email=email)
+    return None
+
+
 def _record_draft_reject_learning(
     *,
     fact_path: str,
@@ -1569,11 +1764,41 @@ def _approve_or_reject(
         }
     gmail_draft: dict[str, Any] | None = None
     if decision == "approved" and fact_path == "approval.reply_draft":
+        if not body.campaign_id:
+            raise HTTPException(
+                status_code=400,
+                detail="campaign_id is required to approve approval.reply_draft",
+            )
+        operator_user_id = _coalesce_operator_user_id(body)
+        if operator_user_id is None or operator_user_id < 1:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "operator_required",
+                    "message": (
+                        "operator_user_id is required to approve approval.reply_draft "
+                        "(pass --operator-user-id, --operator-email, web:email decided_by, "
+                        "or set KOC_DEFAULT_OPERATOR_USER_ID)"
+                    ),
+                },
+            )
+        try:
+            resolved = mailbox_resolver.resolve_for_write(
+                identity_id=body.identity_id,
+                campaign_id=body.campaign_id,
+                env=body.env,
+                operator_user_id=operator_user_id,
+                operator_email=str(body.operator_email or ""),
+                source=f"approval:{body.decided_by}",
+            )
+        except mailbox_resolver.MailboxError as exc:
+            raise _mailbox_http_error(exc) from exc
         gmail_draft = _create_gmail_draft_for_reply_approval(
             identity_id=body.identity_id,
             campaign_id=body.campaign_id,
             approval_value=value,
             env=body.env,
+            client=resolved.client,
         )
         value["gmail_draft"] = gmail_draft
     style_policy_apply: Optional[dict[str, Any]] = None
@@ -1796,12 +2021,94 @@ def _resolve_envelope_from_inbound(
     return None, None
 
 
+def _gmail_self_emails(client: GmailClient) -> set[str]:
+    """Authenticated account + ``KOL_OPS_GMAIL_REPLY_SELF`` extras."""
+    self_emails: set[str] = set()
+    profile = client.get_profile_email()
+    if profile:
+        self_emails.add(profile)
+    extra_self = os.environ.get("KOL_OPS_GMAIL_REPLY_SELF", "")
+    for part in extra_self.split(","):
+        email = gmail_reply_envelope.extract_email(part.strip())
+        if email:
+            self_emails.add(email)
+    return self_emails
+
+
+def _fetch_inbound_for_reply_context(
+    client: GmailClient,
+    *,
+    source_message_id: str | None,
+    thread_id: str | None,
+) -> Any | None:
+    """Resolve the prior message used for reply-all Cc and Gmail quoting.
+
+    Tries ``source_message_id`` first (inbound reply path). When that is
+    missing or not a real Gmail id (e.g. proactive follow-up synthetic id),
+    falls back to the last message in ``thread_id``.
+    """
+    if source_message_id:
+        try:
+            return client.get_message(source_message_id)
+        except GmailUnavailable as exc:
+            log.warning(
+                "reply_draft inbound fetch failed msg=%s: %s",
+                source_message_id,
+                exc,
+            )
+    if thread_id:
+        thread_msgs = client.get_thread(thread_id)
+        if thread_msgs:
+            last_id = str(thread_msgs[-1].get("id") or "").strip()
+            if last_id:
+                try:
+                    return client.get_message(last_id)
+                except GmailUnavailable as exc:
+                    log.warning(
+                        "reply_draft thread tail fetch failed thread=%s msg=%s: %s",
+                        thread_id,
+                        last_id,
+                        exc,
+                    )
+    return None
+
+
+def _apply_reply_all_cc_and_quote(
+    *,
+    body: str,
+    to_addr: str,
+    cc_addr: str | None,
+    inbound: Any,
+    client: GmailClient,
+    html_body: bool,
+) -> tuple[str, str | None]:
+    """Apply reply-all Cc and Gmail-style quote when not already present."""
+    if not cc_addr:
+        cc_addr = gmail_reply_envelope.compute_reply_all_cc(
+            inbound_from=inbound.from_addr,
+            inbound_to=inbound.to,
+            inbound_cc=inbound.cc,
+            reply_to=to_addr,
+            self_emails=_gmail_self_emails(client),
+        ) or None
+    if not gmail_reply_envelope.body_has_quoted_reply(body):
+        body = gmail_reply_envelope.append_quoted_reply(
+            body=body,
+            quoted_from=inbound.from_addr,
+            quoted_date=inbound.date,
+            quoted_body=inbound.body,
+            html=html_body,
+        )
+    return body, cc_addr
+
+
 def _create_gmail_draft_for_reply_approval(
     *,
     identity_id: int,
     campaign_id: str | None,
     approval_value: dict[str, Any],
     env: str,
+    client: Optional[GmailClient] = None,
 ) -> dict[str, Any]:
     draft = approval_value.get("draft")
     if not isinstance(draft, dict):
@@ -1861,51 +2168,27 @@ def _create_gmail_draft_for_reply_approval(
                 detail=f"draft attachment not found on disk: {path_str}",
             )
         attachment_paths.append(path_str)
-    client = GmailClient()
-    if not client.is_available():
+    gmail = client or GmailClient()
+    if not gmail.is_available():
         raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
     cc_addr = str(draft.get("cc") or "").strip() or None
     html_body = bool(draft.get("html"))
-    source_msg_id = raw_source_msg or None
-    if source_msg_id:
-        try:
-            inbound = client.get_message(source_msg_id)
-        except GmailUnavailable as exc:
-            log.warning(
-                "reply_draft inbound fetch failed identity=%s msg=%s: %s",
-                identity_id,
-                source_msg_id,
-                exc,
-            )
-            inbound = None
-        if inbound is not None:
-            if not cc_addr:
-                self_email = client.get_profile_email()
-                self_emails: set[str] = set()
-                if self_email:
-                    self_emails.add(self_email)
-                extra_self = os.environ.get("KOL_OPS_GMAIL_REPLY_SELF", "")
-                for part in extra_self.split(","):
-                    email = gmail_reply_envelope.extract_email(part.strip())
-                    if email:
-                        self_emails.add(email)
-                cc_addr = gmail_reply_envelope.compute_reply_all_cc(
-                    inbound_from=inbound.from_addr,
-                    inbound_to=inbound.to,
-                    inbound_cc=inbound.cc,
-                    reply_to=to_addr,
-                    self_emails=self_emails,
-                ) or None
-            if not gmail_reply_envelope.body_has_quoted_reply(body):
-                body = gmail_reply_envelope.append_quoted_reply(
-                    body=body,
-                    quoted_from=inbound.from_addr,
-                    quoted_date=inbound.date,
-                    quoted_body=inbound.body,
-                    html=html_body,
-                )
+    inbound = _fetch_inbound_for_reply_context(
+        gmail,
+        source_message_id=raw_source_msg or None,
+        thread_id=resolved_thread_id,
+    )
+    if inbound is not None:
+        body, cc_addr = _apply_reply_all_cc_and_quote(
+            body=body,
+            to_addr=to_addr,
+            cc_addr=cc_addr,
+            inbound=inbound,
+            client=gmail,
+            html_body=html_body,
+        )
     try:
-        result = client.create_draft(
+        result = gmail.create_draft(
             to=to_addr,
             subject=subject,
             body=body,
@@ -1953,7 +2236,7 @@ def reconcile_sent(
 ) -> dict[str, Any]:
     _require_bridge_key(x_bridge_key)
     try:
-        result = run_reconcile_sent(
+        result = run_reconcile_all_mailboxes(
             env=body.env,
             lookback_days=body.lookback_days,
             max_results=body.max_results,
@@ -1993,9 +2276,7 @@ def mark_reply_handled(
     label transitions without hand-rolling Gmail label logic in SKILL code.
     """
     _require_bridge_key(x_bridge_key)
-    client = GmailClient()
-    if not client.is_available():
-        raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    client = _gmail_client_for_inbound_labels(body)
     try:
         result = _modify_reply_idempotency_labels(
             client,
@@ -2025,9 +2306,7 @@ def unmark_reply_handled(
     Removes the handled label and re-applies the pending-reply label.
     """
     _require_bridge_key(x_bridge_key)
-    client = GmailClient()
-    if not client.is_available():
-        raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    client = _gmail_client_for_inbound_labels(body)
     try:
         result = _modify_reply_idempotency_labels(
             client,

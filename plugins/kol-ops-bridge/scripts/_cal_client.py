@@ -39,6 +39,38 @@ CONSOLE_ENV_PATH = (
 )
 ENV_CHOICES = ("TEST", "LIVE")
 
+# Colloquial aliases agents/operators use; canonical partition keys are only TEST|LIVE.
+_ENV_ALIASES: dict[str, str] = {
+    "live": "LIVE",
+    "prod": "LIVE",
+    "production": "LIVE",
+    "test": "TEST",
+    "dev": "TEST",
+}
+
+
+def normalize_env(value: str) -> str:
+    """Map ``--env`` to canonical ``TEST`` or ``LIVE`` (argparse ``type=`` hook)."""
+    raw = (value or "").strip()
+    if not raw:
+        raise argparse.ArgumentTypeError(
+            "env is required — use TEST (sandbox) or LIVE (production data)",
+        )
+    key = raw.lower()
+    if key in _ENV_ALIASES:
+        canonical = _ENV_ALIASES[key]
+        if canonical != raw:
+            print(
+                f"kol_bridge_tool: normalized --env {raw!r} -> {canonical}",
+                file=sys.stderr,
+            )
+        return canonical
+    raise argparse.ArgumentTypeError(
+        f"invalid env {raw!r}: CAL only accepts TEST or LIVE "
+        "(production data = LIVE, not 'prod'). "
+        "Accepted aliases: prod/production -> LIVE; dev -> TEST.",
+    )
+
 
 def _load_key_from_kv_file(path: Path, keys: tuple[str, ...]) -> Optional[str]:
     if not path.exists():
@@ -154,12 +186,16 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
 
 
 def add_env_arg(p: argparse.ArgumentParser, *, required: bool = True) -> None:
-    """Attach the mandatory ``--env`` choice argument."""
+    """Attach the mandatory ``--env`` argument (canonical TEST|LIVE)."""
     p.add_argument(
         "--env",
         required=required,
-        choices=ENV_CHOICES,
-        help="TEST or LIVE — never defaults to avoid cross-env writes.",
+        type=normalize_env,
+        metavar="ENV",
+        help=(
+            "CAL partition: TEST (sandbox) or LIVE (production). "
+            "Aliases prod/production -> LIVE; dev -> TEST. No default."
+        ),
     )
 
 

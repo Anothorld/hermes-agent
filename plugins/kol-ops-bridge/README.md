@@ -67,7 +67,18 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-candidate-handles 
 
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py mark-reply-handled \
   --env LIVE \
-  --message-id "19e749bada32cc15"
+  --message-id "19e749bada32cc15" \
+  --identity-id 42 \
+  --campaign-id "TS8319" \
+  --detected-mailbox-user-id 1
+
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py approve \
+  --env LIVE \
+  --fact-path approval.reply_draft \
+  --identity-id 42 \
+  --campaign-id "TS8319" \
+  --decided-by "cli:alice@company.com" \
+  --operator-user-id 1
 
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-escalation \
   --escalation-id 42
@@ -84,8 +95,26 @@ unknown keys are ignored. For KOL compensation, `paid_target_budget` and
 `paid_ceiling` both refer to the extra cash supplement on top of the gifted
 product, not the product value itself.
 
+**`deliverable_count_per_platform` (frequent agent mistake):** must be a
+**single positive integer** in `upsert-campaign` JSON — the same count applies
+to every platform listed in `deliverable_platforms`. Example:
+`"deliverable_platforms": ["instagram","tiktok"], "deliverable_count_per_platform": 1`.
+Do **not** send a per-platform map like `{"instagram": 1, "tiktok": 1}`; that
+shape is for `offer.*` negotiation facts (`offer.deliverable_count_proposed`,
+`offer.deliverable_count_per_platform`), not for `campaign_config`. If every
+platform in a map shares the same count, the API coerces it to that int; mixed
+counts are rejected. See `docs/kol-campaign-config-upsert.md`.
+
 The wrapper requires explicit `env` for mutating calls and never imports or
-opens CAL SQLite directly. Use dedicated projection commands such as
+opens CAL SQLite directly.
+
+**`--env` (frequent agent mistake):** only **`TEST`** or **`LIVE`** are stored in
+CAL. Production / real KOL data = **`LIVE`**, not `prod`, `production`, or
+`live` (lowercase is accepted and normalized). Sandbox / test inbox flows =
+**`TEST`**. The CLI maps `prod` / `production` → `LIVE` and `dev` → `TEST`
+with a stderr notice.
+
+Use dedicated projection commands such as
 `list-candidate-handles` instead of piping `list-candidates` into ad hoc
 `python -c` snippets.
 
@@ -115,6 +144,13 @@ Key payload rules (most frequent failure modes):
 
 Canonical shape examples and skill-side persistence conventions:
 `skills/social-media/instagram-kol-discovery/references/bridge-cli-json-payloads.md`.
+
+### NoxInfluencer integration
+
+See `docs/kol-nox-integration.md` and plugin `plugins/nox-kol-bridge/`.
+Allowed identity facts include `identity.nox_creator_id`,
+`identity.nox_diligence_verdict`, `identity.nox_diligence_at`, and monitor IDs.
+`identity.email_source` may be `noxinfluencer_api` when contacts came from Nox.
 
 ## Toolized deterministic skill steps
 
@@ -242,6 +278,19 @@ CAL writes are best-effort: skill callers wrap every write in a try /
 except that logs and returns. The reconcile loop (`cal.reconcile_*`)
 periodically walks Gmail labels + Kanban cards to back-fill anything
 that was dropped during a write failure.
+
+## Per-operator Gmail (multi-mailbox)
+
+See `docs/kol-operator-gmail-onboarding.md` for operator SOP. Bridge/poller env
+template: `plugins/kol-ops-bridge/.env.example`. Post-upgrade one-shot:
+
+```bash
+python hermes-agent/playground/kol-ops-console/scripts/gmail_multimailbox_setup.py
+```
+
+CLI approve for `approval.reply_draft` requires mailbox context:
+`--operator-user-id`, `--operator-email`, `decided-by web:you@co`, or
+`KOC_DEFAULT_OPERATOR_USER_ID`.
 
 ## Not in scope (yet)
 

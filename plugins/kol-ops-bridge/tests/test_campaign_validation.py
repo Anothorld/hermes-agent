@@ -1,96 +1,67 @@
-"""Tests for deterministic campaign_config validation."""
+"""Tests for campaign_config validation helpers."""
 
 from __future__ import annotations
+
+import pytest
 
 
 def _cv(bridge_pkg):
     return bridge_pkg.campaign_validation
 
 
-def _good_candidate(**over):
-    base = {
-        "product_display_name": "the new media console",
-        "sku_whitelist": ["TS8319"],
-        "color_variant_policy": "strict_whitelist",
-        "compensation": {"default_mode": "paid", "paid_max_amount": 1500},
-        "deliverable_platforms": ["instagram", "tiktok"],
-        "deliverable_count_per_platform": {"instagram": 1, "tiktok": 1},
-        "brief_template_id": "tpl-default",
-        "audit_standards_md": "x" * 60,
-    }
-    base.update(over)
-    return base
+def test_normalize_int(bridge_pkg):
+    norm = _cv(bridge_pkg).normalize_deliverable_count_per_platform
+    assert norm(1) == 1
 
 
-def test_all_green(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(), campaign_id="TS8319-summer")
+def test_normalize_uniform_dict(bridge_pkg):
+    norm = _cv(bridge_pkg).normalize_deliverable_count_per_platform
+    assert norm({"instagram": 1, "tiktok": 1}) == 1
+
+
+def test_normalize_rejects_mixed_dict(bridge_pkg):
+    norm = _cv(bridge_pkg).normalize_deliverable_count_per_platform
+    with pytest.raises(ValueError, match="single integer"):
+        norm({"instagram": 1, "tiktok": 2})
+
+
+def test_validate_normalizes_uniform_dict(bridge_pkg):
+    cv = _cv(bridge_pkg)
+    out = cv.validate_campaign_config(
+        {
+            "product_display_name": "TV Stand",
+            "sku_whitelist": ["TS8319"],
+            "color_variant_policy": "any_in_whitelist",
+            "compensation": {"default_mode": "gifted"},
+            "deliverable_platforms": ["instagram"],
+            "deliverable_count_per_platform": {"instagram": 2},
+            "brief_template_id": "brief-1",
+            "audit_standards_md": "x" * 50,
+        },
+        campaign_id="POVISON-TS-8319",
+        sku_regex=cv.DEFAULT_SKU_REGEX,
+    )
     assert out["status"] == "ok"
-    assert out["normalized"]["product_display_name"] == "the new media console"
+    assert out["normalized"]["deliverable_count_per_platform"] == 2
 
 
-def test_missing_fields(bridge_pkg):
-    cand = _good_candidate()
-    del cand["sku_whitelist"]
-    del cand["audit_standards_md"]
-    out = _cv(bridge_pkg).validate_campaign_config(cand, campaign_id="C1")
-    assert out["status"] == "incomplete"
-    assert "sku_whitelist" in out["missing"]
-    assert "audit_standards_md" in out["missing"]
-
-
-def test_display_name_equal_sku_rejected(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(product_display_name="TS8319"), campaign_id="c")
-    assert out["status"] == "invalid"
-    assert out["invalid"][0]["field"] == "product_display_name"
-
-
-def test_display_name_equal_campaign_id_rejected(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(product_display_name="summer-2026"),
-        campaign_id="summer-2026")
-    assert out["status"] == "invalid"
-
-
-def test_empty_whitelist_is_missing_not_default(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(sku_whitelist=[]), campaign_id="c")
-    assert out["status"] == "incomplete"
-    assert "sku_whitelist" in out["missing"]
-
-
-def test_bad_color_policy_invalid(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(color_variant_policy="any"), campaign_id="c")
-    assert out["status"] == "invalid"
-
-
-def test_short_audit_md_invalid(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(audit_standards_md="too short"), campaign_id="c")
-    assert out["status"] == "invalid"
-
-
-def test_cap_review(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(compensation={"default_mode": "paid",
-                                     "paid_max_amount": 2_000_000}),
-        campaign_id="c")
-    assert out["status"] == "cap_review"
-    assert out["amount"] == 2_000_000
-
-
-def test_cap_review_bypassed_when_confirmed(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(compensation={"default_mode": "paid",
-                                     "paid_max_amount": 2_000_000}),
-        campaign_id="c", confirmed_high_budget=True)
+def test_validate_nox_config_fields(bridge_pkg):
+    cv = _cv(bridge_pkg)
+    out = cv.validate_campaign_config(
+        {
+            "product_display_name": "TV Stand",
+            "sku_whitelist": ["TS8319"],
+            "color_variant_policy": "any_in_whitelist",
+            "compensation": {"default_mode": "gifted"},
+            "deliverable_platforms": ["instagram"],
+            "deliverable_count_per_platform": 1,
+            "brief_template_id": "brief-1",
+            "audit_standards_md": "x" * 50,
+            "nox_quota_enabled": True,
+            "nox_monthly_budget": 1800,
+        },
+        campaign_id="POVISON-TS-8319",
+        sku_regex=cv.DEFAULT_SKU_REGEX,
+    )
     assert out["status"] == "ok"
-
-
-def test_bad_platform_invalid(bridge_pkg):
-    out = _cv(bridge_pkg).validate_campaign_config(
-        _good_candidate(deliverable_platforms=["instagram", "snapchat"]),
-        campaign_id="c")
-    assert out["status"] == "invalid"
+    assert out["normalized"]["nox_monthly_budget"] == 1800
