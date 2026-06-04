@@ -15,6 +15,7 @@ Every read/write that touches CAL must include explicit `--env`; there is no def
 | Dispatch bundle | `get-dispatch-context --identity-id ID --campaign-id CID --env LIVE` | `GET /identities/{id}/dispatch-context?campaign_id=&env=` |
 | Campaign facts only | `get-facts --identity-id ID --campaign-id CID --env LIVE` | `GET /facts/{id}?campaign_id=&env=` |
 | Poller idempotency | *(poller only)* | `GET /identities/{id}/reply-dispatch-status?campaign_id=&message_id=&env=` |
+| Follow-up chase hint | `get-reply-chase-hint --identity-id ID --campaign-id CID --message-id MID --thread-id TH --env LIVE` | `GET /identities/{id}/reply-chase-hint?campaign_id=&message_id=&thread_id=&env=` |
 | Parsed escalation rules | `get-parsed-escalation-rules` | `GET /policies/escalation_rules/parsed` |
 
 `get-dispatch-context` returns `{goals, lanes, relationship, reusable_facts,

@@ -22,6 +22,36 @@ class ReplyDraftError(ValueError):
     """Raised when an envelope cannot be enriched into a sendable draft."""
 
 
+def _non_empty_str(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def extract_thread_anchors(value: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Return ``(thread_id, source_message_id)`` candidates from a reply_draft fact.
+
+    Prefer canonical fields inside ``draft`` / ``source_message_id``. Fall back to
+    legacy top-level ``thread_id`` and ``in_reply_to`` when a synthesizer wrote
+    the fact directly (techjoyce incident: ``draft.thread_id`` missing but top-level
+    anchors present).
+    """
+    draft = value.get("draft") if isinstance(value.get("draft"), dict) else {}
+    thread_id = _non_empty_str(draft.get("thread_id")) or _non_empty_str(
+        value.get("thread_id"),
+    )
+    source_message_id = _non_empty_str(value.get("source_message_id")) or _non_empty_str(
+        value.get("in_reply_to"),
+    )
+    return thread_id, source_message_id
+
+
+def has_thread_anchor(value: Mapping[str, Any]) -> bool:
+    """True when the fact carries enough data to attach a Gmail draft to a thread."""
+    thread_id, source_message_id = extract_thread_anchors(value)
+    return bool(thread_id or source_message_id)
+
+
 def _with_re_prefix(subject: str) -> str:
     subject = (subject or "").strip()
     if not subject:
@@ -124,6 +154,8 @@ def build_approval_fact_value(
 
 __all__ = [
     "enrich_envelope",
+    "extract_thread_anchors",
+    "has_thread_anchor",
     "build_draft_event_payload",
     "build_approval_fact_value",
     "ReplyDraftError",

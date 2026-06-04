@@ -118,6 +118,75 @@ def test_create_draft_proactive_uses_thread_for_cc_and_quote(cal_db):
     assert kwargs["body"].startswith("Hi — just checking in")
 
 
+def test_create_draft_techjoyce_top_level_thread_anchors(cal_db):
+    """Regression: synthesizer wrote thread_id/in_reply_to at fact top-level."""
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="@techjoyce", platform="instagram")
+    cid = "SEB8008-20260525"
+    cal_db.upsert_campaign_config(campaign_id=cid, env="TEST", test_mode_to="t@x.com")
+    cal_db.write_event(
+        identity_id=iid,
+        campaign_id=cid,
+        event_type="kol_inbound_reply",
+        actor="test",
+        env="TEST",
+        payload={
+            "message_id": "19e84b2d4cf91067",
+            "thread_id": "19e81ff6def3b65f",
+            "from_addr": "Ankush Bhasin <ankush@sparkmedia.la>",
+            "subject": "Re: POVISON x @techjoyce — Smart Sofa Bed Collab",
+        },
+    )
+    inbound = SimpleNamespace(
+        message_id="19e84b2d4cf91067",
+        thread_id="19e81ff6def3b65f",
+        from_addr="Ankush Bhasin <ankush@sparkmedia.la>",
+        to="candice@povison-collab.com",
+        cc="",
+        subject="Re: POVISON x @techjoyce — Smart Sofa Bed Collab",
+        snippet="",
+        in_reply_to=None,
+        references=None,
+        date="Mon, 1 Jun 2026 15:39:31 -0400",
+        body="Can you share more details?",
+    )
+    mock_client = MagicMock()
+    mock_client.is_available.return_value = True
+    mock_client.get_profile_email.return_value = "candice@povison-collab.com"
+    mock_client.get_message.return_value = inbound
+    mock_client.create_draft.return_value = SimpleNamespace(
+        draft_id="D-TJ",
+        message_id="M-TJ",
+        thread_id="19e81ff6def3b65f",
+    )
+    approval_value = {
+        "contributing_skills": [
+            {"goal": "product_selection", "lane": "commerce", "skill": "kol-product-selector"},
+        ],
+        "draft": {
+            "body": "Hi Ankush,\n\nThanks for getting back to us!",
+            "subject": "Re: POVISON x @techjoyce — Smart Sofa Bed Collab",
+            "to": "Ankush Bhasin <ankush@sparkmedia.la>",
+        },
+        "event_id": 4565,
+        "in_reply_to": "19e84b2d4cf91067",
+        "primary_goal": "product_selection",
+        "primary_lane": "commerce",
+        "thread_id": "19e81ff6def3b65f",
+    }
+    with patch.object(plugin_api, "GmailClient", return_value=mock_client):
+        out = plugin_api._create_gmail_draft_for_reply_approval(
+            identity_id=iid,
+            campaign_id=cid,
+            approval_value=approval_value,
+            env="TEST",
+        )
+    assert out["thread_id"] == "19e81ff6def3b65f"
+    kwargs = mock_client.create_draft.call_args.kwargs
+    assert kwargs["thread_id"] == "19e81ff6def3b65f"
+    mock_client.get_message.assert_called_once_with("19e84b2d4cf91067")
+
+
 def test_create_draft_skips_duplicate_quote_when_body_has_marker(cal_db):
     plugin_api = _load_plugin_api()
     inbound = _inbound()

@@ -29,7 +29,7 @@ def _load_package() -> types.ModuleType:
     for sub in ("schema", "campaign_nox_integration", "goals", "policies", "cal", "discovery_router",
                 "confirmed_ingest", "confirmed_fact_buffer",
                 "pricing_engine", "campaign_validation", "classifier_facts",
-                "dispatch_router", "reply_draft", "reject_tags", "reply_diff",
+                "dispatch_router", "reply_draft", "reply_chase", "reject_tags", "reply_diff",
                 "learning_store", "learning_llm", "learning_distill", "learning_jobs",
                 "learning_job_store", "learning_promote", "learning_overview",
                 "gmail_reconcile",

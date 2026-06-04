@@ -659,6 +659,41 @@ def _dispatch_context(identity_id: int, campaign_id: Optional[str], env: str) ->
         return {"error": "dispatch_context_unavailable", "detail": str(exc)}
 
 
+def _fetch_chase_context(
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    message_id: str,
+    thread_id: Optional[str],
+    env: str,
+) -> dict[str, Any]:
+    if not campaign_id:
+        return {"recommended_action": "proceed_normal", "prior_pending_draft": False}
+    try:
+        out = _BRIDGE.request(
+            "GET",
+            f"/identities/{identity_id}/reply-chase-hint",
+            params={
+                "campaign_id": campaign_id,
+                "message_id": message_id,
+                "thread_id": thread_id or "",
+                "env": env,
+            },
+        )
+    except SystemExit as exc:
+        log.warning(
+            "bridge reply-chase-hint failed identity=%s msg=%s: %s",
+            identity_id,
+            message_id,
+            exc,
+        )
+        return {"recommended_action": "proceed_normal", "prior_pending_draft": False}
+    return out if isinstance(out, dict) else {
+        "recommended_action": "proceed_normal",
+        "prior_pending_draft": False,
+    }
+
+
 _THREAD_MSG_BODY_CAP = 4000
 _THREAD_HISTORY_TOTAL_CAP = 24000
 
@@ -726,6 +761,13 @@ def _pending_reply_payload(
         thread_id=matched.history_thread_id or msg.thread_id,
         latest_message_id=msg.message_id,
     )
+    chase_context = _fetch_chase_context(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        message_id=msg.message_id,
+        thread_id=msg.thread_id,
+        env=env,
+    )
     return {
         "identity_id": identity_id,
         "campaign_id": campaign_id,
@@ -768,6 +810,7 @@ def _pending_reply_payload(
             ),
         },
         "dispatch_context": context,
+        "chase_context": chase_context,
     }
 
 

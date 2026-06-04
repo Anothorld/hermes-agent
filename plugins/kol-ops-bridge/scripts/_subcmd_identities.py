@@ -91,6 +91,20 @@ def cmd_get_dispatch_context(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_get_reply_chase_hint(args: argparse.Namespace) -> None:
+    params = {
+        "campaign_id": args.campaign_id,
+        "message_id": args.message_id,
+        "env": args.env,
+    }
+    if args.thread_id:
+        params["thread_id"] = args.thread_id
+    print_json(client_from_args(args).request(
+        "GET", f"/identities/{args.identity_id}/reply-chase-hint",
+        params=params,
+    ))
+
+
 def cmd_get_timeline(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "GET", f"/identities/{args.identity_id}/timeline",
@@ -216,6 +230,18 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--identity-id", type=int, required=True)
     p.add_argument("--campaign-id", required=True)
     p.set_defaults(func=cmd_get_dispatch_context)
+
+    p = sub.add_parser(
+        "get-reply-chase-hint",
+        help=("GET .../reply-chase-hint — follow-up supersede policy for one inbound."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--identity-id", type=int, required=True)
+    p.add_argument("--campaign-id", required=True)
+    p.add_argument("--message-id", required=True)
+    p.add_argument("--thread-id", default=None)
+    p.set_defaults(func=cmd_get_reply_chase_hint)
 
     p = sub.add_parser("get-timeline",
                        help="GET /identities/{id}/timeline — reverse-chrono event log for one KOL.")

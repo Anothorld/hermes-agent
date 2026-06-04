@@ -118,6 +118,35 @@ Each `pending_replies[i]` item also carries `detected_mailbox_user_id` and
 `detected_mailbox_email` (the inbox that received this message). Pass these
 through to Step 6 label calls.
 
+### Step 0c — `chase_context` shape (read-only, supplied by pre-run)
+
+`pending_replies[i].chase_context` is computed deterministically by the
+poller from the latest ``approval.reply_draft`` fact + inbound ids:
+
+```json
+{
+  "prior_pending_draft": true,
+  "prior_approved_unsent": false,
+  "prior_source_message_id": "19e84b2d4cf91067",
+  "prior_thread_id": "19e81ff6def3b65f",
+  "recommended_action": "regenerate",
+  "stale_hours": 36.2,
+  "inbound_message_id": "19e8ef255f17f7af",
+  "inbound_thread_id": "19e81ff6def3b65f"
+}
+```
+
+`recommended_action` values:
+
+| Value | Meaning |
+|-------|---------|
+| `proceed_normal` | No stale draft blocking this turn |
+| `skip_same_source` | Draft already targets this inbound message |
+| `regenerate` | **Follow-up chase** — supersede stale draft for prior message |
+| `escalate_thread_fork` | Prior draft thread ≠ inbound thread with no CAL link — escalate only |
+
+Optional probe (same logic): `get-reply-chase-hint --identity-id ID --campaign-id CID --message-id MID --thread-id TH --env LIVE`.
+
 ### Step 1 — Fetch dispatch context (one call)
 For each `pending_replies[i]`, fetch the bundled context:
 
@@ -179,6 +208,31 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
 - After the write, re-fetch dispatch context with `get-dispatch-context`.
   This is the **server's** view of which goals are now active / satisfied
   / blocked, and supersedes the classifier's `active_goals_by_lane`.
+
+### Step 3.1 — Chase supersede (mandatory when `chase_context.recommended_action == "regenerate"`)
+
+Read `pending_replies[i].chase_context` **after** Step 3 re-fetch.
+
+When `recommended_action == "regenerate"` **and** `allow_autoflow` is still
+true (Step 3.25 did not block this turn):
+
+1. **Do not** write `approval.pending_action_reply_needed` / `pending_action_reason`
+   as the sole outcome — the Bridge rejects these on follow-up inbounds.
+2. Continue Steps 4–5.6 normally (classifier facts already written in Step 3).
+3. The merged reply body **must** open with a one-sentence acknowledgment of
+   the follow-up (e.g. “Thanks for following up — …”) before restating the offer.
+4. **Must** persist via `persist-reply-draft` with
+   `source_message_id = latest_email.message_id` (not the prior draft's id).
+   The Bridge writes `kol_reply_draft_superseded` and tags the new fact with
+   `chase_supersede` for the operator console.
+5. Reuse any open linked escalation; do not open a duplicate for the same chase.
+
+When `recommended_action == "escalate_thread_fork"`:
+
+- Open escalation `reply_thread_fork` with both thread ids in `resume_context`.
+- Do **not** auto-draft this turn.
+
+When `proceed_normal` or `skip_same_source`: no extra chase handling.
 
 ### Step 3.25 — Soft-control anomaly gating (mandatory)
 
@@ -497,6 +551,10 @@ Allowed tools for deterministic steps: **`kol_bridge_tool.py` subcommands** and
   stripped it to `{from, date, body}` exactly so downstream LLMs see
   the conversation verbatim and avoid re-asking previously-answered
   questions or echoing already-used phrasing.
+- When `chase_context.recommended_action == "regenerate"`, **never** end
+  the turn with only `approval.pending_action_reply_needed` — the Bridge
+  rejects that write. You **must** run Steps 4–5.7 and
+  `persist-reply-draft` anchored to `latest_email.message_id`.
 - `flow_hint.kol_signaled_next_step` is guidance, not policy. Never
   override what the KOL actually wrote: if they asked a question on
   the current goal, the child skill must answer it even when the hint

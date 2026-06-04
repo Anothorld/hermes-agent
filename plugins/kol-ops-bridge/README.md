@@ -168,6 +168,7 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Escalation-rule matching → `escalation_hint` | `policies.match_escalation_rules` | `match-escalation-rules` | `POST /logic/match-escalation-rules` |
 | Classifier committed-key sanitize (preview) | `classifier_facts.py` | `sanitize-classifier-facts` | `POST /logic/sanitize-classifier-facts` |
 | Reply poller idempotency probe | `cal.reply_dispatch_status` | *(GET only)* | `GET /identities/{id}/reply-dispatch-status` |
+| Follow-up chase policy | `reply_chase.py`, `cal.reply_chase_hint` | `get-reply-chase-hint` | `GET /identities/{id}/reply-chase-hint` |
 | Gmail unmark for re-dispatch | `gmail_client.py` | `unmark-reply-handled` | `POST /gmail/unmark-reply-handled` |
 | Reply-draft envelope enrichment + atomic persist | `reply_draft.py` | `persist-reply-draft` | `POST /reply-drafts/persist` |
 | Learning exports (read-only) | `learning_store.py` | `export-*-events`, `export-fact-corrections`, … | `GET /learning/*` |
@@ -185,6 +186,21 @@ read/write) and need no bridge
 key. `persist-reply-draft` writes CAL (event + `approval.reply_draft` fact in
 one call, after enriching `to` / `Re:`-subject / `thread_id`) and requires the
 key like every other mutating route.
+
+**Thread anchors on `approval.reply_draft`:** every write must carry at least
+one of `draft.thread_id`, `source_message_id`, top-level `thread_id`, or
+`in_reply_to` (CAL rejects anchor-less drafts at write time). Direct
+`write-facts` from `skill:kol-*` on `approval.reply_draft` is rejected — use
+`persist-reply-draft` only.
+
+**Follow-up chase (`reply_chase`):** when a new inbound arrives while an older
+pending (or approved-but-unsent) `approval.reply_draft` exists, the poller
+attaches `chase_context.recommended_action=regenerate` to `pending_replies[]`.
+The dispatcher must supersede via `persist-reply-draft` (writes
+`kol_reply_draft_superseded` + `chase_supersede` on the new fact). Writing
+`approval.pending_action_reply_needed` alone is blocked when chase says
+regenerate. On approve, the bridge resolves Gmail `threadId` from thread anchor
+fields — including legacy synthesizer top-level `thread_id` / `in_reply_to`.
 
 ```bash
 # Pricing: returns {mode_decided, target_number, lower/upper_bound,

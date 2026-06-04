@@ -67,6 +67,58 @@ def test_write_facts_rejects_missing_draft_object(cal_db):
         )
 
 
+def test_write_facts_rejects_missing_thread_anchor(cal_db):
+    iid = cal_db.upsert_identity(primary_handle="vc6", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="V6", env="TEST",
+                                  test_mode_to="t@x.com")
+    with pytest.raises(cal_db.FactNamespaceError) as exc_info:
+        cal_db.write_facts(
+            identity_id=iid, campaign_id="V6", namespace="approval",
+            facts={"approval.reply_draft": {
+                "decision": "pending",
+                "primary_lane": "commerce",
+                "primary_goal": "product_selection",
+                "child_skill": "kol-reply-synthesizer",
+                "draft": {
+                    "subject": "Re: x",
+                    "body": "y",
+                    "to": "k@x.com",
+                },
+            }},
+            source="skill:kol-reply-synthesizer", env="TEST",
+        )
+    assert "thread anchor" in str(exc_info.value).lower()
+
+
+def test_write_facts_accepts_top_level_thread_anchors(cal_db):
+    """techjoyce incident shape: anchors on fact root, not inside draft."""
+    iid = cal_db.upsert_identity(primary_handle="vc7", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="V7", env="TEST",
+                                  test_mode_to="t@x.com")
+    cal_db.write_facts(
+        identity_id=iid, campaign_id="V7", namespace="approval",
+        facts={"approval.reply_draft": {
+            "decision": "pending",
+            "source_message_id": "19e84b2d4cf91067",
+            "primary_lane": "commerce",
+            "primary_goal": "product_selection",
+            "child_skill": "kol-reply-synthesizer",
+            "thread_id": "19e81ff6def3b65f",
+            "in_reply_to": "19e84b2d4cf91067",
+            "draft": {
+                "subject": "Re: collab",
+                "body": "Thanks for following up.",
+                "to": "manager@agency.com",
+            },
+        }},
+        source="draft:19e8ef255f17f7af", env="TEST",
+    )
+    latest = cal_db.latest_facts_for(
+        identity_id=iid, campaign_id="V7", env="TEST",
+    ).get("approval.reply_draft")
+    assert latest["thread_id"] == "19e81ff6def3b65f"
+
+
 def test_write_facts_accepts_complete_reply_draft(cal_db):
     iid = cal_db.upsert_identity(primary_handle="vc4", platform="instagram")
     cal_db.upsert_campaign_config(campaign_id="V4", env="TEST",

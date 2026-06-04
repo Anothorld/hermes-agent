@@ -59,6 +59,8 @@ from .campaign_nox_integration import (
     pick_nox_fields,
 )
 from .goals import GOALS, Context, all_goals
+from . import reply_draft
+from . import reply_chase
 from .schema import FACT_NAMESPACES, GOAL_NAMES, recreate_all
 
 log = logging.getLogger(__name__)
@@ -972,6 +974,74 @@ def _validate_approval_reply_draft(value: Any) -> None:
         raise FactNamespaceError(
             f"approval.reply_draft.draft missing/empty: {', '.join(missing)}"
         )
+    if not reply_draft.has_thread_anchor(value):
+        raise FactNamespaceError(
+            "approval.reply_draft must carry a thread anchor: "
+            "draft.thread_id, source_message_id, top-level thread_id, or in_reply_to"
+        )
+
+
+def _validate_reply_draft_write_source(source: str) -> None:
+    """Block direct skill writes that bypass ``persist-reply-draft``."""
+    if source.startswith("skill:kol-"):
+        raise FactNamespaceError(
+            "approval.reply_draft must be written via persist-reply-draft "
+            "(source draft:<message_id>), not skill write-facts"
+        )
+
+
+def _validate_chase_pending_action_guard(
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    env: str,
+    facts: Mapping[str, Any],
+    source: str,
+) -> None:
+    """Reject pending_action when chase policy requires draft regeneration."""
+    if not campaign_id:
+        return
+    if not facts.get("approval.pending_action_reply_needed"):
+        return
+    if not _truthy(facts.get("approval.pending_action_reply_needed")):
+        return
+    inbound_message_id: str | None = None
+    if source.startswith("email:"):
+        inbound_message_id = source[len("email:"):].strip() or None
+    if not inbound_message_id:
+        return
+    chase = reply_chase_hint(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        message_id=inbound_message_id,
+        thread_id=None,
+        env=env,
+    )
+    if chase.get("recommended_action") == "regenerate":
+        raise FactNamespaceError(
+            "approval.pending_action_reply_needed is blocked for follow-up inbound "
+            f"{inbound_message_id}: use persist-reply-draft to supersede the stale "
+            "pending draft (see chase_context.recommended_action=regenerate)"
+        )
+
+
+def _validate_approval_write_guards(
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    env: str,
+    facts: Mapping[str, Any],
+    source: str,
+) -> None:
+    if "approval.reply_draft" in facts:
+        _validate_reply_draft_write_source(source)
+    _validate_chase_pending_action_guard(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        facts=facts,
+        source=source,
+    )
 
 
 _DISCOVERY_ALLOWED_SOURCES: Final[set[str]] = {
@@ -1371,6 +1441,13 @@ def write_facts(
     _validate_discovery_identity_match(
         identity_id=identity_id, namespace=namespace, facts=facts, env=env,
     )
+    _validate_approval_write_guards(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        facts=facts,
+        source=source,
+    )
 
     def _do() -> int:
         with _connect() as conn:
@@ -1445,6 +1522,13 @@ def write_facts_multi(
         _validate_discovery_provenance_bundle(namespace=ns, facts=facts)
         _validate_discovery_identity_match(
             identity_id=identity_id, namespace=ns, facts=facts, env=env,
+        )
+        _validate_approval_write_guards(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=env,
+            facts=facts,
+            source=source,
         )
 
     written: dict[str, int] = {}
@@ -1858,6 +1942,94 @@ def list_events(
     return _safe("list_events", _do) or []
 
 
+def get_reply_draft_row(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    env: str = "LIVE",
+) -> Optional[dict[str, Any]]:
+    """Latest ``approval.reply_draft`` row with capture timestamp."""
+
+    def _do() -> Optional[dict[str, Any]]:
+        with _connect() as conn:
+            row = conn.execute(
+                """SELECT fact_value, captured_at FROM kol_facts
+                    WHERE identity_id=? AND campaign_id=? AND env=?
+                      AND fact_key='approval.reply_draft'
+                    ORDER BY id DESC LIMIT 1""",
+                (identity_id, campaign_id, env),
+            ).fetchone()
+        if not row:
+            return None
+        val = _jl(row["fact_value"], {})
+        return {
+            "value": val if isinstance(val, dict) else {},
+            "captured_at": row["captured_at"],
+        }
+
+    return _safe("get_reply_draft_row", _do)
+
+
+def collect_campaign_thread_ids(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    env: str = "LIVE",
+    limit: int = 200,
+) -> set[str]:
+    """Collect Gmail thread ids referenced in recent conversation events."""
+    threads: set[str] = set()
+    for ev in list_events(
+        env=env,
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        limit=limit,
+    ):
+        payload = ev.get("payload") if isinstance(ev, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        tid = payload.get("thread_id")
+        if isinstance(tid, str) and tid.strip():
+            threads.add(tid.strip())
+        gmail_draft = payload.get("gmail_draft")
+        if isinstance(gmail_draft, dict):
+            gd_tid = gmail_draft.get("thread_id")
+            if isinstance(gd_tid, str) and gd_tid.strip():
+                threads.add(gd_tid.strip())
+    return threads
+
+
+def reply_chase_hint(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    message_id: str,
+    thread_id: str | None,
+    env: str = "LIVE",
+) -> dict[str, Any]:
+    """Deterministic follow-up policy for one inbound Gmail message."""
+    row = get_reply_draft_row(
+        identity_id=identity_id, campaign_id=campaign_id, env=env,
+    )
+    fact = row.get("value") if isinstance(row, dict) else None
+    captured_at = row.get("captured_at") if isinstance(row, dict) else None
+    evaluation = reply_chase.evaluate_chase(
+        reply_draft_fact=fact if isinstance(fact, dict) else None,
+        reply_draft_captured_at=str(captured_at) if captured_at else None,
+        inbound_message_id=message_id,
+        inbound_thread_id=thread_id,
+        event_thread_ids=collect_campaign_thread_ids(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=env,
+        ),
+    )
+    return {
+        **reply_chase.chase_context_from_evaluation(evaluation),
+        "recommended_action": evaluation.get("recommended_action"),
+    }
+
+
 def reply_dispatch_status(
     *,
     identity_id: int,
@@ -1901,19 +2073,37 @@ def reply_dispatch_status(
                 (identity_id, campaign_id, env, message_id),
             ).fetchone()
         has_pending_draft = False
+        reply_draft_val: dict[str, Any] | None = None
         if fact_row:
             val = _jl(fact_row["fact_value"], {})
-            if isinstance(val, dict) and val.get("source_message_id") == message_id:
-                has_pending_draft = val.get("decision") == "pending"
+            if isinstance(val, dict):
+                reply_draft_val = val
+                _, prior_src = reply_draft.extract_thread_anchors(val)
+                if prior_src == message_id:
+                    has_pending_draft = val.get("decision") in (None, "pending")
         has_draft_ready = draft_ready is not None
         has_inbound = inbound is not None
         has_mailbox_mismatch_esc = mismatch_esc is not None
+        chase = reply_chase.evaluate_chase(
+            reply_draft_fact=reply_draft_val,
+            reply_draft_captured_at=None,
+            inbound_message_id=message_id,
+            inbound_thread_id=None,
+            event_thread_ids=collect_campaign_thread_ids(
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                env=env,
+            ),
+        )
+        chase_context = reply_chase.chase_context_from_evaluation(chase)
         return {
             "message_id": message_id,
             "has_inbound_event": has_inbound,
             "has_draft_ready_event": has_draft_ready,
             "has_pending_reply_draft": has_pending_draft,
             "has_mailbox_mismatch_escalation": has_mailbox_mismatch_esc,
+            "chase_action": chase.get("recommended_action"),
+            "chase_context": chase_context,
             "should_skip_poller": bool(
                 has_draft_ready or has_pending_draft or has_mailbox_mismatch_esc
             ),

@@ -490,6 +490,13 @@ class PolicyPutBody(BaseModel):
     title: Optional[str] = None
 
 
+class PolicyRollbackBody(BaseModel):
+    to_version: int = Field(ge=1)
+    updated_by: str = Field(min_length=1, max_length=120)
+    owner_user_id: Optional[int] = None
+    env: Optional[str] = Field(default=None, pattern="^(TEST|LIVE)$")
+
+
 class EventWriteBody(_CampaignIdNormaliserMixin):
     identity_id: int
     event_type: str
@@ -1588,6 +1595,26 @@ def get_reply_dispatch_status(
     )
 
 
+@router.get("/identities/{identity_id}/reply-chase-hint")
+def get_reply_chase_hint(
+    identity_id: int,
+    campaign_id: Annotated[str, Depends(_campaign_id_query_required_dep)],
+    message_id: str = Query(..., min_length=1, max_length=256),
+    thread_id: Optional[str] = Query(default=None, max_length=256),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Deterministic follow-up policy for one inbound Gmail message."""
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    return cal.reply_chase_hint(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        message_id=message_id,
+        thread_id=thread_id,
+        env=env,
+    )
+
+
 @router.get("/facts/{identity_id}")
 def read_facts(
     identity_id: int,
@@ -1969,7 +1996,41 @@ def _approve_or_reject(
         elif fact_path == learning_store.STYLE_LEARNING_APPROVAL_FACT:
             # Rejecting a batch style/strategy proposal must not open a KOL-facing
             # escalation — edit events stay unconsumed for the next distill batch.
-            pass
+            # Record structured negative feedback so the next distill prompt can
+            # avoid repeating the rejected suggestion.
+            try:
+                cal.write_event(
+                    identity_id=body.identity_id,
+                    campaign_id=None,
+                    event_type="style_proposal_rejected",
+                    goal=None,
+                    lane="meta",
+                    actor=f"approval:{body.decided_by}",
+                    payload={
+                        "scope": value.get("scope") if isinstance(value, dict) else None,
+                        "owner_user_id": (
+                            value.get("owner_user_id") if isinstance(value, dict) else None
+                        ),
+                        "note": reject_note or "",
+                        "tags": reject_tags_list,
+                        "rejected_style_markdown": (
+                            value.get("proposed_style_markdown")
+                            if isinstance(value, dict) else None
+                        ),
+                        "rejected_strategy_markdown": (
+                            value.get("proposed_strategy_markdown")
+                            if isinstance(value, dict) else None
+                        ),
+                        "source_event_ids": (
+                            value.get("source_event_ids") if isinstance(value, dict) else None
+                        ),
+                    },
+                    env=body.env,
+                )
+            except Exception:
+                log.warning(
+                    "failed to record style_proposal_rejected feedback", exc_info=True,
+                )
         else:
             derived_escalation_id = cal.open_escalation(
                 identity_id=body.identity_id,
@@ -2190,14 +2251,15 @@ def _create_gmail_draft_for_reply_approval(
         # Child skill contracts allow subject=null and may omit `to` (the
         # recipient is the inbound sender). Recover from the inbound event
         # before failing the operator's approve click.
-        src_msg = str(approval_value.get("source_message_id") or "") or None
-        thr = str(draft.get("thread_id") or "") or None
+        anchor_thread_id, anchor_source_msg = reply_draft.extract_thread_anchors(
+            approval_value,
+        )
         recovered_to, recovered_subject = _resolve_envelope_from_inbound(
             identity_id=identity_id,
             campaign_id=campaign_id,
             env=env,
-            source_message_id=src_msg,
-            thread_id=thr,
+            source_message_id=anchor_source_msg,
+            thread_id=anchor_thread_id,
         )
         if not to_addr and recovered_to:
             to_addr = recovered_to
@@ -2212,8 +2274,7 @@ def _create_gmail_draft_for_reply_approval(
             status_code=400,
             detail=f"approval.reply_draft draft missing required field(s): {', '.join(missing)}",
         )
-    raw_thread_id = str(draft.get("thread_id") or "") or None
-    raw_source_msg = str(approval_value.get("source_message_id") or "") or None
+    raw_thread_id, raw_source_msg = reply_draft.extract_thread_anchors(approval_value)
     resolved_thread_id = _resolve_thread_id_from_events(
         identity_id=identity_id,
         campaign_id=campaign_id,
@@ -2630,6 +2691,29 @@ def persist_reply_draft(
     _require_bridge_key(x_bridge_key)
     if not cal.get_identity(body.identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
+
+    prior_row = cal.get_reply_draft_row(
+        identity_id=body.identity_id,
+        campaign_id=body.campaign_id,
+        env=body.env,
+    )
+    prior_fact = prior_row.get("value") if isinstance(prior_row, dict) else None
+    chase = cal.reply_chase_hint(
+        identity_id=body.identity_id,
+        campaign_id=body.campaign_id,
+        message_id=body.source_message_id,
+        thread_id=str(body.latest_email.get("thread_id") or "") or None,
+        env=body.env,
+    )
+    superseded_prior_source: str | None = None
+    if (
+        chase.get("recommended_action") == "regenerate"
+        and isinstance(prior_fact, dict)
+    ):
+        _, prior_src = reply_draft.extract_thread_anchors(prior_fact)
+        if prior_src and prior_src != body.source_message_id:
+            superseded_prior_source = prior_src
+
     try:
         merged = reply_draft.enrich_envelope(body.child_envelope, body.latest_email)
     except reply_draft.ReplyDraftError as exc:
@@ -2683,6 +2767,11 @@ def persist_reply_draft(
         linked_escalation_id=body.linked_escalation_id,
         contributing_skills=contributing_skills,
     )
+    if superseded_prior_source:
+        fact_value["chase_supersede"] = {
+            "prior_source_message_id": superseded_prior_source,
+            "superseded_for_follow_up": True,
+        }
     try:
         written = cal.write_facts_multi(
             identity_id=body.identity_id,
@@ -2693,7 +2782,22 @@ def persist_reply_draft(
             env=body.env,
         )
     except cal.FactNamespaceError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if superseded_prior_source:
+        cal.write_event(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            event_type="kol_reply_draft_superseded",
+            goal=body.primary_goal,
+            lane=body.primary_lane,
+            actor="agent:kol-reply-dispatcher",
+            payload={
+                "old_source_message_id": superseded_prior_source,
+                "new_source_message_id": body.source_message_id,
+                "draft_event_id": event_id,
+            },
+            env=body.env,
+        )
     return {
         "ok": True,
         "draft_event_id": event_id,
@@ -2701,6 +2805,8 @@ def persist_reply_draft(
         "draft": merged,
         "child_skill": child_skill,
         "contributing_skills": contributing_skills,
+        "chase_superseded": superseded_prior_source is not None,
+        "prior_source_message_id": superseded_prior_source,
     }
 
 
@@ -2782,6 +2888,33 @@ def get_edit_events(
             limit=limit,
         )
     return {"env": env, "count": len(rows), "events": rows}
+
+
+@router.get("/learning/edit-distance-trend")
+def get_edit_distance_trend(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    days: int = Query(default=90, ge=1, le=730),
+    bucket: str = Query(default="week", pattern="^(day|week)$"),
+    goal: Optional[str] = Query(default=None),
+    child_skill: Optional[str] = Query(default=None),
+    operator_user_id: Optional[int] = Query(default=None),
+) -> dict[str, Any]:
+    """Convergence metric: edit_distance trend over time (read-only).
+
+    Lower ``avg_edit_distance`` / ``was_edited_rate`` over time means the
+    operator is editing AI drafts less, i.e. learning is converging on their
+    style/strategy.
+    """
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        return learning_store.edit_distance_trend(
+            conn,
+            env=env,
+            days=days,
+            bucket=bucket,
+            goal=goal,
+            child_skill=child_skill,
+            operator_user_id=operator_user_id,
+        )
 
 
 class LearningApplyBody(BaseModel):
@@ -3082,6 +3215,32 @@ def list_policy_history(
             conn, scope=scope, owner_user_id=owner, limit=limit
         )
     return {"history": rows}
+
+
+@router.post("/policies/{scope}/rollback")
+def rollback_policy_route(
+    scope: str,
+    body: PolicyRollbackBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Roll a policy back to a prior version (forward-write, audited)."""
+    _require_bridge_key(x_bridge_key)
+    if scope not in _POLICY_SCOPES:
+        raise HTTPException(status_code=404, detail="unknown scope")
+    owner = _resolve_owner(scope, body.owner_user_id)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        try:
+            row = _policies.rollback_policy(
+                conn,
+                scope=scope,
+                to_version=body.to_version,
+                updated_by=body.updated_by,
+                owner_user_id=owner,
+                env=body.env,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"policy": row, "rolled_back_to": body.to_version}
 
 
 @router.get("/policies/escalation_rules/parsed")

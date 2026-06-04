@@ -320,8 +320,16 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
   const body = asString(draft.body) ?? '';
   const isHtml = draft.html === true || /<\s*a\s+href=|<\s*p\s*>|<\s*br\s*\/?\s*>/i.test(body);
   const attachments = Array.isArray(draft.attachments) ? draft.attachments : [];
+  const chaseSupersede = isObj(ctx.chase_supersede) ? ctx.chase_supersede : null;
+  const priorChaseMsg = chaseSupersede ? asString(chaseSupersede.prior_source_message_id) : null;
   return (
     <div className="space-y-2">
+      {priorChaseMsg && (
+        <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          已针对<strong className="font-medium">追信</strong>更新草稿（上一版回复 msg-id:{' '}
+          <span className="font-mono">{priorChaseMsg}</span>）。请确认正文有回应对方跟进后再批准。
+        </div>
+      )}
       <PillRow
         items={[
           ['子技能', childSkill],
@@ -470,7 +478,46 @@ function LogisticsAnomalyView({ ctx }: { ctx: Ctx }) {
   );
 }
 
-function StyleLearningProposalView({ ctx }: { ctx: Ctx }) {
+// Shows the CURRENT approved policy so the operator can see what the proposed
+// delta will refine before approving (Stage C diff preview).
+function CurrentPolicyPreview({ scope, env }: { scope: string; env: string }) {
+  const [md, setMd] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api
+      .get<{ policy: { content_md?: string } | null }>(
+        `/learning/policies/${scope}?env=${env}`,
+      )
+      .then((r) => {
+        if (alive) setMd(r.policy?.content_md ?? '');
+      })
+      .catch(() => {
+        if (alive) setMd('');
+      });
+    return () => {
+      alive = false;
+    };
+  }, [scope, env]);
+  return (
+    <div className="rounded border border-slate-200 bg-slate-50/60 p-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-[11px] font-medium text-slate-600 hover:text-slate-900"
+      >
+        {open ? '收起' : '查看'}当前 {policyScopeLabel(scope)}（批准后在此基础上调整）
+      </button>
+      {open && (
+        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-700">
+          {md == null ? '加载中…' : md.trim() || '(当前为空，批准后将首次写入)'}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function StyleLearningProposalView({ ctx, env }: { ctx: Ctx; env: string }) {
   const md = asString(ctx.proposed_markdown) ?? '';
   const styleMd = asString(ctx.proposed_style_markdown) ?? '';
   const strategyMd = asString(ctx.proposed_strategy_markdown) ?? '';
@@ -481,6 +528,10 @@ function StyleLearningProposalView({ ctx }: { ctx: Ctx }) {
   const eventIds = Array.isArray(ctx.source_event_ids) ? ctx.source_event_ids : [];
   const kolCount = ctx.sample_identity_count;
   const campaignCount = ctx.sample_campaign_count;
+  const operatorIds = Array.isArray(ctx.sample_operator_ids)
+    ? ctx.sample_operator_ids
+    : [];
+  const ownerUserId = ctx.owner_user_id;
   return (
     <div className="space-y-2 text-xs">
       <div className="rounded border border-violet-200 bg-violet-50 px-2 py-1 text-violet-900">
@@ -497,10 +548,21 @@ function StyleLearningProposalView({ ctx }: { ctx: Ctx }) {
             <> · {String(campaignCount)} 个 campaign</>
           )}
           {sampleCount != null && <> · 编辑样本 {String(sampleCount)} 条</>}
+          {scope === 'user_style' && ownerUserId != null && (
+            <> · 操作员 #{String(ownerUserId)}</>
+          )}
+          {scope !== 'user_style' && operatorIds.length > 0 && (
+            <> · 来自 {operatorIds.length} 位操作员</>
+          )}
           {batchThreshold != null && <> · 批次阈值 {String(batchThreshold)}</>}
           {llmUsed ? ' · LLM 蒸馏' : ' · 规则聚合（未配置 Hermes/LLM 凭据）'}
           {eventIds.length > 0 && <> · 来源事件 {eventIds.length} 条</>}
         </div>
+      </div>
+      <div className="rounded border border-slate-100 bg-white px-2 py-1 text-[11px] text-slate-600">
+        提案为<strong>增量修订（delta）</strong>：批准后并入对应 policy，可能含
+        <code className="mx-0.5">ADJUST:</code>/<code className="mx-0.5">REMOVE:</code>
+        指令。展开下方可对比当前 policy。
       </div>
       {strategyMd ? (
         <div className="space-y-1">
@@ -510,6 +572,7 @@ function StyleLearningProposalView({ ctx }: { ctx: Ctx }) {
           <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-amber-200 bg-amber-50/50 p-2 text-[11px] text-slate-800">
             {strategyMd}
           </pre>
+          <CurrentPolicyPreview scope="reply_strategy" env={env} />
         </div>
       ) : null}
       {styleMd ? (
@@ -520,6 +583,7 @@ function StyleLearningProposalView({ ctx }: { ctx: Ctx }) {
           <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-800">
             {styleMd}
           </pre>
+          <CurrentPolicyPreview scope={scope} env={env} />
         </div>
       ) : md ? (
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-800">
@@ -613,7 +677,7 @@ export default function ApprovalContextCard({
       body = <LogisticsAnomalyView ctx={context} />;
       break;
     case 'approval.style_learning_proposal':
-      body = <StyleLearningProposalView ctx={context} />;
+      body = <StyleLearningProposalView ctx={context} env={env} />;
       break;
     default:
       body = <GenericApprovalView ctx={context} />;
