@@ -202,6 +202,13 @@ The dispatcher must supersede via `persist-reply-draft` (writes
 regenerate. On approve, the bridge resolves Gmail `threadId` from thread anchor
 fields — including legacy synthesizer top-level `thread_id` / `in_reply_to`.
 
+**Orphan Gmail draft discard:** when chase supersedes an
+**approved-but-unsent** prior draft, `persist-reply-draft` best-effort
+deletes the old Gmail `draftId` (via `gmail delete-draft`) and clears stale
+`offer.gmail_draft_id` / `offer.gmail_thread_id`. Outcome is recorded on
+`chase_supersede.orphan_gmail_discard` and in `kol_reply_draft_superseded`.
+Failures are logged but do not block supersede.
+
 ```bash
 # Pricing: returns {mode_decided, target_number, lower/upper_bound,
 #   requires_human_gate, gate_reason, suggested_wording, rationale_one_line}

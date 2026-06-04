@@ -527,6 +527,25 @@ def gmail_draft(args):
     }, indent=2))
 
 
+def gmail_delete_draft(args):
+    """Delete a Gmail draft by ``draftId`` (used when chase supersedes stale drafts)."""
+    draft_id = str(args.draft_id or "").strip()
+    if not draft_id:
+        print(json.dumps({"error": "draft_id is required"}))
+        sys.exit(1)
+    if _gws_binary():
+        _run_gws(
+            ["gmail", "users", "drafts", "delete"],
+            params={"userId": "me", "id": draft_id},
+        )
+        print(json.dumps({"status": "deleted", "draftId": draft_id}, indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    service.users().drafts().delete(userId="me", id=draft_id).execute()
+    print(json.dumps({"status": "deleted", "draftId": draft_id}, indent=2))
+
+
 def gmail_send(args):
     if _gws_binary():
         message = _build_outbound_message(args)
@@ -1295,6 +1314,10 @@ def main():
     p.add_argument("--thread-id", default="", help="Thread ID for threading")
     p.add_argument("--attach", action="append", default=[], metavar="PATH", help="File to attach (repeatable)")
     p.set_defaults(func=gmail_draft)
+
+    p = gmail_sub.add_parser("delete-draft")
+    p.add_argument("draft_id", help="Gmail draftId to delete")
+    p.set_defaults(func=gmail_delete_draft)
 
     p = gmail_sub.add_parser("send")
     p.add_argument("--to", required=True)

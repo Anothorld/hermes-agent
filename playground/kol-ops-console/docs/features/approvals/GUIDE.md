@@ -41,4 +41,4 @@
   - 提案为**增量修订（delta）**：蒸馏已读取当前 policy 作基线，仅产出新增/`ADJUST:`/`REMOVE:`；卡片可展开「当前 policy」对比（`CurrentPolicyPreview`）。
   - 批准合并模式 `KOL_STYLE_LEARNING_MERGE_MODE`：`append`（默认累加）/`replace_section`（替换最新 Approved 节，历史留版本链）/`llm_compress`（二次 LLM 合并去矛盾，较慢，失败回退 append）。
   - **驳回**写 `style_proposal_rejected` 负反馈事件（不开升级），下次蒸馏 prompt 会引用「上次被否原因」以避免重复。
-- **`approval.reply_draft.chase_supersede`**：对方追信后系统自动换新草稿时会出现；卡片顶部显示「已针对追信更新草稿」提示，请核对正文是否回应跟进。
+- **`approval.reply_draft.chase_supersede`**：对方追信后系统自动换新草稿时会出现；卡片顶部显示「已针对追信更新草稿」提示，请核对正文是否回应跟进。若上一版已在 Gmail 生成草稿，系统会尝试自动删除；失败时需运营在 Gmail 草稿箱手动删除。

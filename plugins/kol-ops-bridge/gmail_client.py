@@ -168,6 +168,16 @@ class GmailClient:
             thread_id=str(payload.get("threadId", "")),
         )
 
+    def delete_draft(self, *, draft_id: str) -> dict[str, Any]:
+        """Delete a Gmail draft by ``draftId``. Raises :class:`GmailUnavailable` on failure."""
+        draft_id = str(draft_id or "").strip()
+        if not draft_id:
+            raise GmailUnavailable("draft_id is required")
+        payload = self._invoke(["gmail", "delete-draft", draft_id])
+        if isinstance(payload, dict):
+            return payload
+        return {"status": "deleted", "draftId": draft_id}
+
     # -- read ----------------------------------------------------------------
 
     def search(

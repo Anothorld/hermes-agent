@@ -40,6 +40,7 @@ from . import dispatch_router
 from . import policies as _policies
 from . import pricing_engine
 from . import reply_draft
+from . import orphan_gmail_draft
 from . import learning_distill
 from . import learning_jobs
 from . import learning_job_store
@@ -2054,6 +2055,8 @@ def _approve_or_reject(
     }
     if style_policy_apply is not None:
         out["style_policy_apply"] = style_policy_apply
+    if outcome_policy_apply is not None:
+        out["outcome_policy_apply"] = outcome_policy_apply
     return out
 
 
@@ -2772,6 +2775,16 @@ def persist_reply_draft(
             "prior_source_message_id": superseded_prior_source,
             "superseded_for_follow_up": True,
         }
+    orphan_discard: dict[str, Any] | None = None
+    if superseded_prior_source and isinstance(prior_fact, dict):
+        orphan_discard = orphan_gmail_draft.discard_orphan_gmail_draft(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+            prior_fact=prior_fact,
+        )
+        if isinstance(fact_value.get("chase_supersede"), dict) and orphan_discard:
+            fact_value["chase_supersede"]["orphan_gmail_discard"] = orphan_discard
     try:
         written = cal.write_facts_multi(
             identity_id=body.identity_id,
@@ -2795,6 +2808,7 @@ def persist_reply_draft(
                 "old_source_message_id": superseded_prior_source,
                 "new_source_message_id": body.source_message_id,
                 "draft_event_id": event_id,
+                "orphan_gmail_discard": orphan_discard,
             },
             env=body.env,
         )
@@ -2807,6 +2821,7 @@ def persist_reply_draft(
         "contributing_skills": contributing_skills,
         "chase_superseded": superseded_prior_source is not None,
         "prior_source_message_id": superseded_prior_source,
+        "orphan_gmail_discard": orphan_discard,
     }
 
 
@@ -3150,6 +3165,7 @@ _POLICY_SCOPES = {
     "reply_learning",
     "reply_strategy",
     "pricing_calibration",
+    "outcome_strategy",
 }
 
 

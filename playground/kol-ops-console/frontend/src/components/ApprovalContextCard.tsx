@@ -322,12 +322,26 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
   const attachments = Array.isArray(draft.attachments) ? draft.attachments : [];
   const chaseSupersede = isObj(ctx.chase_supersede) ? ctx.chase_supersede : null;
   const priorChaseMsg = chaseSupersede ? asString(chaseSupersede.prior_source_message_id) : null;
+  const orphanDiscard = chaseSupersede && isObj(chaseSupersede.orphan_gmail_discard)
+    ? chaseSupersede.orphan_gmail_discard
+    : null;
+  const orphanDiscardAction = orphanDiscard ? asString(orphanDiscard.action) : null;
   return (
     <div className="space-y-2">
       {priorChaseMsg && (
         <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
           已针对<strong className="font-medium">追信</strong>更新草稿（上一版回复 msg-id:{' '}
           <span className="font-mono">{priorChaseMsg}</span>）。请确认正文有回应对方跟进后再批准。
+          {orphanDiscardAction === 'deleted' && (
+            <span className="mt-1 block text-amber-800">
+              上一版 Gmail 草稿已自动删除，请勿在 Gmail 草稿箱里找旧稿发送。
+            </span>
+          )}
+          {orphanDiscardAction === 'failed' && (
+            <span className="mt-1 block text-red-800">
+              未能自动删除上一版 Gmail 草稿，请在 Gmail 草稿箱手动删除后再批准。
+            </span>
+          )}
         </div>
       )}
       <PillRow
