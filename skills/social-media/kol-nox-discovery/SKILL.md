@@ -40,7 +40,15 @@ python plugins/nox-kol-bridge/scripts/nox_kol_tool.py creator-search \
 Max **one** `creator-search` per platform per gateway run.
 
 3. Present `response.data.items` to operator — **do not** `ingest-confirmed-candidate` automatically.
-4. After operator selects rows, ingest via bridge with `source: skill:kol-nox-discovery` and `payload_json.nox_creator_id` from search `id` field.
+4. After operator selects rows, one terminal call per handle:
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py ingest-confirmed-candidate \
+  --campaign-id <cid> --env <env> --json @/tmp/ingest_<handle>.json
+```
+
+JSON must include top-level `source`, `identity`, and `candidate` (nested shape —
+not flat `handle` / `profile_url`). See `references/nox-to-ingest-mapping.md`.
 
 ## Pitfalls
 

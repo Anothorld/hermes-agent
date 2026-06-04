@@ -320,7 +320,17 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_common_args(p)
     add_env_arg(p)
     p.add_argument("--campaign-id", required=True)
-    p.add_argument("--json", required=True, help="IngestConfirmedCandidateBody JSON or @path")
+    p.add_argument(
+        "--json",
+        required=True,
+        help=(
+            "IngestConfirmedCandidateBody JSON or @path. Required top-level keys: "
+            "source, identity (primary_handle, platform), candidate (source). "
+            "Optional: identity_facts, ingest_id. NOT flat handle/profile_url/bio — "
+            "see skills/social-media/instagram-kol-discovery/references/"
+            "bridge-cli-json-payloads.md"
+        ),
+    )
     p.set_defaults(func=cmd_ingest_confirmed_candidate)
 
     p = sub.add_parser(
@@ -330,7 +340,14 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_common_args(p)
     add_env_arg(p)
     p.add_argument("--campaign-id", required=True)
-    p.add_argument("--json", required=True, help="BufferConfirmedCandidateBody JSON or @path")
+    p.add_argument(
+        "--json",
+        required=True,
+        help=(
+            "Same nested shape as ingest-confirmed-candidate "
+            "(source, identity, candidate). JSON or @path."
+        ),
+    )
     p.set_defaults(func=cmd_buffer_confirmed_candidate)
 
     p = sub.add_parser(

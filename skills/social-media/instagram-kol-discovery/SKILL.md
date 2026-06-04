@@ -278,7 +278,8 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py ingest-confirmed-candid
   --json @/tmp/ingest_<handle>.json
 ```
 
-`/tmp/ingest_<handle>.json` shape:
+`/tmp/ingest_<handle>.json` shape (full anti-patterns and field map:
+`references/bridge-cli-json-payloads.md`):
 
 ```json
 {

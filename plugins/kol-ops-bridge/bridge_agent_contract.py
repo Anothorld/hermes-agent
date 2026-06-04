@@ -287,7 +287,10 @@ def discovery_cli_rules() -> str:
         "# bridge_cli_rules (discovery / rediscover)",
         f"Ingest: {CLI_INVOCATION} ingest-confirmed-candidate --campaign-id <cid> --env <env> "
         "--json @/tmp/ingest_<handle>.json — one handle per call immediately after qualification.",
+        "Ingest JSON requires top-level source + identity + candidate (primary_handle inside identity; "
+        "profile URL in identity_facts as identity.instagram_profile_url). NOT flat handle/profile_url/bio.",
         "Do NOT batch multiple handles in execute_code. Do NOT write /tmp/ingest_*.json via execute_code loops.",
+        "Do NOT use ingest-confirmed-candidate in kol-cold-outreach — identity_id already exists.",
         f"Preflight: {CLI_INVOCATION} list-outreach-cooldown-handles --env <env> --plain",
         f"{CLI_INVOCATION} list-relationships --env <env> --last-outcome competitor --limit 1000",
     ])

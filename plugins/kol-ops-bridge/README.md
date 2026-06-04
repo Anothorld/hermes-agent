@@ -184,6 +184,9 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py ingest-confirmed-candid
 
 Key payload rules (most frequent failure modes):
 
+- JSON must be **nested** `IngestConfirmedCandidateBody`: top-level `source`,
+  `identity` (`primary_handle`, not `handle`), and `candidate` (`source` required).
+  Flat `handle` / `profile_url` / `bio` objects fail with `json_missing_field`.
 - Treat top-level `source` and `identity.*_source` as different fields.
   - top-level `source`: workflow origin (for example `skill:instagram-kol-discovery`)
   - `identity.*_source`: strict enum only (`google_search_result`, `linktree`,

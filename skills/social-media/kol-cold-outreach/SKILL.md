@@ -17,6 +17,10 @@ itself — there is no CLI `run-skill`.
 - **Forbidden:** `execute_code` + subprocess, `curl` / `urllib` to the bridge,
   reading bridge `.py` source, reading `~/.hermes/**/.env` for keys,
   `write-facts` / `write-facts-multi` on `approval.reply_draft`.
+- **Forbidden:** `ingest-confirmed-candidate` — identity already exists after
+  shortlist approval; use `get-dispatch-context` (you receive `identity_id`) and
+  `persist-initial-outreach-draft`. Ingest JSON shape is discovery-only; see
+  `instagram-kol-discovery/references/bridge-cli-json-payloads.md`.
 
 ## Procedure
 
