@@ -61,8 +61,16 @@ REDISCOVERY_INSTRUCTIONS = (
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
     "- Use the **terminal** tool for `kol_bridge_tool.py` (not execute_code+subprocess).\n"
+    "- Ingest JSON shape: `skills/social-media/instagram-kol-discovery/references/"
+    "bridge-cli-json-payloads.md` (nested source/identity/candidate — NOT flat handle).\n"
     "\n"
     "## Pipeline (run in order, do NOT skip)\n"
+    "0. If the brief contains `# resume_directives`, complete STEP_0 there\n"
+    "   FIRST — pending ingests from prior round(s) before ANY new discovery.\n"
+    "   For each listed handle not already in the exclusion set: rebuild\n"
+    "   `/tmp/ingest_<handle>.json`, run `ingest-confirmed-candidate`, verify\n"
+    "   via `list-candidates`. Do NOT start hashtag/browser exploration until\n"
+    "   STEP_0 is done or every pending handle is confirmed in CAL.\n"
     "1. SKIP kol-campaign-intake. campaign_config is already persisted; do\n"
     "   NOT call upsert-campaign and do NOT overwrite any existing config.\n"
     "2. Read the current candidate pool from CAL FIRST:\n"
@@ -92,8 +100,8 @@ REDISCOVERY_INSTRUCTIONS = (
     "     regional tags, language tags, adjacent hashtags, related-account\n"
     "     graph from already-qualified KOLs).\n"
     "   - Disqualifying a profile (off-niche, audience too small, no\n"
-    "     contact) does NOT count toward the floor. Only persisted\n"
-    "     `add-candidate` rows count.\n"
+    "     contact) does NOT count toward the floor. Only successful\n"
+    "     `ingest-confirmed-candidate` rows count.\n"
     "   - Budget yourself up to MAX(40, additional_target_count * 4)\n"
     "     profile visits per pass. Try at least 3 distinct keyword angles\n"
     "     before considering yourself blocked.\n"
@@ -106,22 +114,21 @@ REDISCOVERY_INSTRUCTIONS = (
     "     finishing partial is acceptable ONLY when truly blocked (rate\n"
     "     limits, niche exhausted, bridge/gateway down).\n"
     "   - When you stop short you MUST include in the final answer the\n"
-    "     following two structured lines so the backend can decide between\n"
-    "     auto-retry and early escalation:\n"
+    "     structured diagnostics block (see instagram-kol-discovery skill):\n"
     "       floor_unmet_reason: <one-sentence why>\n"
     "       attempted_angles:\n"
     "         - <keyword/angle 1>\n"
-    "         - <keyword/angle 2>\n"
-    "         - <keyword/angle 3>\n"
+    "       pending_ingests: (required for every qualified-but-not-ingested handle)\n"
+    "         - \"<handle> — <why not ingested>\"\n"
+    "       next_round_focus: (exploration queue after pending ingests)\n"
+    "         - \"<handle/seed> — <why>\"\n"
     "4. Persist each NEW candidate IMMEDIATELY as you qualify it. For every\n"
-    "   newly qualified profile, perform this deterministic sequence before\n"
-    "   browsing for the next profile:\n"
-    "   a) `upsert-identity --env <env> --json @/tmp/identity.json`;\n"
-    "   b) `write-facts` or `write-facts-multi` for followers, region,\n"
-    "      email/contact, creator type, evidence URL, and fit notes;\n"
-    "   c) `add-candidate --env <env> --campaign-id <id> --json\n"
-    "      @/tmp/candidate.json`;\n"
-    "   d) `list-candidates --env <env> --campaign-id <id>` and verify the\n"
+    "   newly qualified profile, BEFORE browsing the next profile:\n"
+    "   a) Write `/tmp/ingest_<handle>.json` with nested `source`, `identity`,\n"
+    "      `candidate`, and `identity_facts` (see bridge-cli-json-payloads.md);\n"
+    "   b) `ingest-confirmed-candidate --campaign-id <id> --env <env> --json\n"
+    "      @/tmp/ingest_<handle>.json`;\n"
+    "   c) `list-candidates --env <env> --campaign-id <id>` and verify the\n"
     "      handle is now present.\n"
     "   NEVER touch existing candidates: do NOT change their\n"
     "   candidate_status, do NOT re-add an excluded handle, do NOT call\n"
@@ -137,8 +144,10 @@ REDISCOVERY_INSTRUCTIONS = (
     "Report the count of NEW candidates persisted in this run (from your\n"
     "second `list-candidates` minus the size of the exclusion set), the\n"
     "additional_target_count from the brief, and the run's CAL totals.\n"
-    "If you stopped short, include `floor_unmet_reason` and `attempted_angles`\n"
-    "as specified in the iteration contract.\n"
+    "If you stopped short, include `floor_unmet_reason`, `attempted_angles`,\n"
+    "`pending_ingests` (if any), and `next_round_focus` as in the skill.\n"
+    "Do NOT use a prose-only \"Next round should:\" list — the console parser\n"
+    "requires the YAML field names above.\n"
     "\n"
     "## Failure handling\n"
     "- If `list-candidates` returns 0 BEFORE step 2, treat the brief's\n"
@@ -249,21 +258,30 @@ def _compose_rediscover_brief(
                 if value:
                     lines.append(f"{scalar_key}: {value}")
             for list_key in _DIAG_LIST_KEYS:
-                if list_key == "next_round_focus":
-                    continue  # already rendered at the top
+                if list_key in ("next_round_focus", "pending_ingests"):
+                    continue  # rendered separately (focus at top; pending in resume_directives)
                 items = entry.get(list_key) or []
                 if items:
                     lines.append(f"{list_key}:")
                     for item in items:
                         lines.append(f"  - {item}")
+
+        pending_for_resume = _collect_pending_ingests_for_resume(
+            prior_diagnostics, excluded_handles
+        )
+        if pending_for_resume:
+            lines.extend(_render_resume_directives_block(pending_for_resume))
+
         lines.extend([
             "",
             "# this_round_guidance",
-            "Read prior_runs above FIRST.",
+            "Read prior_runs and resume_directives above FIRST.",
+            "0. If `# resume_directives` is present, complete STEP_0 (pending",
+            "   ingests) before any browser_navigate or new seed exploration.",
             "1. Process the MOST RECENT round's next_round_focus list before",
             "   generating any new seeds. Each item is a concrete handle / seed /",
             "   reel the prior round flagged as worth digging into; treat them",
-            "   as the highest-priority queue for this run.",
+            "   as the highest-priority exploration queue AFTER pending ingests.",
             "2. Do NOT repeat any seed / hashtag / public-web query listed in",
             "   any prior round's attempted_angles or remediation_attempted",
             "   UNLESS that round's floor_unmet_reason was infrastructural",
@@ -411,11 +429,32 @@ _DIAG_LIST_KEYS = (
     # per SKILL.md contract; capped at 10 items by the composer to avoid
     # next-round brief bloat.
     "next_round_focus",
+    # Qualified handles not yet ingested into CAL — each item
+    # ``<handle> — <why not ingested>``; drives # resume_directives on retry.
+    "pending_ingests",
 )
 
 _NEXT_ROUND_FOCUS_CAP = 10
+_PENDING_INGESTS_CAP = 5
 
 _DIAG_ALL_KEYS = _DIAG_SCALAR_KEYS + _DIAG_LIST_KEYS
+
+_UNPERSISTED_SIGNAL_RE = re.compile(
+    r"(?i)(qualified\s+but\s+unpersisted|not\s+yet\s+persisted|pending\s+ingest)",
+)
+_UNPERSISTED_SECTION_RE = re.compile(
+    r"(?is)"
+    r"(?:#{1,3}\s*)?(?:\*\*)?qualified\s+but\s+unpersisted(?:\*\*)?[^\n]*\n"
+    r"(.*?)"
+    r"(?=^#{1,3}\s|\n---\s*\n|\*\*floor_unmet|\nfloor_unmet_reason:|\Z)",
+    re.MULTILINE,
+)
+# Heuristic bullets must look like KOL handles (**handle** or @handle), not seed phrases.
+_HANDLE_BULLET_RE = re.compile(
+    r"^\s*[-*]\s+(?:\*\*@?([a-zA-Z0-9._]{2,40})\*\*|@([a-zA-Z0-9._]{2,40}))"
+    r"(?:\s|$|—|-)",
+    re.MULTILINE,
+)
 
 _DIAG_SCALAR_RE = re.compile(
     r"^\s*(" + "|".join(_DIAG_SCALAR_KEYS) + r")\s*[:=]\s*(.+?)\s*$",
@@ -432,6 +471,115 @@ def _coerce_output_to_text(output: Any) -> str:
         except (TypeError, ValueError):
             return ""
     return str(output)
+
+
+def _normalize_handle(raw: str) -> str:
+    return raw.strip().lstrip("@").lower()
+
+
+def _handle_from_pending_item(item: str) -> str:
+    """Extract handle from ``handle — reason`` pending_ingests line."""
+    head = item.split("—", 1)[0].split(" - ", 1)[0].strip()
+    head = head.strip("*").strip()
+    return _normalize_handle(head)
+
+
+def _extract_pending_ingests_heuristic(text: str) -> list[str] | None:
+    """Best-effort parse of prose unpersisted sections (Round 8-style output)."""
+    if not _UNPERSISTED_SIGNAL_RE.search(text):
+        return None
+    section = ""
+    m = _UNPERSISTED_SECTION_RE.search(text)
+    if m:
+        section = m.group(1)
+    # No broad fallback: "NOT yet persisted" in a title plus attempted_angles
+    # bullets would false-positive on seed lines (e.g. "dadrianca cluster").
+    if not section.strip():
+        return None
+    items: list[str] = []
+    seen: set[str] = set()
+    for hm in _HANDLE_BULLET_RE.finditer(section):
+        handle = _normalize_handle(hm.group(1) or hm.group(2) or "")
+        if not handle or handle in seen:
+            continue
+        seen.add(handle)
+        items.append(
+            f"{handle} — qualified prior round, not ingested; "
+            "rebuild ingest JSON per bridge-cli-json-payloads.md"
+        )
+        if len(items) >= _PENDING_INGESTS_CAP:
+            break
+    return items or None
+
+
+def _merge_pending_ingests(
+    explicit: list[str] | None, heuristic: list[str] | None
+) -> list[str] | None:
+    """Combine explicit YAML and heuristic items; explicit wins ordering."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for batch in (explicit or [], heuristic or []):
+        for item in batch:
+            handle = _handle_from_pending_item(item)
+            if not handle or handle in seen:
+                continue
+            seen.add(handle)
+            merged.append(item.strip())
+            if len(merged) >= _PENDING_INGESTS_CAP:
+                return merged
+    return merged or None
+
+
+def _collect_pending_ingests_for_resume(
+    prior_diagnostics: list[dict[str, Any]] | None,
+    excluded_handles: list[str],
+) -> list[str]:
+    """Aggregate pending ingests from prior rounds, excluding handles already in CAL."""
+    excluded = {_normalize_handle(h) for h in excluded_handles}
+    out: list[str] = []
+    seen: set[str] = set()
+    rounds = prior_diagnostics or []
+    batches: list[list[str]] = []
+    if rounds:
+        latest = rounds[-1].get("pending_ingests") or []
+        if latest:
+            batches.append(latest)
+    for entry in reversed(rounds[:-1]):
+        older = entry.get("pending_ingests") or []
+        if older:
+            batches.append(older)
+    for batch in batches:
+        for item in batch:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            handle = _handle_from_pending_item(item)
+            if handle in excluded or handle in seen:
+                continue
+            seen.add(handle)
+            out.append(item.strip())
+            if len(out) >= _PENDING_INGESTS_CAP:
+                return out
+    return out
+
+
+def _render_resume_directives_block(pending_items: list[str]) -> list[str]:
+    lines = [
+        "",
+        "# resume_directives (HARD — before any browser_navigate)",
+        f"pending_ingest_count: {len(pending_items)}",
+        "pending_ingests:",
+    ]
+    for item in pending_items:
+        lines.append(f"  - {item}")
+    lines.extend([
+        "STEP_0: For EACH handle above not in list-candidates exclusion set:",
+        "  browser_navigate profile if needed → write /tmp/ingest_<handle>.json",
+        "  (nested source/identity/candidate per bridge-cli-json-payloads.md)",
+        "  → ingest-confirmed-candidate → list-candidates verify",
+        "  → then continue discovery for additional_target_count.",
+        "Do NOT skip STEP_0 to start new hashtag exploration.",
+    ])
+    return lines
 
 
 def _parse_yaml_list(text: str, key: str) -> list[str] | None:
@@ -465,6 +613,12 @@ def _extract_run_diagnostics(output: Any) -> dict[str, Any]:
         diag[key] = m.group(2).strip().strip("`\"', ") or None
     for key in _DIAG_LIST_KEYS:
         diag[key] = _parse_yaml_list(text, key)
+    if not diag.get("pending_ingests"):
+        diag["pending_ingests"] = _extract_pending_ingests_heuristic(text)
+    else:
+        diag["pending_ingests"] = _merge_pending_ingests(
+            diag.get("pending_ingests"), _extract_pending_ingests_heuristic(text)
+        )
     return diag
 
 

@@ -172,3 +172,29 @@ Legacy order (do not use in new runs): `upsert-identity` → `write-facts-multi`
 
 For rediscover floor-only runs, completing ingest per verified handle is enough;
 do not emit `shortlist_ready` unless the run contract requires it.
+
+---
+
+## Auto-retry / rediscover pending ingest
+
+When a discover/rediscover run ends with qualified handles **not** yet in CAL,
+emit structured diagnostics (see `instagram-kol-discovery` SKILL.md):
+
+```yaml
+pending_ingests:
+  - "techbymidas — iteration limit before ingest-confirmed-candidate"
+```
+
+The KOL Ops Console quantity gate stores this in `diagnostics_history` and, on
+auto-retry or operator `/rediscover`, injects `# resume_directives` into the
+next brief with **STEP_0: ingest these handles first**.
+
+**Cross-run constraints:**
+
+- `/tmp/ingest_<handle>.json` from the prior run is **not** available — rebuild
+  nested `source` / `identity` / `candidate` / `identity_facts` from fresh
+  profile evidence (`browser_navigate` if needed).
+- Handles already in `list-candidates` are dropped from `resume_directives`
+  automatically.
+- Prose sections like `### Next round should:` are **not** parsed — use
+  `pending_ingests` and `next_round_focus` field names exactly.

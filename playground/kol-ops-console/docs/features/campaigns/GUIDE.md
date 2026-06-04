@@ -45,6 +45,23 @@
 - `campaign_id` + `env` 唯一标识活动
 - 全局 `useCampaignStore` 决定 Kanban/审批过滤范围
 
+## 发现数量门控与结构化续跑
+
+实现模块：[`backend/app/discovery_gate.py`](../../../backend/app/discovery_gate.py)（`/rediscover` 与产品页 sync 后的 auto-retry 共用）。
+
+| 机制 | 说明 |
+|------|------|
+| **数量门控** | 发现/rediscover run 结束后，比较 CAL 可见候选人数与 `product_campaigns.target_floor`；不足且 `retry_count < 5` 时自动再跑 rediscover |
+| **diagnostics_history** | 每轮终态答案解析为 JSON 追加到 `product_campaigns.diagnostics_history`（`attempted_angles`、`next_round_focus`、`pending_ingests` 等） |
+| **pending_ingests** | 已 qualify 但未 `ingest-confirmed-candidate` 的 handle；下一轮 brief 生成 `# resume_directives` + **STEP_0**（先入库再浏览） |
+| **解析兜底** | 若 agent 未输出 YAML `pending_ingests:`，Console 从「Qualified but unpersisted」等段落启发式抽取（cap 5） |
+| **排除已入库** | 已在 `list-candidates` 池中的 handle 不会出现在 `resume_directives` |
+| **重置** | 操作员 `POST /campaigns/start` 将 `diagnostics_history` 置为 `[]` |
+
+Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingests` / `next_round_focus` 字段名，勿用「Next round should:」纯 prose）。
+
+工程说明：[`agent_prj/docs/kol-discovery-auto-retry-resume.md`](../../../../../../../docs/kol-discovery-auto-retry-resume.md)。
+
 ## Agent 短名单批准 run（outreach）
 
 Console `POST …/approve` 拉起 gateway run；brief 含 `bridge_cli_checklist`：

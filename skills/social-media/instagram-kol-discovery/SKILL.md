@@ -127,9 +127,10 @@ Handles outreached **more than 14 days ago** may be discovered again, but the co
 If this bridge call fails, report `outreach_cooldown_pull_failed: <reason>` and retry once or stop the run (same severity as the do-not-contact gate).
 
 ## Prior runs handling
-If the brief contains a `# prior_runs` block, **read it BEFORE generating any seeds**. Each entry lists what an earlier round of this same campaign generation already tried (`attempted_angles`, `remediation_attempted`), where it fell short (`floor_unmet_reason`, `diversity_floor_unmet`, `underserved_verticals`), and — most important — what it flagged as worth investigating next (`next_round_focus`). Rules, in priority order:
+If the brief contains a `# prior_runs` block, **read it BEFORE generating any seeds**. Each entry lists what an earlier round of this same campaign generation already tried (`attempted_angles`, `remediation_attempted`), where it fell short (`floor_unmet_reason`, `diversity_floor_unmet`, `underserved_verticals`), pending ingests (`pending_ingests`), and what to explore next (`next_round_focus`). Rules, in priority order:
 
-1. **Work the most recent round's `next_round_focus` FIRST.** This is a concrete, agent-curated queue of @handles / hashtags / seeds / reels the previous run identified as the highest-payoff next steps. Burn through it before doing any open-ended exploration. Each item carries its own one-sentence rationale; respect it. (If you disagree with the rationale, note it in your own `next_round_focus` rather than silently skipping.)
+0. **If the brief contains `# resume_directives`, complete STEP_0 FIRST** — ingest every handle listed under `pending_ingests` that is not already in CAL (`list-candidates` exclusion set). Rebuild `/tmp/ingest_<handle>.json` (nested JSON per `references/bridge-cli-json-payloads.md`); do **not** assume `/tmp` files survive across runs. Call `ingest-confirmed-candidate` and verify before any new `browser_navigate` for exploration.
+1. **Work the most recent round's `next_round_focus` FIRST** (after STEP_0). This is a concrete, agent-curated queue of @handles / hashtags / seeds / reels the previous run identified as the highest-payoff next steps. Burn through it before doing any open-ended exploration. Each item carries its own one-sentence rationale; respect it. (If you disagree with the rationale, note it in your own `next_round_focus` rather than silently skipping.)
 2. **Do NOT re-issue any seed/hashtag/public-web query** that appears in any prior round's `attempted_angles` or `remediation_attempted`, UNLESS the prior `floor_unmet_reason` was infrastructural (`rate_limit`, `cdp_lost`, `checkpoint`, `bridge_down`, `gateway_down`). Content-exhaustion reasons (e.g. "niche exhausted", "no new candidates surfaced") do NOT warrant re-trying the same seeds.
 3. **After `next_round_focus` is exhausted**, prioritize NEW seeds that fill the most recent round's `underserved_verticals`.
 4. The `# this_round_guidance` block in the brief restates these rules; treat any conflict as the guidance winning.
@@ -161,9 +162,9 @@ memory contamination, persistence is **streaming, one candidate at a
 time**:
 
 1. Qualify one handle from on-page evidence.
-2. Immediately persist that single handle (`upsert-identity` ->
-   `write-facts-multi` -> `add-candidate`) before moving to the next
-   profile.
+2. Immediately persist that single handle via `ingest-confirmed-candidate`
+   (nested JSON per `references/bridge-cli-json-payloads.md`) before moving
+   to the next profile.
 3. After the write succeeds, treat the candidate as "persisted state"
    and continue browsing; do **not** keep unpersisted candidate queues in
    memory across many profiles.
@@ -189,7 +190,18 @@ vertical_coverage:
 next_round_focus:
   - "<@handle | #hashtag | seed phrase | reel URL> — <one-sentence why this is worth prioritizing next>"
   - ...
+pending_ingests:
+  - "<handle> — <why not ingested; e.g. iteration_limit, json_validation, bridge_error>"
+  - ...
 ```
+
+**Do NOT** use a prose-only `### Next round should:` numbered list — the console parser only reads the YAML field names above.
+
+**`pending_ingests` rules** (required whenever you qualified a handle but did not complete `ingest-confirmed-candidate`):
+- List every qualified-but-not-ingested handle before ending the run (iteration limit, JSON shape error, bridge down, etc.).
+- Format: `"<handle> — <one-sentence why ingest did not complete>"`.
+- Max **5 items** (composer cap). Put ingest work here; put **new exploration** leads in `next_round_focus` (a handle can appear in both if it still needs ingest AND more reel review).
+- Cross-run: `/tmp/ingest_*.json` is **not** preserved — the next round rebuilds JSON from profile evidence.
 
 **`next_round_focus` rules** (read carefully — this is what makes auto-retries non-redundant):
 - Concrete items only: a specific @handle to verify reels for, an unattempted hashtag/seed, a specific reel URL to load, or a niche to expand into. Not generic advice ("try more").
@@ -213,9 +225,9 @@ remediation_attempted:
   - <public-web queries you ran>
 ```
 
-These fields feed the rediscover brief composer; round N+1 reads them from a `# prior_runs` block (see **Prior runs handling**) and avoids re-tracing exhausted angles. Omitting them silently degrades subsequent auto-retries.
+These fields feed the rediscover brief composer; round N+1 reads them from `# prior_runs` and `# resume_directives` (see **Prior runs handling**) and avoids re-tracing exhausted angles or losing pending ingests. Omitting them silently degrades subsequent auto-retries.
 
-**Quantity floor (hard).** When the brief carries `discovery_target_count` or `additional_target_count`, treat it as a HARD FLOOR on PERSISTED candidates (visited via `browser_navigate`, then qualified, then `add-candidate`). The console's quantity gate compares your persisted count against the floor immediately after this run terminates. If you are short of the floor AND auto-retry budget remains, the backend AUTO-FIRES the rediscover skill again (up to 5 auto-retries total = 6 runs max); after that, the operator gets a `discovery_floor_unmet` escalation. Stopping short is therefore a failure mode — finishing partial is acceptable only when truly blocked (rate limits, niche exhausted, IG checkpoint). When stopping short, you MUST set `floor_unmet_reason` (one-sentence why) in the structured diagnostics block above so the backend can decide between auto-retry and early escalation; `attempted_angles` is already mandatory regardless.
+**Quantity floor (hard).** When the brief carries `discovery_target_count` or `additional_target_count`, treat it as a HARD FLOOR on PERSISTED candidates (visited via `browser_navigate`, then qualified, then successful `ingest-confirmed-candidate`). The console's quantity gate compares your persisted count against the floor immediately after this run terminates. If you are short of the floor AND auto-retry budget remains, the backend AUTO-FIRES the rediscover skill again (up to 5 auto-retries total = 6 runs max); after that, the operator gets a `discovery_floor_unmet` escalation. Stopping short is therefore a failure mode — finishing partial is acceptable only when truly blocked (rate limits, niche exhausted, IG checkpoint). When stopping short, you MUST set `floor_unmet_reason` (one-sentence why) in the structured diagnostics block above so the backend can decide between auto-retry and early escalation; `attempted_angles` is already mandatory regardless.
 
 **Vertical diversity floor (hard).** Across the persisted shortlist, the **designer / interior-stylist share** must fall inside the **active range** for this run. "Designer" = creators whose bio or last 15 Reels primarily anchor in interior design, home staging, design education, premium stylist content, or "design firm / studio principal" identity.
 

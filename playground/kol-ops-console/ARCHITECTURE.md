@@ -99,7 +99,7 @@ kol-ops-console/
 |------|------------|----------|
 | 认证与设置 | `/login`, `/settings` | [auth-settings](docs/features/auth-settings/GUIDE.md) |
 | 产品 SKU | `/products` | [products](docs/features/products/GUIDE.md) |
-| 活动 Campaign | `/products/:sku`, `/campaigns/:id/*` | [campaigns](docs/features/campaigns/GUIDE.md) |
+| 活动 Campaign | `/products/:sku`, `/campaigns/:id/*` | [campaigns](docs/features/campaigns/GUIDE.md)（含发现门控 / `pending_ingests` 结构化续跑） |
 | KOL 看板/详情 | `/kols`, `/kols/:id` | [kols](docs/features/kols/GUIDE.md) |
 | 待审批 | `/approvals` | [approvals](docs/features/approvals/GUIDE.md) |
 | 自主学习 | `/learning` | [learning](docs/features/learning/GUIDE.md) |
