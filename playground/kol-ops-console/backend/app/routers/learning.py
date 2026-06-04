@@ -12,6 +12,11 @@ from ..deps import current_user, get_bridge, require_role
 
 router = APIRouter(prefix="/learning", tags=["learning"])
 
+
+def _learning_bridge_timeout(bridge: BridgeClient) -> float:
+    """Long-running LLM distill + cron suites exceed default 60s bridge timeout."""
+    return getattr(bridge, "_learning_timeout", 300.0)
+
 PROMOTABLE_GOALS = (
     "interest_qualification",
     "product_selection",
@@ -92,7 +97,10 @@ async def run_learning_jobs(
     }
     try:
         return await bridge._req(
-            "POST", "/learning/run-scheduled-jobs", json=payload,
+            "POST",
+            "/learning/run-scheduled-jobs",
+            json=payload,
+            timeout_sec=_learning_bridge_timeout(bridge),
         )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
@@ -103,6 +111,32 @@ class ProposeEditPolicyBody(BaseModel):
     scope: str = Field(default="company_style", pattern="^(company_style|user_style)$")
     limit: int = Field(default=200, ge=1, le=500)
     owner_user_id: Optional[int] = None
+
+
+class BackfillEditLearningBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    dry_run: bool = False
+    limit: int = Field(default=500, ge=1, le=2000)
+
+
+@router.post("/backfill-edit-learning")
+async def backfill_edit_learning(
+    body: BackfillEditLearningBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    try:
+        return await bridge._req(
+            "POST",
+            "/learning/backfill-edit-learning",
+            json={
+                "env": body.env,
+                "dry_run": body.dry_run,
+                "limit": body.limit,
+            },
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
 
 @router.post("/propose-edit-policy")
@@ -121,7 +155,10 @@ async def propose_edit_policy(
         payload["owner_user_id"] = body.owner_user_id
     try:
         return await bridge._req(
-            "POST", "/learning/apply-edit-policy", json=payload,
+            "POST",
+            "/learning/apply-edit-policy",
+            json=payload,
+            timeout_sec=_learning_bridge_timeout(bridge),
         )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc

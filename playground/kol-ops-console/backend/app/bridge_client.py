@@ -31,8 +31,10 @@ class BridgeClient:
         self._base = s.bridge_base.rstrip("/")
         bridge_key = resolve_bridge_key(s)
         self._headers = {"X-Bridge-Key": bridge_key} if bridge_key else {}
+        self._default_timeout = s.bridge_timeout_sec
+        self._learning_timeout = s.bridge_learning_timeout_sec
         self._client = httpx.AsyncClient(
-            timeout=s.bridge_timeout_sec,
+            timeout=self._default_timeout,
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
         )
 
@@ -46,6 +48,7 @@ class BridgeClient:
         json: Optional[dict[str, Any]] = None,
         retry: int = 0,
         operator_user_id: Optional[int] = None,
+        timeout_sec: Optional[float] = None,
     ) -> Any:
         # ``retry`` retries ONLY on transient transport errors (httpx.HTTPError:
         # connect, timeout, read failures). HTTP 4xx/5xx response codes are
@@ -65,14 +68,24 @@ class BridgeClient:
         for i in range(attempts):
             try:
                 r = await self._client.request(
-                    method, url, params=params, json=json, headers=headers
+                    method,
+                    url,
+                    params=params,
+                    json=json,
+                    headers=headers,
+                    timeout=timeout_sec if timeout_sec is not None else self._default_timeout,
                 )
                 break
             except httpx.HTTPError as exc:
                 if i + 1 < attempts:
                     await asyncio.sleep(0.5)
                     continue
-                raise BridgeError(502, f"bridge unreachable: {exc}") from exc
+                hint = (
+                    "（学习蒸馏可能需 1–3 分钟，若超时请调大 KOC_BRIDGE_LEARNING_TIMEOUT_SEC）"
+                    if timeout_sec is not None and timeout_sec > self._default_timeout
+                    else ""
+                )
+                raise BridgeError(502, f"bridge unreachable: {exc}{hint}") from exc
         if r.status_code >= 400:
             raise BridgeError(r.status_code, r.text)
         if r.headers.get("content-type", "").startswith("application/json"):

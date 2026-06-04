@@ -479,15 +479,26 @@ function StyleLearningProposalView({ ctx }: { ctx: Ctx }) {
   const batchThreshold = ctx.batch_threshold;
   const llmUsed = ctx.llm_used === true;
   const eventIds = Array.isArray(ctx.source_event_ids) ? ctx.source_event_ids : [];
+  const kolCount = ctx.sample_identity_count;
+  const campaignCount = ctx.sample_campaign_count;
   return (
     <div className="space-y-2 text-xs">
       <div className="rounded border border-violet-200 bg-violet-50 px-2 py-1 text-violet-900">
         <div className="font-medium">编辑学习提案（批准后写入 policy，供 AI 回信参考）</div>
         <div className="mt-0.5 text-[11px]">
+          本批为<strong>跨多位 KOL</strong>的编辑汇总，不是单一 KOL 的审批；列表上的 @handle 仅为系统挂载用，可忽略。
+        </div>
+        <div className="mt-0.5 text-[11px]">
           范围：{policyScopeLabel(scope)}
-          {sampleCount != null && <> · 样本 {String(sampleCount)} 条</>}
+          {typeof kolCount === 'number' && kolCount > 0 && (
+            <> · 涉及 {String(kolCount)} 位 KOL</>
+          )}
+          {typeof campaignCount === 'number' && campaignCount > 0 && (
+            <> · {String(campaignCount)} 个 campaign</>
+          )}
+          {sampleCount != null && <> · 编辑样本 {String(sampleCount)} 条</>}
           {batchThreshold != null && <> · 批次阈值 {String(batchThreshold)}</>}
-          {llmUsed ? ' · LLM 蒸馏' : ' · 规则聚合'}
+          {llmUsed ? ' · LLM 蒸馏' : ' · 规则聚合（未配置 Hermes/LLM 凭据）'}
           {eventIds.length > 0 && <> · 来源事件 {eventIds.length} 条</>}
         </div>
       </div>

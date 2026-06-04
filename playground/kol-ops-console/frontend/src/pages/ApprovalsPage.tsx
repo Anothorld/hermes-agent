@@ -17,6 +17,7 @@ import {
   useInflightLock,
 } from '../useInflightLock';
 import { REJECT_TAGS } from '../constants/rejectTags';
+import { policyScopeLabel } from '../constants/domainLabels';
 
 type ApprovalTypeFilter = 'all' | 'reply_draft' | 'style_learning' | 'other';
 
@@ -31,6 +32,38 @@ function approvalTypeOf(factPath: string): ApprovalTypeFilter {
   if (factPath === 'approval.reply_draft') return 'reply_draft';
   if (factPath === 'approval.style_learning_proposal') return 'style_learning';
   return 'other';
+}
+
+const STYLE_LEARNING_FACT = 'approval.style_learning_proposal';
+
+/** Style proposals are cross-KOL; group by policy scope, not anchor identity. */
+function approvalGroupKey(row: ApprovalRow): string {
+  if (row.fact_path === STYLE_LEARNING_FACT) {
+    const ctx = row.context ?? {};
+    const scope = String(ctx.scope ?? 'company_style');
+    const owner = ctx.owner_user_id;
+    return `style-learning::${scope}::${owner ?? 'none'}`;
+  }
+  return `${row.identity_id}::${row.campaign_id}`;
+}
+
+function isStyleLearningGroup(items: ApprovalRow[]): boolean {
+  return items.length > 0 && items.every((r) => r.fact_path === STYLE_LEARNING_FACT);
+}
+
+function styleLearningGroupTitle(ctx: Record<string, unknown>): string {
+  const scope = String(ctx.scope ?? 'company_style');
+  const sampleCount = ctx.sample_count;
+  const kolCount = ctx.sample_identity_count;
+  const parts = ['跨 KOL 编辑学习'];
+  parts.push(policyScopeLabel(scope));
+  if (typeof kolCount === 'number' && kolCount > 0) {
+    parts.push(`${kolCount} 位 KOL`);
+  }
+  if (typeof sampleCount === 'number' && sampleCount > 0) {
+    parts.push(`${sampleCount} 条样本`);
+  }
+  return parts.join(' · ');
 }
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
@@ -334,7 +367,7 @@ export function ApprovalsPage() {
   const grouped = useMemo(() => {
     const out: Record<string, ApprovalRow[]> = {};
     for (const r of visibleRows) {
-      const key = `${r.identity_id}::${r.campaign_id}`;
+      const key = approvalGroupKey(r);
       (out[key] ||= []).push(r);
     }
     return out;
@@ -502,23 +535,57 @@ export function ApprovalsPage() {
         </div>
       )}
       {Object.entries(grouped).map(([key, items]) => {
+        const styleGroup = isStyleLearningGroup(items);
+        const ctx = (items[0]?.context ?? {}) as Record<string, unknown>;
         const [identityId, campaignId] = key.split('::');
         const handle = items[0]?.handle;
         return (
-          <section key={key} className="rounded border border-slate-200 bg-white">
-            <header className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-3 py-2 text-sm">
+          <section
+            key={key}
+            className={
+              'rounded border bg-white ' +
+              (styleGroup ? 'border-violet-200' : 'border-slate-200')
+            }
+          >
+            <header
+              className={
+                'flex items-center justify-between border-b px-3 py-2 text-sm ' +
+                (styleGroup
+                  ? 'border-violet-100 bg-violet-50'
+                  : 'border-slate-100 bg-slate-50')
+              }
+            >
               <div>
-                <Link
-                  to={`/kols/${identityId}?campaign_id=${encodeURIComponent(campaignId)}`}
-                  className="font-medium text-sky-700 hover:underline"
-                >
-                  {handle ? `@${handle}` : `KOL #${identityId}`}
-                </Link>
-                <span className="ml-2 text-slate-500">
-                  {campaignId && campaignId !== 'null'
-                    ? `campaign ${campaignId}`
-                    : '全局 / 无 campaign'}
-                </span>
+                {styleGroup ? (
+                  <>
+                    <span className="font-medium text-violet-900">
+                      {styleLearningGroupTitle(ctx)}
+                    </span>
+                    <span className="ml-2 text-[11px] text-violet-700">
+                      汇总多位 KOL 的编辑与会话，批准后写入全局 policy
+                    </span>
+                    <Link
+                      to="/learning"
+                      className="ml-2 text-[11px] text-sky-700 hover:underline"
+                    >
+                      查看学习进度
+                    </Link>
+                  </>
+                ) : (
+                  <>
+                    <Link
+                      to={`/kols/${identityId}?campaign_id=${encodeURIComponent(campaignId)}`}
+                      className="font-medium text-sky-700 hover:underline"
+                    >
+                      {handle ? `@${handle}` : `KOL #${identityId}`}
+                    </Link>
+                    <span className="ml-2 text-slate-500">
+                      {campaignId && campaignId !== 'null'
+                        ? `campaign ${campaignId}`
+                        : '全局 / 无 campaign'}
+                    </span>
+                  </>
+                )}
               </div>
               <span className="text-xs text-slate-500">{items.length} 项待处理</span>
             </header>

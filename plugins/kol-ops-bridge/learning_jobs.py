@@ -11,7 +11,7 @@ from . import learning_distill
 from . import learning_job_store as job_store
 from . import learning_store
 from .gmail_client import GmailUnavailable
-from .gmail_reconcile import run_reconcile_all_mailboxes
+from .gmail_reconcile import backfill_edit_learning_all_mailboxes, run_reconcile_all_mailboxes
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 SCHEDULED_LEARNING_ENV: Final[str] = "LIVE"
 
 JOB_RECONCILE_SENT: Final[str] = "reconcile_sent"
+JOB_BACKFILL_EDIT_LEARNING: Final[str] = "backfill_edit_learning"
 JOB_APPLY_REJECT_POLICY: Final[str] = "apply_reject_policy"
 JOB_APPLY_EDIT_POLICY: Final[str] = "apply_edit_policy"
 JOB_APPLY_PRICING_POLICY: Final[str] = "apply_pricing_calibration_policy"
@@ -36,6 +37,7 @@ _JOB_ALIASES: Final[dict[str, str]] = {
 
 ALL_JOBS: Final[tuple[str, ...]] = (
     JOB_RECONCILE_SENT,
+    JOB_BACKFILL_EDIT_LEARNING,
     JOB_APPLY_REJECT_POLICY,
     JOB_APPLY_EDIT_POLICY,
     JOB_APPLY_EDIT_USER_STYLE,
@@ -47,7 +49,7 @@ ALL_JOBS: Final[tuple[str, ...]] = (
 )
 
 JOB_SUITES: Final[dict[str, tuple[str, ...]]] = {
-    "capture": (JOB_RECONCILE_SENT,),
+    "capture": (JOB_RECONCILE_SENT, JOB_BACKFILL_EDIT_LEARNING),
     "distill": (JOB_APPLY_REJECT_POLICY, JOB_APPLY_EDIT_POLICY),
     "pricing": (JOB_APPLY_PRICING_POLICY, JOB_AUTO_PRICING_CAMPAIGNS),
     "audit": (JOB_SNAPSHOT_FACT_CORRECTIONS, JOB_SYNC_FAILURE_EXAMPLES),
@@ -118,6 +120,17 @@ def _execute_job(
         return run_reconcile_all_mailboxes(
             env=env, lookback_days=lookback_days, max_results=max_results,
         )
+
+    if job_name == JOB_BACKFILL_EDIT_LEARNING:
+        if dry_run:
+            return {
+                "dry_run": True,
+                "note": "would backfill draft_edit_learning for sent drafts",
+                "candidates": len(
+                    cal.list_sent_reply_drafts_for_edit_learning(env=env),
+                ),
+            }
+        return backfill_edit_learning_all_mailboxes(env=env, limit=limit)
 
     if job_name == JOB_APPLY_REJECT_POLICY:
         events = learning_store.list_learning_events(

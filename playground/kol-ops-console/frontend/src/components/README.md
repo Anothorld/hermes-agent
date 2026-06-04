@@ -19,7 +19,7 @@
 | 组件 | 模块 GUIDE |
 |------|------------|
 | `ApprovalDetailPanel`, `ApprovalContextCard`, `ApprovalActionBar`, `RejectCorrectionModal`, `DraftEditDiffPanel` | [approvals](../../../docs/features/approvals/GUIDE.md) |
-| `LearningWorkflowStepper`, `StrategyPromotionPanel` | [learning](../../../docs/features/learning/GUIDE.md) |
+| `LearningWorkflowStepper`, `LearningManualTriggerSection`, `StrategyPromotionPanel` | [learning](../../../docs/features/learning/GUIDE.md) |
 | `LaneFilterBar`, `GoalProgressBar`, `FactsEditor`, `KolProfileDashboard`, `KolNoxInsightsBoard`, `NoxDiligencePanel` | [kols](../../../docs/features/kols/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md) |
 | `EditCampaignConfigPanel`, `NoxCampaignOpsPanel`, `ContractReadinessPanel` | [campaigns](../../../docs/features/campaigns/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md) |
 | `CommunicationHistoryPanel` | [gmail](../../../docs/features/gmail/GUIDE.md) |

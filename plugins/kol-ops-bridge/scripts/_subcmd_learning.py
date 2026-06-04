@@ -112,6 +112,17 @@ def cmd_promote_strategy(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_backfill_edit_learning(args: argparse.Namespace) -> None:
+    body = {
+        "env": args.env,
+        "dry_run": args.dry_run,
+        "limit": args.limit,
+    }
+    print_json(client_from_args(args).request(
+        "POST", "/learning/backfill-edit-learning", json=body,
+    ))
+
+
 def cmd_run_learning_jobs(args: argparse.Namespace) -> None:
     body = {
         "env": args.env,
@@ -168,15 +179,28 @@ def register(sub: argparse._SubParsersAction) -> None:
             "GET /learning/job-runs — audit trail for learning cron",
             cmd_list_learning_job_runs,
         ),
+        (
+            "backfill-edit-learning",
+            "POST /learning/backfill-edit-learning — backfill draft_edit_learning for sent drafts",
+            cmd_backfill_edit_learning,
+        ),
     ):
         p = sub.add_parser(name, help=help_text)
-        if name == "run-learning-jobs":
-            p.add_argument(
-                "--env",
-                choices=("LIVE",),
-                default="LIVE",
-                help="LIVE only — autonomous learning uses production data.",
-            )
+        if name in ("run-learning-jobs", "backfill-edit-learning"):
+            if name == "run-learning-jobs":
+                p.add_argument(
+                    "--env",
+                    choices=("LIVE",),
+                    default="LIVE",
+                    help="LIVE only — autonomous learning uses production data.",
+                )
+            else:
+                add_env_arg(p)
+                p.add_argument(
+                    "--dry-run",
+                    action="store_true",
+                    help="Preview candidates without writing events.",
+                )
         elif name == "list-learning-job-runs":
             p.add_argument("--env", choices=("TEST", "LIVE"), default=None)
         else:

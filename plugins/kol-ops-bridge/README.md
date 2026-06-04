@@ -173,8 +173,9 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Learning exports (read-only) | `learning_store.py` | `export-*-events`, `export-fact-corrections`, … | `GET /learning/*` |
 | Learning apply (distill) | `learning_distill.py` | `apply-*-policy`, `apply-pricing-campaign` | `POST /learning/apply-*` |
 | Learning cron (autonomous) | `learning_jobs.py` | `run-learning-jobs`, `list-learning-job-runs` | `POST /learning/run-scheduled-jobs`, `GET /learning/job-runs` |
+| Learning LLM distill | `learning_llm.py` | *(via apply-edit-policy)* | Reuses Hermes `model.default` + `~/.hermes/.env` via `call_llm`; override with `KOL_LEARNING_LLM_*` |
 | Reject tag vocabulary | `reject_tags.py` | *(via reject body)* | `POST /approvals/.../reject` + `correction` |
-| Sent-body edit diff | `reply_diff.py` | *(via reconcile-sent)* | `POST /gmail/reconcile-sent` |
+| Sent-body edit diff | `gmail_reconcile.py`, `reply_diff.py` | `reconcile_sent`, `backfill_edit_learning` | `POST /gmail/reconcile-sent`, `POST /learning/backfill-edit-learning` |
 
 `write-facts-multi` with `source=email:<message_id>` auto-sanitizes namespaces
 when `signals` are supplied (see `classifier_facts.sanitize_classifier_namespaces`).

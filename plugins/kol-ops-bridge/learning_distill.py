@@ -439,6 +439,17 @@ def propose_style_learning_approval(
     )
     anchor_id = resolve_learning_anchor_identity_id(conn, env=env, events=batch)
     event_ids = [int(e["id"]) for e in batch if e.get("id") is not None]
+    distinct_identity_ids = {
+        int(e["identity_id"])
+        for e in batch
+        if e.get("identity_id") is not None
+    }
+    distinct_campaign_ids = {
+        str(e.get("campaign_id") or "").strip()
+        for e in batch
+        if e.get("campaign_id")
+    }
+    distinct_campaign_ids.discard("")
     combined_md = style_md
     if strategy_md.strip():
         combined_md = f"{style_md.rstrip()}\n\n{strategy_md.strip()}\n"
@@ -454,6 +465,8 @@ def propose_style_learning_approval(
         "proposed_strategy_markdown": strategy_md,
         "source_event_ids": event_ids,
         "sample_count": len(batch),
+        "sample_identity_count": len(distinct_identity_ids),
+        "sample_campaign_count": len(distinct_campaign_ids),
         "batch_threshold": threshold,
         "llm_used": llm_used,
         "opened_by": updated_by,

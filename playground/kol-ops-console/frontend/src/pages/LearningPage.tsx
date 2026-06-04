@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import DraftEditDiffPanel from '../components/DraftEditDiffPanel';
 import StrategyPromotionPanel from '../components/StrategyPromotionPanel';
+import { LearningManualTriggerSection } from '../components/LearningManualTriggerSection';
 import {
   LearningEmptySamplesHint,
   LearningWorkflowStepper,
@@ -20,7 +21,6 @@ import {
   jobStatusLabel,
   policyScopeLabel,
   promoteReasonLabel,
-  suiteOptionLabel,
 } from '../constants/domainLabels';
 import { REJECT_TAG_LABELS, type RejectTag } from '../constants/rejectTags';
 
@@ -91,16 +91,6 @@ type RejectEvent = {
   ts?: string;
   payload?: Record<string, unknown>;
 };
-
-const SUITES = [
-  'capture',
-  'distill',
-  'pricing',
-  'audit',
-  'quality',
-  'nightly',
-  'all',
-] as const;
 
 const JOB_OPTIONS = [
   'reconcile_sent',
@@ -186,13 +176,14 @@ export function LearningPage() {
   async function runJobs() {
     if (!dryRun) {
       const ok = await dialog.confirm({
-        title: '在 LIVE 环境执行学习任务？',
-        description:
-          '将调用 Bridge 定时任务（可能写入 policy、campaign 配置或 skill 参考文件）。建议先勾选「仅预览」试跑。',
-        confirmLabel: '执行',
+        title: dryRun ? '预览任务套件？' : '在 LIVE 执行任务套件？',
+        description: dryRun
+          ? `将模拟「${suite}」套件会做什么，不写入数据库。`
+          : `将按「${suite}」套件在 LIVE 真实执行（可能写入驳回策略、定价配置等；若含编辑蒸馏且样本够数，也会创建学习提案）。建议日常先预览。`,
+        confirmLabel: dryRun ? '开始预览' : '确认执行',
         cancelLabel: '取消',
-        variant: 'danger',
-        liveWarning: true,
+        variant: dryRun ? 'info' : 'danger',
+        liveWarning: !dryRun,
       });
       if (!ok) return;
     }
@@ -225,6 +216,7 @@ export function LearningPage() {
     });
     if (!ok) return;
     setBusy('propose');
+    toast.progress('生成中…', 'LLM 蒸馏约需 1–3 分钟，请稍候', { groupKey: 'learning-propose' });
     try {
       const out = await api.post<Record<string, unknown>>('/learning/propose-edit-policy', {
         env,
@@ -378,55 +370,24 @@ export function LearningPage() {
         ) : null}
       </section>
 
-      <section id="trigger" className="rounded border border-slate-200 bg-white p-3 scroll-mt-4">
-        <h2 className="text-sm font-medium text-slate-800">2. 手动触发</h2>
-        <p className="mt-1 text-xs text-slate-500">
-          对应 Bridge 命令行 <code className="rounded bg-slate-100 px-1">run-learning-jobs</code>。
-          生产数据请用 LIVE；勾选「仅预览」时不写库。
-        </p>
-        <div className="mt-2 flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1 text-xs">
-            任务套件
-            <select
-              value={suite}
-              onChange={(e) => setSuite(e.target.value)}
-              className="rounded border border-slate-300 px-2 py-1 text-sm"
-            >
-              {SUITES.map((s) => (
-                <option key={s} value={s}>
-                  {suiteOptionLabel(s)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex items-center gap-2 text-sm" title="勾选后只预览执行结果，不写入数据库">
-            <input
-              type="checkbox"
-              checked={dryRun}
-              onChange={(e) => setDryRun(e.target.checked)}
-            />
-            仅预览（不写库）
-          </label>
-          <button
-            type="button"
-            disabled={busy === 'run-jobs'}
-            onClick={() => void runJobs()}
-            className="rounded bg-violet-600 px-3 py-1 text-sm text-white hover:bg-violet-700 disabled:opacity-40"
-          >
-            {busy === 'run-jobs' ? '执行中…' : '运行套件'}
-          </button>
-          <button
-            type="button"
-            disabled={busy === 'propose'}
-            onClick={() => void proposeEditPolicy()}
-            className="rounded border border-violet-300 bg-violet-50 px-3 py-1 text-sm text-violet-900 hover:bg-violet-100 disabled:opacity-40"
-            title="需达到编辑批次阈值"
-          >
-            生成学习提案
-          </button>
-        </div>
-        <details className="mt-2 text-xs text-slate-600">
-          <summary className="cursor-pointer">单任务名称（CLI 高级）</summary>
+      <div className="rounded border border-slate-200 bg-white p-3">
+        <LearningManualTriggerSection
+          suite={suite}
+          onSuiteChange={setSuite}
+          dryRun={dryRun}
+          onDryRunChange={setDryRun}
+          env={env}
+          busyRunJobs={busy === 'run-jobs'}
+          busyPropose={busy === 'propose'}
+          onRunJobs={() => void runJobs()}
+          onPropose={() => void proposeEditPolicy()}
+          editedUnconsumed={stats?.edited_unconsumed}
+          batchThreshold={overview?.batch_threshold}
+          readyForDistill={stats?.ready_for_distill}
+          pendingProposalCount={pendingCount}
+        />
+        <details className="mt-3 border-t border-slate-100 pt-2 text-xs text-slate-600">
+          <summary className="cursor-pointer text-slate-500">工程师：CLI 单任务名</summary>
           <ul className="mt-1 list-disc pl-4">
             {JOB_OPTIONS.map((j) => (
               <li key={j}>
@@ -436,7 +397,7 @@ export function LearningPage() {
             ))}
           </ul>
         </details>
-      </section>
+      </div>
 
       <section className="rounded border border-slate-200 bg-white p-3">
         <h2 className="text-sm font-medium text-slate-800">3. 任务审计</h2>

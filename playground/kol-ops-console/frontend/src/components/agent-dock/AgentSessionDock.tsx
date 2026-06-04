@@ -44,17 +44,12 @@ export function AgentSessionDock() {
     // Reset the first-load flag whenever env flips so the stale-selection
     // effect waits for fresh data before clearing the persisted choice.
     firstLoadDone.current = false;
-    if (!open || !getToken()) return;
+    if (!getToken()) return;
     fetchSessions();
+    if (!open) return;
     const id = window.setInterval(fetchSessions, POLL_MS);
     return () => window.clearInterval(id);
   }, [open, env, fetchSessions]);
-
-  // Self-guard: this component is mounted at the App root next to
-  // DialogHost/ToastHost (which live outside RequireAuth). Hide on
-  // login / when the token is cleared. Hooks above always run so we
-  // stay compliant with the Rules of Hooks.
-  if (!getToken()) return null;
 
   // Drop the persisted selection if the session disappears (env switch,
   // registry purge). Wait for the first fetch of the new env to settle
@@ -76,6 +71,9 @@ export function AgentSessionDock() {
     () => sessions.reduce((acc, s) => (s.open ? acc + 1 : acc), 0),
     [sessions],
   );
+
+  // Self-guard: mounted at App root (outside RequireAuth). Hide when logged out.
+  if (!getToken()) return null;
 
   if (!open) {
     return (

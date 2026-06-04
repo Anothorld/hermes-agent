@@ -2415,6 +2415,47 @@ def list_approved_reply_drafts(*, env: str = "LIVE") -> list[dict[str, Any]]:
     return out
 
 
+def list_sent_reply_drafts_for_edit_learning(*, env: str = "LIVE") -> list[dict[str, Any]]:
+    """Return approved ``approval.reply_draft`` facts already marked sent.
+
+    Used to backfill ``draft_edit_learning`` when an older lightweight
+    sent-reconcile path marked ``offer.outreach_sent`` without capturing diffs.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM kol_facts_latest
+                WHERE fact_namespace='approval'
+                  AND fact_key='approval.reply_draft'
+                  AND env=?
+                ORDER BY id DESC""",
+            (env,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        identity_id = int(r["identity_id"])
+        campaign_id = r["campaign_id"]
+        facts = latest_facts_for(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        )
+        if facts.get("offer.outreach_sent") is not True:
+            continue
+        value = _jl(r["fact_value"], None)
+        if not isinstance(value, dict) or value.get("decision") != "approved":
+            continue
+        gmail_draft = value.get("gmail_draft")
+        if not isinstance(gmail_draft, dict) or not gmail_draft.get("thread_id"):
+            continue
+        out.append({
+            "identity_id": identity_id,
+            "campaign_id": campaign_id,
+            "fact_key": r["fact_key"],
+            "value": value,
+            "gmail_draft": gmail_draft,
+            "captured_at": r["captured_at"],
+        })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Archive helper
 # ---------------------------------------------------------------------------
@@ -2580,6 +2621,7 @@ __all__ = [
     "list_pending_approvals",
     "list_decided_approvals",
     "list_approved_reply_drafts",
+    "list_sent_reply_drafts_for_edit_learning",
     "open_escalation",
     "recompute_goals",
     "reply_dispatch_status",

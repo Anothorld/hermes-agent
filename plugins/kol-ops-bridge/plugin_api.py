@@ -48,7 +48,11 @@ from . import learning_promote
 from . import learning_store
 from . import reply_diff
 from . import reject_tags
-from .gmail_reconcile import run_reconcile_all_mailboxes, run_reconcile_sent
+from .gmail_reconcile import (
+    backfill_edit_learning_all_mailboxes,
+    run_reconcile_all_mailboxes,
+    run_reconcile_sent,
+)
 from . import email_conversation
 from . import mailbox_resolver
 from .gmail_client import GmailClient, GmailUnavailable
@@ -372,6 +376,12 @@ class ReconcileSentBody(BaseModel):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
     lookback_days: int = Field(default=7, ge=1, le=90)
     max_results: int = Field(default=100, ge=1, le=500)
+
+
+class BackfillEditLearningBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    dry_run: bool = False
+    limit: int = Field(default=500, ge=1, le=2000)
 
 
 class MarkReplyHandledBody(_CampaignIdNormaliserMixin):
@@ -2300,6 +2310,24 @@ def reconcile_sent(
             env=body.env,
             lookback_days=body.lookback_days,
             max_results=body.max_results,
+        )
+    except GmailUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@router.post("/learning/backfill-edit-learning")
+def backfill_edit_learning_route(
+    body: BackfillEditLearningBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Backfill ``draft_edit_learning`` for sent drafts missed by lightweight reconcile."""
+    _require_bridge_key(x_bridge_key)
+    try:
+        result = backfill_edit_learning_all_mailboxes(
+            env=body.env,
+            dry_run=body.dry_run,
+            limit=body.limit,
         )
     except GmailUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

@@ -34,6 +34,17 @@ export const SUITE_LABELS: Record<string, string> = {
   all: '全部任务',
 };
 
+/** One-line operator hint for the selected cron suite (Learning page). */
+export const SUITE_OPERATOR_HINTS: Record<string, string> = {
+  capture: '对齐 Gmail 已发终稿、补录「编辑后发送」记录（不生成学习提案）。',
+  distill: '驳回原因写入策略；若编辑样本够数，会顺带生成学习提案（与右侧按钮相同）。',
+  pricing: '根据历史谈判数据校准定价策略，并可能更新 campaign 出价比例。',
+  audit: '记录人工改事实的错题、同步到分类器参考文档。',
+  quality: '跑分类器金标评测（检查分类是否退化）。',
+  nightly: '夜间常用：蒸馏 + 定价 + 审计 + 评测（不含 Gmail 采集）。',
+  all: '执行全部任务（含 Gmail 采集）；耗时长，建议先预览。',
+};
+
 export const JOB_LABELS: Record<string, string> = {
   reconcile_sent: 'Gmail 终稿对齐',
   apply_reject_policy: '驳回策略蒸馏',
