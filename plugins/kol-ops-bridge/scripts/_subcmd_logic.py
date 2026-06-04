@@ -98,6 +98,55 @@ def cmd_persist_reply_draft(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_persist_initial_outreach_draft(args: argparse.Namespace) -> None:
+    """Cold/re-engagement initial outreach — stable thread anchors + persist-reply-draft."""
+    body = parse_json_arg(args.json)
+    body.setdefault("env", args.env)
+    require_keys(body, "identity_id", "campaign_id", "child_skill", "child_envelope")
+    campaign_id = str(body["campaign_id"])
+    identity_id = int(body["identity_id"])
+    child = body["child_envelope"]
+    if not isinstance(child, dict):
+        raise SystemExit(2)
+    for key in ("subject", "body", "to"):
+        val = child.get(key)
+        if not (isinstance(val, str) and val.strip()):
+            import json
+            import sys
+
+            sys.stderr.write(json.dumps({
+                "error": "invalid_cli_args",
+                "hint": (
+                    f"child_envelope.{key} must be a non-empty string "
+                    "(recipient email goes in `to` for cold outreach)."
+                ),
+            }, ensure_ascii=False) + "\n")
+            raise SystemExit(2)
+    source_message_id = f"draft:outreach_{campaign_id}_{identity_id}"
+    thread_id = f"outreach_{campaign_id}_{identity_id}"
+    persist_body = {
+        "identity_id": identity_id,
+        "campaign_id": campaign_id,
+        "env": body["env"],
+        "source_message_id": source_message_id,
+        "primary_lane": body.get("primary_lane") or "commerce",
+        "primary_goal": body.get("primary_goal") or "outreach",
+        "child_skill": body["child_skill"],
+        "child_envelope": child,
+        "latest_email": {
+            "thread_id": thread_id,
+            "message_id": source_message_id,
+            "subject": child.get("subject", ""),
+        },
+        "linked_escalation_id": body.get("linked_escalation_id"),
+    }
+    if body.get("contributing"):
+        persist_body["contributing"] = body["contributing"]
+    print_json(client_from_args(args).request(
+        "POST", "/reply-drafts/persist", body=persist_body,
+    ))
+
+
 # -------------------------------------------------------------- registration
 def register(sub: "argparse._SubParsersAction") -> None:
     p = sub.add_parser(
@@ -180,3 +229,15 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--json", required=True,
                    help="PersistReplyDraftBody JSON or @path.")
     p.set_defaults(func=cmd_persist_reply_draft)
+
+    p = sub.add_parser(
+        "persist-initial-outreach-draft",
+        help=("Cold/re-engagement initial outreach: stable draft:outreach_* "
+              "anchors + POST /reply-drafts/persist (never write-facts on "
+              "approval.reply_draft)."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--json", required=True,
+                   help="{identity_id, campaign_id, child_skill, child_envelope:{subject,body,to}, ...}")
+    p.set_defaults(func=cmd_persist_initial_outreach_draft)

@@ -94,6 +94,7 @@ All candidates must meet:
 | Account type | individual personal blogger, not agency/media/brand |
 | Self-commerce (furniture only) | NOT a furniture seller themselves — DISCARD if bio, link-in-bio (Linktree/Beacons/Stan etc.), pinned posts, or any of the last 10-15 Reels promote their own furniture brand, furniture DTC store, furniture dropshipping, or a persistent furniture storefront (e.g. Amazon shop / LTK / Shop My where furniture is a recurring category, not a one-off affiliate post). Non-furniture self-commerce (fashion / beauty / food / kitchenware / decor accessories / tech / pet) does NOT trigger this rule — those creators are fine and often better at branded-content execution. |
 | Operator do-not-contact list | DISCARD if the handle appears in the bridge's do-not-contact set (operators flag accounts as `competitor` etc. via the console's archive modal). Fetch the set ONCE at run start (see **Pre-discovery do-not-contact pull** below) and match candidate handles against it before any per-profile qualification. |
+| 14-day outreach cooldown | DISCARD if we already sent a confirmed outreach email to this handle within the last **14 days** (cross-campaign). Fetch the cooldown handle set ONCE at run start (see **Pre-discovery outreach cooldown pull** below). The bridge also hard-rejects `add-candidate` with `outreach_cooldown_active` if you skip the pre-check. |
 | Competitor deals | no active exclusive direct competitor deal; past one-off competitor collab is a positive flag |
 | Scores | Match ≥ 70 and Showcase ≥ 50 |
 
@@ -110,6 +111,20 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-relationships \
 Extract `items[*].primary_handle` (lowercased) into a set. Repeat for any other do-not-contact outcomes if the operator adds new ones (today: only `competitor`). During qualification, before issuing `browser_navigate` to a candidate profile, lowercase-compare the handle against this set — if matched, log a one-line skip and move on. **Do not** spend tool turns measuring views/ER on a do-not-contact handle.
 
 If the bridge call itself fails (network, auth), do NOT silently proceed with an empty list — that would defeat the operator gate. Report `do_not_contact_pull_failed: <reason>` and either retry once or stop the run; treat it like a pre-flight gate failure.
+
+## Pre-discovery outreach cooldown pull
+Before the first seed search (right after the do-not-contact pull), fetch every handle we outreached within the last **14 days** across **all** campaigns. Discovery must skip them even if they look like a perfect fit.
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-outreach-cooldown-handles \
+  --env <TEST|LIVE> --plain
+```
+
+Lowercase each line into a set. During qualification, before `browser_navigate`, compare the handle — if matched, log `skip_outreach_cooldown: @handle` and move on. Do **not** call `add-candidate` for these handles; the bridge returns HTTP 409 `outreach_cooldown_active` if you try.
+
+Handles outreached **more than 14 days ago** may be discovered again, but the console shortlist and KOL detail page will still show an **曾触达** tag with how long ago — operators use that context when approving.
+
+If this bridge call fails, report `outreach_cooldown_pull_failed: <reason>` and retry once or stop the run (same severity as the do-not-contact gate).
 
 ## Prior runs handling
 If the brief contains a `# prior_runs` block, **read it BEFORE generating any seeds**. Each entry lists what an earlier round of this same campaign generation already tried (`attempted_angles`, `remediation_attempted`), where it fell short (`floor_unmet_reason`, `diversity_floor_unmet`, `underserved_verticals`), and — most important — what it flagged as worth investigating next (`next_round_focus`). Rules, in priority order:
@@ -318,6 +333,8 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py replay-ingest-buffer --
 
 Rules:
 - One handle per ingest call; never accumulate unpersisted candidates in memory.
+- **Never** batch ingest via `execute_code` loops over `/tmp/ingest_*.json` files.
+  Use **terminal** + `ingest-confirmed-candidate` immediately after each handle qualifies.
 - If `identity.hero_post_note` is present, include its provenance triple
   in the SAME write:
   `identity.hero_post_note_source`,

@@ -31,6 +31,7 @@ from .bridge_client import BridgeClient, BridgeError
 from .bridge_runtime import ensure_gateway_bridge_key
 from .campaign_locks import campaign_lock
 from .gateway_client import GatewayClient, GatewayError
+from .bridge_agent_contract_loader import discovery_cli_rules, gateway_contract_block
 from .run_registry import get_inflight_run, register_run
 
 
@@ -55,20 +56,11 @@ REDISCOVERY_INSTRUCTIONS = (
     "asked for more candidates.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    "- kol-ops-bridge base URL: http://127.0.0.1:8080/api/plugins/kol-ops-bridge\n"
-    "  (override with HERMES_KOL_OPS_BRIDGE_BASE if needed)\n"
-    "- Bridge auth header: X-Bridge-Key: $HERMES_KOL_OPS_BRIDGE_KEY\n"
-    "  (already in your environment; never echo the value)\n"
+    f"{gateway_contract_block()}\n"
+    f"{discovery_cli_rules()}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
-    "- For search_files/read_file/write_file/patch, use repo-relative\n"
-    "  paths like `plugins/kol-ops-bridge` or absolute paths under\n"
-    f"  `{_REPO_ROOT}/`.\n"
-    "- Do NOT prefix file-tool paths with `./agent_prj/hermes-agent/`.\n"
-    "- For terminal/Python execution, use absolute script paths.\n"
-    "- ALL CAL writes/reads go through the deterministic CLI; never\n"
-    "  hand-craft curl/PUT/POST. Single entry point:\n"
-    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/\n"
-    "      scripts/kol_bridge_tool.py <cmd> --env <env> [--campaign-id <id>] ...\n"
+    "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
+    "- Use the **terminal** tool for `kol_bridge_tool.py` (not execute_code+subprocess).\n"
     "\n"
     "## Pipeline (run in order, do NOT skip)\n"
     "1. SKIP kol-campaign-intake. campaign_config is already persisted; do\n"
@@ -78,7 +70,10 @@ REDISCOVERY_INSTRUCTIONS = (
     "   exclusion set of every handle currently in the pool, regardless of\n"
     "   candidate_status (new/selected_for_outreach/rejected/archived).\n"
     "   Merge this set with the `already_discovered_handles` block in the\n"
-    "   brief — trust whichever is larger.\n"
+    "   brief — trust whichever is larger. Also merge handles from\n"
+    "   `list-outreach-cooldown-handles --env <env> --plain` (14-day\n"
+    "   cross-campaign outreach cooldown) so rediscover never re-adds a\n"
+    "   recently contacted KOL.\n"
     "3. `skill_view(name='instagram-kol-discovery')` and then EXECUTE\n"
     "   discovery using the built-in BrowserUse tools — `browser_navigate`,\n"
     "   `browser_snapshot`, `browser_get_images`, `browser_click`,\n"

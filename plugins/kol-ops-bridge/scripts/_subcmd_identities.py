@@ -2,8 +2,8 @@
 
 Covers ``upsert-identity``, ``get-identity``, ``get-relationship``,
 ``list-relationships``, ``get-reusable-facts``, ``get-goals``,
-``get-dispatch-context``, ``get-timeline``, ``archive-identity``,
-``list-events``, ``write-event``.
+``get-dispatch-context``, ``get-email-conversation``, ``get-timeline``,
+``archive-identity``, ``list-events``, ``write-event``.
 """
 
 from __future__ import annotations
@@ -44,7 +44,33 @@ def cmd_upsert_identity(args: argparse.Namespace) -> None:
 
 def cmd_get_identity(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
-        "GET", f"/identities/{args.identity_id}",
+        "GET",
+        f"/identities/{args.identity_id}",
+        params={"env": args.env},
+    ))
+
+
+def cmd_list_outreach_cooldown_handles(args: argparse.Namespace) -> None:
+    data = client_from_args(args).request(
+        "GET",
+        "/outreach-touch/cooldown-handles",
+        params={"env": args.env, "limit": args.limit},
+    )
+    if args.plain:
+        for row in data.get("items", []):
+            handle = row.get("handle")
+            if handle:
+                print(handle)
+        return
+    print_json(data)
+
+
+def cmd_batch_outreach_touch(args: argparse.Namespace) -> None:
+    ids = [int(x) for x in args.identity_ids.split(",") if x.strip().isdigit()]
+    print_json(client_from_args(args).request(
+        "GET",
+        "/identities/outreach-touch",
+        params={"env": args.env, "identity_ids": ",".join(str(i) for i in ids)},
     ))
 
 
@@ -88,6 +114,20 @@ def cmd_get_dispatch_context(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "GET", f"/identities/{args.identity_id}/dispatch-context",
         params={"campaign_id": args.campaign_id, "env": args.env},
+    ))
+
+
+def _operator_headers(args: argparse.Namespace) -> dict[str, str] | None:
+    if getattr(args, "operator_user_id", None) is None:
+        return None
+    return {"X-KOC-Operator-User-Id": str(args.operator_user_id)}
+
+
+def cmd_get_email_conversation(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "GET", f"/identities/{args.identity_id}/email-conversation",
+        params={"campaign_id": args.campaign_id, "env": args.env},
+        extra_headers=_operator_headers(args),
     ))
 
 
@@ -142,6 +182,22 @@ def cmd_list_events(args: argparse.Namespace) -> None:
     ))
 
 
+def _write_event_missing_fields(
+    *,
+    identity_id: object,
+    event_type: object,
+    actor: object,
+) -> list[str]:
+    missing: list[str] = []
+    if identity_id is None:
+        missing.append("identity_id (pass --identity-id <id>)")
+    if not event_type:
+        missing.append("event_type (pass --event-type <name>)")
+    if not actor:
+        missing.append("actor (pass --actor <name>)")
+    return missing
+
+
 def cmd_write_event(args: argparse.Namespace) -> None:
     body = parse_json_arg(args.json) if args.json else {}
     body.setdefault("env", args.env)
@@ -153,6 +209,28 @@ def cmd_write_event(args: argparse.Namespace) -> None:
         body.setdefault("actor", args.actor)
     if args.campaign_id:
         body.setdefault("campaign_id", args.campaign_id)
+    missing = _write_event_missing_fields(
+        identity_id=body.get("identity_id"),
+        event_type=body.get("event_type"),
+        actor=body.get("actor"),
+    )
+    if missing:
+        import json
+        import sys
+
+        payload = {
+            "error": "invalid_cli_args",
+            "hint": (
+                "write-event needs identity_id, event_type, and actor. "
+                "Example: write-event --identity-id 689 --campaign-id CID "
+                "--env LIVE --event-type shortlist_approval_received "
+                "--actor owner@console.app --json @/tmp/event.json"
+            ),
+            "missing": missing,
+            "canonical_cli": "plugins/kol-ops-bridge/scripts/kol_bridge_tool.py",
+        }
+        sys.stderr.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        raise SystemExit(2)
     require_keys(body, "identity_id", "event_type", "actor")
     print_json(client_from_args(args).request(
         "POST", "/events", body=body,
@@ -181,6 +259,28 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p, required=False)
     p.add_argument("--identity-id", type=int, required=True)
     p.set_defaults(func=cmd_get_identity)
+
+    p = sub.add_parser(
+        "list-outreach-cooldown-handles",
+        help=("GET /outreach-touch/cooldown-handles — handles blocked from "
+              "discovery for 14 days after last outreach send."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--limit", type=int, default=5000)
+    p.add_argument("--plain", action="store_true",
+                   help="Print one handle per line (for brief exclusion sets).")
+    p.set_defaults(func=cmd_list_outreach_cooldown_handles)
+
+    p = sub.add_parser(
+        "batch-outreach-touch",
+        help="GET /identities/outreach-touch — prior outreach timestamps for IDs.",
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--identity-ids", required=True,
+                   help="Comma-separated identity_id values.")
+    p.set_defaults(func=cmd_batch_outreach_touch)
 
     p = sub.add_parser("get-relationship",
                        help="GET /identities/{id}/relationship — identity-level relationship row.")
@@ -232,6 +332,27 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.set_defaults(func=cmd_get_dispatch_context)
 
     p = sub.add_parser(
+        "get-email-conversation",
+        description=(
+            "GET .../email-conversation — Gmail sent/received thread for one KOL "
+            "(console communication panel). Requires --campaign-id. Pass "
+            "--operator-user-id when mailbox binding is per operator."
+        ),
+        help="GET .../email-conversation — Gmail thread (not drafts).",
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--identity-id", type=int, required=True)
+    p.add_argument("--campaign-id", required=True)
+    p.add_argument(
+        "--operator-user-id",
+        type=int,
+        default=None,
+        help="X-KOC-Operator-User-Id header (mailbox-scoped history).",
+    )
+    p.set_defaults(func=cmd_get_email_conversation)
+
+    p = sub.add_parser(
         "get-reply-chase-hint",
         help=("GET .../reply-chase-hint — follow-up supersede policy for one inbound."),
     )
@@ -281,15 +402,15 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p = sub.add_parser(
         "write-event",
         help=("POST /events — append one row to kol_conversation_events. "
-              "Required: --identity-id, --event-type, --actor."),
+              "Required: --identity-id, --event-type, --actor. Prefer "
+              "`--json @/tmp/event.json` over inline JSON in the shell."),
     )
     add_common_args(p)
     add_env_arg(p)
     p.add_argument("--identity-id", type=int)
     p.add_argument("--event-type",
-                   help="e.g. inbound_reply, outbound_draft, escalation_opened")
-    p.add_argument("--actor", help="e.g. 'agent', 'operator:alice', 'gmail:reply-poller'")
+                   help="e.g. shortlist_approval_received, kol_initial_outreach_draft_ready")
+    p.add_argument("--actor", help="e.g. 'owner@console.app', 'skill:kol-cold-outreach'")
     p.add_argument("--campaign-id")
-    p.add_argument("--json", help="Full EventWriteBody as JSON or @path "
-                                  "(use for --payload nested data)")
+    p.add_argument("--json", help="EventWriteBody JSON or @/tmp/event.json (recommended)")
     p.set_defaults(func=cmd_write_event)

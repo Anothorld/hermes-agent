@@ -40,11 +40,19 @@ from ..nox_gate import (
     materialize_campaign_config_file,
     require_nox_supplement_enabled,
 )
+from ..kol_profile_url import SHORTLIST_PREVIEW_FACT_KEYS, resolve_profile_url
 from ..nox_helpers import enrich_shortlist_with_nox
+from ..shortlist_profile_og import enrich_shortlist_profile_og
 from ..nox_quota import (
     assert_nox_quota_available,
     fetch_campaign_nox_stats,
     open_nox_quota_escalation,
+)
+from ..bridge_agent_contract_loader import (
+    approval_cli_checklist,
+    discovery_cli_rules,
+    gateway_contract_block,
+    terminal_safety_rules,
 )
 from ..discovery_gate import (
     REDISCOVERY_INSTRUCTIONS,
@@ -78,20 +86,11 @@ _LAUNCH_INSTRUCTIONS = (
     "You are launching a KOL outreach campaign via the web console.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    "- kol-ops-bridge base URL: http://127.0.0.1:8080/api/plugins/kol-ops-bridge\n"
-    "  (override with HERMES_KOL_OPS_BRIDGE_BASE if needed)\n"
-    "- Bridge auth header: X-Bridge-Key: $HERMES_KOL_OPS_BRIDGE_KEY\n"
-    "  (already in your environment; never echo the value)\n"
+    f"{gateway_contract_block()}\n"
+    f"{discovery_cli_rules()}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
-    "- For search_files/read_file/write_file/patch, use repo-relative\n"
-    "  paths like `plugins/kol-ops-bridge` or absolute paths under\n"
-    f"  `{_REPO_ROOT}/`.\n"
-    "- Do NOT prefix file-tool paths with `./agent_prj/hermes-agent/`.\n"
-    "- For terminal/Python execution, use absolute script paths.\n"
-    "- ALL CAL writes/reads go through the deterministic CLI; never\n"
-    "  hand-craft curl/PUT/POST. Single entry point:\n"
-    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/\n"
-    "      scripts/kol_bridge_tool.py <cmd> --env <env> [--campaign-id <id>] ...\n"
+    "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
+    "- Use the **terminal** tool for `kol_bridge_tool.py` (not execute_code+subprocess).\n"
     "  Run with `--help` once to enumerate subcommands. Key ones:\n"
     "    upsert-campaign, get-campaign, add-candidate, list-candidates,\n"
     "    select-candidates, resolve-relationships, route-discovery,\n"
@@ -148,6 +147,10 @@ _LAUNCH_INSTRUCTIONS = (
     "         - <keyword/angle 1>\n"
     "         - <keyword/angle 2>\n"
     "         - <keyword/angle 3>\n"
+    "   Before browsing, also pull `list-outreach-cooldown-handles --env\n"
+    "   <env> --plain` and skip any handle in that 14-day cross-campaign\n"
+    "   set (see instagram-kol-discovery skill). `add-candidate` hard-\n"
+    "   fails with `outreach_cooldown_active` if you skip the pre-check.\n"
     "4. Persist candidates IMMEDIATELY as you qualify them. Do not keep a\n"
     "   private in-memory candidate list and do not wait until the end of\n"
     "   discovery to write CAL. For every qualified profile, perform this\n"
@@ -190,20 +193,11 @@ _APPROVAL_INSTRUCTIONS = (
     "operator approved a shortlist.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    "- kol-ops-bridge base URL: http://127.0.0.1:8080/api/plugins/kol-ops-bridge\n"
-    "  (override with HERMES_KOL_OPS_BRIDGE_BASE if needed)\n"
-    "- Bridge auth header: X-Bridge-Key: $HERMES_KOL_OPS_BRIDGE_KEY\n"
-    "  (already in your environment; never echo the value)\n"
+    f"{gateway_contract_block()}\n"
+    f"{terminal_safety_rules()}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
-    "- For search_files/read_file/write_file/patch, use repo-relative\n"
-    "  paths like `plugins/kol-ops-bridge` or absolute paths under\n"
-    f"  `{_REPO_ROOT}/`.\n"
-    "- Do NOT prefix file-tool paths with `./agent_prj/hermes-agent/`.\n"
-    "- For terminal/Python execution, use absolute script paths.\n"
-    "- ALL CAL writes/reads go through the deterministic CLI; never\n"
-    "  hand-craft curl/PUT/POST. Single entry point:\n"
-    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/\n"
-    "      scripts/kol_bridge_tool.py <cmd> --env <env> [--campaign-id <id>] ...\n"
+    "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
+    "- Use the **terminal** tool for `kol_bridge_tool.py` (not execute_code+subprocess).\n"
     "- The bridge CLI is data-access only. There is NO `run-skill`,\n"
     "  `execute-skill`, or child-skill-runner subcommand. \"Invoke skill\n"
     "  X\" ALWAYS means: you (the executing LLM) read\n"
@@ -274,12 +268,12 @@ _APPROVAL_INSTRUCTIONS = (
     "   was actually sent; draft-only work writes draft-ready facts and\n"
     "   pending approval records instead.\n"
     "7. Persist every returned initial outreach draft back to CAL before\n"
-    "   reporting success. Write both:\n"
-    "   a) `write-event --event-type kol_initial_outreach_draft_ready` with\n"
-    "      payload containing child_skill, identity_id, and draft envelope;\n"
-    "   b) `write-facts-multi` with `approval.reply_draft={decision:\n"
-    "      \"pending\", kind:\"initial_outreach\", child_skill, draft}`.\n"
-    "   This is the durable Web approval queue.\n"
+    "   reporting success. For each identity use ONLY:\n"
+    "   `persist-initial-outreach-draft --env <env> --json @/tmp/outreach_persist_<id>.json`\n"
+    "   (child_envelope must include non-empty subject, body, to). This writes\n"
+    "   the `kol_reply_draft_ready` event + `approval.reply_draft` atomically.\n"
+    "   NEVER use `write-facts` / `write-facts-multi` on `approval.reply_draft`.\n"
+    "   NEVER use urllib/curl/execute_code for bridge HTTP.\n"
     "8. In TEST mode, any eventual Gmail draft target (created only after\n"
     "   approval.reply_draft is approved) must use test_mode_to from\n"
     "   campaign_config. This shortlist run MUST NOT create Gmail drafts;\n"
@@ -2351,10 +2345,18 @@ async def get_shortlist(
                 is_new_since_last_approval = updated_at > last_selected_at
             else:
                 is_new_since_last_approval = True
+        handle_str = str(handle).lstrip("@")
         candidates.append({
-            "handle": str(handle).lstrip("@"),
+            "handle": handle_str,
             "platform": row.get("platform"),
             "identity_id": identity_id if isinstance(identity_id, int) else None,
+            "profile_url": resolve_profile_url(
+                platform=row.get("platform") if isinstance(row.get("platform"), str) else None,
+                handle=handle_str,
+                fallback_url=row.get("profile_url")
+                if isinstance(row.get("profile_url"), str)
+                else None,
+            ),
             "display_name": row.get("display_name"),
             "audience_fit": payload.get("audience_fit") or payload.get("final_fit") or score_pct,
             "brand_safety": payload.get("brand_safety"),
@@ -2377,6 +2379,85 @@ async def get_shortlist(
         campaign_id=campaign_id,
         env=env,
     )
+    profile_ids = [
+        int(c["identity_id"])
+        for c in candidates
+        if isinstance(c.get("identity_id"), int)
+    ]
+    if profile_ids:
+        try:
+            profile_facts_by_id = await bridge.batch_facts_subset(
+                campaign_id=campaign_id,
+                identity_ids=profile_ids,
+                env=env,
+                fact_keys=SHORTLIST_PREVIEW_FACT_KEYS,
+            )
+        except BridgeError:
+            profile_facts_by_id = {}
+        for c in candidates:
+            iid = c.get("identity_id")
+            if not isinstance(iid, int):
+                continue
+            facts = profile_facts_by_id.get(iid) or {}
+            c["profile_url"] = resolve_profile_url(
+                platform=c.get("platform") if isinstance(c.get("platform"), str) else None,
+                handle=c.get("handle"),
+                facts=facts,
+                fallback_url=c.get("profile_url")
+                if isinstance(c.get("profile_url"), str)
+                else None,
+            )
+            c["preview_facts"] = facts
+    await enrich_shortlist_profile_og(
+        bridge, candidates, campaign_id=campaign_id, env=env
+    )
+    touch_ids = [
+        int(c["identity_id"])
+        for c in candidates
+        if isinstance(c.get("identity_id"), int)
+    ]
+    if touch_ids:
+        touch_items: dict[str, Any] = {}
+        try:
+            touch_resp = await bridge.batch_outreach_touch(touch_ids, env=env)
+            raw = touch_resp.get("items") if isinstance(touch_resp, dict) else {}
+            if isinstance(raw, dict):
+                touch_items = raw
+        except BridgeError:
+            touch_items = {}
+        facts_by_id: dict[str, Any] = {}
+        try:
+            facts_resp = await bridge.batch_facts_subset(
+                campaign_id=campaign_id,
+                identity_ids=touch_ids,
+                env=env,
+                fact_keys=["offer.outreach_sent_at", "offer.outreach_sent"],
+            )
+            facts_by_id = facts_resp.get("by_identity") or {}
+        except BridgeError:
+            facts_by_id = {}
+        for c in candidates:
+            iid = c.get("identity_id")
+            if not isinstance(iid, int):
+                continue
+            touch = touch_items.get(str(iid)) or touch_items.get(iid)
+            if not isinstance(touch, dict):
+                touch = None
+            camp_facts = facts_by_id.get(str(iid))
+            if isinstance(camp_facts, dict):
+                at = camp_facts.get("offer.outreach_sent_at")
+                if isinstance(at, str) and at.strip():
+                    camp_touch = {
+                        "last_touch_at": at.strip(),
+                        "last_touch_campaign_id": campaign_id,
+                    }
+                    if (
+                        not touch
+                        or at.strip() > str(touch.get("last_touch_at") or "")
+                    ):
+                        touch = camp_touch
+            if isinstance(touch, dict) and touch.get("last_touch_at"):
+                c["prior_outreach_touch"] = touch
     return {
         "campaign_id": campaign_id,
         "snapshot_ts": snapshot_ts,
@@ -2407,6 +2488,7 @@ def _compose_approval_brief(
             f"- identity_id: {row['identity_id']}\n"
             f"  handle: {row['handle']}"
         )
+    identity_ids = [int(row["identity_id"]) for row in selected_rows]
     lines.extend([
         "",
         "# required_next_step",
@@ -2415,19 +2497,20 @@ def _compose_approval_brief(
         "the deterministic CLI and prepare outreach drafts only for the approved",
         "identity IDs above.",
         "",
-        "## Runtime contract",
-        f"- Use {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
-        "- Every CLI call MUST pass --env matching `mode` above.",
-        "- If bridge auth fails, stop and report the missing HERMES_KOL_OPS_BRIDGE_KEY; do not bypass CAL.",
-        "- In TEST mode, route any eventual Gmail draft target to test_mode_to above.",
-        "- During this run, do NOT create Gmail drafts. Only persist `approval.reply_draft` with `decision=pending`.",
-        "- Gmail drafts are created only after explicit ApprovalsPage approve of `approval.reply_draft`.",
-        "- Record progress/events through the bridge CLI so the console can show what happened.",
+        gateway_contract_block(),
+        "",
+        terminal_safety_rules(),
         "",
         "## Nox contacts (Gate B)",
         "If `campaign_config.nox_quota_enabled` is true, for each approved identity "
         "without `primary_email`, run `nox_kol_tool.py contacts --gate pre_outreach_confirm` "
         "with `--campaign-config-file` before browser email-discovery.",
+        "",
+        approval_cli_checklist(
+            campaign_id=campaign_id,
+            env=env,
+            identity_ids=identity_ids,
+        ),
     ])
     return "\n".join(lines)
 
@@ -2818,17 +2901,14 @@ def _compose_redraft_brief(
             "or `kol-reengagement-outreach` (repeat) for this identity."
         ),
         (
-            "4. Persist results to CAL: emit `kol_initial_outreach_draft_ready` "
-            "event AND write the `approval.reply_draft` fact with "
-            "`decision=\"pending\", kind=\"initial_outreach\"`. If a "
-            "prior approval.reply_draft exists for this (identity, "
-            "campaign), overwrite it — the operator explicitly asked "
-            "for a fresh draft."
+            "4. Persist via `persist-initial-outreach-draft --env <env> "
+            "--json @/tmp/outreach_persist_<id>.json` only (overwrites prior "
+            "pending draft for this identity/campaign). NEVER write-facts on "
+            "approval.reply_draft."
         ),
         (
-            "5. Do NOT create Gmail drafts in this redraft run. Persist only "
-            "`approval.reply_draft` (decision=pending), then wait for console "
-            "approval."
+            "5. Do NOT create Gmail drafts in this redraft run. Wait for console "
+            "approval of the new pending draft."
         ),
         (
             "6. Do NOT send email. Do NOT write `offer.outreach_sent=true`. "
@@ -2836,11 +2916,15 @@ def _compose_redraft_brief(
             "`approval.reply_draft`."
         ),
         "",
-        "## Runtime contract",
-        f"- Use {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
-        "- Every CLI call MUST pass --env matching `mode` above.",
-        "- In TEST mode, route any eventual Gmail draft target to test_mode_to above.",
-        "- This endpoint must not create Gmail drafts directly; it only refreshes pending approval draft content.",
+        gateway_contract_block(),
+        "",
+        terminal_safety_rules(),
+        "",
+        approval_cli_checklist(
+            campaign_id=campaign_id,
+            env=env,
+            identity_ids=[identity_id],
+        ),
     ])
     return "\n".join(lines)
 

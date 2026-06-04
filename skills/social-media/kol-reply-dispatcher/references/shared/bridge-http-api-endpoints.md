@@ -1,7 +1,8 @@
 # Bridge HTTP / CLI endpoints (kol-reply-dispatcher)
 
 Use **`kol_bridge_tool.py`** only — never `curl` ad hoc, never `import dispatch_router`,
-never `execute_code` for routing. Base URL: `HERMES_KOL_OPS_BRIDGE_BASE`
+never `execute_code` for bridge I/O (facts, dispatch-context, email-conversation,
+persist-reply-draft, policies). Never hardcode `BRIDGE_KEY` in code. Base URL: `HERMES_KOL_OPS_BRIDGE_BASE`
 (default `http://127.0.0.1:8080/api/plugins/kol-ops-bridge`).
 
 **`--env`:** pass **`LIVE`** for production KOL data or **`TEST`** for sandbox —
@@ -13,6 +14,8 @@ Every read/write that touches CAL must include explicit `--env`; there is no def
 | Purpose | CLI | HTTP |
 |---------|-----|------|
 | Dispatch bundle | `get-dispatch-context --identity-id ID --campaign-id CID --env LIVE` | `GET /identities/{id}/dispatch-context?campaign_id=&env=` |
+| Gmail thread (resume/draft) | `get-email-conversation --identity-id ID --campaign-id CID --env LIVE [--operator-user-id UID]` | `GET /identities/{id}/email-conversation?campaign_id=&env=` |
+| Company / escalation policies | `get-policy --doc company_style` / `get-parsed-escalation-rules` | `GET /policies/{doc}` |
 | Campaign facts only | `get-facts --identity-id ID --campaign-id CID --env LIVE` | `GET /facts/{id}?campaign_id=&env=` |
 | Poller idempotency | *(poller only)* | `GET /identities/{id}/reply-dispatch-status?campaign_id=&message_id=&env=` |
 | Follow-up chase hint | `get-reply-chase-hint --identity-id ID --campaign-id CID --message-id MID --thread-id TH --env LIVE` | `GET /identities/{id}/reply-chase-hint?campaign_id=&message_id=&thread_id=&env=` |
@@ -84,7 +87,8 @@ For `select-draftable-plan`, merge facts as:
 |------|-----|------|
 | Classifier facts | `write-facts-multi --identity-id ID --json '{campaign_id,source,signals,namespaces}'` | `POST /facts/{id}/multi` |
 | Fragment merge facts | same; `source=fragment-merge:<message_id>` | same |
-| Persist draft | `persist-reply-draft --json '{...}'` | `POST /reply-drafts/persist` |
+| Persist draft (inbound reply) | `persist-reply-draft --json @/tmp/body.json` | `POST /reply-drafts/persist` |
+| Initial outreach draft (cold) | `persist-initial-outreach-draft --json @/tmp/outreach.json` | `POST /reply-drafts/persist` (stable `draft:outreach_{cid}_{id}` anchors) |
 | Open escalation | `open-escalation --json '{reason,...}'` | `POST /escalations` |
 | Reject draft | `reject --fact-path approval.reply_draft --json '{..., correction:{tags,note,suggested_fix}}'` | `POST /approvals/{fact_path}/reject` |
 | Unmark (reprocess) | `unmark-reply-handled --message-id MID --identity-id ID --campaign-id CID --detected-mailbox-user-id UID` | `POST /gmail/unmark-reply-handled` |

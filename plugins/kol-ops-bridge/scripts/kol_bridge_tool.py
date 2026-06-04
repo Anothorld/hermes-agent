@@ -45,12 +45,14 @@ from typing import Optional
 # by adding this directory to ``sys.path`` before pulling in siblings.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import _cli_guardrails  # noqa: E402
 import _subcmd_campaigns  # noqa: E402
 import _subcmd_facts  # noqa: E402
 import _subcmd_governance  # noqa: E402
 import _subcmd_identities  # noqa: E402
 import _subcmd_learning  # noqa: E402
 import _subcmd_logic  # noqa: E402
+import _subcmd_meta  # noqa: E402
 from _cal_client import (  # noqa: E402
     add_common_args,
     add_env_arg,
@@ -64,9 +66,9 @@ def _cmd_health(args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _cli_guardrails.KolBridgeToolParser(
         prog="kol_bridge_tool",
-        description="Deterministic CLI for hermes kol-ops-bridge.",
+        description="Deterministic CLI for hermes kol-ops-bridge (HTTP → serve.py).",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -81,6 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _subcmd_governance.register(sub)
     _subcmd_learning.register(sub)
     _subcmd_logic.register(sub)
+    _subcmd_meta.register(sub)
     return p
 
 

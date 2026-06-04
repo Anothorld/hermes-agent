@@ -19,6 +19,11 @@ from ..campaign_config_sync import assert_campaign_config_complete
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
+from ..bridge_agent_contract_loader import (
+    draft_preview_cli_checklist,
+    gateway_contract_block,
+    resume_cli_checklist,
+)
 from ..run_registry import get_inflight_run, register_run
 
 
@@ -31,15 +36,16 @@ def _preview_draft_dedup_key(escalation_id: int) -> str:
 
 router = APIRouter(prefix="/escalations", tags=["escalations"])
 
+_BRIDGE_AGENT_HARD_RULES = gateway_contract_block() + "\n"
+
 _RESUME_INSTRUCTIONS = (
     "You are resuming a KOL outreach campaign after a web-console escalation "
     "was answered by the operator.\n"
+    f"{_BRIDGE_AGENT_HARD_RULES}\n"
     f"Repo root for file tools is {_REPO_ROOT}. "
-    "For search_files/read_file/write_file/patch, use repo-relative paths "
-    "like `plugins/kol-ops-bridge` or absolute paths under "
-    f"`{_REPO_ROOT}/`; do NOT prefix file-tool paths with "
-    "`./agent_prj/hermes-agent/`. For terminal/Python execution, use "
-    "absolute script paths. "
+    "Do NOT read or search under `plugins/kol-ops-bridge/` for API discovery. "
+    "For bridge I/O use the native **terminal** tool with one "
+    "`kol_bridge_tool.py` subcommand per call (not execute_code). "
     "Read the campaign, candidate, identity, goal and event state from CAL via "
     "the deterministic kol_bridge_tool.py CLI, always passing the env from the "
     "brief. Do not rerun unrelated discovery. Continue the blocked next step "
@@ -52,12 +58,10 @@ _RESUME_INSTRUCTIONS = (
 _DRAFT_PREVIEW_INSTRUCTIONS = (
     "You are generating a PREVIEW email draft for an open KOL escalation. "
     "Hard rules:\n"
+    f"{_BRIDGE_AGENT_HARD_RULES}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
-    "- For search_files/read_file/write_file/patch, use repo-relative\n"
-    "  paths like `plugins/kol-ops-bridge` or absolute paths under\n"
-    f"  `{_REPO_ROOT}/`.\n"
-    "- Do NOT prefix file-tool paths with `./agent_prj/hermes-agent/`.\n"
-    "- For terminal/Python execution, use absolute script paths.\n"
+    "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
+    "- Use the **terminal** tool with `kol_bridge_tool.py` (not execute_code/curl).\n"
     "- Do NOT call resolve-escalation, write-event, or any state-changing "
     "  bridge endpoint on the escalation row. The operator has NOT yet "
     "  approved a resume; this run only previews what the agent would "
@@ -121,6 +125,13 @@ def _compose_draft_preview_brief(
          "so the approval inherits campaign scope). Do NOT resolve the "
          "escalation or send mail. After writing the fact, report the "
          "fact_path back so the console can poll for it."),
+        "",
+        draft_preview_cli_checklist(
+            escalation_id=escalation.get("id") or 0,
+            identity_id=escalation.get("identity_id") or 0,
+            campaign_id=str(escalation.get("campaign_id") or ""),
+            env=str(escalation.get("env") or "LIVE"),
+        ),
     ])
 
 
@@ -296,6 +307,14 @@ def _compose_resume_brief(
         "",
         "# required_next_step",
         " ".join(next_step_lines),
+        "",
+        resume_cli_checklist(
+            escalation_id=escalation.get("id") or 0,
+            identity_id=escalation.get("identity_id") or 0,
+            campaign_id=str(escalation.get("campaign_id") or ""),
+            env=str(escalation.get("env") or "LIVE"),
+            require_draft=require_draft,
+        ),
     ])
 
 

@@ -29,7 +29,7 @@
 | GET | `/campaigns/{id}/lanes` | 看板泳道数据（Bridge 批量读 CAL；Console 约 8s 缓存） |
 | GET/PATCH | `/campaigns/{id}/config` | 活动配置 |
 | GET/POST | `/campaigns/{id}/candidates/*` | 发现池（GET 使用 handle JOIN，含 `total_collabs`） |
-| GET | `/campaigns/{id}/shortlist` | 短名单（Nox 字段批量读 facts） |
+| GET | `/campaigns/{id}/shortlist` | 短名单（`social_links`、`link_previews` 按 URL、`preview_facts`、Nox、`prior_outreach_touch`） |
 | GET | `/campaigns/{id}/agent-stream` | SSE  transcript |
 | POST | `/reply-watcher/*` | Gmail 回复轮询 |
 
@@ -44,3 +44,13 @@
 
 - `campaign_id` + `env` 唯一标识活动
 - 全局 `useCampaignStore` 决定 Kanban/审批过滤范围
+
+## Agent 短名单批准 run（outreach）
+
+Console `POST …/approve` 拉起 gateway run；brief 含 `bridge_cli_checklist`：
+
+- 只用 **terminal** + `kol_bridge_tool.py`（禁止 execute_code/curl/读 bridge 源码）
+- 冷触达草稿：`persist-initial-outreach-draft`（稳定 `draft:outreach_{campaign}_{identity}`）
+- 门控插件：`kol-bridge-agent-guard`（需重启 Hermes 后生效）
+
+详见 `agent_prj/docs/kol-bridge-agent-tooling.md`、skill `kol-cold-outreach`。

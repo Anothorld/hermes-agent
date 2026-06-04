@@ -1,0 +1,128 @@
+"""Hermes pre_tool_call guard — enforce kol_bridge_tool agent contract."""
+
+from __future__ import annotations
+
+import importlib.util
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+
+logger = logging.getLogger(__name__)
+
+HookResult = Optional[Union[None, Dict[str, str]]]
+
+_KOL_SESSION_PREFIXES = ("kol-campaign:", "kol-reply:", "kol-email-discover:", "kol-nox-")
+
+
+def _guard_enabled() -> bool:
+    return os.environ.get("KOL_BRIDGE_AGENT_GUARD", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _kol_session(session_id: str) -> bool:
+    sid = (session_id or "").strip()
+    return any(sid.startswith(p) for p in _KOL_SESSION_PREFIXES)
+
+
+def _load_contract():
+    cached = sys.modules.get("kol_ops_bridge_bridge_agent_contract_guard")
+    if cached is not None:
+        return cached
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "kol-ops-bridge"
+        / "bridge_agent_contract.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "kol_ops_bridge_bridge_agent_contract_guard",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load bridge_agent_contract from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _extract_text(tool_name: str, args: Dict[str, Any]) -> str:
+    if tool_name == "execute_code":
+        return str(args.get("code") or args.get("source") or "")
+    if tool_name == "terminal":
+        return str(args.get("command") or args.get("cmd") or "")
+    return ""
+
+
+def _extract_path(tool_name: str, args: Dict[str, Any]) -> str:
+    for key in ("path", "file_path", "target_file", "query"):
+        val = args.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
+
+
+def pre_tool_call(
+    tool_name: str,
+    args: Dict[str, Any],
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> HookResult:
+    del task_id, tool_call_id
+
+    if not _guard_enabled():
+        return None
+
+    try:
+        contract = _load_contract()
+    except Exception as exc:
+        logger.warning("kol-bridge-agent-guard: contract load failed: %s", exc)
+        return None
+
+    if tool_name in ("execute_code", "terminal"):
+        text = _extract_text(tool_name, args)
+        violations = contract.lint_agent_bridge_snippet(text)
+        if violations:
+            return {
+                "action": "block",
+                "message": contract.format_block_message(violations),
+            }
+        return None
+
+    if tool_name in ("read_file", "search_files", "grep", "glob_file_search"):
+        if not _kol_session(session_id):
+            return None
+        path = _extract_path(tool_name, args)
+        norm = path.replace("\\", "/").lower()
+        if norm.endswith(".env") or "/.env" in norm:
+            return {
+                "action": "block",
+                "message": contract.format_block_message([{
+                    "code": "read_env_file",
+                    "hint": "Do not read .env for bridge keys; kol_bridge_tool inherits HERMES_KOL_OPS_BRIDGE_KEY.",
+                    "canonical_cli": contract.CANONICAL_CLI_REL,
+                }]),
+            }
+        violations = contract.lint_file_tool_path(path)
+        if "kol-ops-bridge" in path.replace("\\", "/").lower() and tool_name == "search_files":
+            violations = violations or [{
+                "code": "search_bridge_tree",
+                "hint": (
+                    "Do not search kol-ops-bridge source. Use print-agent-contract, "
+                    "skill_view(bridge-http-api-endpoints), or kol_bridge_tool.py --help."
+                ),
+                "canonical_cli": contract.CANONICAL_CLI_REL,
+            }]
+        if violations:
+            return {
+                "action": "block",
+                "message": contract.format_block_message(violations),
+            }
+
+    return None

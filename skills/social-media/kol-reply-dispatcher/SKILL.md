@@ -437,7 +437,7 @@ and the full prior `approval.reply_draft` value under
   skills + synthesizer with the refinement prompt appended; otherwise
   re-invoke the single named `child_skill` (legacy single-skill drafts).
 - Do **not** rewrite domain facts on a refinement run — content-only.
-- Persist via `persist-reply-draft` or `write-facts-multi` on
+- Persist via `persist-reply-draft` only — never `write-facts-multi` on
   `approval.reply_draft` as before. Skip Step 6 label changes.
 
 ### Step 6 — Idempotency labels
@@ -524,9 +524,10 @@ Two fragment skills propose the same fact key. Open
 | `FactNamespaceError` on write | Escalate `fact_namespace_violation`; do not munge keys. |
 | Fragment `assert_disjoint` conflict | Escalate `fragment_fact_conflict`. |
 
-Allowed tools for deterministic steps: **`kol_bridge_tool.py` subcommands** and
-`delegate_task` for fragment child skills only. **Never** use `terminal` or
-`execute_code` to call the Bridge or load `kol-ops-bridge` Python modules.
+Allowed tools for deterministic steps: native **`terminal`** with one
+`kol_bridge_tool.py` subcommand per call, plus `delegate_task` for fragment child
+skills only. **Never** use `execute_code` (including `subprocess` wrappers) or
+`curl`/HTTP to call the bridge; never read `kol-ops-bridge` Python source.
 
 ## Pitfalls
 - The classifier's `active_goals_by_lane` is a **hint**, not the truth.

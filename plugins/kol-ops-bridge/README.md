@@ -35,6 +35,43 @@ the external Web system uses to start / read / write KOL outreach state.
   agent-facing wrapper for CAL-affecting operations. Dispatcher agents
   must call this CLI or the Bridge HTTP API instead of writing SQL or
   running ad hoc scripts against `~/.hermes/kol-ops-bridge/cal.db`.
+  A **compatibility shim** at `plugins/kol-ops-bridge/kol_bridge_tool.py`
+  forwards to `scripts/` if something omits the `scripts/` segment.
+
+## CLI pitfalls (agents & operators)
+
+| Mistake | What happens | Fix |
+|--------|----------------|-----|
+| `python plugins/kol-ops-bridge/kol_bridge_tool.py` (no `scripts/`) | Shim forwards + stderr notice; or use canonical path | Always: `python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py` |
+| Running with no subcommand | Exit 2 + **Hint** pointing at `--help` | Add subcommand, e.g. `health`, `get-escalation` |
+| `get-escalation --campaign-id …` | Preflight **invalid_cli_args** JSON + hint | Use `--escalation-id` only; filter campaigns via `list-escalations --env LIVE` |
+| Swallowing stderr (`2>/dev/null`) | Hides hints and bridge errors | Keep stderr visible when debugging |
+| Expecting direct SQLite | CLI only hits HTTP (`serve.py` must be up) | Start bridge / check `health` first |
+| Agent `execute_code` + `curl` + hardcoded `BRIDGE_KEY` | Bypasses CLI; leaks secrets | See **Agent bridge contract** below |
+
+## Agent bridge contract (gateway / kol-orchestrator)
+
+Shared lint + brief text: `bridge_agent_contract.py`. Hermes hook:
+`plugins/kol-bridge-agent-guard/` (blocks curl / source reads on `kol-*` sessions).
+
+**Cold outreach persist:** `persist-initial-outreach-draft` — stable
+`draft:outreach_{campaign_id}_{identity_id}` anchors; do not use `write-facts`
+on `approval.reply_draft`.
+
+Console resume and draft-preview runs embed hard rules in gateway instructions.
+Skills (`kol-escalation-resumer`, `kol-reply-dispatcher`) repeat the same contract.
+
+- **Reads/writes:** `kol_bridge_tool.py` subcommands only (no curl / execute_code HTTP).
+- **Email thread:** `get-email-conversation --identity-id … --campaign-id … --env LIVE`
+- **Draft persist:** `persist-reply-draft` (not reading `plugin_api.py` in execute_code).
+- **Lint:** `kol_bridge_tool.py lint-agent-code --snippet-file … --strict`
+- **Doc:** `agent_prj/docs/kol-bridge-agent-tooling.md`
+
+`get-escalation` example (no `--campaign-id`):
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-escalation --escalation-id 108
+```
 
 ## Agent-safe operations
 
@@ -117,6 +154,24 @@ with a stderr notice.
 Use dedicated projection commands such as
 `list-candidate-handles` instead of piping `list-candidates` into ad hoc
 `python -c` snippets.
+
+### Outreach touch cooldown (14 days)
+
+Cross-campaign **confirmed outreach sends** (`outreach.sent` events and
+`offer.outreach_sent_at` facts) drive two behaviors:
+
+1. **Discovery block** — `add-candidate` returns HTTP 409
+   `outreach_cooldown_active` when the identity was outreached in the last
+   14 days. Skills should pre-filter with:
+
+   ```bash
+   python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-outreach-cooldown-handles \
+     --env LIVE --plain
+   ```
+
+2. **Console tags** — `GET /identities/outreach-touch?identity_ids=1,2,3`
+   enriches shortlist rows and KOL detail with `prior_outreach_touch`
+   (`last_touch_at`, `within_cooldown`, optional `last_touch_campaign_id`).
 
 ### Confirmed-candidate ingest guardrails
 

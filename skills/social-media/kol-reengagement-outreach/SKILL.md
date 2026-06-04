@@ -21,8 +21,11 @@ Weave hints naturally; do not repeat rejected phrasing.
 
 ## Output
 
-Follow `kol-reply-dispatcher/references/shared/reply-envelope-contract.md` and
-persist via `persist-reply-draft` (same as other child skills).
+Return subject/body/to in `child_envelope`. Parent run persists via
+`persist-initial-outreach-draft` (cold/first-touch after shortlist) or
+`persist-reply-draft` when replying in an existing Gmail thread.
+
+Use native **terminal** for bridge CLI — never `execute_code` + subprocess or HTTP.
 
 ## Pitfalls
 

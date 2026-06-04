@@ -30,6 +30,7 @@ from ..campaign_id_norm import CampaignIdNormaliserMixin
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
+from ..bridge_agent_contract_loader import gateway_contract_block
 from ..run_registry import get_inflight_run, register_run
 
 
@@ -47,11 +48,13 @@ router = APIRouter(prefix="/approvals", tags=["approvals"])
 _TERMINAL_APPROVAL_FACT_PATHS: frozenset[str] = frozenset({
     "approval.reply_draft",
     "approval.style_learning_proposal",
+    "approval.outcome_learning_proposal",
 })
 
 _APPROVAL_RESUME_INSTRUCTIONS = (
     "You are resuming a KOL outreach campaign after a web-console approval "
     "decision.\n"
+    f"{gateway_contract_block()}\n"
     "Read the campaign, candidate, identity, goal and event state from CAL "
     "via the deterministic kol_bridge_tool.py CLI, always passing the env "
     "from the brief. Do not rerun unrelated discovery.\n"

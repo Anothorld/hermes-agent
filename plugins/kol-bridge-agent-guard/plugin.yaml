@@ -1,0 +1,7 @@
+name: kol-bridge-agent-guard
+version: 1.0.0
+description: "Block execute_code/curl and bridge source reads that bypass kol_bridge_tool.py."
+author: kol-ops
+kind: backend
+provides_hooks:
+  - pre_tool_call

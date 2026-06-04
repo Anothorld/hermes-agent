@@ -27,6 +27,22 @@
 | PATCH | `/escalations/{id}` | 更新状态/答复 |
 | POST | `/escalations/{id}/preview-draft` | 预览回信 |
 
+## Agent 恢复 run（Resume）约束
+
+Console 在 `resolve`（decision=resume）或「预览草稿」时会拉起 gateway run，
+`session_id` 一般为 `kol-campaign:{env}:{campaign_id}`。
+
+**硬性要求（`bridge_agent_contract.py` + `routers/escalations.py`）：**
+
+- 只能使用 `plugins/kol-ops-bridge/scripts/kol_bridge_tool.py` 子命令访问 CAL
+- 使用原生 **terminal**（每条命令一个子命令），禁止 `execute_code`+subprocess / `curl`
+- Brief 内含 `# bridge_cli_checklist` 有序步骤（resume / preview-draft）
+- 禁止硬编码 `BRIDGE_KEY`；禁止读/搜 `plugins/kol-ops-bridge/` 源码
+- 邮件线程：**`get-email-conversation`**；草稿：**`persist-reply-draft`** 或 `write-facts`
+- Hermes 插件 **`kol-bridge-agent-guard`** 在 `pre_tool_call` 拦截违规（`KOL_BRIDGE_AGENT_GUARD=0` 可关）
+
+详见：`agent_prj/docs/kol-bridge-agent-tooling.md`
+
 ## 关联模块
 
 - [kols](../kols/GUIDE.md) — 身份上下文
