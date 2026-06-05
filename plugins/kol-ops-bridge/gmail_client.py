@@ -88,6 +88,8 @@ class GmailMessage:
     references: Optional[str]
     date: str
     body: str
+    body_html: str = ""
+    body_plain: str = ""
 
 
 class GmailClient:
@@ -135,9 +137,14 @@ class GmailClient:
         cc: Optional[str] = None,
         html: bool = False,
         thread_id: Optional[str] = None,
+        reply_to_message_id: Optional[str] = None,
         attachments: Optional[list[str]] = None,
     ) -> DraftResult:
         """Create a Gmail draft. Returns IDs; raises on any failure.
+
+        ``reply_to_message_id`` sets ``In-Reply-To`` / ``References`` on the
+        message being replied to (Gmail web Reply behaviour). When omitted,
+        threading headers fall back to the latest message in ``thread_id``.
 
         ``attachments`` is a list of absolute file paths to attach. Each path
         must exist at draft-creation time (the underlying CLI raises
@@ -157,6 +164,8 @@ class GmailClient:
             cmd.append("--html")
         if thread_id:
             cmd.extend(["--thread-id", thread_id])
+        if reply_to_message_id:
+            cmd.extend(["--reply-to-message-id", reply_to_message_id])
         for path in attachments or []:
             if not path:
                 continue
@@ -236,6 +245,8 @@ class GmailClient:
             references=(headers.get("References") or None),
             date=str(headers.get("Date", "")),
             body=str(payload.get("body", "")),
+            body_html=str(payload.get("body_html", "") or ""),
+            body_plain=str(payload.get("body_plain", "") or ""),
         )
 
     def get_profile_email(self) -> Optional[str]:

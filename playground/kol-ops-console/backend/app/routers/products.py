@@ -112,6 +112,20 @@ def _commerce_goal_from_item(item: dict[str, Any]) -> str | None:
     return None
 
 
+def _visible_shortlist_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Operator-facing shortlist pool (excludes rejected/archived).
+
+    Unlike ``get_lanes``, this includes ``discovered`` / ``shortlisted`` rows
+    that have not been approved yet — those drive the product-page review
+    button and pending counts.
+    """
+    return [
+        row for row in rows
+        if isinstance(row, dict)
+        and row.get("candidate_status") not in {"rejected", "archived"}
+    ]
+
+
 def _classify_lane_item(item: dict[str, Any]) -> str:
     """Classify one lane item into an operator-facing outreach bucket."""
     if int(item.get("open_escalation_count") or 0) > 0 or item.get("reply_draft_state") == "pending":
@@ -859,38 +873,50 @@ async def list_product_campaigns(
     async def _enrich_campaign(r: sqlite3.Row) -> dict[str, Any]:
         summary = _summarize_events(events, campaign_id=r["campaign_id"])
 
-        try:
-            lane_payload = await bridge.get_lanes(r["campaign_id"], env=e)
-        except BridgeError:
-            lane_payload = {}
-        lane_items = []
-        if isinstance(lane_payload, dict):
-            raw_items = lane_payload.get("items", [])
-            if isinstance(raw_items, list):
-                lane_items = raw_items
-        visible_lane_items = [
-            it for it in lane_items
-            if isinstance(it, dict) and it.get("candidate_status") not in {"rejected", "archived"}
-        ]
-        visible_candidates = visible_lane_items
+        lane_result, handle_result = await asyncio.gather(
+            bridge.get_lanes(r["campaign_id"], env=e),
+            bridge.list_candidate_handles(r["campaign_id"], env=e),
+            return_exceptions=True,
+        )
+        if isinstance(lane_result, BridgeError):
+            lane_payload: dict[str, Any] = {}
+        else:
+            lane_payload = lane_result if isinstance(lane_result, dict) else {}
+        if isinstance(handle_result, BridgeError):
+            raw_handles: list[dict[str, Any]] = []
+        else:
+            raw_handles = [
+                row for row in (handle_result or [])
+                if isinstance(row, dict)
+            ]
+
+        lane_items: list[dict[str, Any]] = []
+        raw_lane_items = lane_payload.get("items", [])
+        if isinstance(raw_lane_items, list):
+            lane_items = [it for it in raw_lane_items if isinstance(it, dict)]
+        visible_lane_items = _visible_shortlist_rows(lane_items)
+        visible_shortlist = _visible_shortlist_rows(raw_handles)
         outreach = _summarize_outreach(visible_lane_items)
         selected_count = sum(
-            1 for c in visible_candidates
+            1 for c in visible_shortlist
             if c.get("candidate_status") == "selected_for_outreach"
         )
-        candidate_ids = [
-            c.get("identity_id") for c in visible_candidates if isinstance(c.get("identity_id"), int)
+        pending_count = sum(
+            1 for c in visible_shortlist
+            if c.get("candidate_status") != "selected_for_outreach"
+        )
+        shortlist_ids = [
+            c.get("identity_id") for c in visible_shortlist if isinstance(c.get("identity_id"), int)
         ]
         lane_ids = [
             it.get("identity_id") for it in visible_lane_items if isinstance(it.get("identity_id"), int)
         ]
         active_ids = [iid for iid in outreach.get("outreach_active_ids", []) if isinstance(iid, int)]
-        kol_identity_ids = list(dict.fromkeys([*summary["kol_identity_ids"], *candidate_ids, *lane_ids]))
+        kol_identity_ids = list(dict.fromkeys([*summary["kol_identity_ids"], *shortlist_ids, *lane_ids]))
         gw = run_state_map.get(r["campaign_id"], {})
-        pending_count = sum(
-            1 for c in visible_candidates
-            if c.get("candidate_status") != "selected_for_outreach"
-        )
+        outreach["outreach_counts"]["pending_review"] = pending_count
+        outreach["outreach_counts"]["approved"] = selected_count
+        outreach["outreach_counts"]["discovered"] = len(visible_shortlist)
         target_floor = r["target_floor"]
         return {
             "needed_ids": set(kol_identity_ids) | set(active_ids),
@@ -910,18 +936,18 @@ async def list_product_campaigns(
                 **outreach,
                 "kol_identity_ids": kol_identity_ids,
                 "contacted_kol_ids": list(dict.fromkeys([*summary.get("contacted_kol_ids", []), *active_ids])),
-                "candidate_count": len(visible_candidates),
+                "candidate_count": len(visible_shortlist),
                 "pending_candidate_count": pending_count,
-                "shortlist_ready": summary["shortlist_ready"] or bool(visible_candidates),
+                "shortlist_ready": summary["shortlist_ready"] or bool(visible_shortlist),
                 "shortlist_approved": summary["shortlist_approved"] or selected_count > 0,
                 "target_floor": target_floor,
                 "baseline_candidate_count": r["baseline_candidate_count"],
                 "retry_count": r["retry_count"],
                 "floor_unmet_reason": r["floor_unmet_reason"],
-                "current_candidate_count": len(visible_candidates),
+                "current_candidate_count": len(visible_shortlist),
                 "floor_progress": (
                     None if target_floor is None
-                    else f"{len(visible_candidates)}/{target_floor}"
+                    else f"{len(visible_shortlist)}/{target_floor}"
                 ),
             },
         }

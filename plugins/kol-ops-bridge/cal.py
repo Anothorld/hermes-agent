@@ -1257,11 +1257,15 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
 
 def list_campaigns(*, env: Optional[str] = None) -> list[dict[str, Any]]:
     """Distinct (campaign_id, env) pairs known to the bridge, with
-    candidate counts. Pulls from ``campaign_candidates`` (the source of
-    truth for what shows up on the kanban) and left-joins
-    ``campaign_config`` for label/status. Sorted newest-first by the
-    candidate row's max ``updated_at`` so the most-recently touched
-    campaign floats to the top of the picker.
+    operator-visible shortlist counts.
+
+    ``candidate_count`` matches the product-page / shortlist pool: all
+    ``campaign_candidates`` rows except ``rejected`` / ``archived``. This
+    is **not** the kanban (``get_lanes``) count — kanban only lists
+    ``selected_for_outreach`` (+ ``needs_review`` / ``archived`` lifecycle).
+
+    Left-joins ``campaign_config`` for label/status. Sorted newest-first by
+    the candidate row's max ``updated_at``.
     """
     where = ""
     args: list[Any] = []
@@ -1272,7 +1276,10 @@ def list_campaigns(*, env: Optional[str] = None) -> list[dict[str, Any]]:
         rows = conn.execute(
             f"""SELECT c.campaign_id      AS campaign_id,
                        c.env              AS env,
-                       COUNT(*)           AS candidate_count,
+                       SUM(CASE
+                             WHEN c.candidate_status NOT IN ('rejected', 'archived')
+                             THEN 1 ELSE 0
+                           END)           AS candidate_count,
                        MAX(c.updated_at)  AS last_touched_at,
                        cf.label           AS label,
                        cf.status          AS status

@@ -10,12 +10,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 from uuid import uuid4
 
-from schemas import Gate
+from schemas import DILIGENCE_PACK_GATES, Gate
 
 from internal.exceptions import NoxCampaignGateError
 
 GATE_FOR_OPERATION: dict[str, Gate] = {
-    "diligence_pack": "shortlist_confirm",
     "contacts": "pre_outreach_confirm",
     "creator_search": "supplement_search",
     "monitor_setup": "post_publish_confirm",
@@ -110,12 +109,19 @@ def verify_console_dispatch(
     }:
         return
 
-    expected_gate = GATE_FOR_OPERATION.get(operation)
-    if expected_gate and gate != expected_gate:
-        raise NoxCampaignGateError(
-            f"gate={gate!r} does not match operation={operation!r} "
-            f"(expected {expected_gate!r})"
-        )
+    if operation == "diligence_pack":
+        if gate not in DILIGENCE_PACK_GATES:
+            raise NoxCampaignGateError(
+                f"gate={gate!r} invalid for diligence_pack "
+                f"(expected one of {sorted(DILIGENCE_PACK_GATES)!r})"
+            )
+    else:
+        expected_gate = GATE_FOR_OPERATION.get(operation)
+        if expected_gate and gate != expected_gate:
+            raise NoxCampaignGateError(
+                f"gate={gate!r} does not match operation={operation!r} "
+                f"(expected {expected_gate!r})"
+            )
 
     claim = campaign_config.get("nox_console_dispatch")
     if not isinstance(claim, dict):

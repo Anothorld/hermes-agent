@@ -12,7 +12,8 @@ Runs when `post_collab_archival` is the active meta goal. Persists outcome into
 ## Bridge tool (required)
 
 ```bash
-kol_bridge_tool archive-identity --identity-id ID --env LIVE --json '{
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py archive-identity \
+  --identity-id ID --env LIVE --json '{
   "campaign_id": "C1",
   "outcome": "success",
   "preferred_mode": "gifted",

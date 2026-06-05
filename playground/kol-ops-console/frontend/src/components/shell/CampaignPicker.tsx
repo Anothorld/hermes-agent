@@ -4,8 +4,8 @@ import { useCampaignStore, useEnvStore } from '../../lib/store';
 
 // Global campaign picker bound to useCampaignStore. Mounted in
 // GlobalNav so every campaign-scoped page reads from the same source.
-// URL ?campaign_id= still wins on first load (deep-link friendly) —
-// pages should sync the URL value into the store on mount.
+// Campaign-scoped pages call ``useCampaignQuerySync()`` so picker
+// changes update ``?campaign_id=`` and deep links seed the store.
 
 export function CampaignPicker() {
   const env = useEnvStore((s) => s.env);

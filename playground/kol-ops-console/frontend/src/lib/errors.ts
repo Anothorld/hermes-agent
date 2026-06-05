@@ -106,6 +106,10 @@ function extractDetail(body: string): string | null {
           );
         }
         if (typeof inner.detail === 'string') return inner.detail;
+        if (typeof inner.message === 'string') {
+          const hint = typeof inner.hint === 'string' ? ` ${inner.hint}` : '';
+          return inner.message + hint;
+        }
       }
       if (typeof obj.message === 'string') return obj.message;
       if (Array.isArray(obj.detail)) {

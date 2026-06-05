@@ -49,21 +49,54 @@ def test_reply_all_cc_empty_when_no_extra_recipients():
     assert cc == ""
 
 
-def test_append_quoted_reply_plain():
+def test_body_has_quoted_reply_detects_gmail_container():
     mod = _load()
-    out = mod.append_quoted_reply(
-        body="Hello there.",
+    assert mod.body_has_quoted_reply('Hi<div class="gmail_quote gmail_quote_container">')
+    assert not mod.body_has_quoted_reply("Hi\n\nThanks!")
+
+
+def test_extract_message_content_without_quotes_strips_nested_thread():
+    mod = _load()
+    inbound = (
+        "Thanks for the details — we'll pass on this one.\n\n"
+        "On Thu, Jun 4, 2026 at 3:20 AM Candice wrote:\n"
+        "> older offer text\n"
+    )
+    assert mod.extract_message_content_without_quotes(inbound) == (
+        "Thanks for the details — we'll pass on this one."
+    )
+
+
+def test_build_gmail_native_reply_html_matches_web_structure():
+    mod = _load()
+    parent_html = (
+        '<div dir="ltr">Unfortunately we will pass.</div>'
+        '<div class="gmail_quote"><blockquote>older turn</blockquote></div>'
+    )
+    out = mod.build_gmail_native_reply_html(
+        new_body="Totally understand.",
+        quoted_from="Shay <slevene@viralnation.com>",
+        quoted_date="Thu, 4 Jun 2026 04:12:45 -0400",
+        quoted_body_html=parent_html,
+    )
+    assert 'class="gmail_extra"' in out
+    assert 'class="gmail_quote"' in out
+    assert 'class="gmail_attr"' in out
+    assert 'href="mailto:slevene@viralnation.com"' in out
+    assert 'type="cite"' in out
+    assert "Totally understand." in out
+    assert "Unfortunately we will pass." in out
+    assert "older turn" in out
+    assert "&lt;blockquote" not in out
+
+
+def test_build_gmail_native_reply_html_falls_back_to_plain():
+    mod = _load()
+    out = mod.build_gmail_native_reply_html(
+        new_body="Hello there.",
         quoted_from="KOL <kol@example.com>",
         quoted_date="Mon, 2 Jun 2026 10:00:00 +0000",
-        quoted_body="Prior message line.",
+        quoted_body_plain="Prior message line.",
     )
-    assert out.startswith("Hello there.")
-    assert "wrote:" in out
-    assert "kol@example.com" in out
-    assert "> Prior message line." in out
-
-
-def test_body_has_quoted_reply_detects_wrote_marker():
-    mod = _load()
-    assert mod.body_has_quoted_reply("Hi\n\nOn Tue, x wrote:\n> old")
-    assert not mod.body_has_quoted_reply("Hi\n\nThanks!")
+    assert "Prior message line." in out
+    assert "Hello there." in out

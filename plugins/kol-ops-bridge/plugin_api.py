@@ -31,6 +31,8 @@ from pydantic import BaseModel, Field, field_validator
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 from . import cal
+from . import discovery_skip
+from . import outreach_touch
 from . import campaign_validation
 from . import confirmed_ingest
 from . import confirmed_fact_buffer
@@ -44,6 +46,7 @@ from . import orphan_gmail_draft
 from . import learning_distill
 from . import learning_jobs
 from . import learning_job_store
+from . import learning_outcome
 from . import learning_overview
 from . import learning_promote
 from . import learning_store
@@ -63,11 +66,24 @@ from .gmail_console import (
     resolve_console_user_id,
 )
 from . import gmail_reply_envelope
+from . import gmail_thread_resolve
 from .schema import FACT_NAMESPACES, GOAL_NAMES, SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_DISCOVERY_SKIP_LABELS: dict[str, str] = {
+    "competitor": "竞品不合作",
+    "success": "已合作完成",
+    "aborted": "主动叫停",
+    "legacy_collab": "历史合作",
+}
+
+
+def _discovery_skip_message(reason: str) -> str:
+    label = _DISCOVERY_SKIP_LABELS.get(reason, reason)
+    return f"该 KOL 属于{label}，发现流程不可再次纳入候选池"
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +315,7 @@ class CandidateUpsertBody(BaseModel):
     discovery_score: Optional[float] = None
     payload: Optional[dict[str, Any]] = None
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    enforce_outreach_cooldown: bool = True
 
 
 class CandidateSelectBody(BaseModel):
@@ -418,6 +435,13 @@ class RouteDiscoveryBody(BaseModel):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
     selected_by: str = "agent"
     operator_note: str = ""
+    identity_ids: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "When set, only these identities are routed/selected. "
+            "Omit for full-pool Agent routing."
+        ),
+    )
 
 
 class IngestIdentityBody(BaseModel):
@@ -489,6 +513,7 @@ class PolicyPutBody(BaseModel):
     updated_by: str
     owner_user_id: Optional[int] = None
     title: Optional[str] = None
+    env: Optional[str] = Field(default=None, pattern="^(TEST|LIVE)$")
 
 
 class PolicyRollbackBody(BaseModel):
@@ -571,11 +596,70 @@ def upsert_identity(
     return {"identity_id": iid}
 
 
+@router.get("/identities/outreach-touch")
+def batch_outreach_touch(
+    identity_ids: str = Query(
+        ...,
+        description="Comma-separated identity_id values",
+        min_length=1,
+    ),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Cross-campaign last outreach touch for many identities (UI tags)."""
+    ids: list[int] = []
+    for part in identity_ids.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    touches = cal.batch_global_outreach_touch(ids, env=env) if ids else {}
+    return {
+        "env": env,
+        "cooldown_days": outreach_touch.OUTREACH_COOLDOWN_DAYS,
+        "items": {str(k): v for k, v in touches.items()},
+    }
+
+
+@router.get("/outreach-touch/cooldown-handles")
+def list_outreach_cooldown_handles(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    limit: int = Query(default=5000, ge=1, le=10_000),
+) -> dict[str, Any]:
+    """Handles that discovery must skip (outreach within cooldown window)."""
+    items = cal.list_outreach_cooldown_handles(env=env, limit=limit)
+    return {
+        "env": env,
+        "cooldown_days": outreach_touch.OUTREACH_COOLDOWN_DAYS,
+        "count": len(items),
+        "items": items,
+    }
+
+
+@router.get("/discovery-skip-handles")
+def list_discovery_skip_handles(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    limit: int = Query(default=10_000, ge=1, le=20_000),
+) -> dict[str, Any]:
+    """Handles that discovery must skip (archived last_outcome values)."""
+    items = cal.list_discovery_skip_handles(env=env, limit=limit)
+    return {
+        "env": env,
+        "skip_outcomes": sorted(discovery_skip.DISCOVERY_SKIP_OUTCOMES),
+        "count": len(items),
+        "items": items,
+    }
+
+
 @router.get("/identities/{identity_id}")
-def get_identity(identity_id: int) -> dict[str, Any]:
+def get_identity(
+    identity_id: int,
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
     ident = cal.get_identity(identity_id)
     if not ident:
         raise HTTPException(status_code=404, detail="identity not found")
+    touch = cal.batch_global_outreach_touch([identity_id], env=env).get(identity_id)
+    if touch:
+        ident["prior_outreach_touch"] = touch
     return ident
 
 
@@ -618,6 +702,33 @@ def list_archived_kols(
         env=env, q=q, last_outcome=last_outcome, platform=platform,
         limit=limit, offset=offset,
     )
+
+
+@router.get("/kol-registry")
+def list_kol_registry(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    q: Optional[str] = Query(default=None, max_length=200),
+    source: str = Query(default="all", pattern="^(all|legacy|discovery)$"),
+    sort: str = Query(default="ingested_at", pattern="^(ingested_at|first_discovered_at|created_at)$"),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Agent-discovered KOLs, paginated for the metrics table."""
+    return cal.list_discovered_kol_registry(
+        env=env, q=q, source=source, sort=sort, order=order,
+        limit=limit, offset=offset,
+    )
+
+
+@router.get("/kol-registry/funnel")
+def kol_registry_funnel(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    days: int = Query(default=0, ge=0, le=365),
+) -> dict[str, Any]:
+    """Discovery funnel rates for gate-metrics (adoption + reply)."""
+    window = int(days) if days > 0 else None
+    return cal.aggregate_kol_registry_funnel(env=env, days=window)
 
 
 @router.get("/identities/{identity_id}/relationship/reusable-facts")
@@ -1099,14 +1210,42 @@ def upsert_candidate(
                                 detail="must provide identity_id OR primary_handle")
         iid = cal.upsert_identity(primary_handle=body.primary_handle,
                                   platform=body.platform, env=body.env)
-    candidate_id = cal.upsert_candidate(
-        campaign_id=campaign_id,
-        identity_id=iid,
-        source=body.source,
-        discovery_score=body.discovery_score,
-        payload=body.payload,
-        env=body.env,
-    )
+    try:
+        candidate_id = cal.upsert_candidate(
+            campaign_id=campaign_id,
+            identity_id=iid,
+            source=body.source,
+            discovery_score=body.discovery_score,
+            payload=body.payload,
+            env=body.env,
+            enforce_outreach_cooldown=body.enforce_outreach_cooldown,
+        )
+    except discovery_skip.DiscoverySkipActive as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "discovery_skip_active",
+                "message": _discovery_skip_message(exc.reason),
+                "identity_id": exc.identity_id,
+                "handle": exc.handle,
+                "reason": exc.reason,
+            },
+        ) from exc
+    except outreach_touch.OutreachCooldownActive as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "outreach_cooldown_active",
+                "message": (
+                    f"该 KOL 于 {exc.last_touch_at} 已触达，"
+                    f"{exc.cooldown_days} 天内不可再次进入发现池"
+                ),
+                "identity_id": exc.identity_id,
+                "last_touch_at": exc.last_touch_at,
+                "last_touch_campaign_id": exc.last_touch_campaign_id,
+                "cooldown_days": exc.cooldown_days,
+            },
+        ) from exc
     return {"candidate_id": candidate_id, "identity_id": iid}
 
 
@@ -1179,6 +1318,7 @@ def route_discovery(
         env=body.env,
         selected_by=body.selected_by,
         operator_note=body.operator_note,
+        identity_ids=body.identity_ids,
     )
 
 
@@ -1207,6 +1347,17 @@ def ingest_confirmed_candidate(
         )
     except confirmed_ingest.IngestValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except discovery_skip.DiscoverySkipActive as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "discovery_skip_active",
+                "message": _discovery_skip_message(exc.reason),
+                "identity_id": exc.identity_id,
+                "handle": exc.handle,
+                "reason": exc.reason,
+            },
+        ) from exc
 
 
 @router.post("/campaigns/{campaign_id}/buffer-confirmed-candidate")
@@ -1255,6 +1406,19 @@ def list_ingest_buffer_pending(
     return {"buffer_path": str(buf), "count": len(pending), "items": pending}
 
 
+# Post-shortlist-approve lifecycle only; discovery pool stays on product shortlist UI.
+_KANBAN_CANDIDATE_STATUSES = frozenset({
+    "selected_for_outreach",
+    "needs_review",
+    "archived",
+})
+
+
+def _kanban_candidate_visible(candidate: Mapping[str, Any]) -> bool:
+    """Kanban shows shortlist-approved KOLs only (by status, not selected_at)."""
+    return str(candidate.get("candidate_status") or "") in _KANBAN_CANDIDATE_STATUSES
+
+
 @router.get("/campaigns/{campaign_id}/lanes")
 def get_lanes(
     campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
@@ -1273,9 +1437,17 @@ def get_lanes(
     (counts) and the per-card unread red-dots / Draft sub-state badges
     (per-item ``pending_approval_*`` / ``open_escalation_*`` /
     ``reply_draft_state`` fields).
+
+    Discovery-pool candidates (``discovered`` / ``shortlisted``) are
+    excluded — operators review those on the product shortlist panel;
+    kanban lists only ``selected_for_outreach`` (+ ``needs_review`` /
+    ``archived`` lifecycle rows).
     """
     candidates = cal.list_candidate_handles(campaign_id, env=env)
-    identity_ids = [int(c["identity_id"]) for c in candidates if c.get("identity_id")]
+    kanban_candidates = [c for c in candidates if _kanban_candidate_visible(c)]
+    identity_ids = [
+        int(c["identity_id"]) for c in kanban_candidates if c.get("identity_id")
+    ]
 
     # Batch DB reads: one query per resource type instead of 4×N per KOL.
     relationships = cal.batch_relationship_summaries(identity_ids)
@@ -1286,14 +1458,12 @@ def get_lanes(
         campaign_id, env=env, identity_ids=identity_ids,
     )
 
-    # Single sweep over the campaign-scoped queues so per-card lookup
-    # is O(1) and we avoid N+1 bridge calls. The kanban refreshes every
-    # 20s + on every data-channel event, so this matters.
+    # Campaign-scoped queue reads — never scan the whole env here; the
+    # kanban refreshes every 20s + on WS events and used to load every
+    # pending approval / open escalation across all campaigns.
     approvals_by_id: dict[int, list[dict[str, Any]]] = {}
     approvals_latest_at: Optional[str] = None
-    for a in cal.list_pending_approvals(env=env):
-        if a.get("campaign_id") != campaign_id:
-            continue
+    for a in cal.list_pending_approvals(env=env, campaign_id=campaign_id):
         iid = a.get("identity_id")
         if not isinstance(iid, int):
             continue
@@ -1304,9 +1474,9 @@ def get_lanes(
 
     escalations_by_id: dict[int, list[dict[str, Any]]] = {}
     escalations_latest_at: Optional[str] = None
-    for e in cal.list_escalations(state="awaiting_answer", env=env):
-        if e.get("campaign_id") != campaign_id:
-            continue
+    for e in cal.list_escalations(
+        state="awaiting_answer", env=env, campaign_id=campaign_id,
+    ):
         iid = e.get("identity_id")
         if not isinstance(iid, int):
             continue
@@ -1316,7 +1486,7 @@ def get_lanes(
             escalations_latest_at = created
 
     items = []
-    for c in candidates:
+    for c in kanban_candidates:
         if not c.get("identity_id"):
             continue
         iid = int(c["identity_id"])
@@ -1842,10 +2012,13 @@ def _approve_or_reject(
             "gmail_draft": prior_draft,
             "idempotent_replay": True,
         }
-    # Idempotent replay: style/strategy batch already merged into policy.
+    # Idempotent replay: style/strategy or outcome batch already merged into policy.
     if (
         decision == "approved"
-        and fact_path == learning_store.STYLE_LEARNING_APPROVAL_FACT
+        and fact_path in (
+            learning_store.STYLE_LEARNING_APPROVAL_FACT,
+            learning_outcome.OUTCOME_LEARNING_APPROVAL_FACT,
+        )
         and isinstance(previous_value, dict)
         and previous_value.get("decision") == "approved"
     ):
@@ -1858,6 +2031,7 @@ def _approve_or_reject(
             "gmail_draft": None,
             "learning_event_id": None,
             "style_policy_apply": previous_value.get("style_policy_apply"),
+            "outcome_policy_apply": previous_value.get("outcome_policy_apply"),
             "idempotent_replay": True,
         }
     gmail_draft: dict[str, Any] | None = None
@@ -1915,6 +2089,22 @@ def _approve_or_reject(
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    outcome_policy_apply: Optional[dict[str, Any]] = None
+    if (
+        decision == "approved"
+        and fact_path == learning_outcome.OUTCOME_LEARNING_APPROVAL_FACT
+        and isinstance(previous_value, dict)
+    ):
+        try:
+            with cal._connect() as conn:  # type: ignore[attr-defined]
+                outcome_policy_apply = learning_outcome.apply_approved_outcome_proposal(
+                    conn,
+                    env=body.env,
+                    proposal=previous_value,
+                    updated_by=f"approval:{body.decided_by}",
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     value.update({"decision": decision, "decided_by": body.decided_by})
     if body.note:
         value["note"] = body.note
@@ -1922,6 +2112,8 @@ def _approve_or_reject(
         value.update(body.extra_facts)
     if style_policy_apply is not None:
         value["style_policy_apply"] = style_policy_apply
+    if outcome_policy_apply is not None:
+        value["outcome_policy_apply"] = outcome_policy_apply
     try:
         cal.write_facts(
             identity_id=body.identity_id,
@@ -1994,6 +2186,37 @@ def _approve_or_reject(
                 tags=reject_tags_list,
                 suggested_fix=suggested_fix,
             )
+        elif fact_path == learning_outcome.OUTCOME_LEARNING_APPROVAL_FACT:
+            # Rejecting an outcome-learning proposal must not open an escalation;
+            # retros stay unconsumed for the next synthesis batch.
+            try:
+                cal.write_event(
+                    identity_id=body.identity_id,
+                    campaign_id=None,
+                    event_type="outcome_proposal_rejected",
+                    goal=None,
+                    lane="meta",
+                    actor=f"approval:{body.decided_by}",
+                    payload={
+                        "segment": (
+                            value.get("segment") if isinstance(value, dict) else None
+                        ),
+                        "note": reject_note or "",
+                        "tags": reject_tags_list,
+                        "rejected_markdown": (
+                            value.get("proposed_markdown")
+                            if isinstance(value, dict) else None
+                        ),
+                        "source_event_ids": (
+                            value.get("source_event_ids") if isinstance(value, dict) else None
+                        ),
+                    },
+                    env=body.env,
+                )
+            except Exception:
+                log.warning(
+                    "failed to record outcome_proposal_rejected feedback", exc_info=True,
+                )
         elif fact_path == learning_store.STYLE_LEARNING_APPROVAL_FACT:
             # Rejecting a batch style/strategy proposal must not open a KOL-facing
             # escalation — edit events stay unconsumed for the next distill batch.
@@ -2102,6 +2325,39 @@ def _resolve_thread_id_from_events(
             return ev_thread
         if isinstance(ev_msg, str) and ev_msg and ev_msg in candidates:
             return ev_thread
+
+    if candidate_thread_id and gmail_thread_resolve.is_plausible_gmail_resource_id(
+        candidate_thread_id,
+    ):
+        return candidate_thread_id
+
+    try:
+        facts = cal.latest_facts_for(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=env,
+        )
+    except Exception:  # noqa: BLE001 — defensive lookup, never fail the draft path
+        facts = {}
+    for key in ("offer.gmail_sent_thread_id", "offer.gmail_thread_id"):
+        raw = facts.get(key)
+        if isinstance(raw, str) and raw.strip():
+            tid = raw.strip()
+            if gmail_thread_resolve.is_plausible_gmail_resource_id(tid):
+                return tid
+    try:
+        from . import email_conversation
+
+        for tid in email_conversation.collect_thread_ids(
+            identity_id=identity_id,
+            campaign_id=campaign_id or "",
+            env=env,
+            facts=facts if isinstance(facts, dict) else {},
+        ):
+            if gmail_thread_resolve.is_plausible_gmail_resource_id(tid):
+                return tid
+    except Exception:  # noqa: BLE001
+        pass
     return candidate_thread_id
 
 
@@ -2215,8 +2471,8 @@ def _apply_reply_all_cc_and_quote(
     inbound: Any,
     client: GmailClient,
     html_body: bool,
-) -> tuple[str, str | None]:
-    """Apply reply-all Cc and Gmail-style quote when not already present."""
+) -> tuple[str, str | None, bool]:
+    """Apply reply-all Cc and Gmail-web-native quoted reply when missing."""
     if not cc_addr:
         cc_addr = gmail_reply_envelope.compute_reply_all_cc(
             inbound_from=inbound.from_addr,
@@ -2226,14 +2482,23 @@ def _apply_reply_all_cc_and_quote(
             self_emails=_gmail_self_emails(client),
         ) or None
     if not gmail_reply_envelope.body_has_quoted_reply(body):
-        body = gmail_reply_envelope.append_quoted_reply(
-            body=body,
+        body = gmail_reply_envelope.build_gmail_native_reply_html(
+            new_body=body,
             quoted_from=inbound.from_addr,
             quoted_date=inbound.date,
-            quoted_body=inbound.body,
-            html=html_body,
+            quoted_body_html=str(getattr(inbound, "body_html", "") or ""),
+            quoted_body_plain=str(
+                getattr(inbound, "body_plain", "") or inbound.body or "",
+            ),
         )
-    return body, cc_addr
+        if "gmail_quote" not in body:
+            log.warning(
+                "reply_draft approve: parent quote empty (msg=%s thread=%s)",
+                getattr(inbound, "message_id", None),
+                getattr(inbound, "thread_id", None),
+            )
+        html_body = True
+    return body, cc_addr, html_body
 
 
 def _create_gmail_draft_for_reply_approval(
@@ -2305,15 +2570,42 @@ def _create_gmail_draft_for_reply_approval(
     gmail = client or GmailClient()
     if not gmail.is_available():
         raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
+    initial_outreach = reply_draft.is_initial_outreach_draft(
+        approval_value,
+        campaign_id=campaign_id,
+        identity_id=identity_id,
+    )
+    verified_thread_id: str | None
+    if initial_outreach:
+        # Cold/re-engagement first touch uses synthetic outreach_* anchors for CAL
+        # only — Gmail creates a new thread when threadId is omitted.
+        verified_thread_id = None
+    else:
+        verified_thread_id = gmail_thread_resolve.resolve_thread_id_for_draft(
+            gmail,
+            candidate_thread_id=resolved_thread_id,
+            source_message_id=raw_source_msg,
+        )
+        if not verified_thread_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot attach Gmail draft to thread: thread_id is missing, synthetic, "
+                    "or not found in the operator mailbox. Re-persist the reply draft with "
+                    "offer.gmail_thread_id or a kol_inbound_reply event thread_id."
+                ),
+            )
     cc_addr = str(draft.get("cc") or "").strip() or None
     html_body = bool(draft.get("html"))
-    inbound = _fetch_inbound_for_reply_context(
-        gmail,
-        source_message_id=raw_source_msg or None,
-        thread_id=resolved_thread_id,
-    )
+    inbound = None
+    if not initial_outreach:
+        inbound = _fetch_inbound_for_reply_context(
+            gmail,
+            source_message_id=raw_source_msg or None,
+            thread_id=verified_thread_id,
+        )
     if inbound is not None:
-        body, cc_addr = _apply_reply_all_cc_and_quote(
+        body, cc_addr, html_body = _apply_reply_all_cc_and_quote(
             body=body,
             to_addr=to_addr,
             cc_addr=cc_addr,
@@ -2321,6 +2613,21 @@ def _create_gmail_draft_for_reply_approval(
             client=gmail,
             html_body=html_body,
         )
+    elif not initial_outreach:
+        log.warning(
+            "reply_draft approve: no inbound message for quote/cc "
+            "(identity=%s source=%s thread=%s)",
+            identity_id,
+            raw_source_msg,
+            verified_thread_id,
+        )
+    reply_target: str | None = None
+    if gmail_thread_resolve.is_plausible_gmail_resource_id(raw_source_msg):
+        reply_target = str(raw_source_msg).strip()
+    elif inbound is not None:
+        tail_msg_id = str(getattr(inbound, "message_id", "") or "").strip()
+        if gmail_thread_resolve.is_plausible_gmail_resource_id(tail_msg_id):
+            reply_target = tail_msg_id
     try:
         result = gmail.create_draft(
             to=to_addr,
@@ -2328,7 +2635,8 @@ def _create_gmail_draft_for_reply_approval(
             body=body,
             cc=cc_addr,
             html=html_body,
-            thread_id=resolved_thread_id,
+            thread_id=verified_thread_id,
+            reply_to_message_id=reply_target,
             attachments=attachment_paths or None,
         )
     except GmailUnavailable as exc:
@@ -2717,8 +3025,45 @@ def persist_reply_draft(
         if prior_src and prior_src != body.source_message_id:
             superseded_prior_source = prior_src
 
+    child_envelope = dict(body.child_envelope or {})
+    latest_email = dict(body.latest_email or {})
+    if reply_draft.is_proactive_followup_draft({
+        "primary_goal": body.primary_goal,
+        "child_skill": body.child_skill,
+        "draft": child_envelope,
+    }):
+        try:
+            facts = cal.latest_facts_for(
+                identity_id=body.identity_id,
+                campaign_id=body.campaign_id,
+                env=body.env,
+            )
+        except Exception:  # noqa: BLE001
+            facts = {}
+        reply_draft.normalize_proactive_followup_thread(
+            child_envelope,
+            latest_email,
+            facts=facts if isinstance(facts, dict) else {},
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+        )
+        thread_id = str(child_envelope.get("thread_id") or "").strip()
+        if not thread_id or not gmail_thread_resolve.is_plausible_gmail_resource_id(
+            thread_id,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "proactive follow-up requires a real Gmail thread_id on the "
+                    "draft envelope (offer.gmail_sent_thread_id / "
+                    "offer.gmail_thread_id / kol_inbound_reply event). "
+                    "Cannot create a standalone new email."
+                ),
+            )
+
     try:
-        merged = reply_draft.enrich_envelope(body.child_envelope, body.latest_email)
+        merged = reply_draft.enrich_envelope(child_envelope, latest_email)
     except reply_draft.ReplyDraftError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -2921,7 +3266,7 @@ def get_edit_distance_trend(
     style/strategy.
     """
     with cal._connect() as conn:  # type: ignore[attr-defined]
-        return learning_store.edit_distance_trend(
+        trend = learning_store.edit_distance_trend(
             conn,
             env=env,
             days=days,
@@ -2929,6 +3274,45 @@ def get_edit_distance_trend(
             goal=goal,
             child_skill=child_skill,
             operator_user_id=operator_user_id,
+        )
+        trend["style_approval_markers"] = learning_distill.list_style_approval_markers(
+            conn, env=env, days=days,
+        )
+        return trend
+
+
+@router.get("/learning/preview-edit-batch")
+def get_preview_edit_batch(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    scope: str = Query(default="company_style", pattern="^(company_style|user_style)$"),
+    owner_user_id: Optional[int] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, Any]:
+    """Read-only: samples that the next style-learning distill batch would use."""
+    try:
+        with cal._connect() as conn:  # type: ignore[attr-defined]
+            return learning_distill.preview_next_style_edit_batch(
+                conn,
+                env=env,
+                scope=scope,
+                owner_user_id=owner_user_id,
+                limit=limit,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class PolicyMergePreviewBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    proposal: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/learning/policy-merge-preview")
+def post_policy_merge_preview(body: PolicyMergePreviewBody) -> dict[str, Any]:
+    """Read-only: current vs merged policy if the proposal were approved."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        return learning_distill.preview_policy_merge_from_proposal(
+            conn, env=body.env, proposal=body.proposal,
         )
 
 
@@ -2983,6 +3367,18 @@ def apply_edit_learning_policy(
             )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except learning_llm.LearningLlmError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": str(exc),
+                "hint": (
+                    "学习提案必须使用 LLM 蒸馏。请确认 bridge 进程能读取 "
+                    "~/.hermes 凭据，或设置 KOL_LEARNING_LLM_API_KEY；"
+                    "standalone serve 需安装 certifi（HTTPS）与可选 openai。"
+                ),
+            },
+        ) from exc
     return {"ok": True, "env": body.env, "scope": body.scope, **result}
 
 
@@ -3087,6 +3483,7 @@ def run_scheduled_learning_jobs(
 class PromoteStrategyBody(BaseModel):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
     goal: str = Field(min_length=1, max_length=120)
+    scope: str = Field(default="reply_strategy", pattern="^(reply_strategy|outcome_strategy)$")
     min_approvals: int = Field(default=learning_promote.DEFAULT_MIN_APPROVALS, ge=1, le=50)
     min_age_days: int = Field(default=learning_promote.DEFAULT_MIN_AGE_DAYS, ge=0, le=365)
     dry_run: bool = True
@@ -3125,6 +3522,7 @@ def promote_strategy_route(
                 conn,
                 env=body.env,
                 goal=body.goal,
+                scope=body.scope,
                 min_approvals=body.min_approvals,
                 min_age_days=body.min_age_days,
                 dry_run=body.dry_run,
@@ -3213,6 +3611,7 @@ def put_policy(
             updated_by=body.updated_by,
             owner_user_id=owner,
             title=body.title,
+            env=body.env,
         )
     return {"policy": row}
 
@@ -3221,6 +3620,7 @@ def put_policy(
 def list_policy_history(
     scope: str,
     owner_user_id: Optional[int] = Query(default=None),
+    env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
     if scope not in _POLICY_SCOPES:
@@ -3228,7 +3628,7 @@ def list_policy_history(
     owner = _resolve_owner(scope, owner_user_id)
     with cal._connect() as conn:  # type: ignore[attr-defined]
         rows = _policies.list_policy_history(
-            conn, scope=scope, owner_user_id=owner, limit=limit
+            conn, scope=scope, owner_user_id=owner, env=env, limit=limit,
         )
     return {"history": rows}
 
@@ -3257,6 +3657,26 @@ def rollback_policy_route(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"policy": row, "rolled_back_to": body.to_version}
+
+
+@router.get("/policies/{scope}/version/{version}")
+def get_policy_version_route(
+    scope: str,
+    version: int,
+    owner_user_id: Optional[int] = Query(default=None),
+    env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Return a specific historical version (content) for diff/compare."""
+    if scope not in _POLICY_SCOPES:
+        raise HTTPException(status_code=404, detail="unknown scope")
+    owner = _resolve_owner(scope, owner_user_id)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        row = _policies.get_policy_version(
+            conn, scope=scope, version=version, owner_user_id=owner, env=env,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="version not found")
+    return {"policy": row}
 
 
 @router.get("/policies/escalation_rules/parsed")

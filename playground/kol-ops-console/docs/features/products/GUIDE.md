@@ -29,7 +29,7 @@
 
 ## 关联模块
 
-- [campaigns](../campaigns/GUIDE.md) — 在产品详情页启动/管理活动
+- [campaigns](../campaigns/GUIDE.md) — 在产品详情页启动/管理活动；Shortlist review（`candidate_count` / `pending_candidate_count` 来自 Bridge `list-candidate-handles`，含 `discovered` 池；**不是** `get_lanes`；未批准候选持久显示，操作员可「从 shortlist 移除」）
 - [nox](../nox/GUIDE.md) — 产品页 shortlist 批量尽调
 - `ContractReadinessPanel.tsx` — 合约就绪块
 

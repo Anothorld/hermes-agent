@@ -72,7 +72,7 @@ async def get_kol(
     env: str | None = Query(None),
 ) -> dict:
     try:
-        identity = await bridge.get_identity(identity_id)
+        identity = await bridge.get_identity(identity_id, env=_env(env))
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     notes = conn.execute(

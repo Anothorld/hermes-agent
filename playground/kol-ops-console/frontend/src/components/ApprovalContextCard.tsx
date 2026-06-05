@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { goalLabel, laneLabel, policyScopeLabel } from '../constants/domainLabels';
 import InboundEmailCard, { type InboundEmail } from './InboundEmailCard';
+import { PolicyMergeDiffPreview } from './PolicyMergeDiffPreview';
 
 /**
  * Structured renderers for the contents of pending ``approval.*`` facts.
@@ -569,7 +570,7 @@ function StyleLearningProposalView({ ctx, env }: { ctx: Ctx; env: string }) {
             <> · 来自 {operatorIds.length} 位操作员</>
           )}
           {batchThreshold != null && <> · 批次阈值 {String(batchThreshold)}</>}
-          {llmUsed ? ' · LLM 蒸馏' : ' · 规则聚合（未配置 Hermes/LLM 凭据）'}
+          {llmUsed ? ' · LLM 蒸馏' : ' · 非 LLM 提案（历史数据；当前版本已禁止规则回退）'}
           {eventIds.length > 0 && <> · 来源事件 {eventIds.length} 条</>}
         </div>
       </div>
@@ -578,6 +579,7 @@ function StyleLearningProposalView({ ctx, env }: { ctx: Ctx; env: string }) {
         <code className="mx-0.5">ADJUST:</code>/<code className="mx-0.5">REMOVE:</code>
         指令。展开下方可对比当前 policy。
       </div>
+      <PolicyMergeDiffPreview env={env} proposal={ctx} />
       {strategyMd ? (
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-slate-700">
@@ -606,6 +608,42 @@ function StyleLearningProposalView({ ctx, env }: { ctx: Ctx; env: string }) {
       ) : (
         <div className="italic text-slate-500">(无 proposed_markdown)</div>
       )}
+    </div>
+  );
+}
+
+function OutcomeLearningProposalView({ ctx, env }: { ctx: Ctx; env: string }) {
+  const md = asString(ctx.proposed_markdown) ?? '';
+  const sampleCount = ctx.sample_count;
+  const failureCount = ctx.failure_count;
+  const segment = asString(ctx.segment);
+  const llmUsed = ctx.llm_used === true;
+  const eventIds = Array.isArray(ctx.source_event_ids) ? ctx.source_event_ids : [];
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-emerald-900">
+        <div className="font-medium">合作复盘提案（批准后写入回信流程的「结局指导」policy）</div>
+        <div className="mt-0.5 text-[11px]">
+          汇总多次合作的成/败<strong>根因</strong>，指导后续外联/谈判；批准后并入
+          {' '}{policyScopeLabel('outcome_strategy')}（按 goal 注入 AI 参考）。
+        </div>
+        <div className="mt-0.5 text-[11px]">
+          {segment && <>阶段/segment：{goalLabel(segment) !== segment ? goalLabel(segment) : segment} · </>}
+          {sampleCount != null && <>复盘样本 {String(sampleCount)} 次</>}
+          {failureCount != null && <> · 其中失败 {String(failureCount)} 次</>}
+          {llmUsed ? ' · LLM 综合' : ' · 规则聚合（未配置 Hermes/LLM 凭据）'}
+          {eventIds.length > 0 && <> · 来源复盘 {eventIds.length} 条</>}
+        </div>
+      </div>
+      <PolicyMergeDiffPreview env={env} proposal={ctx} />
+      {md ? (
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-800">
+          {md}
+        </pre>
+      ) : (
+        <div className="italic text-slate-500">(无 proposed_markdown)</div>
+      )}
+      <CurrentPolicyPreview scope="outcome_strategy" env={env} />
     </div>
   );
 }
@@ -692,6 +730,9 @@ export default function ApprovalContextCard({
       break;
     case 'approval.style_learning_proposal':
       body = <StyleLearningProposalView ctx={context} env={env} />;
+      break;
+    case 'approval.outcome_learning_proposal':
+      body = <OutcomeLearningProposalView ctx={context} env={env} />;
       break;
     default:
       body = <GenericApprovalView ctx={context} />;

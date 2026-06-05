@@ -386,6 +386,10 @@ only. See `references/shared/fact-ownership.md`.
 Invoke `kol-reply-synthesizer` with ordered `fragments` from Step 5
 (non-gated, non-empty). Receive content-only `{body, thread_id}`.
 
+**Body must be new prose only** — do not append prior thread mail (`On …
+wrote:`, `>` lines, or pasted `thread_history`). The bridge strips accidental
+quotes at persist and adds one Gmail quote block on approve.
+
 Build `contributing` list for persistence:
 
 ```json

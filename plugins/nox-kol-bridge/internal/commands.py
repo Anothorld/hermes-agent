@@ -6,7 +6,7 @@ import json
 import uuid
 from typing import Any, Mapping, Optional
 
-from schemas import DEFAULT_MONTHLY_BUDGET, GATES_REQUIRING_AUDIT
+from schemas import DEFAULT_MONTHLY_BUDGET, DILIGENCE_PACK_GATES, GATES_REQUIRING_AUDIT
 from internal import cli_runner, nox_cache, quota_ledger, summarize
 from internal.audit_hooks import AuditContext, emit_nox_audit
 from internal.campaign_gate import (
@@ -18,7 +18,8 @@ from internal.campaign_gate import (
     resolve_monthly_budget,
     resolve_supplement_max_calls,
 )
-from internal.creator_args import build_creator_read_args
+from internal.creator_args import build_creator_read_args, needs_direct_creator_http
+from internal.creator_http import fetch_creator_read
 from internal.cli_runner import NoxCliError, NoxInsufficientCreditError
 from internal.nox_auth import auth_status, classify_auth_error
 from internal.supplement_ledger import (
@@ -133,14 +134,19 @@ def cmd_diligence_pack(
     audit: Optional[AuditContext] = None,
 ) -> dict[str, Any]:
     _validate_gate(gate)
-    if gate != "shortlist_confirm":
-        raise ValueError("diligence-pack requires gate=shortlist_confirm")
+    if gate not in DILIGENCE_PACK_GATES:
+        raise ValueError(
+            f"diligence-pack requires gate in {sorted(DILIGENCE_PACK_GATES)}"
+        )
 
     cfg = dict(campaign_config or {})
     assert_live_allowed(env, cfg, operation="diligence_pack", gate=gate)
     tz_name = resolve_cache_timezone(cfg, tz_name)
     monthly_budget = resolve_monthly_budget(cfg, monthly_budget)
-    dims = diligence_dimensions(cfg, list(dimensions) or ["profile", "audience", "content"])
+    dims = diligence_dimensions(
+        cfg,
+        list(dimensions) or ["profile", "audience", "content", "cooperation"],
+    )
     if include_cooperation and "cooperation" not in dims:
         dims.append("cooperation")
 
@@ -177,14 +183,42 @@ def cmd_diligence_pack(
             raise ValueError("could not resolve nox_creator_id from url/channel")
         if platform and (url or channel_id):
             put_alias(platform, url or channel_id or "", creator_id)
-        ck = cache_key_diligence(creator_id, dims, lang)
-        store(month, ck, "diligence_pack", bundle)
+        ck = _store_diligence_bundle(month, creator_id, dims, lang, bundle)
         summary = summarize.summarize_diligence_pack(bundle)
         return emit_nox_audit(
             _envelope(False, month, ck, bundle, summary, api_calls=estimated),
             audit,
         )
 
+    return _diligence_pack_for_creator(
+        env=env,
+        lang=lang,
+        monthly_budget=monthly_budget,
+        month=month,
+        tz_name=tz_name,
+        dims=dims,
+        creator_id=creator_id,
+        platform=platform,
+        url=url,
+        channel_id=channel_id,
+        audit=audit,
+    )
+
+
+def _diligence_pack_for_creator(
+    *,
+    env: str,
+    lang: str,
+    monthly_budget: int,
+    month: str,
+    tz_name: str,
+    dims: list[str],
+    creator_id: str,
+    platform: Optional[str],
+    url: Optional[str],
+    channel_id: Optional[str],
+    audit: Optional[AuditContext],
+) -> dict[str, Any]:
     ck = cache_key_diligence(creator_id, dims, lang)
     hit = lookup(month, ck, tz_name=tz_name)
     if hit:
@@ -194,7 +228,6 @@ def cmd_diligence_pack(
             audit,
         )
 
-    estimated = _bundle_calls(dims)
     with file_lock(f"diligence_{creator_id}"):
         hit2 = lookup(month, ck, tz_name=tz_name)
         if hit2:
@@ -203,30 +236,50 @@ def cmd_diligence_pack(
                 _envelope(True, month, ck, hit2["response"], summary, api_calls=0),
                 audit,
             )
+
+        prefilled, missing_dims = _lookup_cached_dims(
+            month, creator_id, dims, lang, tz_name=tz_name
+        )
+        if prefilled and not missing_dims:
+            ck = _store_diligence_bundle(month, creator_id, dims, lang, prefilled)
+            summary = summarize.summarize_diligence_pack(prefilled)
+            return emit_nox_audit(
+                _envelope(True, month, ck, prefilled, summary, api_calls=0),
+                audit,
+            )
+
+        estimated = _bundle_calls(missing_dims)
         try:
-            reserve(estimated, monthly_budget=monthly_budget, cache_month=month)
+            if estimated:
+                reserve(estimated, monthly_budget=monthly_budget, cache_month=month)
             bundle, resolved_id = _fetch_diligence_bundle(
                 env=env,
                 lang=lang,
                 monthly_budget=monthly_budget,
                 month=month,
-                dims=dims,
+                dims=missing_dims,
                 nox_creator_id=creator_id,
                 platform=platform,
                 url=url,
                 channel_id=channel_id,
                 from_cache=False,
+                prefilled=prefilled,
             )
-            commit(_bundle_calls(dims), estimated, monthly_budget=monthly_budget, cache_month=month)
+            if estimated:
+                commit(estimated, estimated, monthly_budget=monthly_budget, cache_month=month)
         except NoxInsufficientCreditError:
-            release(estimated, cache_month=month)
+            if estimated:
+                release(estimated, cache_month=month)
             raise
         except Exception:
-            release(estimated, cache_month=month)
+            if estimated:
+                release(estimated, cache_month=month)
             raise
-    store(month, ck, "diligence_pack", bundle)
+
+    final_id = resolved_id or creator_id
+    ck = _store_diligence_bundle(month, final_id, dims, lang, bundle)
     if platform and (url or channel_id):
-        put_alias(platform, url or channel_id or "", resolved_id or creator_id)
+        put_alias(platform, url or channel_id or "", final_id)
     summary = summarize.summarize_diligence_pack(bundle)
     return emit_nox_audit(
         _envelope(False, month, ck, bundle, summary, api_calls=estimated),
@@ -236,6 +289,72 @@ def cmd_diligence_pack(
 
 def _bundle_calls(dims: list[str]) -> int:
     return len(dims)
+
+
+def _dim_cache_key(creator_id: str, dim: str, lang: str) -> str:
+    return cache_key_diligence(creator_id, [dim], lang)
+
+
+def _extract_dim_payload(cached: Mapping[str, Any], dim: str) -> Optional[dict[str, Any]]:
+    if dim in cached and isinstance(cached[dim], dict):
+        return dict(cached[dim])
+    if len(cached) == 1 and dim in cached:
+        return dict(cached[dim])  # type: ignore[index]
+    return None
+
+
+def _lookup_cached_dims(
+    month: str,
+    creator_id: str,
+    dims: list[str],
+    lang: str,
+    *,
+    tz_name: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Return a partial bundle plus dims that still need API calls."""
+    bundle: dict[str, Any] = {}
+    missing: list[str] = []
+    for dim in dims:
+        hit = lookup(month, _dim_cache_key(creator_id, dim, lang), tz_name=tz_name)
+        payload = hit["response"] if hit and isinstance(hit.get("response"), dict) else None
+        extracted = _extract_dim_payload(payload, dim) if payload else None
+        if extracted is not None:
+            bundle[dim] = extracted
+        else:
+            missing.append(dim)
+    return bundle, missing
+
+
+def _store_diligence_bundle(
+    month: str,
+    creator_id: str,
+    dims: list[str],
+    lang: str,
+    bundle: Mapping[str, Any],
+) -> str:
+    """Persist full-pack and per-dimension cache rows."""
+    ck = cache_key_diligence(creator_id, dims, lang)
+    store(month, ck, "diligence_pack", dict(bundle))
+    for dim in dims:
+        if dim in bundle:
+            store(
+                month,
+                _dim_cache_key(creator_id, dim, lang),
+                "diligence_pack",
+                {dim: bundle[dim]},
+            )
+    return ck
+
+
+def _resolved_id_from_bundle(bundle: Mapping[str, Any], fallback: Optional[str]) -> Optional[str]:
+    resolved = fallback
+    for dim_payload in bundle.values():
+        if not isinstance(dim_payload, dict):
+            continue
+        data = dim_payload.get("data")
+        if isinstance(data, dict) and data.get("creator_id"):
+            resolved = str(data["creator_id"])
+    return resolved
 
 
 def _fetch_diligence_bundle(
@@ -250,10 +369,16 @@ def _fetch_diligence_bundle(
     url: Optional[str],
     channel_id: Optional[str],
     from_cache: bool,
+    prefilled: Optional[Mapping[str, Any]] = None,
 ) -> tuple[dict[str, Any], Optional[str]]:
-    bundle: dict[str, Any] = {}
-    resolved_id = nox_creator_id
+    bundle: dict[str, Any] = dict(prefilled or {})
+    resolved_id = _resolved_id_from_bundle(bundle, nox_creator_id)
     for dim in dims:
+        if dim in bundle:
+            data = bundle[dim].get("data") if isinstance(bundle[dim], dict) else {}
+            if isinstance(data, dict) and data.get("creator_id"):
+                resolved_id = data["creator_id"]
+            continue
         env_resp = _creator_read(
             env, lang, dim, resolved_id, platform, url, channel_id
         )
@@ -278,6 +403,17 @@ def _creator_read(
         return fix.get(dimension) or fix.get("profile", fix)
 
     need_detail = dimension in ("profile", "audience", "content", "cooperation")
+    if needs_direct_creator_http(creator_id, url, platform, channel_id):
+        return fetch_creator_read(
+            dimension,
+            creator_id=creator_id,
+            url=url,
+            platform=platform,
+            channel_id=channel_id,
+            detail=need_detail,
+            lang=lang,
+            env_mode=env,
+        )
     frag = build_creator_read_args(
         dimension,
         creator_id=creator_id,
@@ -339,8 +475,17 @@ def cmd_contacts(
             if env.upper() == "TEST":
                 resp = cli_runner.load_fixture("contacts.json")
             else:
-                args = ["creator", "contacts", creator_id]
-                resp = cli_runner.run_cli(args, env_mode=env, lang=lang)
+                if needs_direct_creator_http(creator_id, url, None, None):
+                    resp = fetch_creator_read(
+                        "contacts",
+                        creator_id=creator_id,
+                        url=url,
+                        lang=lang,
+                        env_mode=env,
+                    )
+                else:
+                    args = ["creator", "contacts", creator_id]
+                    resp = cli_runner.run_cli(args, env_mode=env, lang=lang)
             commit(estimated, estimated, monthly_budget=monthly_budget, cache_month=month)
         except NoxInsufficientCreditError:
             release(estimated, cache_month=month)

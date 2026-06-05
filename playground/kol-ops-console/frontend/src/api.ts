@@ -77,6 +77,24 @@ export const api = {
   patch: <T>(p: string, body?: unknown) =>
     request<T>(p, { method: 'PATCH', body: body ? JSON.stringify(body) : undefined }),
   delete: <T>(p: string) => request<T>(p, { method: 'DELETE' }),
+  /** GET binary response (e.g. file export). */
+  download: async (path: string): Promise<Blob> => {
+    const token = getToken();
+    const headers = new Headers();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    const res = await fetch(`${API_BASE}${path}`, { headers });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      if (res.status === 401) {
+        setToken(null);
+        if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+          window.location.href = '/login';
+        }
+      }
+      throw new ApiError(res.status, text);
+    }
+    return res.blob();
+  },
 };
 
 // ---------- SSE helper ----------

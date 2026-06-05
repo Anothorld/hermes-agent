@@ -26,6 +26,12 @@ router = APIRouter(prefix="/policies", tags=["policies"])
 
 _USER_SCOPE = "user_style"
 _GLOBAL_SCOPES = {"company_style", "escalation_rules"}
+_ENV_SCOPES = frozenset({
+    "reply_strategy",
+    "outcome_strategy",
+    "reply_learning",
+    "pricing_calibration",
+})
 
 
 def _check_user_scope_read(user: dict, owner_user_id: Optional[int]) -> int:
@@ -54,6 +60,7 @@ class PolicyPutBody(BaseModel):
     content_md: str = Field(min_length=0, max_length=200_000)
     owner_user_id: Optional[int] = None
     title: Optional[str] = Field(default=None, max_length=200)
+    env: Optional[str] = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 
 @router.get("/{scope}")
@@ -62,11 +69,17 @@ async def get_policy(
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
     user: Annotated[dict, Depends(current_user)],
     owner_user_id: Optional[int] = Query(None),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict:
     if scope == _USER_SCOPE:
         owner = _check_user_scope_read(user, owner_user_id)
         try:
             return await bridge.get_policy(scope, owner_user_id=owner)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if scope in _ENV_SCOPES:
+        try:
+            return await bridge.get_policy(scope, env=env)
         except BridgeError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if scope not in _GLOBAL_SCOPES:
@@ -94,12 +107,14 @@ async def put_policy(
     if scope == _USER_SCOPE:
         owner = _check_user_scope_write(user, body.owner_user_id)
         payload["owner_user_id"] = owner
-    elif scope in _GLOBAL_SCOPES:
+    elif scope in _GLOBAL_SCOPES or scope in _ENV_SCOPES:
         if user["role"] != "owner":
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 f"only owner can write {scope}",
             )
+        if scope in _ENV_SCOPES:
+            payload["env"] = body.env or "LIVE"
     else:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown scope")
     try:
@@ -121,6 +136,7 @@ async def policy_history(
     user: Annotated[dict, Depends(current_user)],
     owner_user_id: Optional[int] = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict:
     if scope == _USER_SCOPE:
         owner = _check_user_scope_read(user, owner_user_id)
@@ -130,12 +146,86 @@ async def policy_history(
             )
         except BridgeError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if scope in _ENV_SCOPES:
+        try:
+            return await bridge.policy_history(scope, limit=limit, env=env)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if scope not in _GLOBAL_SCOPES:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown scope")
     try:
         return await bridge.policy_history(scope, limit=limit)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@router.get("/{scope}/version/{version}")
+async def policy_version(
+    scope: str,
+    version: int,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(current_user)],
+    owner_user_id: Optional[int] = Query(None),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict:
+    """Return a specific historical version's content for compare/preview."""
+    if scope == _USER_SCOPE:
+        owner = _check_user_scope_read(user, owner_user_id)
+        try:
+            return await bridge.policy_version(scope, version, owner_user_id=owner)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if scope in _ENV_SCOPES:
+        try:
+            return await bridge.policy_version(scope, version, env=env)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if scope not in _GLOBAL_SCOPES:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown scope")
+    try:
+        return await bridge.policy_version(scope, version)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+class PolicyRollbackBody(BaseModel):
+    to_version: int = Field(ge=1)
+    owner_user_id: Optional[int] = None
+    env: Optional[str] = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+@router.post("/{scope}/rollback")
+async def rollback_policy(
+    scope: str,
+    body: PolicyRollbackBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(current_user)],
+    conn=Depends(get_conn),
+) -> dict:
+    """Roll a policy back to a prior version (same RBAC as PUT)."""
+    payload: dict = {"to_version": body.to_version, "updated_by": user["email"]}
+    if scope == _USER_SCOPE:
+        owner = _check_user_scope_write(user, body.owner_user_id)
+        payload["owner_user_id"] = owner
+    elif scope in _GLOBAL_SCOPES or scope in _ENV_SCOPES:
+        if user["role"] != "owner":
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, f"only owner can roll back {scope}",
+            )
+        if scope in _ENV_SCOPES:
+            payload["env"] = body.env or "LIVE"
+    else:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown scope")
+    try:
+        out = await bridge.rollback_policy(scope, payload)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    write_audit(
+        conn, actor_user_id=user["id"], action=f"policy.{scope}.rollback",
+        target=f"{scope}:{body.owner_user_id or '-'}",
+        payload={"to_version": body.to_version},
+    )
+    return out
 
 
 @router.get("/escalation_rules/parsed")

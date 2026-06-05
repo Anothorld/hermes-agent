@@ -21,8 +21,10 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/PUT | `/policies/{scope}` | 读写 MD（scope 如 company_style） |
+| GET/PUT | `/policies/{scope}` | 读写 MD（scope 如 company_style；`reply_strategy` / `outcome_strategy` 需 `?env=LIVE`） |
 | GET | `/policies/{scope}/history` | 版本历史 |
+| GET | `/policies/{scope}/version/{version}` | 指定历史版本内容（对比/预览） |
+| POST | `/policies/{scope}/rollback` | 回滚到指定版本（前向写新版本，保留历史；RBAC 同 PUT） |
 | GET | `/policies/escalation-rules/parsed` | 解析后的升级规则 |
 
 ## 关联模块
@@ -34,3 +36,7 @@
 ## UX
 
 大段 Markdown 编辑：保存需明确成功/失败提示；避免技术 scope 名直接作为主标题（可用中文说明对应项）。
+
+- 历史版本支持「查看」（预览该版本内容）与「回滚」（基于该版本生成新版本，不删历史）。
+- 回滚是自动学习「退化护栏」的人工补救：当 `/learning` 的「编辑幅度趋势」告警变差时，可回滚到上一版。
+- 人工编辑同样计入收敛度量与护栏；自动学习提案是「建议草稿」，最终以人工把关为准。

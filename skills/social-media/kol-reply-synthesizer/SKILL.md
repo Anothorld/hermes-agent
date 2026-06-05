@@ -62,6 +62,9 @@ Structure:
 4. One closing line + sign-off matching style preamble.
 
 Hard rules:
+- Do **not** embed prior thread quotes in `body` (`On … wrote:`, `>` lines,
+  or pasted `thread_history`) — dispatcher persist strips them; approve adds
+  one Gmail quote.
 - Do not repeat the same fact in two paragraphs unless clarifying a
   contradiction the KOL raised.
 - When a fragment mentions compensation and another mentions scope, scope

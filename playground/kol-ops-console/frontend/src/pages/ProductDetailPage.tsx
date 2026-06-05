@@ -5,6 +5,13 @@ import ContractReadinessPanel from '../components/ContractReadinessPanel';
 import EditCampaignConfigPanel from '../components/EditCampaignConfigPanel';
 import NoxCampaignOpsPanel from '../components/NoxCampaignOpsPanel';
 import { TimeAgo } from '../components/inputs/TimeAgo';
+import {
+  PriorOutreachTouchBadge,
+  type PriorOutreachTouch,
+} from '../components/PriorOutreachTouchBadge';
+import { KolSocialQuickLinks } from '../components/KolSocialQuickLinks';
+import type { LinkPreviewPayload } from '../lib/kolProfileSnapshot';
+import { resolvePriorOutreachTouch } from '../lib/priorOutreachTouch';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { dialog } from '../components/dialogs/useDialog';
 import { useEnvStore, toast } from '../lib/store';
@@ -287,12 +294,18 @@ function ReplyWatcherPanel({
 type ShortlistCandidate = {
   handle: string;
   platform: string | null;
+  profile_url?: string | null;
+  preview_facts?: Record<string, unknown> | null;
+  link_preview?: LinkPreviewPayload | null;
+  social_links?: Array<{
+    key?: string;
+    label?: string;
+    short_label?: string;
+    url?: string;
+  }> | null;
+  link_previews?: Record<string, LinkPreviewPayload> | null;
   identity_id: number | null;
   display_name: string | null;
-  audience_fit: number | null;
-  brand_safety: number | null;
-  engagement_quality: number | null;
-  niche_match: number | null;
   reason: string | null;
   candidate_status: string | null;
   updated_at?: string | null;
@@ -301,6 +314,7 @@ type ShortlistCandidate = {
   nox_diligence_verdict?: string | null;
   nox_cache_month?: string | null;
   nox_creator_id?: string | null;
+  prior_outreach_touch?: PriorOutreachTouch | null;
 };
 
 type ShortlistPayload = {
@@ -312,23 +326,6 @@ type ShortlistPayload = {
     rejected_or_archived_hidden: number;
   };
 };
-
-function ScoreBar({ label, value }: { label: string; value: number | null }) {
-  const pct = typeof value === 'number' ? Math.max(0, Math.min(100, value)) : 0;
-  const tone =
-    pct >= 80 ? 'bg-emerald-500' : pct >= 60 ? 'bg-sky-500' : pct >= 40 ? 'bg-amber-500' : 'bg-rose-500';
-  return (
-    <div className="space-y-0.5">
-      <div className="flex justify-between text-[10px] text-slate-500">
-        <span>{label}</span>
-        <span className="font-mono">{value ?? '—'}</span>
-      </div>
-      <div className="h-1.5 w-full rounded bg-slate-100">
-        {value !== null && <div className={`h-full rounded ${tone}`} style={{ width: `${pct}%` }} />}
-      </div>
-    </div>
-  );
-}
 
 function ShortlistReviewPanel({
   campaignId,
@@ -352,13 +349,16 @@ function ShortlistReviewPanel({
   const [snapshotTs, setSnapshotTs] = useState<string | null>(null);
   const [counts, setCounts] = useState<{ pending: number; already_approved: number; rejected_or_archived_hidden: number } | null>(null);
   const [showApproved, setShowApproved] = useState(false);
+  const [removingHandle, setRemovingHandle] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const fetchShortlist = async (showSpinner: boolean) => {
+  const fetchShortlist = async (showSpinner: boolean, prefetchOg = false) => {
     if (showSpinner) setRefreshing(true);
     try {
+      const qs = new URLSearchParams({ env });
+      if (prefetchOg) qs.set('prefetch_og', '1');
       const r = await api.get<ShortlistPayload>(
-        `/campaigns/${encodeURIComponent(campaignId)}/shortlist?env=${env}`,
+        `/campaigns/${encodeURIComponent(campaignId)}/shortlist?${qs.toString()}`,
       );
       const nextCandidates = r.candidates ?? [];
       setCandidates(nextCandidates);
@@ -412,6 +412,40 @@ function ShortlistReviewPanel({
   const pendingCount = counts?.pending ?? pendingCandidates.length;
   const approvedCount = counts?.already_approved ?? approvedCandidates.length;
 
+  const removeFromShortlist = async (c: ShortlistCandidate) => {
+    if (typeof c.identity_id !== 'number') {
+      setErr('该候选缺少 identity_id，无法从 shortlist 移除');
+      return;
+    }
+    const ok = await dialog.confirm({
+      title: `从 shortlist 移除 @${c.handle}？`,
+      description:
+        '候选人数据仍会保留在活动库中，只是不再显示在 shortlist，也无法被勾选批准。',
+      confirmLabel: '移除',
+      cancelLabel: '取消',
+    });
+    if (!ok) return;
+    setRemovingHandle(c.handle);
+    setErr(null);
+    try {
+      await api.post(
+        `/campaigns/${encodeURIComponent(campaignId)}/candidates/status`,
+        {
+          identity_ids: [c.identity_id],
+          candidate_status: 'rejected',
+          review_reason: 'operator_removed_from_shortlist',
+          env,
+        },
+      );
+      toast.success('已从 shortlist 移除', `@${c.handle}`);
+      await fetchShortlist(false);
+    } catch (ex) {
+      setErr(errorSummary(ex));
+    } finally {
+      setRemovingHandle(null);
+    }
+  };
+
   const runNoxDiligenceBatch = async () => {
     if (selectedIdentityIds.length === 0) {
       setErr('所选候选缺少 identity_id，无法批量 Nox 尽调');
@@ -451,8 +485,9 @@ function ShortlistReviewPanel({
         </div>
         <div className="flex gap-2 text-xs">
           <button
-            onClick={() => void fetchShortlist(true)}
+            onClick={() => void fetchShortlist(true, true)}
             disabled={refreshing}
+            title="重新拉取候选并预取主页摘要（较慢）"
             className="rounded border border-slate-300 bg-white px-2 py-0.5 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
           >
             {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -491,6 +526,25 @@ function ShortlistReviewPanel({
             key={c.handle}
             className="rounded border border-emerald-100 bg-white p-2 text-xs"
           >
+            <div className="mb-1 flex items-start justify-end">
+              <button
+                type="button"
+                disabled={
+                  removingHandle === c.handle
+                  || typeof c.identity_id !== 'number'
+                  || !!approveBlockedReason
+                }
+                title={
+                  typeof c.identity_id !== 'number'
+                    ? '缺少 identity_id，无法移除'
+                    : '从 shortlist 移除（数据仍保留在活动库）'
+                }
+                onClick={() => void removeFromShortlist(c)}
+                className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[10px] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+              >
+                {removingHandle === c.handle ? '移除中…' : '从 shortlist 移除'}
+              </button>
+            </div>
             <label className="flex cursor-pointer items-start gap-2">
               <input
                 type="checkbox"
@@ -540,6 +594,9 @@ function ShortlistReviewPanel({
                       NEW
                     </span>
                   )}
+                  <PriorOutreachTouchBadge
+                    touch={resolvePriorOutreachTouch(c.prior_outreach_touch)}
+                  />
                   {c.nox_diligence_verdict && (
                     <span
                       className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-800"
@@ -557,12 +614,32 @@ function ShortlistReviewPanel({
                     <span className="text-slate-500">{c.display_name}</span>
                   )}
                 </div>
-                <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-4">
-                  <ScoreBar label="Audience fit" value={c.audience_fit} />
-                  <ScoreBar label="Brand safety" value={c.brand_safety} />
-                  <ScoreBar label="Engagement" value={c.engagement_quality} />
-                  <ScoreBar label="Niche match" value={c.niche_match} />
+                <div
+                  className="mt-1.5"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <KolSocialQuickLinks
+                    facts={c.preview_facts ?? {}}
+                    identityId={c.identity_id}
+                    env={env}
+                    platform={c.platform}
+                    handle={c.handle}
+                    profileUrl={c.profile_url}
+                    linkPreviewsByUrl={c.link_previews ?? undefined}
+                    primaryLinkPreview={c.link_preview ?? undefined}
+                    socialLinks={c.social_links ?? undefined}
+                    stopPropagation
+                  />
                 </div>
+                {resolvePriorOutreachTouch(c.prior_outreach_touch) && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-slate-600">
+                    <span className="font-medium text-slate-700">历史触达</span>
+                    <PriorOutreachTouchBadge
+                      touch={resolvePriorOutreachTouch(c.prior_outreach_touch)}
+                    />
+                  </div>
+                )}
                 {c.reason ? (
                   <div className="mt-1.5 text-[11px] text-slate-600">
                     <span className="font-medium text-slate-500">Reason: </span>
@@ -595,17 +672,32 @@ function ShortlistReviewPanel({
             <ul className="mt-2 space-y-2">
               {approvedCandidates.map((c) => (
                 <li key={c.handle} className="rounded border border-slate-200 bg-slate-50 p-2 text-xs">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium text-slate-700">@{c.handle}</span>
                     <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-800">
                       already approved
                     </span>
+                    <PriorOutreachTouchBadge
+                      touch={resolvePriorOutreachTouch(c.prior_outreach_touch)}
+                    />
                     {c.selected_at && (
                       <span className="text-[10px] text-slate-400">
                         selected <TimeAgo iso={c.selected_at} prefix="@" className="ml-1" />
                       </span>
                     )}
                   </div>
+                  <KolSocialQuickLinks
+                    facts={c.preview_facts ?? {}}
+                    identityId={c.identity_id}
+                    env={env}
+                    platform={c.platform}
+                    handle={c.handle}
+                    profileUrl={c.profile_url}
+                    linkPreviewsByUrl={c.link_previews ?? undefined}
+                    primaryLinkPreview={c.link_preview ?? undefined}
+                    socialLinks={c.social_links ?? undefined}
+                    className="mt-1.5"
+                  />
                 </li>
               ))}
             </ul>
@@ -735,9 +827,9 @@ function CampaignCard({
     .map((id) => kols[String(id)]?.primary_handle)
     .filter((handle): handle is string => Boolean(handle));
   const counts = c.outreach_counts ?? {
-    discovered: Math.max(0, c.kol_identity_ids.length - c.contacted_kol_ids.length),
+    discovered: c.candidate_count,
     pending_review: c.pending_candidate_count,
-    approved: c.candidate_count - c.pending_candidate_count,
+    approved: Math.max(0, c.candidate_count - c.pending_candidate_count),
     draft_ready: c.contacted_kol_ids.length,
     sent: 0,
     replied: 0,
@@ -799,7 +891,7 @@ function CampaignCard({
             Stop + close
           </button>
         )}
-        {(c.shortlist_ready || c.candidate_count > 0) && c.pending_candidate_count > 0 && (
+        {(c.shortlist_ready || c.candidate_count > 0) && (
           <button
             onClick={() => setShowReview((v) => !v)}
             className="rounded border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800 hover:bg-emerald-100"
@@ -807,9 +899,11 @@ function CampaignCard({
           >
             {showReview
               ? '× Close review'
-              : c.shortlist_approved
-              ? `✓ Review new candidates (${c.pending_candidate_count})`
-              : `✓ Review candidates (${c.candidate_count})`}
+              : c.pending_candidate_count > 0
+              ? c.shortlist_approved
+                ? `✓ Review new candidates (${c.pending_candidate_count})`
+                : `✓ Review candidates (${c.candidate_count})`
+              : `✓ View shortlist (${c.candidate_count})`}
           </button>
         )}
         {c.shortlist_ready && c.shortlist_approved && (
@@ -822,7 +916,7 @@ function CampaignCard({
         )}
         <RediscoverControl
           campaignId={c.campaign_id}
-          alreadyDiscovered={c.kol_identity_ids.length}
+          alreadyDiscovered={c.candidate_count}
           blocked={
             c.gate_active
             || (c.status === 'running'

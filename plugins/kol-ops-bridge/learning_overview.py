@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from . import learning_distill
 from . import learning_job_store as job_store
+from . import learning_outcome
 from . import learning_promote
 from . import learning_store
 from . import policies as pol
@@ -49,6 +50,14 @@ def build_learning_overview(
     edited = [
         e for e in fresh if (e.get("payload") or {}).get("was_edited")
     ]
+    # Edits already batched into a pending proposal are not available for the
+    # next distill until that proposal is approved (consumed) or rejected.
+    reserved_ids = learning_distill.pending_style_reserved_event_ids(conn, env=env)
+    edited_available = [
+        e for e in edited
+        if int(e.get("id") or 0) not in reserved_ids
+    ]
+    edited_queued = len(edited) - len(edited_available)
 
     pending_proposals: list[dict[str, Any]] = []
     for pending in learning_distill.list_pending_style_proposals(conn, env=env):
@@ -63,10 +72,59 @@ def build_learning_overview(
             "captured_at": pending.get("captured_at"),
         })
 
+    # Collaboration outcome learning (result-level retros + pending synthesis).
+    outcome_retros = learning_outcome.list_outcome_retro_events(conn, env=env, limit=200)
+    outcome_consumed = learning_outcome.list_consumed_outcome_event_ids(conn, env=env)
+    outcome_fresh = [
+        e for e in outcome_retros if int(e.get("id") or 0) not in outcome_consumed
+    ]
+    outcome_fresh = learning_store.filter_events_within_days(
+        outcome_fresh, learning_store.learning_window_days(),
+    )
+    outcome_reserved = learning_outcome.pending_outcome_reserved_event_ids(conn, env=env)
+    outcome_available = [
+        e for e in outcome_fresh
+        if int(e.get("id") or 0) not in outcome_reserved
+    ]
+    outcome_queued = len(outcome_fresh) - len(outcome_available)
+    outcome_grouped = learning_outcome._group_retros_by_segment(outcome_available)
+    outcome_met = False
+    outcome_gate: dict[str, Any] = {
+        "total": len(outcome_available),
+        "failures": sum(
+            1 for e in outcome_available
+            if str((e.get("payload") or {}).get("outcome_class") or "") == "failure"
+        ),
+        "batch_size": learning_outcome.outcome_batch_size(),
+        "min_failures": learning_outcome.outcome_min_failures(),
+    }
+    for _seg, seg_events in outcome_grouped.items():
+        met, gate = learning_outcome._outcome_threshold_met(seg_events)
+        if met:
+            outcome_met = True
+            outcome_gate = gate
+            break
+    by_class: dict[str, int] = {"failure": 0, "success": 0, "partial": 0}
+    for ev in outcome_retros:
+        cls = str((ev.get("payload") or {}).get("outcome_class") or "partial")
+        by_class[cls] = by_class.get(cls, 0) + 1
+    outcome_pending = learning_outcome.find_pending_outcome_proposal(conn, env=env)
+    outcome_stats = {
+        "total_retros": len(outcome_retros),
+        "fresh_retros": len(outcome_fresh),
+        "fresh_available": len(outcome_available),
+        "fresh_queued_in_pending": outcome_queued,
+        "by_class": by_class,
+        "ready_for_synthesis": outcome_met,
+        "has_pending_proposal": outcome_pending is not None,
+        **outcome_gate,
+    }
+
     policy_versions: dict[str, Any] = {}
     for scope in (
         learning_store.REJECT_LEARNING_SCOPE,
         learning_store.REPLY_STRATEGY_SCOPE,
+        learning_store.OUTCOME_STRATEGY_SCOPE,
         "company_style",
     ):
         policy_env = env if scope in pol.ENV_SCOPED_POLICIES else None
@@ -83,12 +141,30 @@ def build_learning_overview(
             conn, env=env, goal=goal,
         )
         promote_eligibility.append({
+            "scope": learning_store.REPLY_STRATEGY_SCOPE,
             "goal": assess["goal"],
             "skill": assess["skill"],
             "eligible": assess["eligible"],
             "reason": assess["reason"],
             "approvals": assess["approvals"],
             "policy_versions_with_goal": assess["approvals"],
+            "age_days": assess["age_days"],
+        })
+    promote_outcome_eligibility: list[dict[str, Any]] = []
+    for goal in learning_promote.PROMOTABLE_GOALS:
+        assess = learning_promote.select_promotable_strategy(
+            conn,
+            env=env,
+            goal=goal,
+            scope=learning_store.OUTCOME_STRATEGY_SCOPE,
+        )
+        promote_outcome_eligibility.append({
+            "scope": learning_store.OUTCOME_STRATEGY_SCOPE,
+            "goal": assess["goal"],
+            "skill": assess["skill"],
+            "eligible": assess["eligible"],
+            "reason": assess["reason"],
+            "approvals": assess["approvals"],
             "age_days": assess["age_days"],
         })
 
@@ -102,18 +178,89 @@ def build_learning_overview(
     disabled_raw = os.environ.get("KOL_LEARNING_JOBS_DISABLED", "").strip().lower()
     jobs_disabled = disabled_raw in ("1", "true", "yes", "on")
 
+    # Convergence metric: is the operator editing AI drafts less over time?
+    trend = learning_store.edit_distance_trend(conn, env=env, days=90, bucket="week")
+    style_approval_markers = learning_distill.list_style_approval_markers(
+        conn, env=env, days=90,
+    )
+    channel_trends = {
+        "edits": trend,
+        "rejects": learning_store.event_volume_trend(
+            conn, env=env, event_type="draft_rejected_learning", days=90, bucket="week",
+        ),
+        "outcome_retros": learning_store.event_volume_trend(
+            conn, env=env, event_type=learning_outcome.OUTCOME_LEARNING_EVENT,
+            days=90, bucket="week",
+        ),
+    }
+    # Regression guard: flag when recent edits got LARGER after learning (a bad
+    # batch may have degraded the policy → consider rolling back).
+    try:
+        alert_delta = float(
+            os.environ.get("KOL_LEARNING_CONVERGENCE_ALERT_DELTA", "0.05")
+        )
+    except ValueError:
+        alert_delta = 0.05
+    rvp = trend.get("recent_vs_prior") or {}
+    last_marker_at = None
+    if style_approval_markers:
+        last_marker_at = max(
+            str(m.get("at") or "") for m in style_approval_markers
+        ) or None
+    after_approval = learning_store.edit_distance_since_last_style_approval(
+        conn,
+        env=env,
+        last_approval_at=last_marker_at,
+        days=90,
+    )
+    guard_basis = "recent_vs_prior"
+    delta = rvp.get("delta")
+    if after_approval.get("usable"):
+        guard_basis = "after_last_approval"
+        delta = after_approval.get("delta")
+    convergence_alert = {
+        "worsening": bool(delta is not None and delta > alert_delta),
+        "delta": delta,
+        "threshold": alert_delta,
+        "guard_basis": guard_basis,
+        "after_last_approval": after_approval,
+        "recent_vs_prior": rvp,
+        "hint": (
+            "自最近一次学习批准后，操作员编辑幅度上升，可能该批 policy 反而变差；可在 policy 历史回滚上一版。"
+            if guard_basis == "after_last_approval"
+            and (delta is not None and delta > alert_delta)
+            else (
+                "最近一周编辑幅度高于此前各周平均，可能某次批准的 policy 反而变差；可在 policy 历史回滚上一版。"
+                if (delta is not None and delta > alert_delta)
+                else ""
+            )
+        ),
+    }
+
+    edit_stats_by_scope = learning_distill.build_edit_stats_by_scope(
+        conn, env=env, threshold=threshold,
+    )
+
     return {
         "env": env,
         "jobs_disabled": jobs_disabled,
+        "edit_distance_trend": trend,
+        "style_approval_markers": style_approval_markers,
+        "channel_trends": channel_trends,
+        "convergence_alert": convergence_alert,
+        "outcome_learning": outcome_stats,
         "style_in_hints": learning_store._env_flag("KOL_STYLE_IN_HINTS", default=True),
         "batch_threshold": threshold,
         "edit_stats": {
             "total_events": len(events),
             "unconsumed": len(fresh),
             "edited_unconsumed": len(edited),
+            "edited_available": len(edited_available),
+            "edited_queued_in_pending": edited_queued,
             "consumed": len(consumed),
-            "ready_for_distill": len(edited) >= threshold,
+            "ready_for_distill": len(edited_available) >= threshold,
         },
+        "edit_stats_by_scope": edit_stats_by_scope,
         "pending_style_proposals": pending_proposals,
         "approved_style_proposals": _count_approved_style_proposals(conn, env=env),
         "promote_metric_note": (
@@ -123,6 +270,7 @@ def build_learning_overview(
         ),
         "policy_versions": policy_versions,
         "promote_eligibility": promote_eligibility,
+        "promote_outcome_eligibility": promote_outcome_eligibility,
         "last_runs": last_runs,
         "run_summary": summary,
     }

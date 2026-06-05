@@ -19,43 +19,55 @@ import {
 import { REJECT_TAGS } from '../constants/rejectTags';
 import { policyScopeLabel } from '../constants/domainLabels';
 
-type ApprovalTypeFilter = 'all' | 'reply_draft' | 'style_learning' | 'other';
+type ApprovalTypeFilter =
+  | 'all'
+  | 'reply_draft'
+  | 'style_learning'
+  | 'outcome_learning'
+  | 'other';
 
 const TYPE_FILTER_LABEL: Record<ApprovalTypeFilter, string> = {
   all: '全部',
   reply_draft: '回信草稿',
   style_learning: '学习提案',
+  outcome_learning: '合作复盘',
   other: '其他',
 };
 
 function approvalTypeOf(factPath: string): ApprovalTypeFilter {
   if (factPath === 'approval.reply_draft') return 'reply_draft';
   if (factPath === 'approval.style_learning_proposal') return 'style_learning';
+  if (factPath === 'approval.outcome_learning_proposal') return 'outcome_learning';
   return 'other';
 }
 
 const STYLE_LEARNING_FACT = 'approval.style_learning_proposal';
+const OUTCOME_LEARNING_FACT = 'approval.outcome_learning_proposal';
+const LEARNING_FACTS = [STYLE_LEARNING_FACT, OUTCOME_LEARNING_FACT];
 
-/** Style proposals are cross-KOL; group by policy scope, not anchor identity. */
+/** Learning proposals are cross-KOL; group by policy scope, not anchor identity. */
 function approvalGroupKey(row: ApprovalRow): string {
-  if (row.fact_path === STYLE_LEARNING_FACT) {
+  if (LEARNING_FACTS.includes(row.fact_path)) {
     const ctx = row.context ?? {};
     const scope = String(ctx.scope ?? 'company_style');
     const owner = ctx.owner_user_id;
-    return `style-learning::${scope}::${owner ?? 'none'}`;
+    return `learning::${row.fact_path}::${scope}::${owner ?? 'none'}`;
   }
   return `${row.identity_id}::${row.campaign_id}`;
 }
 
 function isStyleLearningGroup(items: ApprovalRow[]): boolean {
-  return items.length > 0 && items.every((r) => r.fact_path === STYLE_LEARNING_FACT);
+  return (
+    items.length > 0 && items.every((r) => LEARNING_FACTS.includes(r.fact_path))
+  );
 }
 
-function styleLearningGroupTitle(ctx: Record<string, unknown>): string {
+function styleLearningGroupTitle(ctx: Record<string, unknown>, factPath?: string): string {
   const scope = String(ctx.scope ?? 'company_style');
   const sampleCount = ctx.sample_count;
   const kolCount = ctx.sample_identity_count;
-  const parts = ['跨 KOL 编辑学习'];
+  const isOutcome = factPath === OUTCOME_LEARNING_FACT;
+  const parts = [isOutcome ? '跨 KOL 合作复盘' : '跨 KOL 编辑学习'];
   parts.push(policyScopeLabel(scope));
   if (typeof kolCount === 'number' && kolCount > 0) {
     parts.push(`${kolCount} 位 KOL`);
@@ -242,11 +254,11 @@ export function ApprovalsPage() {
       let note = '';
       let reasonTags: RejectionTag[] = [];
       if (decision === 'reject') {
-        const isStyleLearning = row.fact_path === 'approval.style_learning_proposal';
+        const isStyleLearning = LEARNING_FACTS.includes(row.fact_path);
         const reason = await dialog.prompt({
           title: '驳回理由',
           description: isStyleLearning
-            ? '学习提案驳回不会开启升级。请说明为何不采纳本次 style/策略沉淀。'
+            ? '学习提案驳回不会开启升级。请说明为何不采纳本次沉淀（下次蒸馏会参考此理由）。'
             : '请说明驳回原因。建议使用结构化标签（与回信驳回相同）：tone_too_salesy、premature_pricing、factual_error 等；非回信草稿可能仍会派生升级。',
           placeholder: isStyleLearning
             ? '例：策略段落过于笼统，需更具体的报价节奏说明 …'
@@ -559,7 +571,7 @@ export function ApprovalsPage() {
                 {styleGroup ? (
                   <>
                     <span className="font-medium text-violet-900">
-                      {styleLearningGroupTitle(ctx)}
+                      {styleLearningGroupTitle(ctx, items[0]?.fact_path)}
                     </span>
                     <span className="ml-2 text-[11px] text-violet-700">
                       汇总多位 KOL 的编辑与会话，批准后写入全局 policy
@@ -673,7 +685,7 @@ function ApprovalRowItem({
 }: ApprovalRowItemProps) {
   const k = rowKey(row);
   const isReplyDraft = row.fact_path === 'approval.reply_draft';
-  const isStyleLearning = row.fact_path === 'approval.style_learning_proposal';
+  const isStyleLearning = LEARNING_FACTS.includes(row.fact_path);
   const useStructuredPanel =
     isReplyDraft && status === 'pending' && row.status === 'pending';
   const ctx = (row.context ?? {}) as Record<string, unknown>;

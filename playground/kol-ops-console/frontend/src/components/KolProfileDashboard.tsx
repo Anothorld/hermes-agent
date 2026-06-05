@@ -1,12 +1,20 @@
 import { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { RepeatKolBadge } from './RepeatKolBadge';
+import {
+  PriorOutreachTouchBadge,
+  type PriorOutreachTouch,
+} from './PriorOutreachTouchBadge';
 import { TimeAgo } from './inputs/TimeAgo';
 import { outcomeChipClass, outcomeLabel } from '../lib/kolOutcomes';
-import { KolNoxInsightsBoard } from './KolNoxInsightsBoard';
 import { pickKolProfileMetrics } from '../lib/kolProfileMetrics';
+import { resolvePriorOutreachTouch } from '../lib/priorOutreachTouch';
 import { truncateNoxId } from '../lib/noxLabels';
 import { factKeyLabel } from './factKeyLabel';
+import { KolProfilePreviewLink } from './KolProfilePreviewLink';
+import { KolSocialQuickLinks, listSocialLinkItems } from './KolSocialQuickLinks';
+import { resolveKolProfileUrl } from '../lib/kolProfileUrl';
+import { buildKolProfileSnapshot } from '../lib/kolProfileSnapshot';
 
 type IdentitySummary = {
   id: number;
@@ -19,6 +27,7 @@ type IdentitySummary = {
   env: string;
   repeat_count?: number;
   last_outcome?: string | null;
+  prior_outreach_touch?: PriorOutreachTouch | null;
 };
 
 function StatCard({
@@ -82,6 +91,7 @@ export function KolProfileDashboard({
   const initials = (displayName || handle).replace(/^@/, '').slice(0, 2).toUpperCase();
 
   const m = pickKolProfileMetrics(facts, identity);
+  const priorTouch = resolvePriorOutreachTouch(identity.prior_outreach_touch, facts);
   const noxCreatorId =
     typeof facts['identity.nox_creator_id'] === 'string'
       ? facts['identity.nox_creator_id']
@@ -91,19 +101,16 @@ export function KolProfileDashboard({
       ? facts['identity.outreach_path']
       : null;
 
-  const socialCount = [
-    'identity.instagram_profile_url',
-    'identity.tiktok_profile_url',
-    'identity.youtube_profile_url',
-    'identity.facebook_profile_url',
-    'identity.twitter_profile_url',
-    'identity.threads_profile_url',
-    'identity.linktree_url',
-    'identity.personal_site_url',
-  ].filter((k) => {
-    const v = facts[k];
-    return typeof v === 'string' && v.trim().startsWith('http');
-  }).length;
+  const profileUrl = resolveKolProfileUrl(facts, {
+    handle: identity.primary_handle,
+  });
+  const profileSnapshot = buildKolProfileSnapshot(facts, {
+    handle: identity.primary_handle,
+    displayName: identity.display_name,
+  });
+
+  const socialItems = listSocialLinkItems(facts);
+  const socialCount = socialItems.length;
 
   const noxSource = m.hasNoxDiligence ? 'Nox' : undefined;
 
@@ -121,10 +128,20 @@ export function KolProfileDashboard({
             <h1 className="text-xl font-semibold tracking-tight text-slate-900">
               @{handle}
             </h1>
+            <KolProfilePreviewLink
+              url={profileUrl}
+              label="预览主页"
+              variant="chip"
+              snapshot={profileSnapshot}
+              previewFacts={facts}
+              identityId={identity.id}
+              env={identity.env}
+            />
             <RepeatKolBadge
               count={identity.repeat_count || 0}
               lastOutcome={identity.last_outcome ?? null}
             />
+            <PriorOutreachTouchBadge touch={priorTouch} />
             <span className="rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-slate-600">
               {identity.env}
             </span>
@@ -144,6 +161,17 @@ export function KolProfileDashboard({
           </div>
           {displayName && (
             <p className="mt-0.5 text-sm text-slate-600">{displayName}</p>
+          )}
+          {priorTouch?.last_touch_at && (
+            <p className="mt-1.5 text-xs text-slate-600">
+              <span className="font-medium text-slate-700">历史触达：</span>
+              <PriorOutreachTouchBadge touch={priorTouch} />
+              {priorTouch.last_touch_campaign_id && (
+                <span className="ml-1 text-slate-500">
+                  （活动 {priorTouch.last_touch_campaign_id}）
+                </span>
+              )}
+            </p>
           )}
           <p className="mt-1 text-sm text-slate-700">
             {identity.primary_email ? (
@@ -172,6 +200,12 @@ export function KolProfileDashboard({
               </>
             )}
           </p>
+          <KolSocialQuickLinks
+            facts={facts}
+            identityId={identity.id}
+            env={identity.env}
+            className="mt-2"
+          />
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           <button
@@ -238,7 +272,7 @@ export function KolProfileDashboard({
         <StatCard
           label="社交主页"
           value={socialCount > 0 ? `已填 ${socialCount} 个` : '未填写'}
-          sub={socialCount > 0 ? '见下方快速跳转' : '可在下方补充链接'}
+          sub={socialCount > 0 ? '见上方快速跳转' : '可在下方补充链接'}
         />
         <StatCard
           label="Nox 达人 ID"
@@ -254,8 +288,6 @@ export function KolProfileDashboard({
           sub={noxCreatorId ? '尽调后写入' : undefined}
         />
       </div>
-
-      <KolNoxInsightsBoard facts={facts} />
 
       {outreachPath && (
         <div className="border-t border-slate-200/80 px-4 py-2 text-xs text-slate-600">

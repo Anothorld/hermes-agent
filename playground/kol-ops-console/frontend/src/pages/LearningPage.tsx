@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import DraftEditDiffPanel from '../components/DraftEditDiffPanel';
+import { LearningChannelTrends } from '../components/LearningChannelTrends';
+import { LearningNextBatchPreview } from '../components/LearningNextBatchPreview';
+import OutcomePromotionPanel from '../components/OutcomePromotionPanel';
 import StrategyPromotionPanel from '../components/StrategyPromotionPanel';
 import { LearningManualTriggerSection } from '../components/LearningManualTriggerSection';
 import {
@@ -33,6 +36,8 @@ type Overview = {
     total_events: number;
     unconsumed: number;
     edited_unconsumed: number;
+    edited_available?: number;
+    edited_queued_in_pending?: number;
     consumed: number;
     ready_for_distill: boolean;
   };
@@ -59,6 +64,71 @@ type Overview = {
   }>;
   last_runs: JobRun[];
   run_summary: Record<string, number>;
+  edit_distance_trend?: EditDistanceTrend;
+  edit_stats_by_scope?: Array<{
+    scope: string;
+    owner_user_id?: number | null;
+    edited_available: number;
+    edited_queued_in_pending: number;
+    ready_for_distill: boolean;
+    has_pending_proposal: boolean;
+  }>;
+  convergence_alert?: {
+    worsening: boolean;
+    delta: number | null;
+    threshold: number;
+    guard_basis?: 'after_last_approval' | 'recent_vs_prior';
+    hint: string;
+  };
+  outcome_learning?: {
+    total_retros: number;
+    fresh_retros: number;
+    fresh_available?: number;
+    fresh_queued_in_pending?: number;
+    by_class: { failure?: number; success?: number; partial?: number };
+    ready_for_synthesis: boolean;
+    has_pending_proposal: boolean;
+    total: number;
+    failures: number;
+    batch_size: number;
+    min_failures: number;
+  };
+  style_approval_markers?: Array<{
+    at?: string;
+    scope?: string;
+    sample_count?: number;
+  }>;
+  channel_trends?: {
+    edits?: EditDistanceTrend;
+    rejects?: { buckets?: Array<{ bucket: string; count: number }> };
+    outcome_retros?: { buckets?: Array<{ bucket: string; count: number }> };
+  };
+  promote_outcome_eligibility?: Overview['promote_eligibility'];
+};
+
+type EditDistanceBucket = {
+  bucket: string;
+  count: number;
+  edited_count: number;
+  was_edited_rate: number | null;
+  avg_edit_distance: number | null;
+  p50_edit_distance: number | null;
+  p90_edit_distance: number | null;
+};
+
+type EditDistanceTrend = {
+  overall: {
+    count: number;
+    edited_count: number;
+    was_edited_rate: number | null;
+    avg_edit_distance: number | null;
+  };
+  buckets: EditDistanceBucket[];
+  recent_vs_prior: {
+    recent_avg: number | null;
+    prior_avg: number | null;
+    delta: number | null;
+  };
 };
 
 type JobRun = {
@@ -257,8 +327,14 @@ export function LearningPage() {
   }
 
   const stats = overview?.edit_stats;
+  const editedAvailable =
+    stats?.edited_available ?? stats?.edited_unconsumed ?? 0;
+  const editedQueued = stats?.edited_queued_in_pending ?? 0;
   const batchPct = stats
-    ? Math.min(100, Math.round((stats.edited_unconsumed / overview!.batch_threshold) * 100))
+    ? Math.min(
+        100,
+        Math.round((editedAvailable / overview!.batch_threshold) * 100),
+      )
     : 0;
   const pendingCount = overview?.pending_style_proposals.length ?? 0;
 
@@ -289,6 +365,8 @@ export function LearningPage() {
 
       <LearningWorkflowStepper activeStep={activeWorkflowStep} />
 
+      <LearningChannelsExplainer />
+
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
 
       {overview?.jobs_disabled && (
@@ -317,10 +395,16 @@ export function LearningPage() {
             label="编辑批次进度"
             value={
               stats
-                ? `${stats.edited_unconsumed} / ${overview?.batch_threshold}`
+                ? `${editedAvailable} / ${overview?.batch_threshold}`
                 : '—'
             }
-            hint={stats?.ready_for_distill ? '已达蒸馏阈值，可生成提案' : '未达阈值'}
+            hint={
+              editedQueued > 0
+                ? `另有 ${editedQueued} 条在待审批提案中（批准后才计入已消费）`
+                : stats?.ready_for_distill
+                  ? '已达蒸馏阈值，可生成提案'
+                  : '未达阈值'
+            }
           />
           <StatCard
             label="最近定时任务"
@@ -345,14 +429,82 @@ export function LearningPage() {
             />
           </div>
         )}
+        {(overview?.edit_stats_by_scope?.length ?? 0) > 0 && (
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full min-w-[320px] text-left text-[11px] text-slate-700">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-500">
+                  <th className="py-1 pr-2 font-medium">蒸馏范围</th>
+                  <th className="py-1 pr-2 font-medium">可蒸馏 / 阈值</th>
+                  <th className="py-1 font-medium">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(overview?.edit_stats_by_scope ?? []).map((row) => {
+                  const label =
+                    row.scope === 'user_style' && row.owner_user_id != null
+                      ? `${policyScopeLabel('user_style')} · 操作员 #${row.owner_user_id}`
+                      : policyScopeLabel(row.scope);
+                  const th = overview?.batch_threshold ?? 0;
+                  return (
+                    <tr
+                      key={`${row.scope}-${row.owner_user_id ?? 'co'}`}
+                      className="border-b border-slate-100"
+                    >
+                      <td className="py-1 pr-2">{label}</td>
+                      <td className="py-1 pr-2">
+                        {row.edited_available} / {th}
+                        {row.edited_queued_in_pending > 0 && (
+                          <span className="text-slate-500">
+                            {' '}
+                            （{row.edited_queued_in_pending} 条在待批提案中）
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-1">
+                        {row.has_pending_proposal ? (
+                          <span className="text-amber-700">有待批提案</span>
+                        ) : row.ready_for_distill ? (
+                          <span className="text-emerald-700">可生成</span>
+                        ) : (
+                          <span className="text-slate-500">未达阈值</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="mt-1 text-[10px] text-slate-500">
+              上方「编辑批次进度」为全库可蒸馏合计；本表按公司风格 / 各操作员分别计数。
+            </p>
+          </div>
+        )}
         {pendingCount === 0 && stats && !stats.ready_for_distill && (
           <div className="mt-3">
             <LearningEmptySamplesHint />
           </div>
         )}
+        {overview?.promote_outcome_eligibility?.length ? (
+          <div className="mt-3 text-xs text-slate-600">
+            <span className="font-medium text-emerald-800">合作复盘升格资格</span>
+            <ul className="mt-1 list-disc pl-4">
+              {overview.promote_outcome_eligibility.map((p) => (
+                <li key={`out-${p.goal}`}>
+                  <strong>{goalLabel(p.goal)}</strong>：
+                  {p.eligible ? (
+                    <span className="text-emerald-700">可升格</span>
+                  ) : (
+                    promoteReasonLabel(p.reason)
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {overview?.promote_eligibility?.length ? (
           <div className="mt-3 text-xs text-slate-600">
-            <span className="font-medium text-slate-700">策略升格资格</span>
+            <span className="font-medium text-slate-700">回信策略升格资格</span>
             <span className="ml-1 text-slate-500">（policy 版本稳定度，非待审批次数）</span>
             <ul className="mt-1 list-disc pl-4">
               {overview.promote_eligibility.map((p) => (
@@ -370,6 +522,18 @@ export function LearningPage() {
         ) : null}
       </section>
 
+      <EditDistanceTrendCard
+        trend={overview?.edit_distance_trend}
+        alert={overview?.convergence_alert}
+        markers={overview?.style_approval_markers}
+      />
+
+      <LearningChannelTrends trends={overview?.channel_trends} />
+
+      <LearningNextBatchPreview env={env} />
+
+      <OutcomeLearningCard outcome={overview?.outcome_learning} />
+
       <div className="rounded border border-slate-200 bg-white p-3">
         <LearningManualTriggerSection
           suite={suite}
@@ -381,8 +545,9 @@ export function LearningPage() {
           busyPropose={busy === 'propose'}
           onRunJobs={() => void runJobs()}
           onPropose={() => void proposeEditPolicy()}
-          editedUnconsumed={stats?.edited_unconsumed}
+          editedUnconsumed={editedAvailable}
           batchThreshold={overview?.batch_threshold}
+          editedQueuedInPending={editedQueued}
           readyForDistill={stats?.ready_for_distill}
           pendingProposalCount={pendingCount}
         />
@@ -492,14 +657,17 @@ export function LearningPage() {
       >
         <h2 className="text-sm font-medium text-slate-800">4. 沉淀与反哺</h2>
 
-        <div id="promote" className="scroll-mt-4">
+        <div id="promote" className="scroll-mt-4 space-y-3">
           <StrategyPromotionPanel defaultOpen />
+          <OutcomePromotionPanel />
         </div>
 
         <div>
           <div className="mb-2 flex flex-wrap gap-2">
             <span className="text-xs font-medium text-slate-700">Policy 预览</span>
-            {(['reply_strategy', 'reply_learning', 'company_style'] as const).map((scope) => (
+            {(
+              ['reply_strategy', 'reply_learning', 'company_style', 'outcome_strategy'] as const
+            ).map((scope) => (
               <button
                 key={scope}
                 type="button"
@@ -580,6 +748,115 @@ export function LearningPage() {
   );
 }
 
+// Three learning channels — clarify which operator action feeds which policy.
+function LearningChannelsExplainer() {
+  const channels: Array<{ action: string; policy: string; cls: string; text: string }> = [
+    {
+      action: '驳回回信',
+      policy: '回信策略（reply_learning）',
+      cls: 'border-amber-200 bg-amber-50/50',
+      text: 'text-amber-900',
+    },
+    {
+      action: '编辑终稿后发送',
+      policy: '邮件风格 + 回信策略（company/user_style · reply_strategy）',
+      cls: 'border-violet-200 bg-violet-50/50',
+      text: 'text-violet-900',
+    },
+    {
+      action: '合作达成/失败归档',
+      policy: '合作结局指导（outcome_strategy）',
+      cls: 'border-emerald-200 bg-emerald-50/50',
+      text: 'text-emerald-900',
+    },
+  ];
+  return (
+    <div className="rounded border border-slate-200 bg-white p-3">
+      <div className="text-sm font-medium text-slate-800">三条学习通道（你的哪个动作影响哪个 policy）</div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-3">
+        {channels.map((c) => (
+          <div key={c.action} className={`rounded border p-2 ${c.cls}`}>
+            <div className={`text-[12px] font-medium ${c.text}`}>{c.action}</div>
+            <div className="mt-0.5 text-[11px] text-slate-600">→ {c.policy}</div>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-[11px] text-slate-500">
+        三者都经「待审批」人工门控；稳定后可在下方「策略反哺」升格进对应技能（advisory）。
+      </p>
+    </div>
+  );
+}
+
+// Post-collaboration root-cause learning: won/lost reasons → forward guidance.
+function OutcomeLearningCard({
+  outcome,
+}: {
+  outcome: Overview['outcome_learning'];
+}) {
+  if (!outcome) return null;
+  const {
+    by_class,
+    total_retros,
+    fresh_retros,
+    fresh_available,
+    fresh_queued_in_pending,
+    failures,
+    batch_size,
+    min_failures,
+  } = outcome;
+  const avail = fresh_available ?? fresh_retros;
+  return (
+    <div className="rounded border border-emerald-200 bg-white p-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="text-sm font-medium text-emerald-900">合作复盘学习</span>
+        <span className="text-[11px] text-slate-500">
+          合作达成/失败后做根因分析，沉淀「结局指导」供后续外联/谈判参考
+        </span>
+        {outcome.has_pending_proposal ? (
+          <Link to="/approvals?type=outcome_learning" className="ml-auto text-[11px] text-sky-700 underline">
+            有待审批复盘提案 →
+          </Link>
+        ) : outcome.ready_for_synthesis ? (
+          <span className="ml-auto rounded bg-emerald-100 px-2 py-0.5 text-[11px] text-emerald-800">
+            可生成复盘提案
+          </span>
+        ) : (
+          <span className="ml-auto text-[11px] text-slate-500">
+            未达阈值（≥{batch_size} 次 或 ≥{min_failures} 失败）
+          </span>
+        )}
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <StatCard label="复盘总数" value={String(total_retros)} hint="已分析的合作" />
+        <StatCard
+          label="待综合"
+          value={String(avail)}
+          hint={
+            fresh_queued_in_pending
+              ? `另有 ${fresh_queued_in_pending} 条在待审批提案中`
+              : '未并入提案'
+          }
+        />
+        <StatCard
+          label="失败案例"
+          value={String(by_class.failure ?? 0)}
+          hint={`成功 ${by_class.success ?? 0} · 部分 ${by_class.partial ?? 0}`}
+        />
+        <StatCard
+          label="本批失败"
+          value={String(failures)}
+          hint={`阈值 ≥${min_failures} 提前触发`}
+        />
+      </div>
+      <p className="mt-2 text-[11px] text-slate-500">
+        触发：合作归档时立即单案复盘（同步）+ job 补漏（<code>analyze_collab_outcome</code>）；够批次后综合为提案（job{' '}
+        <code>apply_outcome_policy</code>），在「待审批 → 合作复盘」批准。
+      </p>
+    </div>
+  );
+}
+
 function StatCard({
   label,
   value,
@@ -594,6 +871,157 @@ function StatCard({
       <div className="text-[11px] text-slate-500">{label}</div>
       <div className="text-sm font-semibold text-slate-900 leading-snug">{value}</div>
       <div className="text-[11px] text-slate-600">{hint}</div>
+    </div>
+  );
+}
+
+function pct(value: number | null | undefined): string {
+  if (value == null) return '—';
+  return `${Math.round(value * 100)}%`;
+}
+
+// Convergence chart: lower bars = operator edits AI drafts less = learning works.
+function bucketFromIso(at: string | undefined, bucketKey: string): string | null {
+  if (!at) return null;
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return null;
+  if (bucketKey.includes('W')) {
+    const onejan = new Date(d.getFullYear(), 0, 1);
+    const week = Math.ceil(
+      ((d.getTime() - onejan.getTime()) / 86400000 + onejan.getDay() + 1) / 7,
+    );
+    return `${d.getFullYear()}-W${String(week).padStart(2, '0')}`;
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+function EditDistanceTrendCard({
+  trend,
+  alert,
+  markers,
+}: {
+  trend: EditDistanceTrend | undefined;
+  alert?: Overview['convergence_alert'];
+  markers?: Overview['style_approval_markers'];
+}) {
+  if (!trend || trend.overall.count === 0) {
+    return (
+      <div className="rounded border border-slate-200 bg-white p-3">
+        <div className="text-sm font-medium text-slate-800">编辑幅度趋势</div>
+        <p className="mt-1 text-xs text-slate-500">
+          暂无「编辑后发送」样本。操作员在 Gmail 修改 AI 草稿并发出后，这里会显示编辑幅度随时间的变化。
+        </p>
+      </div>
+    );
+  }
+  const buckets = trend.buckets.slice(-12);
+  const markerByBucket = new Map<string, number>();
+  for (const m of markers ?? []) {
+    const key = bucketFromIso(m.at, trend.buckets[0]?.bucket ?? '');
+    if (key) markerByBucket.set(key, (markerByBucket.get(key) ?? 0) + 1);
+  }
+  const delta = trend.recent_vs_prior.delta;
+  const improving = delta != null && delta < 0;
+  const worsening = delta != null && delta > 0;
+  return (
+    <div className="rounded border border-slate-200 bg-white p-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span className="text-sm font-medium text-slate-800">编辑幅度趋势</span>
+        <span className="text-[11px] text-slate-500">
+          越低越好 = 操作员越来越少改 AI 草稿（近 90 天 · 按周）
+        </span>
+        {delta != null && (
+          <span
+            className={
+              'ml-auto rounded px-2 py-0.5 text-[11px] font-medium ' +
+              (improving
+                ? 'bg-emerald-100 text-emerald-800'
+                : worsening
+                  ? 'bg-rose-100 text-rose-800'
+                  : 'bg-slate-100 text-slate-600')
+            }
+            title={
+              alert?.guard_basis === 'after_last_approval'
+                ? '最近一次学习批准后 vs 批准前的平均编辑幅度'
+                : '最近一周平均编辑幅度 vs 此前各周平均'
+            }
+          >
+            {improving ? '↓ 改善' : worsening ? '↑ 变差' : '持平'} {pct(Math.abs(delta))}
+            {alert?.guard_basis === 'after_last_approval' && (
+              <span className="ml-1 font-normal text-slate-600">（批准后）</span>
+            )}
+          </span>
+        )}
+      </div>
+      <div className="relative mt-2" style={{ height: 64 }}>
+        <div className="flex h-full items-end gap-1">
+          {buckets.map((b) => {
+            const v = b.avg_edit_distance ?? 0;
+            const h = Math.max(2, Math.round(v * 60));
+            return (
+              <div
+                key={b.bucket}
+                className="flex h-full flex-1 flex-col justify-end"
+                title={`${b.bucket} · 平均 ${pct(b.avg_edit_distance)} · 编辑率 ${pct(
+                  b.was_edited_rate,
+                )} · ${b.count} 封${
+                  markerByBucket.get(b.bucket)
+                    ? ` · ${markerByBucket.get(b.bucket)} 次学习批准`
+                    : ''
+                }`}
+              >
+                <div
+                  className="w-full rounded-t bg-violet-400"
+                  style={{ height: `${h}px` }}
+                />
+              </div>
+            );
+          })}
+        </div>
+        <div
+          className="pointer-events-none absolute inset-0 flex gap-1"
+          aria-hidden
+        >
+          {buckets.map((b) => (
+            <div key={`line-${b.bucket}`} className="flex flex-1 justify-center">
+              {markerByBucket.get(b.bucket) ? (
+                <div
+                  className="h-full w-0.5 bg-emerald-600 opacity-90"
+                  title="学习提案已批准"
+                />
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-slate-600">
+        <div>
+          总体平均编辑幅度{' '}
+          <span className="font-semibold text-slate-900">
+            {pct(trend.overall.avg_edit_distance)}
+          </span>
+        </div>
+        <div>
+          编辑率{' '}
+          <span className="font-semibold text-slate-900">
+            {pct(trend.overall.was_edited_rate)}
+          </span>
+        </div>
+        <div>样本 {trend.overall.count} 封</div>
+      </div>
+      {(markers?.length ?? 0) > 0 && (
+        <p className="mt-1 text-[11px] text-slate-500">
+          绿色竖线 = 该周有学习提案批准（共 {markers?.length} 次）
+        </p>
+      )}
+      {alert?.worsening && (
+        <div className="mt-2 rounded border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] text-rose-800">
+          {alert.hint || '最近编辑幅度上升，可能某次批准的 policy 反而变差，建议检查并回滚。'}
+          <Link to="/policies" className="ml-1 underline">
+            去 policy 历史
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

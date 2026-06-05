@@ -292,7 +292,8 @@ def discovery_cli_rules() -> str:
         "Do NOT batch multiple handles in execute_code. Do NOT write /tmp/ingest_*.json via execute_code loops.",
         "Do NOT use ingest-confirmed-candidate in kol-cold-outreach — identity_id already exists.",
         f"Preflight: {CLI_INVOCATION} list-outreach-cooldown-handles --env <env> --plain",
-        f"{CLI_INVOCATION} list-relationships --env <env> --last-outcome competitor --limit 1000",
+        f"{CLI_INVOCATION} list-discovery-skip-handles --env <env> "
+        "(JSON — parse items[*].handle + items[*].reason; do not use --plain)",
     ])
 
 

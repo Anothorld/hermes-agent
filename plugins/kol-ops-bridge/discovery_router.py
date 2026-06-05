@@ -43,8 +43,16 @@ def route_discovery_pool(
     env: str = "LIVE",
     selected_by: str = "agent",
     operator_note: str = "",
+    identity_ids: Optional[list[int]] = None,
 ) -> dict[str, Any]:
-    """Route every candidate currently in ``candidate_status='discovered'``.
+    """Route candidates currently in ``candidate_status='discovered'``.
+
+    When ``identity_ids`` is provided, only those identities are considered
+    for routing and ``select-candidates``. This scoped mode is used by the
+    web console ``approve-shortlist`` handler so operator checkbox selection
+    is not overridden by a full-pool bulk select. When ``identity_ids`` is
+    ``None`` (default), every discovered candidate in the pool is eligible —
+    the Agent ``route-discovery`` tool path.
 
     Steps (idempotent):
       1. ``cal.resolve_candidate_relationships`` to fill ``relationship_status``.
@@ -68,6 +76,10 @@ def route_discovery_pool(
     # Step 1 — refresh relationship_status (idempotent).
     cal.resolve_candidate_relationships(campaign_id=campaign_id, env=env)
 
+    scope: Optional[set[int]] = None
+    if identity_ids is not None:
+        scope = {int(i) for i in identity_ids}
+
     # Step 2 — partition.
     candidates = cal.list_candidates(campaign_id, env=env)
     routed_to_cold: list[int] = []
@@ -79,6 +91,8 @@ def route_discovery_pool(
     for row in candidates:
         identity_id = row.get("identity_id")
         if not identity_id:
+            continue
+        if scope is not None and int(identity_id) not in scope:
             continue
         if row.get("candidate_status") != "discovered":
             skipped_already_routed.append(int(identity_id))
@@ -160,6 +174,7 @@ def route_discovery_pool(
     return {
         "campaign_id": campaign_id,
         "env": env,
+        "scoped_identity_ids": sorted(scope) if scope is not None else None,
         "routed_to_cold": routed_to_cold,
         "routed_to_reengagement": routed_to_reengagement,
         "needs_review_escalations": needs_review_escalations,

@@ -210,6 +210,10 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p = sub.add_parser(
         "get-escalation",
         help="GET /escalations/{id} — read one escalation (full row).",
+        description=(
+            "Fetch a single escalation by numeric id. Does not accept "
+            "--campaign-id; use list-escalations to browse by env/state."
+        ),
     )
     add_common_args(p)
     add_env_arg(p, required=False)

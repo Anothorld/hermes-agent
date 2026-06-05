@@ -128,6 +128,7 @@ class CALClient:
         *,
         params: Optional[dict[str, Any]] = None,
         body: Optional[Any] = None,
+        extra_headers: Optional[dict[str, str]] = None,
     ) -> Any:
         url = f"{self.base}{path}"
         if params:
@@ -141,6 +142,8 @@ class CALClient:
             headers["Content-Type"] = "application/json"
         if self.bridge_key:
             headers["X-Bridge-Key"] = self.bridge_key
+        if extra_headers:
+            headers.update(extra_headers)
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:

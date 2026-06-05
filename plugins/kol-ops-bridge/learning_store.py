@@ -5,10 +5,12 @@ Pure DB reads via an open sqlite3 connection or cal wrappers — no HTTP.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
 import sqlite3
+from collections import defaultdict
 from typing import Any, Final, Optional
 
 LEARNING_EVENT_TYPES = (
@@ -18,6 +20,7 @@ LEARNING_EVENT_TYPES = (
 
 REJECT_LEARNING_SCOPE = "reply_learning"
 REPLY_STRATEGY_SCOPE = "reply_strategy"
+OUTCOME_STRATEGY_SCOPE = "outcome_strategy"
 EDIT_LEARNING_SCOPES = ("company_style", "user_style")
 STYLE_LEARNING_APPROVAL_FACT = "approval.style_learning_proposal"
 PRICING_CALIBRATION_SCOPE = "pricing_calibration"
@@ -43,11 +46,11 @@ _FACT_PREFIX_PRIORITY: Final[tuple[str, ...]] = (
 
 def style_learning_batch_size() -> int:
     """Min ``draft_edit_learning`` (was_edited) events before LLM distill runs."""
-    raw = os.environ.get("KOL_STYLE_LEARNING_BATCH_SIZE", "10").strip()
+    raw = os.environ.get("KOL_STYLE_LEARNING_BATCH_SIZE", "5").strip()
     try:
         return max(1, min(int(raw), 100))
     except ValueError:
-        return 10
+        return 5
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
@@ -236,6 +239,7 @@ def build_style_learning_sample(
         "goal": ev.get("goal") or payload.get("goal"),
         "lane": ev.get("lane"),
         "child_skill": payload.get("child_skill"),
+        "operator_user_id": payload.get("operator_user_id"),
         "edit_distance": payload.get("edit_distance"),
         "sent_message_id": sent_msg_id or None,
         "current_facts": latest_facts_snapshot(
@@ -408,6 +412,297 @@ def list_negotiation_history(
     return list(grouped.values())
 
 
+def _parse_event_ts(raw: Any) -> Optional[_dt.datetime]:
+    """Parse a ``kol_conversation_events.ts`` value to an aware UTC datetime."""
+    if not raw:
+        return None
+    text = str(raw).strip().replace("Z", "+00:00")
+    # SQLite ``datetime('now')`` yields ``YYYY-MM-DD HH:MM:SS`` (space, no tz).
+    for candidate in (text, text.replace(" ", "T")):
+        try:
+            dt = _dt.datetime.fromisoformat(candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_dt.timezone.utc)
+            return dt.astimezone(_dt.timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def learning_window_days() -> int:
+    """Sliding window for distill sampling; 0 disables (use all unconsumed)."""
+    raw = os.environ.get("KOL_LEARNING_WINDOW_DAYS", "90").strip()
+    try:
+        return max(0, min(int(raw), 3650))
+    except ValueError:
+        return 0
+
+
+def filter_events_within_days(
+    events: list[dict[str, Any]], days: int,
+) -> list[dict[str, Any]]:
+    """Keep only events whose ``ts`` is within the last ``days`` (0 = no filter).
+
+    Avoids stale samples dominating distill once the operator's style/strategy
+    has moved on.
+    """
+    if not days or days <= 0:
+        return events
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+    out: list[dict[str, Any]] = []
+    for ev in events:
+        dt = _parse_event_ts(ev.get("ts"))
+        if dt is None or dt >= cutoff:
+            # Keep events with unparseable ts (be permissive, don't silently drop).
+            out.append(ev)
+    return out
+
+
+def _percentile(values: list[float], pct: float) -> Optional[float]:
+    """Nearest-rank percentile (pct in [0,1]); None for empty input."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 4)
+    rank = max(0, min(len(ordered) - 1, int(round(pct * (len(ordered) - 1)))))
+    return round(ordered[rank], 4)
+
+
+def _bucket_key(dt: _dt.datetime, bucket: str) -> str:
+    if bucket == "day":
+        return dt.strftime("%Y-%m-%d")
+    # ISO week, e.g. 2026-W23
+    iso = dt.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _summarize_edit_distances(
+    distances: list[float], edited_flags: list[bool]
+) -> dict[str, Any]:
+    count = len(distances)
+    edited_count = sum(1 for f in edited_flags if f)
+    return {
+        "count": count,
+        "edited_count": edited_count,
+        "was_edited_rate": round(edited_count / count, 4) if count else None,
+        "avg_edit_distance": round(sum(distances) / count, 4) if count else None,
+        "p50_edit_distance": _percentile(distances, 0.5),
+        "p90_edit_distance": _percentile(distances, 0.9),
+    }
+
+
+def edit_distance_trend(
+    conn: sqlite3.Connection,
+    *,
+    env: str,
+    days: int = 90,
+    bucket: str = "week",
+    goal: Optional[str] = None,
+    child_skill: Optional[str] = None,
+    operator_user_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Convergence metric: aggregate ``draft_edit_learning`` edit_distance over time.
+
+    The intent is to answer "is the operator editing AI drafts less over time?"
+    (lower ``avg_edit_distance`` / ``was_edited_rate`` = learning is working).
+
+    Args:
+        env: CAL partition (LIVE/TEST).
+        days: lookback window; events older than this are ignored.
+        bucket: ``"week"`` (ISO week) or ``"day"`` time bucket.
+        goal: optional filter on the event ``goal`` column.
+        child_skill: optional filter on ``payload.child_skill``.
+        operator_user_id: optional filter on ``payload.operator_user_id``.
+
+    Returns:
+        Dict with ``overall`` summary, ordered ``buckets`` list, and
+        ``recent_vs_prior`` (last-bucket avg vs the average of earlier buckets)
+        suitable for the regression guard.
+    """
+    bucket = bucket if bucket in ("day", "week") else "week"
+    days = max(1, min(int(days), 730))
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+
+    where = ["env = ?", "event_type = 'draft_edit_learning'"]
+    args: list[Any] = [env]
+    if goal:
+        where.append("goal = ?")
+        args.append(goal)
+    sql = (
+        "SELECT id, ts, goal, payload_json FROM kol_conversation_events "
+        f"WHERE {' AND '.join(where)} ORDER BY id ASC"
+    )
+    rows = conn.execute(sql, args).fetchall()
+
+    bucketed: dict[str, dict[str, list[Any]]] = {}
+    all_distances: list[float] = []
+    all_edited: list[bool] = []
+    for row in rows:
+        dt = _parse_event_ts(row["ts"])
+        if dt is None or dt < cutoff:
+            continue
+        try:
+            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        if child_skill and str(payload.get("child_skill") or "") != child_skill:
+            continue
+        if operator_user_id is not None and int(
+            payload.get("operator_user_id") or 0
+        ) != int(operator_user_id):
+            continue
+        dist = payload.get("edit_distance")
+        try:
+            dist = float(dist)
+        except (TypeError, ValueError):
+            continue
+        was_edited = bool(payload.get("was_edited"))
+        key = _bucket_key(dt, bucket)
+        slot = bucketed.setdefault(key, {"distances": [], "edited": []})
+        slot["distances"].append(dist)
+        slot["edited"].append(was_edited)
+        all_distances.append(dist)
+        all_edited.append(was_edited)
+
+    buckets_out: list[dict[str, Any]] = []
+    for key in sorted(bucketed):
+        slot = bucketed[key]
+        summary = _summarize_edit_distances(slot["distances"], slot["edited"])
+        buckets_out.append({"bucket": key, **summary})
+
+    recent_vs_prior: dict[str, Any] = {
+        "recent_avg": None, "prior_avg": None, "delta": None
+    }
+    if len(buckets_out) >= 2:
+        recent = buckets_out[-1].get("avg_edit_distance")
+        prior_vals = [
+            b["avg_edit_distance"]
+            for b in buckets_out[:-1]
+            if b.get("avg_edit_distance") is not None
+        ]
+        prior = round(sum(prior_vals) / len(prior_vals), 4) if prior_vals else None
+        delta = (
+            round(recent - prior, 4)
+            if recent is not None and prior is not None
+            else None
+        )
+        recent_vs_prior = {"recent_avg": recent, "prior_avg": prior, "delta": delta}
+
+    return {
+        "env": env,
+        "days": days,
+        "bucket": bucket,
+        "goal": goal,
+        "child_skill": child_skill,
+        "operator_user_id": operator_user_id,
+        "overall": _summarize_edit_distances(all_distances, all_edited),
+        "buckets": buckets_out,
+        "recent_vs_prior": recent_vs_prior,
+    }
+
+
+def edit_distance_since_last_style_approval(
+    conn: sqlite3.Connection,
+    *,
+    env: str,
+    last_approval_at: Optional[str] = None,
+    days: int = 90,
+) -> dict[str, Any]:
+    """Compare avg edit distance after the latest approved batch vs before it.
+
+    Used for the regression guard so a worsening trend is tied to policy changes,
+    not only «last calendar week vs earlier weeks».
+    """
+    days = max(1, min(int(days), 730))
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+    last_dt = _parse_event_ts(last_approval_at) if last_approval_at else None
+    if last_dt is None:
+        return {"usable": False, "reason": "no_last_approval_at"}
+
+    where = ["env = ?", "event_type = 'draft_edit_learning'"]
+    args: list[Any] = [env]
+    rows = conn.execute(
+        "SELECT ts, payload_json FROM kol_conversation_events "
+        f"WHERE {' AND '.join(where)} ORDER BY id ASC",
+        args,
+    ).fetchall()
+
+    after: list[float] = []
+    before: list[float] = []
+    for row in rows:
+        dt = _parse_event_ts(row["ts"])
+        if dt is None or dt < cutoff:
+            continue
+        try:
+            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or not payload.get("was_edited"):
+            continue
+        try:
+            dist = float(payload.get("edit_distance"))
+        except (TypeError, ValueError):
+            continue
+        if dt > last_dt:
+            after.append(dist)
+        elif dt <= last_dt:
+            before.append(dist)
+
+    after_avg = round(sum(after) / len(after), 4) if after else None
+    before_avg = round(sum(before) / len(before), 4) if before else None
+    delta = (
+        round(after_avg - before_avg, 4)
+        if after_avg is not None and before_avg is not None
+        else None
+    )
+    usable = (
+        delta is not None
+        and len(after) >= 1
+        and len(before) >= 1
+    )
+    return {
+        "usable": usable,
+        "last_approval_at": last_approval_at,
+        "after_avg": after_avg,
+        "before_avg": before_avg,
+        "after_count": len(after),
+        "before_count": len(before),
+        "delta": delta,
+    }
+
+
+def event_volume_trend(
+    conn: sqlite3.Connection,
+    *,
+    env: str,
+    event_type: str,
+    days: int = 90,
+    bucket: str = "week",
+) -> dict[str, Any]:
+    """Count learning events per time bucket (for multi-channel overview charts)."""
+    bucket = bucket if bucket in ("day", "week") else "week"
+    days = max(1, min(int(days), 730))
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+    rows = conn.execute(
+        """SELECT ts FROM kol_conversation_events
+            WHERE env=? AND event_type=? ORDER BY id ASC""",
+        (env, event_type),
+    ).fetchall()
+    counts: dict[str, int] = defaultdict(int)
+    total = 0
+    for row in rows:
+        dt = _parse_event_ts(row["ts"])
+        if dt is None or dt < cutoff:
+            continue
+        counts[_bucket_key(dt, bucket)] += 1
+        total += 1
+    buckets_out = [{"bucket": k, "count": counts[k]} for k in sorted(counts)]
+    return {"event_type": event_type, "days": days, "bucket": bucket, "total": total, "buckets": buckets_out}
+
+
 def slice_policy_md_for_goals(content_md: str, active_goals: list[str]) -> str:
     """Return only ``## <goal>`` sections matching ``active_goals``."""
     text = (content_md or "").strip()
@@ -482,6 +777,18 @@ def build_learning_hints(
                 "source": "policy",
                 "scope": REPLY_STRATEGY_SCOPE,
                 "content": filtered_strat.strip()[:max_chars],
+            })
+
+    # Outcome learning (won/lost root-cause guidance) — goal-sliced advisory.
+    outcome_policy = pol.get_policy(conn, scope=OUTCOME_STRATEGY_SCOPE, env=env)
+    outcome_md = (outcome_policy or {}).get("content_md") or ""
+    if outcome_md.strip() and goals:
+        filtered_outcome = slice_policy_md_for_goals(outcome_md, goals)
+        if filtered_outcome.strip():
+            hints.append({
+                "source": "policy",
+                "scope": OUTCOME_STRATEGY_SCOPE,
+                "content": filtered_outcome.strip()[:max_chars],
             })
 
     # Company-wide style is cross-goal tone guidance (not goal-sectioned), so

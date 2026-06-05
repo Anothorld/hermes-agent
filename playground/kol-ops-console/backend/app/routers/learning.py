@@ -28,7 +28,9 @@ LEARNING_POLICY_SCOPES = frozenset({
     "reply_learning",
     "reply_strategy",
     "company_style",
+    "user_style",
     "pricing_calibration",
+    "outcome_strategy",
 })
 
 
@@ -207,6 +209,72 @@ async def list_reject_events(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
 
+@router.get("/edit-distance-trend")
+async def edit_distance_trend(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    days: int = Query(default=90, ge=1, le=730),
+    bucket: str = Query(default="week", pattern="^(day|week)$"),
+    goal: Optional[str] = Query(default=None),
+    child_skill: Optional[str] = Query(default=None),
+    operator_user_id: Optional[int] = Query(default=None),
+) -> dict[str, Any]:
+    """Proxy the Bridge convergence metric (edit_distance over time)."""
+    params: dict[str, Any] = {"env": env, "days": days, "bucket": bucket}
+    if goal:
+        params["goal"] = goal
+    if child_skill:
+        params["child_skill"] = child_skill
+    if operator_user_id is not None:
+        params["operator_user_id"] = operator_user_id
+    try:
+        return await bridge._req(
+            "GET", "/learning/edit-distance-trend", params=params,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@router.get("/preview-edit-batch")
+async def preview_edit_batch(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    scope: str = Query(default="company_style", pattern="^(company_style|user_style)$"),
+    owner_user_id: Optional[int] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"env": env, "scope": scope, "limit": limit}
+    if owner_user_id is not None:
+        params["owner_user_id"] = owner_user_id
+    try:
+        return await bridge._req("GET", "/learning/preview-edit-batch", params=params)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+class PolicyMergePreviewBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    proposal: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/policy-merge-preview")
+async def policy_merge_preview(
+    body: PolicyMergePreviewBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+) -> dict[str, Any]:
+    try:
+        return await bridge._req(
+            "POST",
+            "/learning/policy-merge-preview",
+            json=body.model_dump(),
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
 @router.get("/policies/{scope}")
 async def get_learning_policy(
     scope: str,
@@ -227,9 +295,71 @@ async def get_learning_policy(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
 
+@router.get("/policies/{scope}/history")
+async def get_learning_policy_history(
+    scope: str,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+    owner_user_id: Optional[int] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    if scope not in LEARNING_POLICY_SCOPES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"scope must be one of {sorted(LEARNING_POLICY_SCOPES)}",
+        )
+    params: dict[str, Any] = {"limit": limit}
+    if owner_user_id is not None:
+        params["owner_user_id"] = owner_user_id
+    try:
+        return await bridge._req(
+            "GET", f"/policies/{scope}/history", params=params,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+class PolicyRollbackBody(BaseModel):
+    to_version: int = Field(ge=1)
+    owner_user_id: Optional[int] = None
+    env: Optional[str] = Field(default=None, pattern="^(TEST|LIVE)$")
+
+
+@router.post("/policies/{scope}/rollback")
+async def rollback_learning_policy(
+    scope: str,
+    body: PolicyRollbackBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """Roll a learning policy back to a prior version (regression-guard remedy)."""
+    if scope not in LEARNING_POLICY_SCOPES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"scope must be one of {sorted(LEARNING_POLICY_SCOPES)}",
+        )
+    payload: dict[str, Any] = {
+        "to_version": body.to_version,
+        "updated_by": f"console:{user.get('email', 'unknown')}",
+    }
+    if body.owner_user_id is not None:
+        payload["owner_user_id"] = body.owner_user_id
+    if body.env is not None:
+        payload["env"] = body.env
+    try:
+        return await bridge._req(
+            "POST", f"/policies/{scope}/rollback", json=payload,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
 class PromoteStrategyBody(BaseModel):
     goal: str = Field(min_length=1, max_length=120)
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    scope: str = Field(
+        default="reply_strategy", pattern="^(reply_strategy|outcome_strategy)$",
+    )
     min_approvals: int = Field(default=2, ge=1, le=50)
     min_age_days: int = Field(default=7, ge=0, le=365)
     dry_run: bool = True
@@ -249,6 +379,7 @@ async def promote_strategy(
     payload = {
         "goal": body.goal,
         "env": body.env,
+        "scope": body.scope,
         "min_approvals": body.min_approvals,
         "min_age_days": body.min_age_days,
         "dry_run": body.dry_run,

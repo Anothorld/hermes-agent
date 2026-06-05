@@ -1,17 +1,12 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api';
 import { toast } from '../lib/store';
-import { pickKolProfileMetrics } from '../lib/kolProfileMetrics';
-import {
-  formatNoxDiligenceVerdict,
-  parseNoxCacheKey,
-  truncateNoxId,
-} from '../lib/noxLabels';
+import { NoxInsightsSections } from './NoxInsightsSections';
+import { formatNoxDiligenceVerdict, parseNoxCacheKey } from '../lib/noxLabels';
 import NoxQuotaBanner, {
   isNoxQuotaExhausted,
   type NoxStatsPayload,
 } from './NoxQuotaBanner';
-import { TimeAgo } from './inputs/TimeAgo';
 
 function parseApiErrorDetail(err: unknown): { message?: string } | null {
   if (!(err instanceof ApiError)) return { message: String(err) };
@@ -44,10 +39,7 @@ export function NoxDiligencePanel({
   onTriggered,
 }: Props) {
   const verdict = facts['identity.nox_diligence_verdict'];
-  const cacheMonth = facts['identity.nox_cache_month'];
   const cacheKey = facts['identity.nox_cache_key'];
-  const diligenceAt = facts['identity.nox_diligence_at'];
-  const noxCreatorId = facts['identity.nox_creator_id'];
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -111,21 +103,16 @@ export function NoxDiligencePanel({
     }
   };
 
-  const metrics = pickKolProfileMetrics(facts);
   const verdictStr = typeof verdict === 'string' ? verdict.trim() : '';
   const verdictUi = verdictStr ? formatNoxDiligenceVerdict(verdictStr) : null;
   const parsedKey =
     typeof cacheKey === 'string' ? parseNoxCacheKey(cacheKey) : null;
-  const creatorIdStr =
-    typeof noxCreatorId === 'string'
-      ? noxCreatorId
-      : parsedKey?.noxCreatorId ?? null;
-
   return (
     <div className="rounded-xl border border-violet-200 bg-gradient-to-br from-violet-50/80 to-white p-4 text-sm shadow-sm">
-      <div className="font-semibold text-violet-900">Nox 尽调 (Gate A)</div>
+      <div className="font-semibold text-violet-900">Nox 尽调与数据 (Gate A)</div>
       <p className="mt-1 text-xs text-violet-800/90">
-        短名单确认阶段：拉取 Nox 达人档案、受众与内容数据，并给出是否优先合作的建议。
+        短名单确认阶段：拉取档案、受众、内容与商业合作四维数据（约 4 次 API），
+        给出合作建议，并在下方集中展示已有 Nox 指标（分布类数据以图表呈现）；无数据的字段不展示。
       </p>
 
       <NoxQuotaBanner
@@ -149,65 +136,7 @@ export function NoxDiligencePanel({
             <p className="mt-1 text-xs leading-snug opacity-90">{verdictUi.hint}</p>
           </div>
 
-          {(metrics.engagementRate
-            || metrics.avgViews
-            || metrics.region
-            || metrics.audienceAuthenticity) && (
-            <dl className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-              {metrics.engagementRate && (
-                <div className="rounded-lg border border-violet-100 bg-white/80 px-3 py-2">
-                  <dt className="font-medium text-violet-700">互动率</dt>
-                  <dd className="mt-0.5 text-slate-900">{metrics.engagementRate}</dd>
-                </div>
-              )}
-              {metrics.avgViews && (
-                <div className="rounded-lg border border-violet-100 bg-white/80 px-3 py-2">
-                  <dt className="font-medium text-violet-700">平均播放</dt>
-                  <dd className="mt-0.5 text-slate-900">{metrics.avgViews}</dd>
-                </div>
-              )}
-              {metrics.region && (
-                <div className="rounded-lg border border-violet-100 bg-white/80 px-3 py-2">
-                  <dt className="font-medium text-violet-700">主要受众地区</dt>
-                  <dd className="mt-0.5 text-slate-900">{metrics.region}</dd>
-                </div>
-              )}
-              {metrics.audienceAuthenticity && (
-                <div className="rounded-lg border border-violet-100 bg-white/80 px-3 py-2">
-                  <dt className="font-medium text-violet-700">受众真实度</dt>
-                  <dd className="mt-0.5 text-slate-900">{metrics.audienceAuthenticity}</dd>
-                </div>
-              )}
-            </dl>
-          )}
-
-          <dl className="grid gap-2 text-xs sm:grid-cols-2">
-            {typeof cacheMonth === 'string' && cacheMonth && (
-              <div className="rounded-lg border border-violet-100 bg-white/80 px-3 py-2">
-                <dt className="font-medium text-violet-700">数据所属月份</dt>
-                <dd className="mt-0.5 text-slate-900">{cacheMonth}</dd>
-                <dd className="mt-0.5 text-[10px] text-slate-500">
-                  同月内重复尽调可命中缓存，通常不再扣 API
-                </dd>
-              </div>
-            )}
-            {creatorIdStr && (
-              <div className="rounded-lg border border-violet-100 bg-white/80 px-3 py-2">
-                <dt className="font-medium text-violet-700">Nox 达人 ID</dt>
-                <dd className="mt-0.5 font-mono text-[11px] text-slate-800" title={creatorIdStr}>
-                  {truncateNoxId(creatorIdStr, 14, 8)}
-                </dd>
-              </div>
-            )}
-            {typeof diligenceAt === 'string' && diligenceAt && (
-              <div className="rounded-lg border border-violet-100 bg-white/80 px-3 py-2">
-                <dt className="font-medium text-violet-700">最近尽调时间</dt>
-                <dd className="mt-0.5 text-slate-900">
-                  <TimeAgo iso={diligenceAt} />
-                </dd>
-              </div>
-            )}
-          </dl>
+          <NoxInsightsSections facts={facts} />
 
           {parsedKey && (
             <details className="rounded-lg border border-violet-100 bg-white/60 px-3 py-2 text-xs">

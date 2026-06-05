@@ -18,13 +18,43 @@ _local = threading.local()
 
 
 def set_client(client):
-    """Store a lark client for the current thread (called by feishu_comment)."""
+    """Store a lark client for the current thread (called by feishu_comment handler)."""
     _local.client = client
 
 
 def get_client():
-    """Return the lark client for the current thread, or None."""
-    return getattr(_local, "client", None)
+    """Return the lark client for the current thread.
+
+    If no client was injected (e.g. in a DM session rather than a comment
+    event), attempt to build one from environment variables FEISHU_APP_ID
+    and FEISHU_APP_SECRET.  The created client is cached on the thread-local
+    so subsequent calls reuse it.
+    """
+    client = getattr(_local, "client", None)
+    if client is not None:
+        return client
+
+    # Lazy-build from env vars
+    import os
+    app_id = os.getenv("FEISHU_APP_ID", "").strip()
+    app_secret = os.getenv("FEISHU_APP_SECRET", "").strip()
+    if not app_id or not app_secret:
+        return None
+
+    try:
+        import lark_oapi as lark
+        client = (
+            lark.Client.builder()
+            .app_id(app_id)
+            .app_secret(app_secret)
+            .log_level(lark.LogLevel.WARNING)
+            .build()
+        )
+        _local.client = client
+        return client
+    except Exception as e:
+        logger.warning("Failed to build Feishu client from env vars: %s", e)
+        return None
 
 
 def _check_feishu():

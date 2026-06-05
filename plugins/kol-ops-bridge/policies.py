@@ -43,11 +43,13 @@ POLICY_SCOPES: Final[tuple[str, ...]] = (
     "reply_learning",
     "reply_strategy",
     "pricing_calibration",
+    "outcome_strategy",
 )
 ENV_SCOPED_POLICIES: Final[frozenset[str]] = frozenset({
     "reply_learning",
     "reply_strategy",
     "pricing_calibration",
+    "outcome_strategy",
 })
 PolicyScope = Literal[
     "company_style",
@@ -56,6 +58,7 @@ PolicyScope = Literal[
     "reply_learning",
     "reply_strategy",
     "pricing_calibration",
+    "outcome_strategy",
 ]
 
 
@@ -236,6 +239,79 @@ def list_policy_history(
     return [dict(r) for r in rows]
 
 
+def get_policy_version(
+    conn: sqlite3.Connection,
+    *,
+    scope: str,
+    version: int,
+    owner_user_id: Optional[int] = None,
+    env: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Return a specific historical version row (active or not) or None."""
+    _validate_scope(scope)
+    _validate_owner(scope, owner_user_id)
+    resolved_env = _resolve_env(scope, env)
+    if owner_user_id is None:
+        if resolved_env is None:
+            row = conn.execute(
+                """SELECT * FROM policy_documents
+                    WHERE scope=? AND owner_user_id IS NULL AND env IS NULL
+                      AND version=? LIMIT 1""",
+                (scope, version),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT * FROM policy_documents
+                    WHERE scope=? AND owner_user_id IS NULL
+                      AND COALESCE(env, 'LIVE')=? AND version=? LIMIT 1""",
+                (scope, resolved_env, version),
+            ).fetchone()
+    else:
+        row = conn.execute(
+            """SELECT * FROM policy_documents
+                WHERE scope=? AND owner_user_id=? AND env IS NULL
+                  AND version=? LIMIT 1""",
+            (scope, owner_user_id, version),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def rollback_policy(
+    conn: sqlite3.Connection,
+    *,
+    scope: str,
+    to_version: int,
+    updated_by: str,
+    owner_user_id: Optional[int] = None,
+    env: Optional[str] = None,
+) -> dict[str, Any]:
+    """Roll a policy back to a prior version's content.
+
+    Implemented as a forward write (new active version carrying the old
+    content), so the version chain and audit trail are preserved — no history
+    is destroyed. Returns the new active row.
+
+    Raises ValueError when ``to_version`` does not exist for the scope.
+    """
+    target = get_policy_version(
+        conn, scope=scope, version=to_version, owner_user_id=owner_user_id, env=env,
+    )
+    if target is None:
+        raise ValueError(
+            f"policy {scope!r} has no version {to_version} to roll back to",
+        )
+    title = target.get("title") or scope
+    return put_policy(
+        conn,
+        scope=scope,
+        content_md=target.get("content_md") or "",
+        updated_by=updated_by,
+        owner_user_id=owner_user_id,
+        title=f"{title} (rollback→v{to_version})",
+        env=env,
+    )
+
+
 # ---------------------------------------------------------------------------
 # escalation_rules markdown parser
 # ---------------------------------------------------------------------------
@@ -384,8 +460,10 @@ __all__ = [
     "PolicyScope",
     "DEFAULT_MAX_ESCALATION_DEPTH",
     "get_policy",
+    "get_policy_version",
     "list_policy_history",
     "match_escalation_rules",
     "parse_escalation_rules",
     "put_policy",
+    "rollback_policy",
 ]

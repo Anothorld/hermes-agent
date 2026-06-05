@@ -145,6 +145,55 @@ def _headers_dict(msg: dict) -> dict[str, str]:
     return {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
 
 
+def _threading_headers_from_message_headers(headers: dict[str, str]) -> tuple[str | None, str | None]:
+    """Build ``(In-Reply-To, References)`` from one message's MIME headers."""
+    parent_msg_id = headers.get("Message-ID") or headers.get("Message-Id")
+    if not parent_msg_id:
+        return None, None
+    parent_refs = (headers.get("References") or "").strip()
+    references = f"{parent_refs} {parent_msg_id}".strip() if parent_refs else parent_msg_id
+    return parent_msg_id, references
+
+
+def _resolve_threading_headers_for_message(
+    message_id: str,
+    *,
+    service=None,
+) -> tuple[str | None, str | None]:
+    """Look up RFC threading headers for a specific Gmail message id."""
+    if not message_id:
+        return None, None
+    try:
+        if service is not None:
+            msg = service.users().messages().get(
+                userId="me",
+                id=message_id,
+                format="metadata",
+                metadataHeaders=["Message-ID", "References"],
+            ).execute()
+        elif _gws_binary():
+            msg = _run_gws(
+                ["gmail", "users", "messages", "get"],
+                params={
+                    "userId": "me",
+                    "id": message_id,
+                    "format": "metadata",
+                    "metadataHeaders": ["Message-ID", "References"],
+                },
+            )
+        else:
+            svc = build_service("gmail", "v1")
+            msg = svc.users().messages().get(
+                userId="me",
+                id=message_id,
+                format="metadata",
+                metadataHeaders=["Message-ID", "References"],
+            ).execute()
+    except Exception:
+        return None, None
+    return _threading_headers_from_message_headers(_headers_dict(msg))
+
+
 def _resolve_threading_headers(
     thread_id: str,
     *,
@@ -195,19 +244,11 @@ def _resolve_threading_headers(
     messages = thread.get("messages") or []
     if not messages:
         return None, None
-    headers = _headers_dict(messages[-1])
-    parent_msg_id = headers.get("Message-ID") or headers.get("Message-Id")
-    if not parent_msg_id:
-        return None, None
-    parent_refs = (headers.get("References") or "").strip()
-    references = f"{parent_refs} {parent_msg_id}".strip() if parent_refs else parent_msg_id
-    return parent_msg_id, references
+    return _threading_headers_from_message_headers(_headers_dict(messages[-1]))
 
 
-def _extract_message_body(msg: dict) -> str:
-    # Outlook + Gmail-web commonly wrap content in nested multipart/* (e.g.
-    # multipart/related → multipart/alternative → text/plain), so we walk
-    # the whole MIME tree instead of only scanning the top-level parts.
+def _extract_message_bodies(msg: dict) -> tuple[str, str]:
+    """Return ``(plain, html)`` bodies from a Gmail API message payload."""
     def _find(part: dict, want: str) -> str:
         if part.get("mimeType") == want and part.get("body", {}).get("data"):
             return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
@@ -219,8 +260,22 @@ def _extract_message_body(msg: dict) -> str:
 
     payload = msg.get("payload", {})
     if payload.get("body", {}).get("data") and not payload.get("parts"):
-        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
-    return _find(payload, "text/plain") or _find(payload, "text/html")
+        raw = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+        mime = payload.get("mimeType") or ""
+        if mime == "text/html":
+            return "", raw
+        return raw, ""
+    plain = _find(payload, "text/plain")
+    html = _find(payload, "text/html")
+    return plain, html
+
+
+def _extract_message_body(msg: dict) -> str:
+    # Outlook + Gmail-web commonly wrap content in nested multipart/* (e.g.
+    # multipart/related → multipart/alternative → text/plain), so we walk
+    # the whole MIME tree instead of only scanning the top-level parts.
+    plain, html = _extract_message_bodies(msg)
+    return plain or html
 
 
 def _extract_doc_text(doc: dict) -> str:
@@ -366,6 +421,7 @@ def gmail_get(args):
             params={"userId": "me", "id": args.message_id, "format": "full"},
         )
         headers = _headers_dict(msg)
+        body_plain, body_html = _extract_message_bodies(msg)
         result = {
             "id": msg["id"],
             "threadId": msg["threadId"],
@@ -374,7 +430,9 @@ def gmail_get(args):
             "subject": headers.get("Subject", ""),
             "date": headers.get("Date", ""),
             "labels": msg.get("labelIds", []),
-            "body": _extract_message_body(msg),
+            "body": body_plain or body_html,
+            "body_plain": body_plain,
+            "body_html": body_html,
             "headers": headers,
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -386,6 +444,7 @@ def gmail_get(args):
     ).execute()
 
     headers = _headers_dict(msg)
+    body_plain, body_html = _extract_message_bodies(msg)
     result = {
         "id": msg["id"],
         "threadId": msg["threadId"],
@@ -394,7 +453,9 @@ def gmail_get(args):
         "subject": headers.get("Subject", ""),
         "date": headers.get("Date", ""),
         "labels": msg.get("labelIds", []),
-        "body": _extract_message_body(msg),
+        "body": body_plain or body_html,
+        "body_plain": body_plain,
+        "body_html": body_html,
         "headers": headers,
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -478,14 +539,24 @@ def _build_outbound_message(args):
     return message
 
 
+def _resolve_draft_threading_headers(args, *, service=None) -> tuple[str | None, str | None]:
+    reply_to = str(getattr(args, "reply_to_message_id", "") or "").strip()
+    if reply_to:
+        irt, refs = _resolve_threading_headers_for_message(reply_to, service=service)
+        if irt:
+            return irt, refs
+    if args.thread_id:
+        return _resolve_threading_headers(args.thread_id, service=service)
+    return None, None
+
+
 def gmail_draft(args):
     if _gws_binary():
         message = _build_outbound_message(args)
-        if args.thread_id:
-            irt, refs = _resolve_threading_headers(args.thread_id)
-            if irt:
-                message["In-Reply-To"] = irt
-                message["References"] = refs
+        irt, refs = _resolve_draft_threading_headers(args)
+        if irt:
+            message["In-Reply-To"] = irt
+            message["References"] = refs
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         draft_message = {"raw": raw}
@@ -506,11 +577,10 @@ def gmail_draft(args):
 
     service = build_service("gmail", "v1")
     message = _build_outbound_message(args)
-    if args.thread_id:
-        irt, refs = _resolve_threading_headers(args.thread_id, service=service)
-        if irt:
-            message["In-Reply-To"] = irt
-            message["References"] = refs
+    irt, refs = _resolve_draft_threading_headers(args, service=service)
+    if irt:
+        message["In-Reply-To"] = irt
+        message["References"] = refs
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     draft_message = {"raw": raw}
@@ -1312,6 +1382,11 @@ def main():
     p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
     p.add_argument("--html", action="store_true", help="Store body as HTML")
     p.add_argument("--thread-id", default="", help="Thread ID for threading")
+    p.add_argument(
+        "--reply-to-message-id",
+        default="",
+        help="Gmail message id for In-Reply-To (native reply target; preferred over thread tail)",
+    )
     p.add_argument("--attach", action="append", default=[], metavar="PATH", help="File to attach (repeatable)")
     p.set_defaults(func=gmail_draft)
 

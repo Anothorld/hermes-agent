@@ -56,6 +56,7 @@ def test_identity_facts_from_diligence_maps_core_fields():
     assert facts["identity.nox_audience_authenticity"] == 0.84
     assert facts["identity.followers"] == 120000
     assert facts["identity.nox_top_region"] == "US (75.0%)"
+    assert "female" in facts["identity.nox_gender_skew"]
     assert facts["identity.nox_diligence_verdict"] in (
         "high_priority",
         "needs_manual_review",

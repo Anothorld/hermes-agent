@@ -16,7 +16,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Annotated, Any, AsyncIterator
+from typing import Annotated, Any, AsyncIterator, Mapping
 from urllib.parse import urlparse
 
 import httpx
@@ -38,11 +38,19 @@ from ..nox_dispatch import dispatch_nox_contacts_batch
 from ..nox_gate import (
     extract_campaign_config,
     materialize_campaign_config_file,
+    materialize_discovery_nox_config,
     require_nox_supplement_enabled,
 )
 from ..kol_profile_url import SHORTLIST_PREVIEW_FACT_KEYS, resolve_profile_url
-from ..nox_helpers import enrich_shortlist_with_nox
+from ..nox_helpers import NOX_SHORTLIST_FACT_KEYS, _nox_fields_from_facts
 from ..shortlist_profile_og import enrich_shortlist_profile_og
+
+_SHORTLIST_BATCH_FACT_KEYS: list[str] = list(dict.fromkeys([
+    *SHORTLIST_PREVIEW_FACT_KEYS,
+    *NOX_SHORTLIST_FACT_KEYS,
+    "offer.outreach_sent_at",
+    "offer.outreach_sent",
+]))
 from ..nox_quota import (
     assert_nox_quota_available,
     fetch_campaign_nox_stats,
@@ -118,10 +126,16 @@ _LAUNCH_INSTRUCTIONS = (
     "   raw candidates (which is set to 2-4x `headcount_target`).\n"
     "   Do NOT use the `mcp_chrome_devtools_*` family — those are flaky\n"
     "   here; stick to `browser_*`.\n"
-    "   Nox API discovery is NOT part of Launch — do not run\n"
-    "   `nox_kol_tool.py` or `kol-nox-discovery` during Step 3. If the\n"
-    "   operator needs YouTube/TikTok supplement pool, they trigger\n"
-    "   Console「Nox 补搜」after the Instagram floor is met.\n"
+    "   NOX AUDIENCE SCREEN (optional — when brief has\n"
+    "   `nox_discovery_enabled: true` and `campaign_config_file:`):\n"
+    "   After each profile passes follower/handle pre-checks and BEFORE\n"
+    "   deep Reel scoring, run the audience screen in\n"
+    "   `instagram-kol-discovery` (see skill § Nox audience screen).\n"
+    "   Use `nox_kol_tool.py diligence-pack --gate discovery_qualify\n"
+    "     --dimensions audience` only — NOT supplement search, NOT Gate A\n"
+    "     full pack. Persist facts immediately; skip Reel work on discard.\n"
+    "   If Nox is disabled or fields absent, continue browser-only qualification.\n"
+    "   YouTube/TikTok supplement pool remains manual Console「Nox 补搜」.\n"
     "\n"
     "   ITERATION CONTRACT — HARD QUANTITY FLOOR (read carefully):\n"
     "   - `discovery_target_count` is a HARD FLOOR on persisted candidates,\n"
@@ -828,6 +842,15 @@ async def start(
         pre_candidates = []
     baseline_count = _count_uncontacted_candidates(pre_candidates)
     target_floor = baseline_count + discovery_target
+
+    nox_cfg_path = await materialize_discovery_nox_config(
+        bridge, campaign_id, env=body.env
+    )
+    if nox_cfg_path:
+        brief_text = (
+            f"{brief_text}\n\nnox_discovery_enabled: true\n"
+            f"campaign_config_file: {nox_cfg_path}\n"
+        )
 
     try:
         out = await gateway.start_run(
@@ -2288,12 +2311,121 @@ async def agent_stream(
     )
 
 
+def _merge_prior_outreach_touch(
+    *,
+    campaign_id: str,
+    camp_facts: dict[str, Any] | None,
+    touch_from_batch: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Pick the latest prior-touch summary for one shortlist row."""
+    touch = touch_from_batch if isinstance(touch_from_batch, dict) else None
+    if isinstance(camp_facts, dict):
+        at = camp_facts.get("offer.outreach_sent_at")
+        if isinstance(at, str) and at.strip():
+            camp_touch = {
+                "last_touch_at": at.strip(),
+                "last_touch_campaign_id": campaign_id,
+            }
+            if (
+                not touch
+                or at.strip() > str(touch.get("last_touch_at") or "")
+            ):
+                touch = camp_touch
+    if isinstance(touch, dict) and touch.get("last_touch_at"):
+        return touch
+    return None
+
+
+async def _enrich_shortlist_rows(
+    bridge: BridgeClient,
+    candidates: list[dict[str, Any]],
+    *,
+    campaign_id: str,
+    env: str,
+    prefetch_og: bool,
+) -> None:
+    """Batch-enrich shortlist rows; default path avoids per-row read_facts + OG HTTP."""
+    profile_ids = [
+        int(c["identity_id"])
+        for c in candidates
+        if isinstance(c.get("identity_id"), int)
+    ]
+    if not profile_ids:
+        await enrich_shortlist_profile_og(
+            bridge,
+            candidates,
+            campaign_id=campaign_id,
+            env=env,
+            prefetch_missing_og=prefetch_og,
+        )
+        return
+
+    facts_result, touch_result = await asyncio.gather(
+        bridge.batch_facts_subset(
+            campaign_id=campaign_id,
+            identity_ids=profile_ids,
+            env=env,
+            fact_keys=_SHORTLIST_BATCH_FACT_KEYS,
+        ),
+        bridge.batch_outreach_touch(profile_ids, env=env),
+        return_exceptions=True,
+    )
+    facts_by_id: dict[int, dict[str, Any]] = (
+        facts_result if isinstance(facts_result, dict) else {}
+    )
+    touch_items: dict[str, Any] = {}
+    if isinstance(touch_result, dict):
+        raw_touch = touch_result.get("items")
+        if isinstance(raw_touch, dict):
+            touch_items = raw_touch
+
+    for c in candidates:
+        iid = c.get("identity_id")
+        if not isinstance(iid, int):
+            continue
+        facts = facts_by_id.get(iid) or {}
+        c["preview_facts"] = facts
+        c.update(_nox_fields_from_facts(facts))
+        c["profile_url"] = resolve_profile_url(
+            platform=c.get("platform") if isinstance(c.get("platform"), str) else None,
+            handle=c.get("handle"),
+            facts=facts,
+            fallback_url=c.get("profile_url")
+            if isinstance(c.get("profile_url"), str)
+            else None,
+        )
+        raw_touch = touch_items.get(str(iid)) or touch_items.get(iid)
+        touch = raw_touch if isinstance(raw_touch, dict) else None
+        merged = _merge_prior_outreach_touch(
+            campaign_id=campaign_id,
+            camp_facts=facts,
+            touch_from_batch=touch,
+        )
+        if merged is not None:
+            c["prior_outreach_touch"] = merged
+
+    await enrich_shortlist_profile_og(
+        bridge,
+        candidates,
+        campaign_id=campaign_id,
+        env=env,
+        prefetch_missing_og=prefetch_og,
+    )
+
+
 @router.get("/{campaign_id}/shortlist")
 async def get_shortlist(
     campaign_id: str,
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
     _: Annotated[dict, Depends(current_user)],
     env: str = Query("TEST", pattern="^(LIVE|TEST)$"),
+    prefetch_og: bool = Query(
+        False,
+        description=(
+            "When true, run the slow path: per-row read_facts + live OG "
+            "fetches. Default false — use cached CAL facts; hover fetches OG."
+        ),
+    ),
 ) -> dict:
     """Return the agent's latest shortlist_ready payload (candidates + scores).
 
@@ -2373,91 +2505,13 @@ async def get_shortlist(
         "already_approved": sum(1 for c in candidates if c.get("candidate_status") == "selected_for_outreach"),
         "rejected_or_archived_hidden": hidden_count,
     }
-    await enrich_shortlist_with_nox(
+    await _enrich_shortlist_rows(
         bridge,
         candidates,
         campaign_id=campaign_id,
         env=env,
+        prefetch_og=prefetch_og,
     )
-    profile_ids = [
-        int(c["identity_id"])
-        for c in candidates
-        if isinstance(c.get("identity_id"), int)
-    ]
-    if profile_ids:
-        try:
-            profile_facts_by_id = await bridge.batch_facts_subset(
-                campaign_id=campaign_id,
-                identity_ids=profile_ids,
-                env=env,
-                fact_keys=SHORTLIST_PREVIEW_FACT_KEYS,
-            )
-        except BridgeError:
-            profile_facts_by_id = {}
-        for c in candidates:
-            iid = c.get("identity_id")
-            if not isinstance(iid, int):
-                continue
-            facts = profile_facts_by_id.get(iid) or {}
-            c["profile_url"] = resolve_profile_url(
-                platform=c.get("platform") if isinstance(c.get("platform"), str) else None,
-                handle=c.get("handle"),
-                facts=facts,
-                fallback_url=c.get("profile_url")
-                if isinstance(c.get("profile_url"), str)
-                else None,
-            )
-            c["preview_facts"] = facts
-    await enrich_shortlist_profile_og(
-        bridge, candidates, campaign_id=campaign_id, env=env
-    )
-    touch_ids = [
-        int(c["identity_id"])
-        for c in candidates
-        if isinstance(c.get("identity_id"), int)
-    ]
-    if touch_ids:
-        touch_items: dict[str, Any] = {}
-        try:
-            touch_resp = await bridge.batch_outreach_touch(touch_ids, env=env)
-            raw = touch_resp.get("items") if isinstance(touch_resp, dict) else {}
-            if isinstance(raw, dict):
-                touch_items = raw
-        except BridgeError:
-            touch_items = {}
-        facts_by_id: dict[str, Any] = {}
-        try:
-            facts_resp = await bridge.batch_facts_subset(
-                campaign_id=campaign_id,
-                identity_ids=touch_ids,
-                env=env,
-                fact_keys=["offer.outreach_sent_at", "offer.outreach_sent"],
-            )
-            facts_by_id = facts_resp.get("by_identity") or {}
-        except BridgeError:
-            facts_by_id = {}
-        for c in candidates:
-            iid = c.get("identity_id")
-            if not isinstance(iid, int):
-                continue
-            touch = touch_items.get(str(iid)) or touch_items.get(iid)
-            if not isinstance(touch, dict):
-                touch = None
-            camp_facts = facts_by_id.get(str(iid))
-            if isinstance(camp_facts, dict):
-                at = camp_facts.get("offer.outreach_sent_at")
-                if isinstance(at, str) and at.strip():
-                    camp_touch = {
-                        "last_touch_at": at.strip(),
-                        "last_touch_campaign_id": campaign_id,
-                    }
-                    if (
-                        not touch
-                        or at.strip() > str(touch.get("last_touch_at") or "")
-                    ):
-                        touch = camp_touch
-            if isinstance(touch, dict) and touch.get("last_touch_at"):
-                c["prior_outreach_touch"] = touch
     return {
         "campaign_id": campaign_id,
         "snapshot_ts": snapshot_ts,
@@ -2744,7 +2798,14 @@ async def approve_shortlist(
         try:
             await bridge.route_discovery(
                 campaign_id,
-                {"env": body.env, "selected_by": f"web:{user['email']}"},
+                {
+                    "env": body.env,
+                    "selected_by": f"web:{user['email']}",
+                    # Scoped routing: only operator-selected identities get
+                    # outreach_path facts + select-candidates. Full-pool routing
+                    # is reserved for the Agent route-discovery tool.
+                    "identity_ids": identity_ids,
+                },
             )
         except BridgeError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
@@ -3132,6 +3193,64 @@ async def redraft_outreach(
         }
 
 
+_INITIAL_OUTREACH_CHILD_SKILLS = frozenset({
+    "kol-cold-outreach",
+    "kol-reengagement-outreach",
+})
+
+
+def _is_initial_outreach_reply_draft(
+    reply_draft: Mapping[str, Any],
+    *,
+    campaign_id: str,
+    identity_id: int,
+) -> bool:
+    """True when ``approval.reply_draft`` is the first-touch outreach envelope."""
+    child_skill = str(reply_draft.get("child_skill") or "").strip()
+    if child_skill in _INITIAL_OUTREACH_CHILD_SKILLS:
+        return True
+    draft = reply_draft.get("draft")
+    if isinstance(draft, dict) and draft.get("kind") == "initial_outreach":
+        return True
+    expected_thread = f"outreach_{campaign_id}_{identity_id}"
+    expected_source = f"draft:outreach_{campaign_id}_{identity_id}"
+    for key in ("source_message_id", "thread_id"):
+        anchor = str(reply_draft.get(key) or "").strip()
+        if not anchor:
+            continue
+        if anchor.startswith("draft:outreach_") or anchor.startswith("outreach_"):
+            return True
+        if anchor in (expected_thread, expected_source):
+            return True
+    return False
+
+
+def _approved_reply_draft_blocks_followup(
+    reply_draft: Any,
+    *,
+    campaign_id: str,
+    identity_id: int,
+) -> bool:
+    """True when an approved draft should block proactive follow-up generation.
+
+    After initial outreach is sent, ``approval.reply_draft`` often still shows
+    ``decision=approved`` from the cold-outreach approval — that historical
+    record must not block operator follow-ups. Only an approved *reply* draft
+    with a Gmail draft still waiting on Send should require confirmation.
+    """
+    if not isinstance(reply_draft, dict):
+        return False
+    if reply_draft.get("decision") != "approved":
+        return False
+    if _is_initial_outreach_reply_draft(
+        reply_draft,
+        campaign_id=campaign_id,
+        identity_id=identity_id,
+    ):
+        return False
+    return isinstance(reply_draft.get("gmail_draft"), dict)
+
+
 class FollowupDraftBody(BaseModel):
     """Body for ``POST /campaigns/{cid}/identities/{iid}/followup-draft``."""
 
@@ -3151,7 +3270,9 @@ _FOLLOWUP_DRAFT_INSTRUCTIONS = (
     "  decision=pending, child_skill=kol-proactive-followup,\n"
     "  primary_lane=meta, primary_goal=proactive_followup.\n"
     "- Embed operator_topic inside the draft object (child_envelope).\n"
-    "- Set a real Gmail thread_id on the draft envelope.\n"
+    "- MUST reply inside the existing Gmail thread — use the brief's\n"
+    "  gmail_thread_id / gmail_sent_thread_id (or timeline inbound thread_id).\n"
+    "  Subject must be Re: <prior subject>. NEVER create a standalone new email.\n"
     "- Do NOT create Gmail drafts. Do NOT send mail.\n"
     "- Do NOT write offer.outreach_sent or other domain facts.\n"
     "- Do NOT embed quoted prior mail in body (approve adds Gmail quote).\n"
@@ -3168,6 +3289,8 @@ def _compose_followup_brief(
     actor_email: str,
     operator_topic: str,
     test_mode_to: str | None,
+    gmail_sent_thread_id: str | None = None,
+    gmail_thread_id: str | None = None,
 ) -> str:
     lines = [
         "# campaign_followup_draft",
@@ -3179,6 +3302,10 @@ def _compose_followup_brief(
     ]
     if handle:
         lines.append(f"handle: {handle}")
+    if gmail_sent_thread_id:
+        lines.append(f"gmail_sent_thread_id: {gmail_sent_thread_id}")
+    if gmail_thread_id:
+        lines.append(f"gmail_thread_id: {gmail_thread_id}")
     lines.extend([
         "",
         "# operator_topic",
@@ -3187,6 +3314,9 @@ def _compose_followup_brief(
         "# required_next_step",
         (
             "Run kol-proactive-followup for this single identity. "
+            "Draft MUST be a reply in the existing Gmail thread "
+            "(use gmail_sent_thread_id or gmail_thread_id above on child_envelope.thread_id; "
+            "subject Re: …). Do NOT start a new email thread. "
             "Overwrite any prior approval.reply_draft for this "
             "(identity, campaign) with a fresh pending draft. "
             "Report when approval.reply_draft is readable with decision=pending."
@@ -3307,15 +3437,23 @@ async def followup_draft(
                     ),
                 },
             )
-        if prior_decision == "approved" and not body.discard_existing_approved_draft:
+        if (
+            _approved_reply_draft_blocks_followup(
+                prior_reply_draft,
+                campaign_id=campaign_id,
+                identity_id=identity_id,
+            )
+            and not body.discard_existing_approved_draft
+        ):
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 {
                     "code": "approved_draft_exists",
                     "message": (
-                        "a previously approved Gmail draft exists for this "
-                        "KOL. Re-generating will orphan that Gmail draft. "
-                        "Confirm with discard_existing_approved_draft=true."
+                        "an approved reply draft with a Gmail draft still "
+                        "waiting on Send exists for this KOL. Re-generating "
+                        "will orphan that Gmail draft. Confirm with "
+                        "discard_existing_approved_draft=true."
                     ),
                     "gmail_draft_id": facts.get("offer.gmail_draft_id"),
                     "gmail_thread_id": facts.get("offer.gmail_thread_id"),
@@ -3336,6 +3474,8 @@ async def followup_draft(
 
         ensure_gateway_bridge_key()
         handle = ident.get("primary_handle") if isinstance(ident, dict) else None
+        sent_thread = facts.get("offer.gmail_sent_thread_id")
+        draft_thread = facts.get("offer.gmail_thread_id")
         brief = _compose_followup_brief(
             campaign_id=campaign_id,
             env=env,
@@ -3344,6 +3484,16 @@ async def followup_draft(
             actor_email=user["email"],
             operator_topic=body.topic,
             test_mode_to=test_mode_to,
+            gmail_sent_thread_id=(
+                sent_thread.strip()
+                if isinstance(sent_thread, str) and sent_thread.strip()
+                else None
+            ),
+            gmail_thread_id=(
+                draft_thread.strip()
+                if isinstance(draft_thread, str) and draft_thread.strip()
+                else None
+            ),
         )
         try:
             run = await gateway.start_run(
@@ -3385,6 +3535,19 @@ async def followup_draft(
             "env": env,
             "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         }
+
+
+# Post-shortlist-approve only — mirrors kol-ops-bridge get_lanes filter so an
+# older bridge process cannot repopulate the kanban with discovery-pool rows.
+_KANBAN_CANDIDATE_STATUSES = frozenset({
+    "selected_for_outreach",
+    "needs_review",
+    "archived",
+})
+
+
+def _kanban_lane_item_visible(item: Mapping[str, Any]) -> bool:
+    return str(item.get("candidate_status") or "") in _KANBAN_CANDIDATE_STATUSES
 
 
 # Goal status values the bridge writes (cal.update_goal_state_for):
@@ -4005,6 +4168,8 @@ async def lanes(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     items_out = []
     for it in raw.get("items", []):
+        if not _kanban_lane_item_visible(it):
+            continue
         items_out.append({
             "identity_id": it["identity_id"],
             "handle": it.get("handle") or f"id{it['identity_id']}",

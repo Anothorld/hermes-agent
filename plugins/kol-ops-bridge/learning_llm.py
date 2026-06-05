@@ -1,4 +1,4 @@
-"""Optional LLM helpers for learning distill (stdlib HTTP + optional Hermes agent)."""
+"""LLM helpers for learning distill (Hermes runtime + stdlib HTTP)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import subprocess
 import urllib.error
 import urllib.request
@@ -14,6 +15,10 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = "You write concise markdown for operators to review."
+
+
+class LearningLlmError(RuntimeError):
+    """Learning distill requires a successful LLM call (no silent rule fallback)."""
 
 
 def _has_explicit_learning_override() -> bool:
@@ -33,71 +38,104 @@ def _max_tokens() -> int:
         return 4096
 
 
+def _openai_sdk_available() -> bool:
+    try:
+        import openai  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _resolve_hermes_runtime() -> Optional[dict[str, str]]:
+    try:
+        from .internal.learning_hermes_runtime import resolve_openai_compatible_runtime
+
+        return resolve_openai_compatible_runtime()
+    except Exception as exc:
+        logger.debug("Hermes runtime resolve failed: %s", exc)
+        return None
+
+
 def invoke_learning_llm(
     prompt: str,
     *,
     runner: Optional[Callable[[str], str]] = None,
 ) -> str:
-    """Return raw model text.
+    """Return raw model text; raises :class:`LearningLlmError` on failure.
 
     Resolution order:
     1. ``runner`` (tests)
     2. ``KOL_LEARNING_LLM_CMD`` shell command
     3. Explicit ``KOL_LEARNING_LLM_*`` env (override)
-    4. Hermes agent — ``call_llm`` with the same model/credentials as CLI
-    5. Hermes-resolved OpenAI-compatible HTTP (stdlib)
+    4. Hermes-resolved OpenAI-compatible HTTP (``~/.hermes`` config)
+    5. Hermes ``call_llm`` when ``openai`` package is installed
     6. Legacy env: ``OPENAI_API_KEY`` / classifier eval vars
     """
     if runner is not None:
         return runner(prompt)
     cmd = os.environ.get("KOL_LEARNING_LLM_CMD", "").strip()
     if cmd:
-        proc = subprocess.run(
-            cmd,
-            shell=True,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=int(os.environ.get("KOL_LEARNING_LLM_CMD_TIMEOUT", "180")),
-            check=False,
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=int(os.environ.get("KOL_LEARNING_LLM_CMD_TIMEOUT", "180")),
+                check=False,
+            )
+        except Exception as exc:
+            raise LearningLlmError(f"KOL_LEARNING_LLM_CMD failed: {exc}") from exc
         if proc.returncode != 0:
-            raise RuntimeError(
+            raise LearningLlmError(
                 f"KOL_LEARNING_LLM_CMD exit {proc.returncode}: {proc.stderr[:500]}",
             )
+        if not proc.stdout.strip():
+            raise LearningLlmError("KOL_LEARNING_LLM_CMD returned empty output")
         return proc.stdout
     if _has_explicit_learning_override():
         return _invoke_openai_compatible(prompt)
     if not _hermes_disabled():
-        try:
-            from .internal.learning_hermes_runtime import invoke_via_hermes_call_llm
-
-            return invoke_via_hermes_call_llm(
-                prompt,
-                system=_SYSTEM_PROMPT,
-                temperature=0.2,
-                max_tokens=_max_tokens(),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Hermes agent call_llm unavailable for learning distill; "
-                "trying OpenAI-compatible fallback (%s)",
-                exc,
-            )
-        try:
-            from .internal.learning_hermes_runtime import resolve_openai_compatible_runtime
-
-            runtime = resolve_openai_compatible_runtime()
-            if runtime:
+        runtime = _resolve_hermes_runtime()
+        if runtime:
+            try:
                 return _invoke_openai_compatible(
                     prompt,
                     base_url=runtime["base_url"],
                     api_key=runtime["api_key"],
                     model=runtime["model"],
                 )
-        except Exception as exc:
-            logger.debug("Hermes OpenAI-compatible resolve failed: %s", exc)
-    return _invoke_openai_compatible(prompt)
+            except Exception as exc:
+                raise LearningLlmError(
+                    "Hermes-configured LLM HTTP call failed "
+                    f"({runtime.get('base_url')} / {runtime.get('model')}): {exc}",
+                ) from exc
+        if _openai_sdk_available():
+            try:
+                from .internal.learning_hermes_runtime import invoke_via_hermes_call_llm
+
+                return invoke_via_hermes_call_llm(
+                    prompt,
+                    system=_SYSTEM_PROMPT,
+                    temperature=0.2,
+                    max_tokens=_max_tokens(),
+                )
+            except Exception as exc:
+                raise LearningLlmError(f"Hermes call_llm failed: {exc}") from exc
+        raise LearningLlmError(
+            "No usable Hermes LLM runtime. Ensure ~/.hermes/config.yaml has a "
+            "chat-completions provider + API key, or set KOL_LEARNING_LLM_API_KEY. "
+            "If using call_llm, install the openai package in the bridge venv.",
+        )
+    try:
+        return _invoke_openai_compatible(prompt)
+    except Exception as exc:
+        raise LearningLlmError(
+            "No LLM credentials for learning distill. Configure Hermes "
+            "(~/.hermes/config.yaml + .env) or set KOL_LEARNING_LLM_API_KEY / "
+            "OPENAI_API_KEY, or KOL_LEARNING_LLM_CMD.",
+        ) from exc
 
 
 def _hermes_disabled() -> bool:
@@ -123,6 +161,17 @@ def _env_lookup(key: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _urlopen(req: urllib.request.Request, *, timeout: int) -> object:
+    """HTTPS with certifi when available (macOS Python often lacks system CAs)."""
+    try:
+        import certifi
+
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    except ImportError:
+        return urllib.request.urlopen(req, timeout=timeout)
 
 
 def _invoke_openai_compatible(
@@ -177,11 +226,13 @@ def _invoke_openai_compatible(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with _urlopen(req, timeout=120) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"LLM HTTP {exc.code}: {detail[:500]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"LLM network error: {exc}") from exc
     choices = payload.get("choices") or []
     if not choices:
         raise RuntimeError("LLM response missing choices")

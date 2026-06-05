@@ -26,6 +26,7 @@ export type LearningManualTriggerProps = {
   onPropose: () => void;
   editedUnconsumed: number | undefined;
   batchThreshold: number | undefined;
+  editedQueuedInPending?: number;
   readyForDistill: boolean | undefined;
   pendingProposalCount: number;
 };
@@ -42,14 +43,19 @@ export function LearningManualTriggerSection({
   onPropose,
   editedUnconsumed,
   batchThreshold,
+  editedQueuedInPending,
   readyForDistill,
   pendingProposalCount,
 }: LearningManualTriggerProps) {
   const suiteHint = SUITE_OPERATOR_HINTS[suite] ?? '';
   const batchLabel =
     editedUnconsumed != null && batchThreshold != null
-      ? `${editedUnconsumed} / ${batchThreshold} 条编辑样本`
+      ? `${editedUnconsumed} / ${batchThreshold} 条可蒸馏样本`
       : '—';
+  const queuedNote =
+    editedQueuedInPending != null && editedQueuedInPending > 0
+      ? `（${editedQueuedInPending} 条已在待审批提案中）`
+      : '';
   const proposeBlocked = pendingProposalCount > 0;
   const proposeReady = readyForDistill === true && !proposeBlocked;
 
@@ -129,11 +135,18 @@ export function LearningManualTriggerSection({
             只做一件事：把够批次的「编辑后发送」样本蒸馏成<strong>待审批</strong>提案（公司风格 +
             回信策略），不直接生效。
           </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-amber-900/70">
+            阈值按<strong>编辑事件条数</strong>计（默认 5 条），不是「5 封邮件」或「5 个 KOL」；每条含该 KOL
+            的会话时间线，可能来自多位 KOL。生成时<strong>必须成功调用 LLM</strong>，失败会报错而不会生成规则拼接稿。
+          </p>
           <ul className="mt-2 list-disc space-y-0.5 pl-4 text-[11px] text-amber-900/80">
             <li>
               使用页顶环境 <strong>{env}</strong>（可与 LIVE 定时任务不同）
             </li>
-            <li>样本进度：{batchLabel}</li>
+            <li>
+              样本进度：{batchLabel}
+              {queuedNote}
+            </li>
             <li>通常需 1–3 分钟，请勿重复点击（超时已放宽至 5 分钟）</li>
             {proposeBlocked ? (
               <li className="text-amber-800">

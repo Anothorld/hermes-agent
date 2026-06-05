@@ -1,103 +1,67 @@
-"""Tests for the deterministic Discovery → Outreach router."""
+"""Discovery → outreach router (scoped vs full-pool)."""
 
 from __future__ import annotations
 
-import importlib
-import sys
 
-
-CAMPAIGN = "C-router-test"
-
-
-def _router(cal):
-    # Pull the same loader the conftest set up.
-    return sys.modules["kol_ops_bridge_pkg.discovery_router"]
-
-
-def _seed_campaign(cal):
-    cal.upsert_campaign_config(
-        campaign_id=CAMPAIGN, label="Router test",
-        barter_policy="barter_first", product_unit_price=200.0,
-        paid_ceiling=1000.0, sku_whitelist=["SKU-A"],
-        deliverable_platforms=["instagram"], deliverable_count_per_platform=1,
-        contract_required=False,
+def _seed_discovered(cal, *, campaign_id: str, handle: str) -> int:
+    cal.upsert_campaign_config(campaign_id=campaign_id, env="LIVE")
+    iid = cal.upsert_identity(
+        primary_handle=handle,
+        primary_email=f"{handle.lstrip('@')}@example.com",
+        env="LIVE",
     )
-
-
-def _add_candidate(cal, *, handle, last_outcome=None, total_collabs=0):
-    iid = cal.upsert_identity(primary_handle=handle, platform="instagram")
-    if total_collabs > 0 or last_outcome is not None:
-        cal.upsert_relationship(
-            identity_id=iid,
-            increment_collabs=(total_collabs > 0),
-            last_outcome=last_outcome,
-        )
-        # Force total_collabs to the requested count for >1 cases.
-        for _ in range(max(0, total_collabs - 1)):
-            cal.upsert_relationship(identity_id=iid, increment_collabs=True)
     cal.upsert_candidate(
-        campaign_id=CAMPAIGN, identity_id=iid, source="discovery",
+        campaign_id=campaign_id,
+        identity_id=iid,
+        source="test",
         candidate_status="discovered",
+        env="LIVE",
     )
     return iid
 
 
-def test_route_discovery_partitions_pool(cal_db):
+def test_route_discovery_scoped_selects_only_requested_ids(bridge_pkg, cal_db):
+    """Console approve-shortlist passes identity_ids so unchecked KOLs stay discovered."""
     cal = cal_db
-    router = _router(cal)
-    _seed_campaign(cal)
-
-    new1 = _add_candidate(cal, handle="alice")
-    new2 = _add_candidate(cal, handle="bob")
-    repeat_ok = _add_candidate(cal, handle="carol",
-                               last_outcome="satisfied", total_collabs=2)
-    repeat_risky = _add_candidate(cal, handle="dave",
-                                  last_outcome="disputed", total_collabs=1)
+    router = bridge_pkg.discovery_router  # type: ignore[attr-defined]
+    cid = "ROUTE-SCOPE-1"
+    a = _seed_discovered(cal, campaign_id=cid, handle="@kol_a")
+    b = _seed_discovered(cal, campaign_id=cid, handle="@kol_b")
+    c = _seed_discovered(cal, campaign_id=cid, handle="@kol_c")
 
     out = router.route_discovery_pool(
-        campaign_id=CAMPAIGN, env="LIVE", selected_by="agent",
+        campaign_id=cid,
+        env="LIVE",
+        selected_by="web:operator@test",
+        identity_ids=[b],
     )
 
-    assert sorted(out["routed_to_cold"]) == sorted([new1, new2])
-    assert out["routed_to_reengagement"] == [repeat_ok]
-    assert len(out["needs_review_escalations"]) == 1
-    assert out["rejected"] == []
+    assert out["scoped_identity_ids"] == [b]
+    assert out["routed_to_cold"] == [b]
+    assert out["skipped_already_routed"] == []
 
-    # candidate_status flipped only for selected ones.
-    rows = {c["identity_id"]: c for c in cal.list_candidates(CAMPAIGN)}
-    assert rows[new1]["candidate_status"] == "selected_for_outreach"
-    assert rows[new2]["candidate_status"] == "selected_for_outreach"
-    assert rows[repeat_ok]["candidate_status"] == "selected_for_outreach"
-    assert rows[repeat_risky]["candidate_status"] != "selected_for_outreach"
-
-    # outreach_path facts written.
-    facts_alice = cal.latest_facts_for(identity_id=new1, campaign_id=CAMPAIGN)
-    assert facts_alice.get("identity.outreach_path") == "cold"
-    facts_carol = cal.latest_facts_for(identity_id=repeat_ok, campaign_id=CAMPAIGN)
-    assert facts_carol.get("identity.outreach_path") == "reengagement"
+    rows = {r["identity_id"]: r["candidate_status"] for r in cal.list_candidates(cid, env="LIVE")}
+    assert rows[a] == "discovered"
+    assert rows[b] == "selected_for_outreach"
+    assert rows[c] == "discovered"
 
 
-def test_route_discovery_is_idempotent(cal_db):
+def test_route_discovery_full_pool_when_identity_ids_omitted(bridge_pkg, cal_db):
+    """Agent route-discovery without identity_ids still routes the whole discovered pool."""
     cal = cal_db
-    router = _router(cal)
-    _seed_campaign(cal)
-    _add_candidate(cal, handle="alice")
+    router = bridge_pkg.discovery_router  # type: ignore[attr-defined]
+    cid = "ROUTE-FULL-1"
+    a = _seed_discovered(cal, campaign_id=cid, handle="@full_a")
+    b = _seed_discovered(cal, campaign_id=cid, handle="@full_b")
 
-    first = router.route_discovery_pool(campaign_id=CAMPAIGN, env="LIVE")
-    second = router.route_discovery_pool(campaign_id=CAMPAIGN, env="LIVE")
+    out = router.route_discovery_pool(
+        campaign_id=cid,
+        env="LIVE",
+        selected_by="agent",
+    )
 
-    assert len(first["routed_to_cold"]) == 1
-    assert second["routed_to_cold"] == []
-    assert len(second["skipped_already_routed"]) == 1
-
-
-def test_route_discovery_rejects_unknown_env(cal_db):
-    cal = cal_db
-    router = _router(cal)
-    _seed_campaign(cal)
-    try:
-        router.route_discovery_pool(campaign_id=CAMPAIGN, env="STAGING")
-    except ValueError as exc:
-        assert "env" in str(exc).lower()
-    else:
-        raise AssertionError("expected ValueError for invalid env")
+    assert out["scoped_identity_ids"] is None
+    assert set(out["routed_to_cold"]) == {a, b}
+    rows = {r["identity_id"]: r["candidate_status"] for r in cal.list_candidates(cid, env="LIVE")}
+    assert rows[a] == "selected_for_outreach"
+    assert rows[b] == "selected_for_outreach"

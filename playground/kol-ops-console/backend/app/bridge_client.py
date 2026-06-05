@@ -100,8 +100,26 @@ class BridgeClient:
     async def upsert_identity(self, body: dict[str, Any]) -> dict[str, Any]:
         return await self._req("POST", "/identities", json=body)
 
-    async def get_identity(self, identity_id: int) -> dict[str, Any]:
-        return await self._req("GET", f"/identities/{identity_id}")
+    async def get_identity(
+        self, identity_id: int, *, env: str = "LIVE",
+    ) -> dict[str, Any]:
+        return await self._req(
+            "GET", f"/identities/{identity_id}", params={"env": env},
+        )
+
+    async def batch_outreach_touch(
+        self, identity_ids: list[int], *, env: str = "LIVE",
+    ) -> dict[str, Any]:
+        if not identity_ids:
+            return {"env": env, "items": {}}
+        return await self._req(
+            "GET",
+            "/identities/outreach-touch",
+            params={
+                "env": env,
+                "identity_ids": ",".join(str(i) for i in identity_ids),
+            },
+        )
 
     async def get_relationship(self, identity_id: int) -> dict[str, Any]:
         return await self._req("GET", f"/identities/{identity_id}/relationship")
@@ -129,6 +147,38 @@ class BridgeClient:
         if platform:
             params["platform"] = platform
         return await self._req("GET", "/relationships", params=params)
+
+    async def list_kol_registry(
+        self,
+        *,
+        env: str = "LIVE",
+        q: str | None = None,
+        source: str = "all",
+        sort: str = "ingested_at",
+        order: str = "desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "env": env,
+            "source": source,
+            "sort": sort,
+            "order": order,
+            "limit": limit,
+            "offset": offset,
+        }
+        if q:
+            params["q"] = q
+        return await self._req("GET", "/kol-registry", params=params)
+
+    async def get_kol_registry_funnel(
+        self,
+        *,
+        env: str = "LIVE",
+        days: int = 0,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"env": env, "days": days}
+        return await self._req("GET", "/kol-registry/funnel", params=params)
 
     async def get_reusable_facts(self, identity_id: int) -> dict[str, Any]:
         return await self._req(
@@ -303,11 +353,16 @@ class BridgeClient:
 
     # ------------------------------------------------------------ Policies
     async def get_policy(
-        self, scope: str, owner_user_id: Optional[int] = None
+        self,
+        scope: str,
+        owner_user_id: Optional[int] = None,
+        env: Optional[str] = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if owner_user_id is not None:
             params["owner_user_id"] = owner_user_id
+        if env is not None:
+            params["env"] = env
         return await self._req("GET", f"/policies/{scope}", params=params)
 
     async def put_policy(
@@ -320,13 +375,37 @@ class BridgeClient:
         scope: str,
         owner_user_id: Optional[int] = None,
         limit: int = 50,
+        env: Optional[str] = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit}
         if owner_user_id is not None:
             params["owner_user_id"] = owner_user_id
+        if env is not None:
+            params["env"] = env
         return await self._req(
             "GET", f"/policies/{scope}/history", params=params
         )
+
+    async def policy_version(
+        self,
+        scope: str,
+        version: int,
+        owner_user_id: Optional[int] = None,
+        env: Optional[str] = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if owner_user_id is not None:
+            params["owner_user_id"] = owner_user_id
+        if env is not None:
+            params["env"] = env
+        return await self._req(
+            "GET", f"/policies/{scope}/version/{version}", params=params,
+        )
+
+    async def rollback_policy(
+        self, scope: str, body: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._req("POST", f"/policies/{scope}/rollback", json=body)
 
     async def parsed_escalation_rules(self) -> dict[str, Any]:
         return await self._req("GET", "/policies/escalation_rules/parsed")

@@ -8,7 +8,7 @@
 
 | Gate | Subcommand | Calls |
 |------|------------|-------|
-| A | `diligence-pack` | 3 (profile+audience+content) |
+| A | `diligence-pack` | 4 (profile+audience+content+cooperation) |
 | B | `contacts` | 1 |
 | C | `monitor-setup` | 2 when `--force` |
 | Supplement | `creator-search` | 1 per platform page |

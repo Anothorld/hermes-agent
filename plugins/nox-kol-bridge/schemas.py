@@ -6,6 +6,7 @@ from typing import Final, Literal
 
 Gate = Literal[
     "shortlist_confirm",
+    "discovery_qualify",
     "pre_outreach_confirm",
     "post_publish_confirm",
     "supplement_search",
@@ -14,10 +15,15 @@ Gate = Literal[
 GATES_REQUIRING_AUDIT: Final[frozenset[str]] = frozenset(
     {
         "shortlist_confirm",
+        "discovery_qualify",
         "pre_outreach_confirm",
         "post_publish_confirm",
         "supplement_search",
     }
+)
+
+DILIGENCE_PACK_GATES: Final[frozenset[str]] = frozenset(
+    {"shortlist_confirm", "discovery_qualify"}
 )
 
 OPERATIONS: Final[frozenset[str]] = frozenset(

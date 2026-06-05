@@ -85,7 +85,8 @@ same gated subcommand (`cache_hit: true`, `api_calls: 0`).
 
 | Gate | Subcommand |
 |------|------------|
-| `shortlist_confirm` | `diligence-pack` |
+| `shortlist_confirm` | `diligence-pack` (Gate A; incremental dim fetch) |
+| `discovery_qualify` | `diligence-pack` (`audience` only during IG discover) |
 | `pre_outreach_confirm` | `contacts` |
 | `supplement_search` | `creator-search` |
 | `post_publish_confirm` | `monitor-setup` |
@@ -107,6 +108,33 @@ CAL writes still go through `kol-ops-bridge` / `kol_bridge_tool.py`.
 `identity_facts_from_contacts`) — operators see categorized Nox metrics on the
 KOL detail dashboard without relying on gateway agents to hand-write keys.
 
+### Audience facts (`summarize.py` → `identity.nox_*`)
+
+| CAL key | Nox `audience` source |
+|---------|----------------------|
+| `nox_top_region` | `regions[]` (`name` + `value` as %) |
+| `nox_gender_skew` | `genders[]` or legacy `female_ratio` |
+| `nox_audience_age_distribution` | `female_ages` / `male_ages` or `follower_ages` |
+| `nox_audience_adults_split` | `adults[]` |
+| `nox_audience_languages_top` | `languages[]` |
+| `nox_audience_types_top` | `audience_types[]` |
+| `nox_audience_authenticity` | `audience_authenticity` |
+| `nox_audience_quality_score` | `audience_quality` |
+| `nox_audience_positive_pct` | `positive_audience_pct` |
+| `nox_audience_promo_*` | `promo_attractiveness`, `promo_interested_audience_pct`, `promo_professionalism` |
+| `nox_audience_interests_top` | `audience` or **`content.audience_interests`** (`keyword`) |
+| `nox_median_views`, `nox_wave`, `nox_avg_active_days`, `nox_view_per_followers` | `profile` performance |
+| `nox_performance_levels`, `nox_benchmark_ranks` | `profile` `*_level` and `*_benchmark.rank` |
+| `nox_content_format_counts`, `nox_content_engagement_split` | `profile` posts/reels/pics counts |
+| `nox_content_tags_all` | `content.all_tags` |
+| `nox_cooperation_*`, `nox_dispute_types` | `cooperation` dimension (Gate A default) or `profile` fallback |
+| `nox_cooperation_price_*`, `nox_cooperation_brands_top`, etc. | `cooperation` detail: pricing, brands, response hours |
+
+Gate A default dimensions: `profile,audience,content,cooperation` (**4** `api_calls`).
+
+Re-run `diligence-pack` after upgrading the bridge to backfill keys for creators
+diligenced before these fields were mapped.
+
 ## LIVE campaign gates
 
 `diligence-pack`, `contacts`, `creator-search`, and `monitor-setup` require
@@ -120,6 +148,13 @@ campaign config JSON. **KOL Ops Console** signs the claim when materializing
 `~/.hermes/kol-ops/nox_campaign_configs/<campaign_id>.json`. Gateway workers need
 `NOX_CONSOLE_DISPATCH_SECRET` or `HERMES_KOL_OPS_BRIDGE_KEY` matching Console.
 Dev only: `NOX_SKIP_CONSOLE_DISPATCH=1`.
+
+## CLI notes
+
+Nox `creator_id` values may start with `-`. Commander cannot parse them as positional
+args (and a bare `--` is consumed as the ID). The bridge falls back to `--url` /
+`--platform --channel-id` when available, otherwise issues the same GET as the CLI
+via `internal/creator_http.py`.
 
 ## Error codes (CLI exit)
 

@@ -94,6 +94,29 @@ async def require_nox_supplement_enabled(
     return cfg
 
 
+async def materialize_discovery_nox_config(
+    bridge: BridgeClient,
+    campaign_id: str,
+    *,
+    env: str,
+) -> str:
+    """Write signed config for discovery-time Nox audience screen (LIVE only)."""
+    if env.upper() == "TEST":
+        return ""
+    try:
+        campaign = await bridge.get_campaign(campaign_id, env=env)
+    except BridgeError:
+        return ""
+    cfg = extract_campaign_config(campaign)
+    if not _nox_quota_is_enabled(cfg):
+        return ""
+    return materialize_campaign_config_file(
+        campaign_id,
+        cfg,
+        allowed_gates=("discovery_qualify",),
+    )
+
+
 def materialize_campaign_config_file(
     campaign_id: str,
     cfg: Mapping[str, Any],

@@ -9,9 +9,11 @@ from collections import Counter, defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 
 from ..bridge_client import BridgeClient, BridgeError
 from ..deps import get_bridge, get_conn, require_role
+from ..kol_registry_export import build_registry_xlsx
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -130,6 +132,7 @@ async def gate_metrics(
 
     try:
         escalations = await bridge.list_escalations(env=env_norm)
+        funnel = await bridge.get_kol_registry_funnel(env=env_norm, days=days)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     re_escalated = sum(1 for r in escalations if isinstance(r, dict) and r.get("state") == "re_escalated")
@@ -154,9 +157,113 @@ async def gate_metrics(
             "manual_touchpoints_per_campaign": avg_manual_touches,
             "termination_rate": (terminated_count / resolved_count) if resolved_count else 0.0,
             "live_incident_rate": (live_rejected / live_decisions) if live_decisions else 0.0,
+            "kol_candidate_adoption_rate": float(
+                funnel.get("kol_candidate_adoption_rate") or 0.0,
+            ),
+            "initial_outreach_reply_rate": float(
+                funnel.get("initial_outreach_reply_rate") or 0.0,
+            ),
+        },
+        "kol_funnel": {
+            "discovered_total": int(funnel.get("discovered_total") or 0),
+            "prior_collab_excluded": int(funnel.get("prior_collab_excluded") or 0),
+            "eligible_total": int(funnel.get("eligible_total") or 0),
+            "initial_outreach_draft_count": int(
+                funnel.get("initial_outreach_draft_count") or 0,
+            ),
+            "initial_outreach_reply_count": int(
+                funnel.get("initial_outreach_reply_count") or 0,
+            ),
         },
         "top_rejection_tags": [
             {"tag": tag, "count": count}
             for tag, count in tag_counter.most_common(10)
         ],
     }
+
+
+@router.get("/kol-registry")
+async def kol_registry(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    _: Annotated[dict, Depends(require_role("owner", "operator"))],
+    env: str = Query("TEST"),
+    q: str | None = Query(None, max_length=200),
+    source: str = Query("all", pattern="^(all|legacy|discovery)$"),
+    sort: str = Query("ingested_at", pattern="^(ingested_at|first_discovered_at|created_at)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """Paginated Agent红人列表 — Agent-discovered KOLs only."""
+    env_norm = env.upper()
+    try:
+        out = await bridge.list_kol_registry(
+            env=env_norm, q=q, source=source, sort=sort, order=order,
+            limit=limit, offset=offset,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    campaign_ids = sorted({
+        str(row.get("latest_campaign_id"))
+        for row in out.get("items", [])
+        if isinstance(row, dict) and row.get("latest_campaign_id")
+    })
+    sku_by_campaign: dict[str, str | None] = {}
+    if campaign_ids:
+        placeholders = ",".join("?" * len(campaign_ids))
+        rows = conn.execute(
+            f"SELECT campaign_id, sku FROM product_campaigns "
+            f"WHERE env=? AND campaign_id IN ({placeholders})",
+            (env_norm, *campaign_ids),
+        ).fetchall()
+        sku_by_campaign = {str(r["campaign_id"]): str(r["sku"]) for r in rows}
+
+    items = []
+    for row in out.get("items", []):
+        if not isinstance(row, dict):
+            continue
+        cid = row.get("latest_campaign_id")
+        campaign_sku = sku_by_campaign.get(str(cid)) if cid else None
+        fact_spu = row.get("target_spu")
+        target_spu = campaign_sku or fact_spu
+        items.append({
+            **row,
+            "target_spu": target_spu,
+        })
+    return {
+        "env": env_norm,
+        "source": out.get("source", source),
+        "total": out.get("total", 0),
+        "counts": out.get("counts") or {},
+        "limit": out.get("limit", limit),
+        "offset": out.get("offset", offset),
+        "items": items,
+    }
+
+
+@router.get("/kol-registry/export")
+async def kol_registry_export(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    _: Annotated[dict, Depends(require_role("owner", "operator"))],
+    env: str = Query("TEST"),
+    q: str | None = Query(None, max_length=200),
+    source: str = Query("all", pattern="^(all|legacy|discovery)$"),
+) -> Response:
+    """Download full KOL registry as .xlsx (matches Agent红人列表 template columns)."""
+    try:
+        content, filename, _row_count = await build_registry_xlsx(
+            bridge, conn, env=env.upper(), q=q, source=source,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )

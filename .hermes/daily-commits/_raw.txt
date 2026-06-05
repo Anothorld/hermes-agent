@@ -1,0 +1,273 @@
+DATE:2026-06-03
+06d1f5011d9a6efc07fafbf7b94572f5f10e57ba|06d1f5011|Anothorld|2026-06-03 18:19:03 +0800|feat(kol-ops): restore list perf and wire KOL detail Nox dashboard
+
+ .../kol-ops-console/backend/app/bridge_client.py   |  79 ++++-
+ .../kol-ops-console/backend/app/nox_helpers.py     |  60 ++--
+ .../backend/app/routers/approvals.py               |  42 +--
+ .../backend/app/routers/campaigns.py               |   2 +-
+ .../backend/app/routers/candidates.py              |  25 +-
+ .../backend/app/routers/escalations.py             |   9 +-
+ .../backend/app/routers/products.py                |  97 +++---
+ .../docs/features/campaigns/GUIDE.md               |   5 +-
+ .../kol-ops-console/docs/features/kols/GUIDE.md    |  15 +-
+ playground/kol-ops-console/frontend/src/api.ts     |   1 +
+ .../frontend/src/pages/EscalationConsolePage.tsx   |  12 +-
+ .../frontend/src/pages/KolDetailPage.tsx           |  74 ++---
+ .../frontend/src/pages/KolKanbanPage.tsx           |  43 ++-
+ plugins/kol-ops-bridge/cal.py                      | 335 ++++++++++++++++++---
+ plugins/kol-ops-bridge/plugin_api.py               |  99 ++++--
+ .../tests/test_kanban_lanes_batch.py               |  48 +++
+ .../kol-ops-bridge/tests/test_list_batch_perf.py   |  86 ++++++
+ 17 files changed, 785 insertions(+), 247 deletions(-)
+753a8b4beec22a4962dc500761bf62a4ba25f5e7|753a8b4be|Anothorld|2026-06-03 17:56:44 +0800|Revert "feat(kol-ops): sync Nox diligence to CAL and operator Nox dashboard"
+
+ .../kol-ops-console/backend/app/bridge_client.py   |  79 +----
+ .../kol-ops-console/backend/app/nox_helpers.py     |  60 ++--
+ .../backend/app/routers/approvals.py               |  42 ++-
+ .../backend/app/routers/campaigns.py               |   2 +-
+ .../backend/app/routers/candidates.py              |  25 +-
+ .../backend/app/routers/escalations.py             |   9 +-
+ .../backend/app/routers/products.py                |  97 +++---
+ .../docs/features/campaigns/GUIDE.md               |   5 +-
+ .../kol-ops-console/docs/features/kols/GUIDE.md    |  15 +-
+ playground/kol-ops-console/frontend/src/api.ts     |   1 -
+ .../frontend/src/pages/EscalationConsolePage.tsx   |  12 +-
+ .../frontend/src/pages/KolDetailPage.tsx           |  15 +-
+ .../frontend/src/pages/KolKanbanPage.tsx           |  43 +--
+ plugins/kol-ops-bridge/cal.py                      | 335 +++------------------
+ plugins/kol-ops-bridge/plugin_api.py               |  99 ++----
+ .../tests/test_kanban_lanes_batch.py               |  48 ---
+ .../kol-ops-bridge/tests/test_list_batch_perf.py   |  86 ------
+ 17 files changed, 200 insertions(+), 773 deletions(-)
+7e4e5d8c1f0401139dccc6d93517eae939e071c9|7e4e5d8c1|Anothorld|2026-06-03 17:50:55 +0800|feat(kol-ops): add Nox fact mapping, sync diligence, and metric display
+
+ .../backend/app/nox_contacts_sync.py               |  27 +--
+ .../backend/app/nox_diligence_sync.py              | 242 ++++++++++++++++++
+ .../kol-ops-console/backend/app/routers/kols.py    | 219 ++++++++---------
+ .../backend/tests/test_nox_diligence_sync.py       |  45 ++++
+ .../kol-ops-console/docs/features/nox/GUIDE.md     |   7 +-
+ .../src/components/KolNoxInsightsBoard.tsx         |  55 +++++
+ .../src/components/KolProfileDashboard.tsx         | 270 +++++++++++++++++++++
+ .../frontend/src/components/NoxDiligencePanel.tsx  | 264 ++++++++++++++++++++
+ .../frontend/src/components/README.md              |   2 +-
+ .../frontend/src/components/factKeyLabel.ts        |  95 ++++++++
+ .../frontend/src/lib/kolProfileMetrics.ts          | 129 ++++++++++
+ .../frontend/src/lib/noxDashboardCategories.ts     | 189 +++++++++++++++
+ .../kol-ops-console/frontend/src/lib/noxLabels.ts  | 129 ++++++++++
+ .../frontend/src/lib/noxValueFormat.ts             | 120 +++++++++
+ .../frontend/src/pages/ProductDetailPage.tsx       |   7 +-
+ plugins/kol-ops-bridge/confirmed_ingest.py         |  24 ++
+ plugins/nox-kol-bridge/README.md                   |   5 +
+ plugins/nox-kol-bridge/internal/commands.py        |   2 +-
+ plugins/nox-kol-bridge/internal/diligence_facts.py | 199 +++++++++++++++
+ plugins/nox-kol-bridge/internal/summarize.py       | 237 ++++++++++++++++--
+ .../nox-kol-bridge/tests/test_diligence_facts.py   | 119 +++++++++
+ plugins/nox-kol-bridge/tests/test_summarize.py     |  53 ++++
+ scripts/daily-git-summary.py                       |  63 +++++
+ scripts/daily-git-summary.sh                       |  69 +++---
+ skills/social-media/kol-nox-diligence/SKILL.md     |  19 +-
+ 25 files changed, 2390 insertions(+), 200 deletions(-)
+edee3cc07419356ab1bdda175099993d190859f5|edee3cc07|Anothorld|2026-06-03 17:50:41 +0800|feat(kol-ops): sync Nox diligence to CAL and operator Nox dashboard
+
+ .../kol-ops-console/backend/app/bridge_client.py   |  79 ++++-
+ .../kol-ops-console/backend/app/nox_helpers.py     |  60 ++--
+ .../backend/app/routers/approvals.py               |  42 +--
+ .../backend/app/routers/campaigns.py               |   2 +-
+ .../backend/app/routers/candidates.py              |  25 +-
+ .../backend/app/routers/escalations.py             |   9 +-
+ .../backend/app/routers/products.py                |  97 +++---
+ .../docs/features/campaigns/GUIDE.md               |   5 +-
+ .../kol-ops-console/docs/features/kols/GUIDE.md    |  15 +-
+ playground/kol-ops-console/frontend/src/api.ts     |   1 +
+ .../frontend/src/pages/EscalationConsolePage.tsx   |  12 +-
+ .../frontend/src/pages/KolDetailPage.tsx           |  15 +-
+ .../frontend/src/pages/KolKanbanPage.tsx           |  43 ++-
+ plugins/kol-ops-bridge/cal.py                      | 335 ++++++++++++++++++---
+ plugins/kol-ops-bridge/plugin_api.py               |  99 ++++--
+ .../tests/test_kanban_lanes_batch.py               |  48 +++
+ .../kol-ops-bridge/tests/test_list_batch_perf.py   |  86 ++++++
+ 17 files changed, 773 insertions(+), 200 deletions(-)
+d3832ba6ea421fec9272609e30b40688cad5796d|d3832ba6e|Anothorld|2026-06-03 16:22:55 +0800|feat(nox): integrate Nox KOL bridge with console gates and quota UX
+
+ playground/kol-ops-console/.env.example            |   3 +
+ playground/kol-ops-console/ARCHITECTURE.md         | 173 ++++++
+ playground/kol-ops-console/README.md               |   7 +
+ playground/kol-ops-console/backend/README.md       |  68 +--
+ .../kol-ops-console/backend/app/bridge_client.py   |  14 +-
+ .../backend/app/nox_console_dispatch.py            |  47 ++
+ .../backend/app/nox_contacts_sync.py               | 228 ++++++++
+ .../kol-ops-console/backend/app/nox_dispatch.py    | 129 +++++
+ playground/kol-ops-console/backend/app/nox_gate.py | 125 +++++
+ .../kol-ops-console/backend/app/nox_helpers.py     |  89 ++++
+ .../kol-ops-console/backend/app/nox_quota.py       | 123 +++++
+ .../kol-ops-console/backend/app/nox_tool_runner.py |  57 ++
+ .../kol-ops-console/backend/app/routers/README.md  |  20 +
+ .../backend/app/routers/campaigns.py               | 149 +++++-
+ .../kol-ops-console/backend/app/routers/kols.py    | 275 +++++++++-
+ .../backend/tests/test_nox_contacts_sync.py        |  38 ++
+ .../kol-ops-console/backend/tests/test_nox_gate.py |  35 ++
+ .../backend/tests/test_nox_quota.py                |  42 ++
+ playground/kol-ops-console/docs/README.md          |  27 +
+ .../docs/features/agent-gateway/GUIDE.md           |  39 ++
+ .../docs/features/approvals/GUIDE.md               |  39 ++
+ .../docs/features/auth-settings/GUIDE.md           |  38 ++
+ .../docs/features/campaigns/GUIDE.md               |  45 ++
+ .../docs/features/escalations/GUIDE.md             |  38 ++
+ .../docs/features/gate-metrics/GUIDE.md            |  33 ++
+ .../kol-ops-console/docs/features/gmail/GUIDE.md   |  39 ++
+ .../kol-ops-console/docs/features/kols/GUIDE.md    |  44 ++
+ .../docs/features/learning/GUIDE.md                |  40 ++
+ .../docs/features/live-events/GUIDE.md             |  32 ++
+ .../kol-ops-console/docs/features/nox/GUIDE.md     |  54 ++
+ .../docs/features/policies/GUIDE.md                |  36 ++
+ .../docs/features/products/GUIDE.md                |  38 ++
+ playground/kol-ops-console/frontend/README.md      |   2 +
+ .../src/components/EditCampaignConfigPanel.tsx     |  85 +++
+ .../src/components/NoxCampaignOpsPanel.tsx         | 145 ++++++
+ .../frontend/src/components/NoxQuotaBanner.tsx     |  90 ++++
+ .../frontend/src/components/README.md              |  29 ++
+ .../kol-ops-console/frontend/src/lib/errors.ts     |  19 +
+ .../frontend/src/pages/KolDetailPage.tsx           | 267 +++++++++-
+ .../frontend/src/pages/ProductDetailPage.tsx       |  58 ++-
+ .../kol-ops-console/frontend/src/pages/README.md   |  25 +
+ plugins/kol-ops-bridge/cal.py                      |  26 +-
+ plugins/kol-ops-bridge/campaign_nox_integration.py |  81 +++
+ plugins/kol-ops-bridge/campaign_validation.py      |   9 +
+ plugins/kol-ops-bridge/confirmed_ingest.py         |   8 +
+ plugins/kol-ops-bridge/plugin_api.py               |   8 +
+ plugins/kol-ops-bridge/tests/conftest.py           |   2 +-
+ .../tests/test_campaign_nox_integration.py         |  38 ++
+ .../tests/test_campaign_validation.py              |   2 +
+ plugins/nox-kol-bridge/.env.example                |   7 +
+ plugins/nox-kol-bridge/README.md                   | 135 +++++
+ plugins/nox-kol-bridge/__init__.py                 |   9 +
+ plugins/nox-kol-bridge/internal/__init__.py        |   1 +
+ plugins/nox-kol-bridge/internal/audit_hooks.py     |  60 +++
+ plugins/nox-kol-bridge/internal/bridge_audit.py    |  78 +++
+ plugins/nox-kol-bridge/internal/campaign_gate.py   | 137 +++++
+ plugins/nox-kol-bridge/internal/cli_runner.py      | 214 ++++++++
+ plugins/nox-kol-bridge/internal/commands.py        | 579 +++++++++++++++++++++
+ .../nox-kol-bridge/internal/console_dispatch.py    | 168 ++++++
+ plugins/nox-kol-bridge/internal/creator_args.py    |  27 +
+ plugins/nox-kol-bridge/internal/exceptions.py      |   9 +
+ plugins/nox-kol-bridge/internal/locks.py           |  24 +
+ plugins/nox-kol-bridge/internal/normalize.py       |  69 +++
+ plugins/nox-kol-bridge/internal/nox_auth.py        | 227 ++++++++
+ plugins/nox-kol-bridge/internal/nox_cache.py       | 229 ++++++++
+ plugins/nox-kol-bridge/internal/paths.py           |  26 +
+ plugins/nox-kol-bridge/internal/quota_ledger.py    | 144 +++++
+ plugins/nox-kol-bridge/internal/quota_remote.py    |  66 +++
+ plugins/nox-kol-bridge/internal/summarize.py       | 152 ++++++
+ .../nox-kol-bridge/internal/supplement_ledger.py   | 100 ++++
+ plugins/nox-kol-bridge/plugin.yaml                 |   9 +
+ plugins/nox-kol-bridge/schemas.py                  |  36 ++
+ plugins/nox-kol-bridge/scripts/nox_kol_tool.py     | 293 +++++++++++
+ plugins/nox-kol-bridge/tests/conftest.py           |  21 +
+ .../nox-kol-bridge/tests/fixtures/contacts.json    |   8 +
+ .../tests/fixtures/creator_search.json             |  15 +
+ .../tests/fixtures/diligence_pack.json             |  27 +
+ .../tests/fixtures/monitor_setup.json              |  10 +
+ .../nox-kol-bridge/tests/test_cache_timezone.py    |  20 +
+ plugins/nox-kol-bridge/tests/test_campaign_gate.py |  60 +++
+ plugins/nox-kol-bridge/tests/test_cli_envelope.py  |  25 +
+ .../nox-kol-bridge/tests/test_console_dispatch.py  |  93 ++++
+ plugins/nox-kol-bridge/tests/test_creator_args.py  |  36 ++
+ .../nox-kol-bridge/tests/test_creator_search.py    |  66 +++
+ plugins/nox-kol-bridge/tests/test_nox_auth.py      |  99 ++++
+ plugins/nox-kol-bridge/tests/test_nox_cache.py     |  94 ++++
+ plugins/nox-kol-bridge/tests/test_nox_kol_tool.py  |  35 ++
+ .../tests/test_parallel_diligence.py               |  56 ++
+ plugins/nox-kol-bridge/tests/test_summarize.py     |  36 ++
+ .../nox-kol-bridge/tests/test_supplement_ledger.py |  26 +
+ plugins/nox-kol-bridge/tools.py                    |  20 +
+ skills/social-media/kol-nox-contacts/SKILL.md      |  39 ++
+ skills/social-media/kol-nox-diligence/SKILL.md     | 132 +++++
+ skills/social-media/kol-nox-discovery/SKILL.md     |  52 ++
+ .../references/nox-to-ingest-mapping.md            |  17 +
+ .../kol-nox-discovery/references/quota-budget.md   |  23 +
+ skills/social-media/kol-nox-monitor/SKILL.md       |  55 ++
+ 97 files changed, 6815 insertions(+), 107 deletions(-)
+6c9dbff8d912cbb548fed434adf15d94cd3467b0|6c9dbff8d|Anothorld|2026-06-03 15:15:05 +0800|feat(kol-ops): add kol-proactive-followup skill and route tests
+
+ .../backend/tests/test_followup_draft.py           |  81 ++++++++++
+ .../social-media/kol-proactive-followup/SKILL.md   | 168 +++++++++++++++++++++
+ tests/skills/test_kol_proactive_followup_skill.py  |  48 ++++++
+ 3 files changed, 297 insertions(+)
+b8a664b76346ed8f926b7a98b1073aa1f7777b9c|b8a664b76|Anothorld|2026-06-03 15:14:16 +0800|feat(kol-ops): add per-operator Gmail with sticky campaign mailbox
+
+ playground/kol-ops-console/.env.example            |  24 +
+ playground/kol-ops-console/backend/app/config.py   |  25 +
+ playground/kol-ops-console/backend/app/db.py       |  62 +++
+ .../kol-ops-console/backend/app/gmail_store.py     | 220 +++++++++
+ .../backend/app/gmail_token_crypto.py              |  44 ++
+ playground/kol-ops-console/backend/app/main.py     |  14 +
+ .../backend/app/routers/approvals.py               |  27 +-
+ .../backend/app/routers/google_auth.py             | 224 +++++++++
+ .../backend/app/routers/internal.py                |  84 ++++
+ .../kol-ops-console/backend/app/routers/kols.py    | 280 ++++++++++-
+ .../src/components/CommunicationHistoryPanel.tsx   | 288 +++++++++++
+ .../frontend/src/pages/KolDetailPage.tsx           | 536 +++++++++++++++++++++
+ .../frontend/src/pages/SettingsPage.tsx            | 208 ++++----
+ .../scripts/gmail_multimailbox_setup.py            | 113 +++++
+ plugins/kol-ops-bridge/.env.example                |  29 ++
+ plugins/kol-ops-bridge/email_conversation.py       | 262 ++++++++++
+ plugins/kol-ops-bridge/gmail_client.py             |  19 +-
+ plugins/kol-ops-bridge/gmail_console.py            | 178 +++++++
+ plugins/kol-ops-bridge/gmail_credentials.py        |  50 ++
+ plugins/kol-ops-bridge/gmail_reconcile.py          |  96 ++++
+ plugins/kol-ops-bridge/learning_jobs.py            |   4 +-
+ plugins/kol-ops-bridge/mailbox_escalation.py       |  72 +++
+ plugins/kol-ops-bridge/mailbox_resolver.py         | 382 +++++++++++++++
+ .../kol-ops-bridge/scripts/_subcmd_governance.py   |  65 ++-
+ .../kol-ops-bridge/scripts/kol_reply_dispatcher.py | 249 ++++++++--
+ plugins/kol-ops-bridge/tests/conftest.py           |   6 +
+ .../tests/test_email_conversation.py               |  86 ++++
+ .../tests/test_gmail_draft_thread_fallback.py      | 165 +++++++
+ .../tests/test_mailbox_escalation.py               |  70 +++
+ .../kol-ops-bridge/tests/test_mailbox_resolver.py  | 171 +++++++
+ .../google-workspace/scripts/google_api.py         |  22 +-
+ skills/social-media/kol-reply-dispatcher/SKILL.md  |  28 +-
+ 32 files changed, 3941 insertions(+), 162 deletions(-)
+97e79318f306957f9d7014884cc3896556348a65|97e79318f|Anothorld|2026-06-03 15:13:42 +0800|fix(kol-ops-bridge): normalize campaign upsert fields and CLI env aliases
+
+ plugins/kol-ops-bridge/README.md                   |  53 ++-
+ plugins/kol-ops-bridge/campaign_validation.py      | 126 ++++++-
+ plugins/kol-ops-bridge/plugin_api.py               | 379 ++++++++++++++++++---
+ plugins/kol-ops-bridge/scripts/_cal_client.py      |  42 ++-
+ .../kol-ops-bridge/tests/test_cal_client_env.py    |  44 +++
+ .../tests/test_campaign_validation.py              | 133 +++-----
+ .../references/shared/bridge-http-api-endpoints.md |  10 +-
+ .../references/shared/fact-ownership.md            |   7 +
+ 8 files changed, 641 insertions(+), 153 deletions(-)
+e9a820988663b850aded58b0ac065d586b522681|e9a820988|Anothorld|2026-06-03 15:13:28 +0800|fix(console): cut bridge 502 blips and speed product/shortlist loads
+
+ .../kol-ops-console/backend/app/bridge_client.py   |  83 ++++-
+ .../backend/app/routers/campaigns.py               | 346 ++++++++++++++++++++-
+ .../backend/app/routers/products.py                | 137 ++++----
+ playground/kol-ops-console/frontend/src/api.ts     |  22 +-
+ .../frontend/src/pages/ProductDetailPage.tsx       |  32 +-
+ plugins/kol-ops-bridge/cal.py                      |  23 +-
+ 6 files changed, 552 insertions(+), 91 deletions(-)
+70bfce95a824081860fc2c49bcf8e1b1d10251a7|70bfce95a|Anothorld|2026-06-03 15:13:13 +0800|feat(browser): add local-chrome tab pool for concurrent agent runs
+
+ .../local-chrome-debug/start-debug-chrome.sh       |   3 +-
+ playground/local-chrome-debug/tab_pool.py          |  56 +++++
+ plugins/local-chrome-tab-pool/README.md            |  89 +++++++
+ plugins/local-chrome-tab-pool/__init__.py          |  33 +++
+ plugins/local-chrome-tab-pool/hooks.py             | 187 +++++++++++++++
+ plugins/local-chrome-tab-pool/internal/__init__.py |   1 +
+ plugins/local-chrome-tab-pool/internal/tab_pool.py | 265 +++++++++++++++++++++
+ plugins/local-chrome-tab-pool/plugin.yaml          |   7 +
+ plugins/local-chrome-tab-pool/tests/conftest.py    |   3 +
+ plugins/local-chrome-tab-pool/tests/test_hooks.py  | 116 +++++++++
+ .../local-chrome-tab-pool/tests/test_tab_pool.py   | 161 +++++++++++++
+ 11 files changed, 920 insertions(+), 1 deletion(-)
+a30c9a2687d630f180659c65912765d4358b5031|a30c9a268|Anothorld|2026-06-03 09:35:42 +0800|fix(kol-ops): reply-all Cc and quoted prior message on Gmail draft approve
+
+ plugins/kol-ops-bridge/gmail_client.py             |  19 +++
+ plugins/kol-ops-bridge/gmail_reply_envelope.py     | 131 +++++++++++++++++++++
+ plugins/kol-ops-bridge/plugin_api.py               |  45 ++++++-
+ .../kol-ops-bridge/scripts/kol_reply_dispatcher.py |   3 +
+ .../tests/test_gmail_reply_envelope.py             |  69 +++++++++++
+ .../google-workspace/scripts/google_api.py         |  17 +++
+ 6 files changed, 282 insertions(+), 2 deletions(-)

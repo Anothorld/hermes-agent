@@ -72,6 +72,7 @@ export const POLICY_SCOPE_LABELS: Record<string, string> = {
   user_style: '个人邮件风格',
   escalation_rules: '异常处理规则',
   pricing_calibration: '定价校准',
+  outcome_strategy: '合作结局指导',
 };
 
 /** Goals eligible for strategy promote in Console. */

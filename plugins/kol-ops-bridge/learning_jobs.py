@@ -9,6 +9,7 @@ from typing import Any, Final, Optional
 from . import cal
 from . import learning_distill
 from . import learning_job_store as job_store
+from . import learning_outcome
 from . import learning_store
 from .gmail_client import GmailUnavailable
 from .gmail_reconcile import backfill_edit_learning_all_mailboxes, run_reconcile_all_mailboxes
@@ -28,6 +29,8 @@ JOB_SNAPSHOT_FACT_CORRECTIONS: Final[str] = "snapshot_fact_corrections"
 JOB_SYNC_FAILURE_EXAMPLES: Final[str] = "sync_failure_examples"
 JOB_CLASSIFIER_EVAL: Final[str] = "classifier_eval_deterministic"
 JOB_APPLY_EDIT_USER_STYLE: Final[str] = "apply_edit_user_style"
+JOB_ANALYZE_COLLAB_OUTCOME: Final[str] = "analyze_collab_outcome"
+JOB_APPLY_OUTCOME_POLICY: Final[str] = "apply_outcome_policy"
 
 # Backward-compatible alias for older cron lines / docs.
 JOB_AUTO_PRICING_TEST: Final[str] = "auto_pricing_test_campaigns"
@@ -38,9 +41,11 @@ _JOB_ALIASES: Final[dict[str, str]] = {
 ALL_JOBS: Final[tuple[str, ...]] = (
     JOB_RECONCILE_SENT,
     JOB_BACKFILL_EDIT_LEARNING,
+    JOB_ANALYZE_COLLAB_OUTCOME,
     JOB_APPLY_REJECT_POLICY,
     JOB_APPLY_EDIT_POLICY,
     JOB_APPLY_EDIT_USER_STYLE,
+    JOB_APPLY_OUTCOME_POLICY,
     JOB_APPLY_PRICING_POLICY,
     JOB_AUTO_PRICING_CAMPAIGNS,
     JOB_SNAPSHOT_FACT_CORRECTIONS,
@@ -49,14 +54,24 @@ ALL_JOBS: Final[tuple[str, ...]] = (
 )
 
 JOB_SUITES: Final[dict[str, tuple[str, ...]]] = {
-    "capture": (JOB_RECONCILE_SENT, JOB_BACKFILL_EDIT_LEARNING),
-    "distill": (JOB_APPLY_REJECT_POLICY, JOB_APPLY_EDIT_POLICY),
+    "capture": (
+        JOB_RECONCILE_SENT,
+        JOB_BACKFILL_EDIT_LEARNING,
+        JOB_ANALYZE_COLLAB_OUTCOME,
+    ),
+    "distill": (
+        JOB_APPLY_REJECT_POLICY,
+        JOB_APPLY_EDIT_POLICY,
+        JOB_APPLY_OUTCOME_POLICY,
+    ),
     "pricing": (JOB_APPLY_PRICING_POLICY, JOB_AUTO_PRICING_CAMPAIGNS),
     "audit": (JOB_SNAPSHOT_FACT_CORRECTIONS, JOB_SYNC_FAILURE_EXAMPLES),
     "quality": (JOB_CLASSIFIER_EVAL,),
     "nightly": (
+        JOB_ANALYZE_COLLAB_OUTCOME,
         JOB_APPLY_REJECT_POLICY,
         JOB_APPLY_EDIT_POLICY,
+        JOB_APPLY_OUTCOME_POLICY,
         JOB_APPLY_PRICING_POLICY,
         JOB_AUTO_PRICING_CAMPAIGNS,
         JOB_SNAPSHOT_FACT_CORRECTIONS,
@@ -220,36 +235,87 @@ def _execute_job(
 
     if job_name == JOB_APPLY_EDIT_USER_STYLE:
         owner_raw = os.environ.get("KOL_LEARNING_USER_STYLE_OWNER_ID", "").strip()
-        if not owner_raw:
-            return {
-                "skipped": True,
-                "reason": "KOL_LEARNING_USER_STYLE_OWNER_ID not set",
-            }
-        owner_user_id = int(owner_raw)
-        events = learning_store.list_learning_events(
-            conn, env=env, event_types=("draft_edit_learning",), limit=limit,
-        )
-        consumed = learning_distill.list_consumed_edit_event_ids(conn, env=env)
-        fresh = [e for e in events if int(e.get("id") or 0) not in consumed]
-        edited = [e for e in fresh if (e.get("payload") or {}).get("was_edited")]
+        # Per-operator calibration: when no fixed owner env is set, derive the
+        # operators with unconsumed edits (operator_user_id attribution) and
+        # propose a user_style batch for each. Falls back to the single env
+        # owner for back-compat / pre-attribution data.
+        if owner_raw:
+            owner_ids = [int(owner_raw)]
+        else:
+            owner_ids = learning_distill.list_edit_operator_ids(conn, env=env, limit=limit)
         threshold = learning_store.style_learning_batch_size()
         if dry_run:
             return {
                 "dry_run": True,
-                "owner_user_id": owner_user_id,
-                "edited_events": len(edited),
+                "owner_user_ids": owner_ids,
                 "batch_threshold": threshold,
-                "ready_for_distill": len(edited) >= threshold,
+                "source": "env_owner" if owner_raw else "operator_attribution",
             }
-        if not edited:
-            return {"skipped": True, "reason": "no edited sent bodies", "events": len(events)}
-        return learning_distill.propose_style_learning_approval(
-            conn,
-            env=env,
-            scope="user_style",
-            updated_by=_updated_by(triggered_by, job_name),
-            owner_user_id=owner_user_id,
-            limit=limit,
+        if not owner_ids:
+            return {
+                "skipped": True,
+                "reason": (
+                    "no KOL_LEARNING_USER_STYLE_OWNER_ID and no operator-attributed "
+                    "edits found"
+                ),
+            }
+        results: list[dict[str, Any]] = []
+        for oid in owner_ids:
+            results.append({
+                "owner_user_id": oid,
+                **learning_distill.propose_style_learning_approval(
+                    conn,
+                    env=env,
+                    scope="user_style",
+                    updated_by=_updated_by(triggered_by, job_name),
+                    owner_user_id=oid,
+                    limit=limit,
+                ),
+            })
+        proposed = [r for r in results if r.get("pending")]
+        return {
+            "owner_count": len(owner_ids),
+            "proposed_count": len(proposed),
+            "results": results,
+        }
+
+    if job_name == JOB_ANALYZE_COLLAB_OUTCOME:
+        archived = learning_outcome.list_archived_collabs(conn, env=env, limit=limit)
+        pending = [
+            r for r in archived
+            if not learning_outcome.has_outcome_learning_event(
+                conn, env=env, identity_id=int(r["identity_id"]),
+                campaign_id=r.get("campaign_id"),
+            )
+        ]
+        if dry_run:
+            return {
+                "dry_run": True,
+                "archived_seen": len(archived),
+                "pending_retros": len(pending),
+            }
+        if not pending:
+            return {"skipped": True, "reason": "no archived collabs pending retro"}
+        return learning_outcome.analyze_pending_collab_outcomes(
+            conn, env=env, limit=limit, updated_by=_updated_by(triggered_by, job_name),
+        )
+
+    if job_name == JOB_APPLY_OUTCOME_POLICY:
+        events = learning_outcome.list_outcome_retro_events(conn, env=env, limit=limit)
+        consumed = learning_outcome.list_consumed_outcome_event_ids(conn, env=env)
+        fresh = [e for e in events if int(e.get("id") or 0) not in consumed]
+        met, gate = learning_outcome._outcome_threshold_met(fresh)
+        if dry_run:
+            return {
+                "dry_run": True,
+                "fresh_retros": len(fresh),
+                "ready_for_synthesis": met,
+                **gate,
+            }
+        if not fresh:
+            return {"skipped": True, "reason": "no new outcome retros"}
+        return learning_outcome.propose_outcome_learning_approval(
+            conn, env=env, updated_by=_updated_by(triggered_by, job_name), limit=limit,
         )
 
     if job_name == JOB_SYNC_FAILURE_EXAMPLES:

@@ -127,6 +127,42 @@ def test_persist_with_contributing_skills(cal_db):
     assert draft_fact["child_skill"] == "kol-reply-synthesizer"
 
 
+def test_persist_proactive_followup_resolves_thread_from_facts(cal_db):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="t-pf", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="C1", env="TEST")
+    cal_db.write_facts(
+        identity_id=iid,
+        campaign_id="C1",
+        namespace="offer",
+        facts={"offer.gmail_sent_thread_id": "19e81ff6def3b65f"},
+        source="test",
+        env="TEST",
+    )
+    out = plugin_api.persist_reply_draft(
+        _body(
+            plugin_api,
+            identity_id=iid,
+            source_message_id="proactive-followup:TEST:1:999",
+            primary_lane="meta",
+            primary_goal="proactive_followup",
+            child_skill="kol-proactive-followup",
+            child_envelope={
+                "body": "Just checking in on timing.",
+                "kind": "proactive_followup",
+                "operator_topic": "chase timeline",
+            },
+            latest_email={
+                "from": "kol@x.com",
+                "subject": "POVISON collab",
+            },
+        ),
+        x_bridge_key=None,
+    )
+    assert out["draft"]["thread_id"] == "19e81ff6def3b65f"
+    assert out["draft"]["subject"] == "Re: POVISON collab"
+
+
 def test_persist_missing_recipient_400(cal_db):
     plugin_api = _load_plugin_api()
     iid = cal_db.upsert_identity(primary_handle="t2", platform="instagram")
@@ -135,6 +171,43 @@ def test_persist_missing_recipient_400(cal_db):
                  latest_email={"subject": "x"})  # no from/from_addr
     with pytest.raises(HTTPException) as exc:
         plugin_api.persist_reply_draft(body, x_bridge_key=None)
+    assert exc.value.status_code == 400
+
+
+def test_persist_strips_quoted_thread_from_body(cal_db):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="t2q", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="C1", env="TEST")
+    body_with_quote = (
+        "Thanks for the update!\n\n"
+        "On Mon, 1 Jan 2024 12:00:00 +0000, kol@example.com wrote:\n"
+        "> Can you confirm the rate?\n"
+        "> Thanks"
+    )
+    out = plugin_api.persist_reply_draft(
+        _body(
+            plugin_api,
+            identity_id=iid,
+            child_envelope={"body": body_with_quote},
+        ),
+        x_bridge_key=None,
+    )
+    assert out["draft"]["body"] == "Thanks for the update!"
+
+
+def test_persist_empty_body_after_quote_strip_400(cal_db):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="t2e", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="C1", env="TEST")
+    quote_only = (
+        "On Mon, 1 Jan 2024 12:00:00 +0000, kol@example.com wrote:\n"
+        "> prior message only"
+    )
+    with pytest.raises(HTTPException) as exc:
+        plugin_api.persist_reply_draft(
+            _body(plugin_api, identity_id=iid, child_envelope={"body": quote_only}),
+            x_bridge_key=None,
+        )
     assert exc.value.status_code == 400
 
 

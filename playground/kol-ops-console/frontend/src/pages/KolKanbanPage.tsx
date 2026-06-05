@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { api, LaneSnapshot } from '../api';
 import { GOAL_COLUMNS } from '../components/GoalProgressBar';
 import { RepeatKolBadge } from '../components/RepeatKolBadge';
@@ -13,12 +13,14 @@ import { laneLabel } from '../constants/domainLabels';
 import { usePrefsStore } from '../lib/store';
 import { KolArchiveDialog } from '../components/dialogs/KolArchiveDialog';
 import { UnreadDot } from '../components/UnreadDot';
-import { useCampaignStore, useEnvStore, toast } from '../lib/store';
+import { useEnvStore, toast } from '../lib/store';
+import { useCampaignQuerySync } from '../lib/useCampaignQuerySync';
 import { useUnreadStore, isUnread } from '../lib/unread';
 import { errorSummary } from '../lib/errors';
 import { cardStatus, STATUS_BADGE } from '../lib/kolCardStatus';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
+import { resolveKanbanColumnGoal } from '../lib/kolKanbanBucket';
 
 type LanesResponse = {
   campaign_id: string;
@@ -37,25 +39,9 @@ type EnrichedSnapshot = LaneSnapshot & {
 };
 
 export function KolKanbanPage() {
-  const [search, setSearch] = useSearchParams();
   const env = useEnvStore((s) => s.env);
   const showRaw = usePrefsStore((s) => s.showRawFactKeys);
-  const campaignId = useCampaignStore((s) => s.currentCampaignId);
-  const setCampaignId = useCampaignStore((s) => s.setCampaignId);
-  // Prefer URL on first paint so deep links fetch immediately (persist
-  // rehydration can lag and previously caused a blank-then-slow reload).
-  const urlCampaignId = search.get('campaign_id') ?? '';
-  const effectiveCampaignId = urlCampaignId || campaignId;
-
-  // Deep-link sync: URL ?campaign_id= wins on first load (so a copied
-  // link still works), then the store takes over.
-  useEffect(() => {
-    const fromUrl = search.get('campaign_id');
-    if (fromUrl && fromUrl !== campaignId) setCampaignId(fromUrl);
-    else if (!fromUrl && campaignId) {
-      setSearch({ campaign_id: campaignId }, { replace: true });
-    }
-  }, [search, campaignId, setCampaignId, setSearch]);
+  const effectiveCampaignId = useCampaignQuerySync();
 
   const [data, setData] = useState<EnrichedSnapshot[]>([]);
   const [counts, setCounts] = useState<{
@@ -149,18 +135,19 @@ export function KolKanbanPage() {
     visibleColumns.map((c) => [c.goal, [] as EnrichedSnapshot[]]),
   );
   for (const row of liveItems) {
-    const goalNames = [
-      row.goals.commerce?.goal,
-      row.goals.fulfillment?.goal,
-      row.goals.publish?.goal,
-    ].filter(Boolean) as string[];
-    const primary = goalNames[goalNames.length - 1] || 'outreach';
+    const primary = resolveKanbanColumnGoal(row.goals);
     if (grouped[primary]) grouped[primary].push(row);
     else if (visibleColumns.length > 0) {
-      const firstGoal = visibleColumns[0].goal;
-      grouped[firstGoal].push(row);
+      grouped[visibleColumns[0].goal].push(row);
     }
   }
+
+  const visibleCardCount = visibleColumns.reduce(
+    (n, c) => n + (grouped[c.goal]?.length ?? 0),
+    0,
+  );
+  const hiddenByLaneFilter =
+    laneFilter !== 'all' && liveItems.length > 0 && visibleCardCount === 0;
 
   return (
     <div className="space-y-3">
@@ -244,6 +231,39 @@ export function KolKanbanPage() {
       </div>
 
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
+
+      {effectiveCampaignId && !refreshing && data.length === 0 && !err && (
+        <div className="rounded border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+          <p className="font-medium">当前 campaign 在看板里没有 KOL</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-amber-900">
+            {env === 'TEST' ? (
+              <li>
+                该 campaign 的数据在 <strong>LIVE</strong> 环境（shortlist 审批也在 LIVE）。
+                请把导航栏 env 切到 LIVE 后再刷新。
+              </li>
+            ) : (
+              <li>
+                看板只显示已在产品页 <strong>Shortlist review</strong> 里 approve 通过的 KOL；
+                discover 候选仍在产品页，不会出现在这里。
+              </li>
+            )}
+            <li>确认顶部 campaign 选的是 <code className="text-xs">{effectiveCampaignId}</code></li>
+          </ul>
+        </div>
+      )}
+
+      {hiddenByLaneFilter && (
+        <div className="rounded border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+          有 {liveItems.length} 个 KOL 进行中，但都不在当前阶段筛选里。
+          <button
+            type="button"
+            onClick={() => setLaneFilter('all')}
+            className="ml-2 font-medium text-sky-800 underline hover:text-sky-950"
+          >
+            切换到「全部」
+          </button>
+        </div>
+      )}
 
       {!effectiveCampaignId && (
         <div className="rounded border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">

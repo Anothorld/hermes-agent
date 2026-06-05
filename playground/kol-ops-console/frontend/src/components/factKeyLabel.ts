@@ -86,6 +86,27 @@ const FACT_DICT: Record<string, DictEntry> = {
   'identity.threads_profile_url': { short: 'Threads', title: 'Threads 主页 URL', kind: 'url' },
   'identity.linktree_url': { short: 'Link-in-bio', title: 'Linktree / Beacons / bio.link / lnk.bio / solo.to', kind: 'url' },
   'identity.personal_site_url': { short: '个人站', title: '个人网站 / 工作室站点', kind: 'url' },
+  'identity.profile_og_image_url': {
+    short: '主页头像缓存',
+    title: 'Console 抓取的主页 OG 头像 URL（7 天有效）',
+    kind: 'url',
+  },
+  'identity.profile_og_title': { short: '主页标题缓存', title: 'OG 标题缓存', kind: 'string' },
+  'identity.profile_og_description': {
+    short: '主页简介缓存',
+    title: 'OG 简介缓存',
+    kind: 'string',
+  },
+  'identity.profile_og_fetched_at': {
+    short: 'OG 抓取时间',
+    title: '主页 OG 缓存写入时间',
+    kind: 'datetime',
+  },
+  'identity.profile_og_source_url': {
+    short: 'OG 来源 URL',
+    title: '写入 OG 缓存时对应的主页 URL',
+    kind: 'url',
+  },
 
   'identity.nox_creator_id': {
     short: 'Nox 达人 ID',
@@ -143,10 +164,50 @@ const FACT_DICT: Record<string, DictEntry> = {
     title: 'Nox 尽调：受众主要国家/地区分布',
     kind: 'string',
   },
+  'identity.nox_channel_handle': {
+    short: 'Nox 账号',
+    title: 'Nox 尽调：频道 handle',
+    kind: 'string',
+  },
+  'identity.nox_median_views': {
+    short: 'Nox 中位播放',
+    title: 'Nox 尽调：中位播放量',
+    kind: 'number',
+  },
+  'identity.nox_wave': {
+    short: 'Nox 播放波动',
+    title: 'Nox 尽调：播放量波动系数',
+    kind: 'number',
+  },
+  'identity.nox_avg_active_days': {
+    short: 'Nox 活跃天数',
+    title: 'Nox 尽调：周均活跃发帖天数',
+    kind: 'number',
+  },
+  'identity.nox_view_per_followers': {
+    short: 'Nox 粉播比',
+    title: 'Nox 尽调：播放/粉丝比',
+    kind: 'number',
+  },
+  'identity.nox_performance_levels': {
+    short: 'Nox 表现等级',
+    title: 'Nox 尽调：播放/波动/互动等等级 (L1–L5)',
+    kind: 'string',
+  },
+  'identity.nox_benchmark_ranks': {
+    short: 'Nox 对标排名',
+    title: 'Nox 尽调：多维度对标百分位',
+    kind: 'string',
+  },
   'identity.nox_audience_authenticity': {
     short: 'Nox 受众真实度',
     title: 'Nox 尽调：受众真实性评分',
     kind: 'number',
+  },
+  'identity.nox_audience_authenticity_range': {
+    short: 'Nox 真实度区间',
+    title: 'Nox 尽调：受众真实度置信区间',
+    kind: 'string',
   },
   'identity.nox_audience_quality_score': {
     short: 'Nox 受众质量',
@@ -157,6 +218,46 @@ const FACT_DICT: Record<string, DictEntry> = {
     short: 'Nox 性别分布',
     title: 'Nox 尽调：受众性别占比',
     kind: 'string',
+  },
+  'identity.nox_audience_age_distribution': {
+    short: 'Nox 年龄分布',
+    title: 'Nox 尽调：受众年龄分布',
+    kind: 'string',
+  },
+  'identity.nox_audience_adults_split': {
+    short: 'Nox 成人儿童',
+    title: 'Nox 尽调：成人与儿童受众占比',
+    kind: 'string',
+  },
+  'identity.nox_audience_languages_top': {
+    short: 'Nox 受众语言',
+    title: 'Nox 尽调：受众语言分布',
+    kind: 'string',
+  },
+  'identity.nox_audience_types_top': {
+    short: 'Nox 受众类型',
+    title: 'Nox 尽调：真实/可疑/机器人等受众类型占比',
+    kind: 'string',
+  },
+  'identity.nox_audience_positive_pct': {
+    short: 'Nox 正面受众',
+    title: 'Nox 尽调：正面受众占比',
+    kind: 'number',
+  },
+  'identity.nox_audience_promo_attractiveness': {
+    short: 'Nox 推广吸引力',
+    title: 'Nox 尽调：推广吸引力评分',
+    kind: 'number',
+  },
+  'identity.nox_audience_promo_interested_pct': {
+    short: 'Nox 推广兴趣',
+    title: 'Nox 尽调：对推广感兴趣的受众占比',
+    kind: 'number',
+  },
+  'identity.nox_audience_promo_professionalism': {
+    short: 'Nox 推广专业度',
+    title: 'Nox 尽调：推广专业度评分',
+    kind: 'number',
   },
   'identity.nox_audience_interests_top': {
     short: 'Nox 受众兴趣',
@@ -174,6 +275,101 @@ const FACT_DICT: Record<string, DictEntry> = {
   'identity.nox_platform': { short: 'Nox 平台', title: 'Nox 尽调：主平台', kind: 'string' },
   'identity.nox_benchmark_rank': { short: 'Nox 排名', title: 'Nox 尽调：表现百分位/排名', kind: 'number' },
   'identity.nox_channel_url': { short: 'Nox 频道', title: 'Nox 尽调：频道 URL', kind: 'url' },
+  'identity.nox_content_tags_all': {
+    short: 'Nox 全部标签',
+    title: 'Nox 尽调：全部内容标签',
+    kind: 'string',
+  },
+  'identity.nox_content_format_counts': {
+    short: 'Nox 内容形式',
+    title: 'Nox 尽调：帖/Reels/图等内容数量',
+    kind: 'string',
+  },
+  'identity.nox_content_engagement_split': {
+    short: 'Nox 分形式互动',
+    title: 'Nox 尽调：按内容形式的平均互动',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_score': {
+    short: 'Nox 合作分',
+    title: 'Nox 尽调：合作倾向评分',
+    kind: 'number',
+  },
+  'identity.nox_cooperation_price_estimate': {
+    short: 'Nox 估价',
+    title: 'Nox 合作：预估报价区间',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_first_price_range': {
+    short: 'Nox 首次报价',
+    title: 'Nox 合作：首次报价区间',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_final_price_range': {
+    short: 'Nox 最终价',
+    title: 'Nox 合作：最终成交报价区间',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_avg_response_hours': {
+    short: 'Nox 响应时长',
+    title: 'Nox 合作：平均响应小时数',
+    kind: 'number',
+  },
+  'identity.nox_cooperation_contact_efficiency': {
+    short: 'Nox 联系效率',
+    title: 'Nox 合作：联系天数/轮次/合作周期',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_ad_video_stats': {
+    short: 'Nox 广告视频',
+    title: 'Nox 合作：广告视频占比与表现',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_brands_top': {
+    short: 'Nox 合作品牌',
+    title: 'Nox 合作：历史合作品牌',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_confirmation_pct': {
+    short: 'Nox 确认率',
+    title: 'Nox 合作：合作确认率',
+    kind: 'number',
+  },
+  'identity.nox_cooperation_start_contact_pct': {
+    short: 'Nox 联系率',
+    title: 'Nox 合作：发起联系转化率',
+    kind: 'number',
+  },
+  'identity.nox_cooperation_promotion_online_pct': {
+    short: 'Nox 上线率',
+    title: 'Nox 合作：推广内容上线率',
+    kind: 'number',
+  },
+  'identity.nox_cooperation_active_period': {
+    short: 'Nox 活跃时段',
+    title: 'Nox 合作：活跃时段 (UTC)',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_brand_video_engagement_rate': {
+    short: 'Nox 品牌互动',
+    title: 'Nox 合作：品牌合作视频互动率',
+    kind: 'number',
+  },
+  'identity.nox_cooperation_pros': {
+    short: 'Nox 合作优点',
+    title: 'Nox 尽调：合作优点列表',
+    kind: 'string',
+  },
+  'identity.nox_cooperation_cons': {
+    short: 'Nox 合作风险',
+    title: 'Nox 尽调：合作风险/缺点列表',
+    kind: 'string',
+  },
+  'identity.nox_dispute_types': {
+    short: 'Nox 争议类型',
+    title: 'Nox 尽调：历史争议类型',
+    kind: 'string',
+  },
   'identity.nox_dispute_count': { short: 'Nox 争议', title: 'Nox 合作争议次数', kind: 'number' },
   'identity.nox_cache_hit': { short: 'Nox 缓存命中', title: '上次尽调是否命中本月缓存', kind: 'bool' },
   'identity.nox_api_calls_last': { short: 'Nox API 次数', title: '上次尽调消耗的 API 次数', kind: 'number' },

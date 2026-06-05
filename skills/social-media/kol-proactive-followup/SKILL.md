@@ -23,7 +23,8 @@ Never sends mail or creates Gmail drafts directly.
 - `offer.outreach_sent=true` (initial touch already sent).
 - `identity.primary_email` present (or TEST `campaign_config.test_mode_to`).
 - Real `thread_id` on the draft envelope (from facts/timeline) so approve
-  can reply-all and quote the prior message.
+  creates a **reply draft in the existing thread** (Re: subject, Gmail
+  quote block) — never a standalone new email.
 
 ## Inputs
 

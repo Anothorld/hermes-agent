@@ -3,7 +3,16 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useEnvStore } from '../lib/store';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
+import { KolRegistryTable } from '../components/KolRegistryTable';
 import { REJECT_TAG_LABELS, type RejectTag } from '../constants/rejectTags';
+
+type KolFunnel = {
+  discovered_total: number;
+  prior_collab_excluded: number;
+  eligible_total: number;
+  initial_outreach_draft_count: number;
+  initial_outreach_reply_count: number;
+};
 
 type MetricsResp = {
   env: 'TEST' | 'LIVE' | string;
@@ -15,7 +24,10 @@ type MetricsResp = {
     manual_touchpoints_per_campaign: number;
     termination_rate: number;
     live_incident_rate: number;
+    kol_candidate_adoption_rate: number;
+    initial_outreach_reply_rate: number;
   };
+  kol_funnel: KolFunnel;
   top_rejection_tags: Array<{ tag: string; count: number }>;
 };
 
@@ -78,6 +90,32 @@ const METRIC_HELP: Array<{
     format: (m) => pct(m.live_incident_rate),
     hint: '生产环境异常或误发相关事件比例',
     improve: '偏高时：先在 TEST 验证流程，LIVE 审批务必逐条核对',
+  },
+];
+
+const KOL_FUNNEL_HELP: Array<{
+  key: 'kol_candidate_adoption_rate' | 'initial_outreach_reply_rate';
+  title: string;
+  format: (m: MetricsResp['metrics']) => string;
+  hint: (f: KolFunnel) => string;
+  improve: string;
+}> = [
+  {
+    key: 'kol_candidate_adoption_rate',
+    title: 'KOL候选采纳率',
+    format: (m) => pct(m.kol_candidate_adoption_rate),
+    hint: (f) =>
+      `${f.initial_outreach_draft_count} / ${f.eligible_total} 生成初邀草稿`
+      + `（发现 ${f.discovered_total}，排除历史合作 ${f.prior_collab_excluded}）`,
+    improve: '偏低时：检查 shortlist 通过率、邮箱发现率与初邀草稿审批是否积压',
+  },
+  {
+    key: 'initial_outreach_reply_rate',
+    title: '初邀回信率',
+    format: (m) => pct(m.initial_outreach_reply_rate),
+    hint: (f) =>
+      `${f.initial_outreach_reply_count} / ${f.initial_outreach_draft_count} 初邀后有回信`,
+    improve: '偏低时：核对邮件是否已发出、邮箱是否有效、产品与红人匹配度',
   },
 ];
 
@@ -146,6 +184,21 @@ export function GateMetricsPage() {
                 improve={def.improve}
               />
             ))}
+            {KOL_FUNNEL_HELP.map((def) => (
+              <MetricCard
+                key={def.key}
+                title={def.title}
+                value={def.format(data.metrics)}
+                hint={def.hint(data.kol_funnel ?? {
+                  discovered_total: 0,
+                  prior_collab_excluded: 0,
+                  eligible_total: 0,
+                  initial_outreach_draft_count: 0,
+                  initial_outreach_reply_count: 0,
+                })}
+                improve={def.improve}
+              />
+            ))}
           </div>
           <div className="rounded border border-slate-200 bg-white p-3">
             <div className="mb-2 text-sm font-medium text-slate-800">高频驳回标签</div>
@@ -199,6 +252,7 @@ export function GateMetricsPage() {
           </details>
         </>
       )}
+      <KolRegistryTable />
     </div>
   );
 }

@@ -17,6 +17,12 @@ import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
 import { CommunicationHistoryPanel } from '../components/CommunicationHistoryPanel';
 import { KolProfileDashboard } from '../components/KolProfileDashboard';
+import {
+  SOCIAL_LINKS,
+  readSocialUrl,
+  type SocialPlatformKey,
+} from '../components/KolSocialQuickLinks';
+import type { PriorOutreachTouch } from '../components/PriorOutreachTouchBadge';
 import { NoxDiligencePanel } from '../components/NoxDiligencePanel';
 import NoxQuotaBanner, {
   isNoxQuotaExhausted,
@@ -127,6 +133,7 @@ type IdentityResponse = {
   env: string;
   repeat_count?: number;
   last_outcome?: string | null;
+  prior_outreach_touch?: PriorOutreachTouch | null;
 };
 
 type EscalationLite = {
@@ -361,8 +368,6 @@ export function KolDetailPage() {
           </ul>
         </div>
       )}
-
-      <SocialLinksBar facts={factsVal} />
 
       <OutreachTimelinePanel facts={factsVal} />
 
@@ -1520,8 +1525,11 @@ function ProactiveFollowupPanel({
 
       {phase.kind === 'confirm_discard' && (
         <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
-          <div className="font-medium">已有审批通过的 Gmail 草稿，仍要生成新的跟进草稿？</div>
+          <div className="font-medium">Gmail 里还有一封已审批、未发送的回信草稿，仍要生成跟进草稿？</div>
           <p className="mt-1">
+            待审批页只显示 <span className="font-mono">pending</span> 条目；已审批草稿在
+            {' '}<a href={GMAIL_DRAFTS_URL} target="_blank" rel="noreferrer noopener"
+              className="underline-offset-2 hover:underline">Gmail 草稿箱</a>。
             旧草稿
             {phase.previousDraftId ? (
               <> (<span className="font-mono">{phase.previousDraftId}</span>)</>
@@ -2273,7 +2281,7 @@ function EmailPanel({
 }
 
 // ---------------------------------------------------------------------------
-// 社交主页快速跳转 — SocialLinksBar + SocialLinksPanel
+// 社交主页 — KolSocialQuickLinks（顶栏）+ SocialLinksPanel（补充/发现）
 // ---------------------------------------------------------------------------
 //
 // 操作员在审批/起草/追单各阶段经常想跳到 KOL 的真实主页看动态（"她还在
@@ -2286,79 +2294,9 @@ function EmailPanel({
 // fact 渲染为链接，但 ConfirmedFactsPanel 在折叠区域，操作员看一眼上方
 // 即可一键跳走的体验需要这个独立 bar。
 //
-// SocialLinksBar：紧凑图标按钮组。没有任何 URL 时不渲染（不留空栏）。
+// 快速跳转已并入 KolProfileDashboard 顶栏（KolSocialQuickLinks）。
 // SocialLinksPanel：常驻折叠面板（与 EmailPanel 的"邮箱缺失"区别在于
 // 社交链接永远不存在"完整"状态，操作员随时可能想补充一个）。
-
-type SocialPlatformKey =
-  | 'identity.instagram_profile_url'
-  | 'identity.tiktok_profile_url'
-  | 'identity.youtube_profile_url'
-  | 'identity.facebook_profile_url'
-  | 'identity.twitter_profile_url'
-  | 'identity.threads_profile_url'
-  | 'identity.linktree_url'
-  | 'identity.personal_site_url';
-
-// 同时是 SocialLinksBar 的渲染顺序与 SocialLinksPanel 下拉框的展示顺序。
-// IG 排第一是因为大部分 KOL 都是 IG 来源；个人站排最后是因为它最罕见。
-const SOCIAL_LINKS: ReadonlyArray<{
-  key: SocialPlatformKey;
-  label: string;
-  shortLabel: string;
-}> = [
-  { key: 'identity.instagram_profile_url', label: 'Instagram', shortLabel: 'IG' },
-  { key: 'identity.tiktok_profile_url', label: 'TikTok', shortLabel: 'TikTok' },
-  { key: 'identity.youtube_profile_url', label: 'YouTube', shortLabel: 'YT' },
-  { key: 'identity.facebook_profile_url', label: 'Facebook', shortLabel: 'FB' },
-  { key: 'identity.twitter_profile_url', label: 'X', shortLabel: 'X' },
-  { key: 'identity.threads_profile_url', label: 'Threads', shortLabel: 'Threads' },
-  { key: 'identity.linktree_url', label: 'Link-in-bio', shortLabel: 'bio' },
-  { key: 'identity.personal_site_url', label: '个人站', shortLabel: 'site' },
-];
-
-function readSocialUrl(facts: Record<string, unknown>, key: SocialPlatformKey): string | null {
-  const v = facts[key];
-  if (typeof v !== 'string') return null;
-  const trimmed = v.trim();
-  if (!trimmed) return null;
-  // 客户端轻量校验：拒绝渲染明显不是 URL 的字段值（防止脏数据生成
-  // 点不动 / 跳错地方的按钮）。后端 set_social_link 已经在写入前做了
-  // 完整校验，这里只是兜底。
-  if (!/^https?:\/\//i.test(trimmed)) return null;
-  return trimmed;
-}
-
-function SocialLinksBar({ facts }: { facts: Record<string, unknown> }) {
-  const items = SOCIAL_LINKS
-    .map(({ key, label, shortLabel }) => {
-      const url = readSocialUrl(facts, key);
-      return url ? { key, label, shortLabel, url } : null;
-    })
-    .filter((x): x is { key: SocialPlatformKey; label: string; shortLabel: string; url: string } => !!x);
-
-  if (items.length === 0) return null;
-
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 rounded border border-slate-200 bg-white px-2 py-1.5">
-      <span className="text-[10px] uppercase tracking-wide text-slate-500">
-        快速跳转
-      </span>
-      {items.map((item) => (
-        <a
-          key={item.key}
-          href={item.url}
-          target="_blank"
-          rel="noreferrer noopener"
-          title={`${item.label} · ${item.url}`}
-          className="rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-800 hover:border-sky-400 hover:bg-sky-100"
-        >
-          {item.shortLabel}
-        </a>
-      ))}
-    </div>
-  );
-}
 
 // SocialLinksPanel 状态机镜像 EmailPanel：discover_running 持续 sessionStorage
 // 冷却 + 一秒一次的 tick 让 "已等待 Xs" 走起来。后端 dedup TTL 是 300s，

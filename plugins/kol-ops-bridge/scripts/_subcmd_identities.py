@@ -65,6 +65,21 @@ def cmd_list_outreach_cooldown_handles(args: argparse.Namespace) -> None:
     print_json(data)
 
 
+def cmd_list_discovery_skip_handles(args: argparse.Namespace) -> None:
+    data = client_from_args(args).request(
+        "GET",
+        "/discovery-skip-handles",
+        params={"env": args.env, "limit": args.limit},
+    )
+    if args.plain:
+        for row in data.get("items", []):
+            handle = row.get("handle")
+            if handle:
+                print(handle)
+        return
+    print_json(data)
+
+
 def cmd_batch_outreach_touch(args: argparse.Namespace) -> None:
     ids = [int(x) for x in args.identity_ids.split(",") if x.strip().isdigit()]
     print_json(client_from_args(args).request(
@@ -273,6 +288,18 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.set_defaults(func=cmd_list_outreach_cooldown_handles)
 
     p = sub.add_parser(
+        "list-discovery-skip-handles",
+        help=("GET /discovery-skip-handles — handles blocked from discovery "
+              "(历史合作/已合作/主动叫停/竞品归档结论)."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--limit", type=int, default=10_000)
+    p.add_argument("--plain", action="store_true",
+                   help="Print one handle per line (for brief exclusion sets).")
+    p.set_defaults(func=cmd_list_discovery_skip_handles)
+
+    p = sub.add_parser(
         "batch-outreach-touch",
         help="GET /identities/outreach-touch — prior outreach timestamps for IDs.",
     )
@@ -292,8 +319,8 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p = sub.add_parser(
         "list-relationships",
         help=("GET /relationships — list KOL relationship rows (archived KOLs + "
-              "outcome filters). Used by the discovery skills to fetch the "
-              "operator-maintained do-not-contact set (e.g. --last-outcome competitor)."),
+              "outcome filters). Prefer list-discovery-skip-handles for the "
+              "discovery exclusion set."),
     )
     add_common_args(p)
     add_env_arg(p, required=False)

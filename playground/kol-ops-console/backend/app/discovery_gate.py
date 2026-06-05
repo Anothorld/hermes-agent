@@ -28,6 +28,7 @@ from typing import Any
 
 from .audit import write_audit
 from .bridge_client import BridgeClient, BridgeError
+from .nox_gate import materialize_discovery_nox_config
 from .bridge_runtime import ensure_gateway_bridge_key
 from .campaign_locks import campaign_lock
 from .gateway_client import GatewayClient, GatewayError
@@ -87,6 +88,10 @@ REDISCOVERY_INSTRUCTIONS = (
     "   `browser_snapshot`, `browser_get_images`, `browser_click`,\n"
     "   `browser_type`, `vision_analyze`. Do NOT use the\n"
     "   `mcp_chrome_devtools_*` family.\n"
+    "   When the brief includes `nox_discovery_enabled: true` and\n"
+    "   `campaign_config_file:`, run the Nox audience screen per the\n"
+    "   discovery skill (after profile pre-check, before Reel deep dive).\n"
+    "   Use `--gate discovery_qualify --dimensions audience` only.\n"
     "\n"
     "   ITERATION CONTRACT — HARD QUANTITY FLOOR (read carefully):\n"
     "   - The goal is to PERSIST at least `additional_target_count` NEW\n"
@@ -185,6 +190,7 @@ def _compose_rediscover_brief(
     excluded_handles: list[str],
     test_mode_to: str | None,
     prior_diagnostics: list[dict[str, Any]] | None = None,
+    nox_cfg_path: str = "",
 ) -> str:
     """Brief for any rediscover run (operator-initiated or auto-retry).
 
@@ -302,6 +308,12 @@ def _compose_rediscover_brief(
     selling_points = (product["selling_points"] or "").strip()
     if selling_points:
         lines.extend(["", "# selling_points", selling_points])
+    if nox_cfg_path:
+        lines.extend([
+            "",
+            "nox_discovery_enabled: true",
+            f"campaign_config_file: {nox_cfg_path}",
+        ])
     return "\n".join(lines)
 
 
@@ -697,6 +709,9 @@ async def _trigger_rediscover_internal(
         conn, campaign_id=campaign_id, env=env
     )
 
+    nox_cfg_path = await materialize_discovery_nox_config(
+        bridge, campaign_id, env=env
+    )
     brief_text = _compose_rediscover_brief(
         campaign_id=campaign_id,
         env=env,
@@ -705,6 +720,7 @@ async def _trigger_rediscover_internal(
         excluded_handles=excluded_handles,
         test_mode_to=test_mode_to,
         prior_diagnostics=prior_diagnostics,
+        nox_cfg_path=nox_cfg_path,
     )
 
     ensure_gateway_bridge_key()

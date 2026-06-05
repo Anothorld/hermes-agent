@@ -4,10 +4,10 @@
 // string), but the console centralises the known values here so the archive
 // modal, the archive page filter, and the kanban tag styling stay in sync.
 //
-// Axis: most values describe how a campaign-level engagement ended; the
-// `do-not-contact` group (currently just `competitor`) describes the KOL
-// itself as unsuitable across all future campaigns. Discovery skills should
-// hard-skip handles whose `last_outcome` is in DO_NOT_CONTACT_OUTCOMES.
+// Axis: most values describe how a campaign-level engagement ended.
+// ``DO_NOT_CONTACT_OUTCOMES`` lists archived outcomes that block re-discovery
+// (see kol-ops-bridge ``discovery_skip.py``); it is not the same as the
+// 曾触达列表 allowlist used only for touch-count metrics.
 
 export type KolOutcome =
   | 'success'
@@ -49,7 +49,7 @@ export const OUTCOMES: OutcomeDef[] = [
     label: '主动叫停',
     manual: true,
     tone: 'amber',
-    hint: '我方主动终止本次合作',
+    hint: '我方主动终止本次合作；发现流程会跳过',
   },
   {
     value: 'incomplete',
@@ -69,20 +69,26 @@ export const OUTCOMES: OutcomeDef[] = [
     label: '已合作完成',
     manual: false,
     tone: 'emerald',
+    hint: '发现流程会跳过',
   },
   {
     value: 'legacy_collab',
     label: '历史合作',
     manual: false,
     tone: 'slate',
+    hint: '发现流程会跳过',
   },
 ];
 
 export const MANUAL_OUTCOMES = OUTCOMES.filter((o) => o.manual);
 
-// Outcomes that mean "never contact this identity again", checked by the
-// discovery skills before recommending a handle.
-export const DO_NOT_CONTACT_OUTCOMES: KolOutcome[] = ['competitor'];
+// Outcomes that block re-discovery; mirrored in kol-ops-bridge/discovery_skip.py.
+export const DO_NOT_CONTACT_OUTCOMES: KolOutcome[] = [
+  'competitor',
+  'success',
+  'aborted',
+  'legacy_collab',
+];
 
 export function outcomeDef(value: string | null | undefined): OutcomeDef | null {
   if (!value) return null;

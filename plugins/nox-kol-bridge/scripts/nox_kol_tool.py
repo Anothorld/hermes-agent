@@ -94,7 +94,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     qs.set_defaults(func=_cmd_quota_snapshot)
 
-    dp = sub.add_parser("diligence-pack", help="Gate A: profile+audience+content bundle")
+    dp = sub.add_parser(
+        "diligence-pack",
+        help="Gate A: profile+audience+content+cooperation bundle",
+    )
     _add_common(dp)
     _add_audit(dp)
     dp.add_argument("--gate", required=True)
@@ -104,10 +107,14 @@ def _build_parser() -> argparse.ArgumentParser:
     dp.add_argument("--channel-id")
     dp.add_argument(
         "--dimensions",
-        default="profile,audience,content",
-        help="Comma-separated dimensions",
+        default="profile,audience,content,cooperation",
+        help="Comma-separated dimensions (Gate A default includes cooperation)",
     )
-    dp.add_argument("--include-cooperation", action="store_true")
+    dp.add_argument(
+        "--include-cooperation",
+        action="store_true",
+        help="Deprecated: cooperation is in --dimensions by default",
+    )
     dp.set_defaults(func=_cmd_diligence_pack)
 
     ct = sub.add_parser("contacts", help="Gate B: creator contacts")

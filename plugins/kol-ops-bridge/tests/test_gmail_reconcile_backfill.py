@@ -20,6 +20,7 @@ def _seed_sent_approved_draft(cal_mod, *, identity_id: int, campaign_id: str, en
                     "subject": "Test",
                     "to": "kol@example.com",
                     "body": "Agent draft paragraph for learning.",
+                    "thread_id": "thread-backfill-1",
                 },
                 "primary_goal": "outreach",
                 "primary_lane": "commerce",

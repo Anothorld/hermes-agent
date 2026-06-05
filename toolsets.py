@@ -293,8 +293,79 @@ TOOLSETS = {
     },
 
     "feishu_doc": {
-        "description": "Read Feishu/Lark document content",
-        "tools": ["feishu_doc_read"],
+        "description": "Feishu/Lark document and spreadsheet operations (read, create, write, update, list blocks/sheets)",
+        "tools": [
+            "feishu_doc_read", "feishu_doc_create", "feishu_doc_write",
+            "feishu_doc_update", "feishu_doc_list_blocks",
+            "feishu_sheet_create", "feishu_sheet_write", "feishu_sheet_read",
+            "feishu_sheet_add_sheet", "feishu_sheet_list_sheets",
+        ],
+        "includes": []
+    },
+
+    "feishu_bitable": {
+        "description": "Feishu/Lark Bitable (多维表格) operations — manage tables and records",
+        "tools": [
+            "feishu_bitable_list_tables",
+            "feishu_bitable_list_records",
+            "feishu_bitable_create_record",
+            "feishu_bitable_update_record",
+            "feishu_bitable_delete_record",
+        ],
+        "includes": []
+    },
+
+    "feishu_wiki": {
+        "description": "Feishu/Lark Wiki (知识库) operations — manage spaces and nodes",
+        "tools": [
+            "feishu_wiki_list_spaces",
+            "feishu_wiki_create_node",
+            "feishu_wiki_get_node",
+            "feishu_wiki_list_nodes",
+        ],
+        "includes": []
+    },
+
+    "feishu_calendar": {
+        "description": "Feishu/Lark Calendar (日历) operations — manage events and free/busy",
+        "tools": [
+            "feishu_calendar_list",
+            "feishu_calendar_create_event",
+            "feishu_calendar_list_events",
+            "feishu_calendar_freebusy",
+        ],
+        "includes": []
+    },
+
+    "feishu_task": {
+        "description": "Feishu/Lark Task (任务) operations — create, list, update, complete tasks",
+        "tools": [
+            "feishu_task_create",
+            "feishu_task_list",
+            "feishu_task_update",
+            "feishu_task_complete",
+        ],
+        "includes": []
+    },
+
+    "feishu_chat": {
+        "description": "Feishu/Lark Chat (消息/群组) operations — create groups, send messages",
+        "tools": [
+            "feishu_chat_create",
+            "feishu_chat_send_message",
+            "feishu_chat_update",
+            "feishu_chat_list",
+        ],
+        "includes": []
+    },
+
+    "feishu_approval": {
+        "description": "Feishu/Lark Approval (审批) operations — create and query approvals",
+        "tools": [
+            "feishu_approval_create",
+            "feishu_approval_list",
+            "feishu_approval_get",
+        ],
         "includes": []
     },
 
@@ -480,6 +551,39 @@ TOOLSETS = {
         "description": "Feishu/Lark bot toolset - enterprise messaging via Feishu/Lark (full access)",
         "tools": _HERMES_CORE_TOOLS + [
             "feishu_doc_read",
+            "feishu_doc_create",
+            "feishu_doc_write",
+            "feishu_doc_update",
+            "feishu_doc_list_blocks",
+            "feishu_sheet_create",
+            "feishu_sheet_write",
+            "feishu_sheet_read",
+            "feishu_sheet_add_sheet",
+            "feishu_sheet_list_sheets",
+            "feishu_bitable_list_tables",
+            "feishu_bitable_list_records",
+            "feishu_bitable_create_record",
+            "feishu_bitable_update_record",
+            "feishu_bitable_delete_record",
+            "feishu_wiki_list_spaces",
+            "feishu_wiki_create_node",
+            "feishu_wiki_get_node",
+            "feishu_wiki_list_nodes",
+            "feishu_calendar_list",
+            "feishu_calendar_create_event",
+            "feishu_calendar_list_events",
+            "feishu_calendar_freebusy",
+            "feishu_task_create",
+            "feishu_task_list",
+            "feishu_task_update",
+            "feishu_task_complete",
+            "feishu_chat_create",
+            "feishu_chat_send_message",
+            "feishu_chat_update",
+            "feishu_chat_list",
+            "feishu_approval_create",
+            "feishu_approval_list",
+            "feishu_approval_get",
             "feishu_drive_list_comments",
             "feishu_drive_list_comment_replies",
             "feishu_drive_reply_comment",

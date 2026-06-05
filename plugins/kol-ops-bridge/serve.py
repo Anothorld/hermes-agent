@@ -91,6 +91,27 @@ def create_app() -> FastAPI:
     return app
 
 
+def _load_env_file(path: Path) -> None:
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip("'\"")
+        if key and not os.environ.get(key):
+            os.environ[key] = val
+
+
+def _hydrate_env() -> None:
+    """Load Hermes + plugin .env so learning LLM can resolve credentials."""
+    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
+    _load_env_file(hermes_home / ".env")
+    _load_env_file(_PLUGIN_ROOT / ".env")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="kol-ops-bridge")
     p.add_argument("--host", default="127.0.0.1")
@@ -100,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
+    _hydrate_env()
     logging.basicConfig(level=args.log_level.upper())
     app = create_app()
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)

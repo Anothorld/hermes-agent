@@ -334,10 +334,15 @@ message ids mistaken for thread ids are rejected or corrected so
 **Initial cold/re-engagement outreach** (`kol-cold-outreach`, anchors
 `draft:outreach_{campaign}_{identity}` / `outreach_{campaign}_{identity}`) skips
 thread attach — Gmail creates a new standalone draft with no `threadId`.
-Quoted history uses Gmail's `gmail_quote` / `blockquote type="cite"` so the
-web UI shows the collapsible **…** block (not a fully expanded plain-text
-``>`` thread). Only the **latest inbound message body** is quoted — nested
-``On … wrote:`` blocks from the KOL's email are stripped first (`gmail_reply_envelope.py`).
+**Proactive operator follow-up** (`kol-proactive-followup`, `primary_goal=proactive_followup`)
+always attaches to the existing thread: `persist-reply-draft` replaces synthetic
+thread anchors with `offer.gmail_sent_thread_id` / timeline ids; approve sets
+`threadId`, `In-Reply-To` (thread tail when source is synthetic), and Gmail quote.
+Quoted history mirrors **Gmail web Reply**: parent MIME HTML (when available) is
+embedded inside ``gmail_extra`` + ``gmail_quote`` + ``blockquote type="cite"`` —
+the same wrapper Gmail-sent replies use for the collapsible ``…`` control.
+``In-Reply-To`` / ``References`` target the inbound Gmail message id via
+``--reply-to-message-id`` on draft create.
 
 ```bash
 # Pricing: returns {mode_decided, target_number, lower/upper_bound,

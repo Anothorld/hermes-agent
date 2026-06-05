@@ -31,6 +31,7 @@ from .routers import (
     goals,
     kols,
     learning,
+    link_preview,
     policies,
     products,
     reply_watcher,
@@ -154,6 +155,7 @@ def create_app() -> FastAPI:
     app.include_router(escalations.router)
     app.include_router(approvals.router)
     app.include_router(learning.router)
+    app.include_router(link_preview.router)
     app.include_router(gateway_approvals.router)
     app.include_router(policies.router)
     app.include_router(reply_watcher.router)

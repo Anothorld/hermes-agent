@@ -47,19 +47,44 @@ class _FakeDraftResult:
     thread_id: str
 
 
-class _FakeGmailClient:
-    """Records create_draft kwargs and returns a deterministic result."""
+_THREAD_A = "19e81ff6def3b65f01"
+_THREAD_B = "19e81ff6def3b65f02"
+_THREAD_C = "19e81ff6def3b65f03"
+_MSG_A = "19e84b2d4cf91067"
+_MSG_B = "19e84b2d4cf91068"
+_MSG_C = "19e84b2d4cf91069"
 
-    last_kwargs: dict[str, Any] = {}
 
-    def is_available(self) -> bool:  # noqa: D401 — bridge contract
-        return True
+def _make_fake_gmail_client(bridge_pkg) -> type:
+    GmailUnavailable = bridge_pkg.gmail_client.GmailUnavailable
 
-    def create_draft(self, **kwargs: Any) -> _FakeDraftResult:
-        _FakeGmailClient.last_kwargs = dict(kwargs)
-        return _FakeDraftResult(
-            draft_id="DRAFT-1", message_id="MSG-1", thread_id="THREAD-1",
-        )
+    class _FakeGmailClient:
+        """Records create_draft kwargs and returns a deterministic result."""
+
+        last_kwargs: dict[str, Any] = {}
+        known_threads: set[str] = {_THREAD_A, _THREAD_B, _THREAD_C}
+
+        def is_available(self) -> bool:  # noqa: D401 — bridge contract
+            return True
+
+        def get_thread(self, thread_id: str) -> list[dict[str, str]]:
+            if thread_id in self.known_threads:
+                return [{"id": "tail", "from": "", "date": "", "body": ""}]
+            return []
+
+        def get_message(self, message_id: str) -> Any:
+            raise GmailUnavailable("fake client")
+
+        def get_profile_email(self) -> str:
+            return "ops@brand.com"
+
+        def create_draft(self, **kwargs: Any) -> _FakeDraftResult:
+            _FakeGmailClient.last_kwargs = dict(kwargs)
+            return _FakeDraftResult(
+                draft_id="DRAFT-1", message_id="MSG-1", thread_id="THREAD-1",
+            )
+
+    return _FakeGmailClient
 
 
 def _seed_inbound(cal_db, *, identity_id: int, campaign_id: str,
@@ -80,26 +105,27 @@ def _seed_inbound(cal_db, *, identity_id: int, campaign_id: str,
     )
 
 
-def test_envelope_resolved_from_inbound_event(cal_db, monkeypatch):
+def test_envelope_resolved_from_inbound_event(cal_db, bridge_pkg, monkeypatch):
     plugin_api = _load_plugin_api()
+    fake_client = _make_fake_gmail_client(bridge_pkg)
     iid = cal_db.upsert_identity(primary_handle="t1", platform="instagram")
     cal_db.upsert_campaign_config(campaign_id="C1", env="TEST",
                                   test_mode_to="t@x.com")
     _seed_inbound(
         cal_db, identity_id=iid, campaign_id="C1",
-        message_id="M1", thread_id="TH1",
+        message_id=_MSG_A, thread_id=_THREAD_A,
         from_addr="kol@x.com", subject="Re: budget",
     )
-    monkeypatch.setattr(plugin_api, "GmailClient", _FakeGmailClient)
+    monkeypatch.setattr(plugin_api, "GmailClient", fake_client)
 
     approval_value = {
         "decision": "pending",
-        "source_message_id": "M1",
+        "source_message_id": _MSG_A,
         "child_skill": "kol-compensation-negotiator",
         "draft": {
             # sparse — subject/to missing, body+thread_id only
             "body": "Hi alice, the cap is $1500.",
-            "thread_id": "TH1",
+            "thread_id": _THREAD_A,
         },
     }
     out = plugin_api._create_gmail_draft_for_reply_approval(
@@ -107,48 +133,50 @@ def test_envelope_resolved_from_inbound_event(cal_db, monkeypatch):
         approval_value=approval_value, env="TEST",
     )
     assert out["draft_id"] == "DRAFT-1"
-    seen = _FakeGmailClient.last_kwargs
+    seen = fake_client.last_kwargs
     assert seen["to"] == "kol@x.com"
     assert seen["subject"] == "Re: budget"
     assert seen["body"] == "Hi alice, the cap is $1500."
 
 
-def test_envelope_resolved_subject_prefixed_when_missing_re(cal_db, monkeypatch):
+def test_envelope_resolved_subject_prefixed_when_missing_re(cal_db, bridge_pkg, monkeypatch):
     plugin_api = _load_plugin_api()
+    fake_client = _make_fake_gmail_client(bridge_pkg)
     iid = cal_db.upsert_identity(primary_handle="t2", platform="instagram")
     cal_db.upsert_campaign_config(campaign_id="C2", env="TEST",
                                   test_mode_to="t@x.com")
     _seed_inbound(
         cal_db, identity_id=iid, campaign_id="C2",
-        message_id="M2", thread_id="TH2",
+        message_id=_MSG_B, thread_id=_THREAD_B,
         from_addr="kol@y.com", subject="budget",  # no Re: prefix
     )
-    monkeypatch.setattr(plugin_api, "GmailClient", _FakeGmailClient)
+    monkeypatch.setattr(plugin_api, "GmailClient", fake_client)
 
     approval_value = {
         "decision": "pending",
-        "source_message_id": "M2",
-        "draft": {"body": "ok.", "thread_id": "TH2"},
+        "source_message_id": _MSG_B,
+        "draft": {"body": "ok.", "thread_id": _THREAD_B},
     }
     plugin_api._create_gmail_draft_for_reply_approval(
         identity_id=iid, campaign_id="C2",
         approval_value=approval_value, env="TEST",
     )
-    assert _FakeGmailClient.last_kwargs["subject"] == "Re: budget"
+    assert fake_client.last_kwargs["subject"] == "Re: budget"
 
 
-def test_no_inbound_event_returns_400_with_named_fields(cal_db, monkeypatch):
+def test_no_inbound_event_returns_400_with_named_fields(cal_db, bridge_pkg, monkeypatch):
     plugin_api = _load_plugin_api()
+    fake_client = _make_fake_gmail_client(bridge_pkg)
     iid = cal_db.upsert_identity(primary_handle="t3", platform="instagram")
     cal_db.upsert_campaign_config(campaign_id="C3", env="TEST",
                                   test_mode_to="t@x.com")
     # No kol_inbound_reply event seeded — resolver returns (None, None).
-    monkeypatch.setattr(plugin_api, "GmailClient", _FakeGmailClient)
+    monkeypatch.setattr(plugin_api, "GmailClient", fake_client)
 
     approval_value = {
         "decision": "pending",
-        "source_message_id": "M3",
-        "draft": {"body": "hi.", "thread_id": "TH3"},
+        "source_message_id": _MSG_C,
+        "draft": {"body": "hi.", "thread_id": _THREAD_C},
     }
     with pytest.raises(HTTPException) as exc_info:
         plugin_api._create_gmail_draft_for_reply_approval(

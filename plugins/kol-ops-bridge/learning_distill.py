@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 from statistics import mean
@@ -131,6 +133,37 @@ def list_consumed_edit_event_ids(conn, *, env: str) -> set[int]:
     return consumed
 
 
+def list_edit_operator_ids(conn, *, env: str, limit: int = 500) -> list[int]:
+    """Distinct ``operator_user_id`` among unconsumed edited events (newest-first).
+
+    Used by the ``user_style`` job to propose per operator instead of relying on
+    a single ``KOL_LEARNING_USER_STYLE_OWNER_ID``.
+    """
+    events = learning_store.list_learning_events(
+        conn, env=env, event_types=("draft_edit_learning",), limit=limit,
+    )
+    consumed = list_consumed_edit_event_ids(conn, env=env)
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for ev in events:
+        if int(ev.get("id") or 0) in consumed:
+            continue
+        payload = ev.get("payload") or {}
+        if not payload.get("was_edited"):
+            continue
+        raw = payload.get("operator_user_id")
+        if raw is None:
+            continue
+        try:
+            oid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if oid > 0 and oid not in seen:
+            seen.add(oid)
+            ordered.append(oid)
+    return ordered
+
+
 def find_pending_style_proposal(
     conn,
     *,
@@ -169,6 +202,27 @@ def find_pending_style_proposal(
             "captured_at": row["captured_at"],
         }
     return None
+
+
+def pending_style_reserved_event_ids(
+    conn,
+    *,
+    env: str,
+) -> set[int]:
+    """Event ids tied to pending (not yet approved) style-learning proposals.
+
+    These edits are already in a distill batch awaiting approval; they should
+    not count toward the next batch progress bar.
+    """
+    reserved: set[int] = set()
+    for row in list_pending_style_proposals(conn, env=env):
+        val = row.get("value") or {}
+        for raw in val.get("source_event_ids") or []:
+            try:
+                reserved.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+    return reserved
 
 
 def list_pending_style_proposals(
@@ -284,25 +338,114 @@ def aggregate_strategy_markdown(events: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _current_policy_baseline(
+    conn,
+    *,
+    style_scope: str,
+    env: str,
+    owner_user_id: Optional[int],
+    max_chars: int = 2000,
+) -> tuple[str, str]:
+    """Return (current_style_md, current_strategy_md) trimmed for the distill prompt."""
+    style_env = env if style_scope in pol.ENV_SCOPED_POLICIES else None
+    try:
+        style_row = pol.get_policy(
+            conn, scope=style_scope, owner_user_id=owner_user_id, env=style_env,
+        )
+    except Exception:
+        style_row = None
+    try:
+        strat_row = pol.get_policy(
+            conn, scope=learning_store.REPLY_STRATEGY_SCOPE, env=env,
+        )
+    except Exception:
+        strat_row = None
+    style_md = ((style_row or {}).get("content_md") or "").strip()[:max_chars]
+    strat_md = ((strat_row or {}).get("content_md") or "").strip()[:max_chars]
+    return style_md, strat_md
+
+
+def _recent_rejection_feedback_block(
+    conn,
+    *,
+    env: str,
+    scope: str,
+    owner_user_id: Optional[int],
+    limit: int = 5,
+) -> str:
+    """Summarize recent operator rejections of style proposals for the prompt.
+
+    Closes the feedback loop: the model is told what operators previously
+    rejected (and why) so it avoids repeating the same suggestion.
+    """
+    try:
+        events = learning_store.list_learning_events(
+            conn, env=env, event_types=("style_proposal_rejected",), limit=limit,
+        )
+    except Exception:
+        return ""
+    lines: list[str] = []
+    for ev in events:
+        payload = ev.get("payload") or {}
+        if str(payload.get("scope") or "") not in ("", scope):
+            continue
+        if scope == "user_style" and owner_user_id is not None:
+            ev_owner = payload.get("owner_user_id")
+            if ev_owner is not None and int(ev_owner) != int(owner_user_id):
+                continue
+        note = str(payload.get("note") or "").strip()
+        tags = payload.get("tags") or []
+        if note or tags:
+            tag_str = f" [{', '.join(tags)}]" if tags else ""
+            lines.append(f"- {note or '(no note)'}{tag_str}")
+    if not lines:
+        return ""
+    return (
+        "PREVIOUSLY REJECTED SUGGESTIONS (do NOT repeat these; address the reason):\n"
+        + "\n".join(lines[:limit])
+        + "\n\n"
+    )
+
+
 def distill_edit_learning_llm(
     conn,
     events: list[dict[str, Any]],
     *,
     style_scope: str,
     env: str,
+    owner_user_id: Optional[int] = None,
 ) -> tuple[str, str, bool]:
-    """LLM-distill style + strategy markdown; fallback to deterministic aggregates."""
+    """LLM-distill style + strategy markdown; fallback to deterministic aggregates.
+
+    The prompt includes the CURRENT approved guidelines as a baseline and asks
+    the model for INCREMENTAL revisions (delta), so each approved batch refines
+    rather than rewrites the policy — the system converges on operator intent.
+    """
     edited = _edited_events(events)
     samples = [
         learning_store.build_style_learning_sample(conn, ev, env=env)
         for ev in edited
     ]
     batch_n = len(samples)
+    cur_style_md, cur_strat_md = _current_policy_baseline(
+        conn, style_scope=style_scope, env=env, owner_user_id=owner_user_id,
+    )
+    baseline_block = (
+        "CURRENT APPROVED GUIDELINES (baseline — refine these, do NOT restate verbatim):\n\n"
+        f"### Current {style_scope}\n{cur_style_md or '(none yet)'}\n\n"
+        f"### Current reply_strategy\n{cur_strat_md or '(none yet)'}\n\n"
+    )
+    rejected_block = _recent_rejection_feedback_block(
+        conn, env=env, scope=style_scope, owner_user_id=owner_user_id,
+    )
     prompt = (
         "You analyze operator edits to KOL email drafts (agent draft vs Gmail sent body).\n"
         f"Style target scope: {style_scope} (env={env}). Batch size: {batch_n} edits.\n"
         "Each sample includes `edit`, `current_facts`, and `conversation_timeline`.\n\n"
-        "Produce TWO markdown sections for operator approval (output ONLY markdown):\n\n"
+        f"{baseline_block}"
+        f"{rejected_block}"
+        "Produce TWO markdown sections of INCREMENTAL revisions for operator approval "
+        "(output ONLY markdown):\n\n"
         f"{_STYLE_SECTION_HEADING}\n"
         "- Subsections per child_skill.\n"
         "- 3–8 bullets: tone, phrasing, length, structure, what NOT to say.\n\n"
@@ -311,32 +454,30 @@ def distill_edit_learning_llm(
         "- 3–8 bullets: sequencing, when to ask/avoid price, barter vs paid, fact order,\n"
         "  escalation triggers implied by edits — tactical playbook, not tone.\n\n"
         "Rules:\n"
+        "- Output only the DELTA vs the baseline: new rules, adjustments, or removals.\n"
+        "- Do NOT repeat baseline rules that the samples leave unchanged.\n"
+        "- If a sample CONTRADICTS a baseline rule, propose an explicit adjustment and "
+        "prefix the bullet with `ADJUST:` (or `REMOVE:` when the rule should be dropped).\n"
         "- Every bullet must cite evidence from diffs and/or thread/facts.\n"
         "- Do NOT invent rules not supported by samples.\n"
-        "- End with `### Context notes` (batch size, distinct campaigns).\n\n"
+        "- End with `### Context notes` (batch size, distinct campaigns, what changed vs baseline).\n\n"
         f"SAMPLES_JSON:\n{json.dumps(samples, indent=2, ensure_ascii=False)}"
     )
     try:
         raw = learning_llm.invoke_learning_llm(prompt)
-        md = learning_llm.strip_markdown_fences(raw).strip()
-        if not md:
-            raise RuntimeError("empty LLM markdown")
-        style_md, strategy_md = split_style_and_strategy_markdown(md)
-        if not style_md and not strategy_md:
-            style_md = md
-        return style_md, strategy_md, True
-    except Exception:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "LLM edit-learning distill failed; using deterministic aggregate",
-            exc_info=True,
-        )
-        return (
-            aggregate_edit_markdown(edited),
-            aggregate_strategy_markdown(edited),
-            False,
-        )
+    except learning_llm.LearningLlmError:
+        raise
+    except Exception as exc:
+        raise learning_llm.LearningLlmError(
+            f"LLM edit-learning distill failed: {exc}",
+        ) from exc
+    md = learning_llm.strip_markdown_fences(raw).strip()
+    if not md:
+        raise learning_llm.LearningLlmError("LLM returned empty markdown for edit learning")
+    style_md, strategy_md = split_style_and_strategy_markdown(md)
+    if not style_md and not strategy_md:
+        style_md = md
+    return style_md, strategy_md, True
 
 
 def distill_edit_style_llm(
@@ -356,30 +497,531 @@ def distill_edit_style_llm(
     return combined, llm_used
 
 
-def merge_strategy_policy_content(current_md: str, proposed_section: str) -> str:
-    """Append approved strategy section (goal-oriented, env-scoped policy)."""
+def _merge_mode() -> str:
+    """``replace_section`` (default) | ``append`` | ``llm_compress``.
+
+    - replace_section: keep preamble before the marker; replace the approved block.
+    - append: legacy — accumulate approved deltas under the marker.
+    - llm_compress: consolidate baseline + delta via a second LLM pass.
+    """
+    raw = os.environ.get(
+        "KOL_STYLE_LEARNING_MERGE_MODE", "replace_section",
+    ).strip().lower()
+    if raw in ("append", "replace_section", "llm_compress"):
+        return raw
+    return "replace_section"
+
+
+def _merge_section(current_md: str, proposed_section: str, *, marker: str, mode: str) -> str:
     base = (current_md or "").strip()
-    section = proposed_section.strip()
+    section = (proposed_section or "").strip()
+    if section.startswith(marker):
+        section = section[len(marker) :].lstrip("\n").strip()
     if not section:
         return base
-    marker = "## Approved strategy learning"
+    if mode == "replace_section":
+        # Keep preamble before the marker; drop the old approved block entirely.
+        head = base.split(marker, 1)[0].rstrip() if marker in base else base
+        tail = f"{marker}\n\n{section}\n"
+        return f"{head}\n\n{tail}".strip() if head else tail.strip()
+    # append: accumulate under a single marker.
     if marker not in base:
         tail = f"{marker}\n\n{section}\n"
         return f"{base}\n\n{tail}".strip() if base else tail.strip()
     return f"{base}\n\n{section}\n"
 
 
-def merge_style_policy_content(current_md: str, proposed_section: str) -> str:
-    """Append an approved proposal section to existing policy markdown."""
+def consolidate_policy_llm(current_md: str, proposed_section: str, *, scope: str) -> str:
+    """LLM-merge baseline + approved delta into a clean consolidated policy.
+
+    Raises on failure so callers can fall back to a deterministic merge.
+    """
+    prompt = (
+        f"You maintain the `{scope}` guideline document for KOL outreach emails.\n"
+        "Merge the APPROVED CHANGES into the CURRENT document, producing one clean,\n"
+        "de-duplicated, contradiction-free markdown document. Apply ADJUST:/REMOVE:\n"
+        "directives, drop superseded rules, keep section headings stable, stay concise.\n"
+        "Output ONLY the merged markdown.\n\n"
+        f"CURRENT DOCUMENT:\n{(current_md or '(empty)').strip()}\n\n"
+        f"APPROVED CHANGES:\n{(proposed_section or '').strip()}\n"
+    )
+    raw = learning_llm.invoke_learning_llm(prompt)
+    merged = learning_llm.strip_markdown_fences(raw).strip()
+    if not merged:
+        raise RuntimeError("empty consolidation output")
+    return merged
+
+
+OUTCOME_LEARNING_MARKER = "## Approved outcome learning"
+
+
+def merge_strategy_policy_content(
+    current_md: str, proposed_section: str, *, mode: Optional[str] = None,
+) -> str:
+    """Merge approved strategy section (goal-oriented, env-scoped policy)."""
+    return _merge_section(
+        current_md,
+        proposed_section,
+        marker="## Approved strategy learning",
+        mode=mode or _merge_mode(),
+    )
+
+
+def merge_outcome_policy_content(
+    current_md: str, proposed_section: str, *, mode: Optional[str] = None,
+) -> str:
+    """Merge approved outcome guidance into ``outcome_strategy`` policy."""
+    return _merge_section(
+        current_md,
+        proposed_section,
+        marker=OUTCOME_LEARNING_MARKER,
+        mode=mode or _merge_mode(),
+    )
+
+
+def merge_style_policy_content(
+    current_md: str, proposed_section: str, *, mode: Optional[str] = None,
+) -> str:
+    """Merge an approved proposal section into existing policy markdown."""
+    return _merge_section(
+        current_md,
+        proposed_section,
+        marker="## Approved style learning",
+        mode=mode or _merge_mode(),
+    )
+
+
+def _batch_order() -> str:
+    """``newest`` (default) prioritises the most recent edits for calibration."""
+    raw = os.environ.get("KOL_STYLE_LEARNING_BATCH_ORDER", "newest").strip().lower()
+    return raw if raw in ("newest", "oldest") else "newest"
+
+
+def _event_recency_key(ev: dict[str, Any]) -> tuple[float, int]:
+    """Sort key: prefer ``ts`` (newest first), tie-break on monotonic event id."""
+    dt = learning_store._parse_event_ts(ev.get("ts"))
+    ts_ord = dt.timestamp() if dt is not None else 0.0
+    return (ts_ord, int(ev.get("id") or 0))
+
+
+def _min_distinct_identities() -> int:
+    raw = os.environ.get("KOL_STYLE_LEARNING_MIN_DISTINCT_IDENTITIES", "0").strip()
+    try:
+        return max(0, min(int(raw), 100))
+    except ValueError:
+        return 0
+
+
+def _select_edit_batch(
+    edited: list[dict[str, Any]],
+    *,
+    threshold: int,
+    order: str,
+    min_distinct: int,
+) -> list[dict[str, Any]]:
+    """Pick ``threshold`` edit events honouring recency + KOL diversity.
+
+    ``order='newest'`` selects the most recent edits (so the proposal tracks the
+    operator's latest habits); ``min_distinct`` greedily covers that many distinct
+    identities first (avoid 10 near-duplicate edits from one campaign) before
+    filling remaining slots by recency.
+    """
+    if order == "newest":
+        candidates = sorted(edited, key=_event_recency_key, reverse=True)
+    else:
+        candidates = sorted(edited, key=_event_recency_key)
+
+    if min_distinct <= 1 or threshold <= 1:
+        chosen = candidates[:threshold]
+    else:
+        chosen = []
+        seen_ids: set[int] = set()
+        used_event = set()
+        # Pass 1: cover distinct identities up to min_distinct (or batch full).
+        for ev in candidates:
+            if len(chosen) >= threshold:
+                break
+            iid = ev.get("identity_id")
+            if iid is None or int(iid) in seen_ids:
+                continue
+            seen_ids.add(int(iid))
+            chosen.append(ev)
+            used_event.add(id(ev))
+            if len(seen_ids) >= min_distinct:
+                break
+        # Pass 2: fill remaining slots by recency order.
+        for ev in candidates:
+            if len(chosen) >= threshold:
+                break
+            if id(ev) in used_event:
+                continue
+            chosen.append(ev)
+            used_event.add(id(ev))
+
+    # Always present the batch to the LLM in chronological order.
+    chosen.sort(key=_event_recency_key)
+    return chosen
+
+
+def _gather_edited_for_style_proposal(
+    conn,
+    *,
+    env: str,
+    scope: str,
+    owner_user_id: Optional[int],
+    limit: int,
+) -> dict[str, Any]:
+    """Shared filter pipeline for preview + propose (newest/window/operator)."""
+    events = learning_store.list_learning_events(
+        conn, env=env, event_types=("draft_edit_learning",), limit=limit,
+    )
+    consumed = list_consumed_edit_event_ids(conn, env=env)
+    fresh = [e for e in events if int(e.get("id") or 0) not in consumed]
+    fresh = learning_store.filter_events_within_days(
+        fresh, learning_store.learning_window_days(),
+    )
+    edited = _edited_events(fresh)
+    if scope == "user_style" and owner_user_id is not None:
+        attributed = [
+            e for e in edited
+            if (e.get("payload") or {}).get("operator_user_id") is not None
+        ]
+        if attributed:
+            edited = [
+                e for e in attributed
+                if int((e.get("payload") or {}).get("operator_user_id") or 0)
+                == int(owner_user_id)
+            ]
+    reserved_ids = pending_style_reserved_event_ids(conn, env=env)
+    edited_available = [
+        e for e in edited
+        if int(e.get("id") or 0) not in reserved_ids
+    ]
+    return {
+        "events_seen": len(events),
+        "edited_unconsumed": len(edited),
+        "edited_available": edited_available,
+        "edited_queued_in_pending": len(edited) - len(edited_available),
+        "reserved_ids": reserved_ids,
+    }
+
+
+def _gathered_edit_counts(gathered: dict[str, Any]) -> dict[str, Any]:
+    """Operator-facing counts from ``_gather_edited_for_style_proposal``."""
+    avail = gathered.get("edited_available") or []
+    return {
+        "events_seen": gathered.get("events_seen", 0),
+        "edited_unconsumed": gathered.get("edited_unconsumed", 0),
+        "edited_available": len(avail),
+        "edited_queued_in_pending": gathered.get("edited_queued_in_pending", 0),
+    }
+
+
+def preview_next_style_edit_batch(
+    conn,
+    *,
+    env: str,
+    scope: str,
+    owner_user_id: Optional[int] = None,
+    limit: int = 200,
+    batch_size: Optional[int] = None,
+) -> dict[str, Any]:
+    """Read-only: which edit events would be taken for the next distill batch."""
+    if scope not in learning_store.EDIT_LEARNING_SCOPES:
+        raise ValueError(f"scope must be one of {learning_store.EDIT_LEARNING_SCOPES}")
+    if scope == "user_style" and owner_user_id is None:
+        raise ValueError("user_style requires owner_user_id")
+
+    threshold = (
+        batch_size
+        if batch_size is not None
+        else learning_store.style_learning_batch_size()
+    )
+    if find_pending_style_proposal(conn, env=env, scope=scope, owner_user_id=owner_user_id):
+        return {
+            "ready": False,
+            "skipped": True,
+            "reason": "pending style_learning_proposal already exists",
+            "scope": scope,
+            "batch_threshold": threshold,
+        }
+
+    gathered = _gather_edited_for_style_proposal(
+        conn, env=env, scope=scope, owner_user_id=owner_user_id, limit=limit,
+    )
+    edited_available: list[dict[str, Any]] = gathered["edited_available"]
+    if not edited_available:
+        return {
+            "ready": False,
+            "skipped": True,
+            "reason": "no new edited sent bodies",
+            "scope": scope,
+            "batch_threshold": threshold,
+            **_gathered_edit_counts(gathered),
+        }
+    if len(edited_available) < threshold:
+        return {
+            "ready": False,
+            "skipped": True,
+            "reason": "below_style_learning_batch_threshold",
+            "pending_edits": len(edited_available),
+            "scope": scope,
+            "batch_threshold": threshold,
+            **_gathered_edit_counts(gathered),
+        }
+
+    batch = _select_edit_batch(
+        edited_available,
+        threshold=threshold,
+        order=_batch_order(),
+        min_distinct=_min_distinct_identities(),
+    )
+    samples: list[dict[str, Any]] = []
+    for ev in batch:
+        payload = ev.get("payload") or {}
+        samples.append({
+            "event_id": ev.get("id"),
+            "identity_id": ev.get("identity_id"),
+            "campaign_id": ev.get("campaign_id"),
+            "goal": ev.get("goal") or payload.get("goal"),
+            "ts": ev.get("ts"),
+            "edit_distance": payload.get("edit_distance"),
+            "child_skill": payload.get("child_skill"),
+            "operator_user_id": payload.get("operator_user_id"),
+            "was_edited": payload.get("was_edited"),
+        })
+    distinct_identity_ids = {
+        int(e["identity_id"]) for e in batch if e.get("identity_id") is not None
+    }
+    return {
+        "ready": True,
+        "scope": scope,
+        "owner_user_id": owner_user_id,
+        "batch_threshold": threshold,
+        "sample_count": len(batch),
+        "sample_identity_count": len(distinct_identity_ids),
+        "remaining_after_batch": max(0, len(edited_available) - len(batch)),
+        "samples": samples,
+        **_gathered_edit_counts(gathered),
+    }
+
+
+def _section_merge_effect(
+    current_md: str,
+    *,
+    marker: str,
+    mode: str,
+) -> str:
+    """Operator-facing hint: how approval will change the policy document."""
     base = (current_md or "").strip()
-    section = proposed_section.strip()
-    if not section:
-        return base
-    marker = "## Approved style learning"
-    if marker not in base:
-        tail = f"{marker}\n\n{section}\n"
-        return f"{base}\n\n{tail}".strip() if base else tail.strip()
-    return f"{base}\n\n{section}\n"
+    has_marker = marker in base
+    if mode == "replace_section":
+        return "replace" if has_marker else "add_new"
+    if mode == "llm_compress":
+        return "replace" if has_marker else "add_new"
+    return "append_delta" if has_marker else "add_new"
+
+
+def build_edit_stats_by_scope(
+    conn,
+    *,
+    env: str,
+    threshold: int,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Per-scope (and per-operator user_style) distill batch progress."""
+    rows: list[dict[str, Any]] = []
+
+    def _row(scope: str, owner_user_id: Optional[int]) -> dict[str, Any]:
+        gathered = _gather_edited_for_style_proposal(
+            conn, env=env, scope=scope, owner_user_id=owner_user_id, limit=limit,
+        )
+        avail = len(gathered["edited_available"])
+        pending = find_pending_style_proposal(
+            conn, env=env, scope=scope, owner_user_id=owner_user_id,
+        )
+        return {
+            "scope": scope,
+            "owner_user_id": owner_user_id,
+            "edited_available": avail,
+            "edited_queued_in_pending": gathered["edited_queued_in_pending"],
+            "ready_for_distill": avail >= threshold,
+            "has_pending_proposal": pending is not None,
+        }
+
+    rows.append(_row("company_style", None))
+
+    events = learning_store.list_learning_events(
+        conn, env=env, event_types=("draft_edit_learning",), limit=limit,
+    )
+    consumed = list_consumed_edit_event_ids(conn, env=env)
+    fresh = [e for e in events if int(e.get("id") or 0) not in consumed]
+    fresh = learning_store.filter_events_within_days(
+        fresh, learning_store.learning_window_days(),
+    )
+    operator_ids: set[int] = set()
+    for ev in _edited_events(fresh):
+        oid = (ev.get("payload") or {}).get("operator_user_id")
+        if oid is not None:
+            try:
+                operator_ids.add(int(oid))
+            except (TypeError, ValueError):
+                continue
+    for oid in sorted(operator_ids):
+        rows.append(_row("user_style", oid))
+    return rows
+
+
+def preview_policy_merge_from_proposal(
+    conn,
+    *,
+    env: str,
+    proposal: dict[str, Any],
+) -> dict[str, Any]:
+    """Read-only: show current vs merged policy if this proposal were approved."""
+    scope = str(proposal.get("scope") or "")
+    owner_user_id = proposal.get("owner_user_id")
+    if owner_user_id is not None:
+        owner_user_id = int(owner_user_id)
+    mode = _merge_mode()
+
+    style_md = str(proposal.get("proposed_style_markdown") or "").strip()
+    strategy_md = str(proposal.get("proposed_strategy_markdown") or "").strip()
+    combined = str(proposal.get("proposed_markdown") or "").strip()
+    if not style_md and not strategy_md and combined:
+        style_md, strategy_md = split_style_and_strategy_markdown(combined)
+
+    out: dict[str, Any] = {"env": env, "merge_mode": mode, "sections": {}}
+
+    if scope in learning_store.EDIT_LEARNING_SCOPES and style_md:
+        style_env = env if scope in pol.ENV_SCOPED_POLICIES else None
+        cur = pol.get_policy(
+            conn, scope=scope, owner_user_id=owner_user_id, env=style_env,
+        )
+        current_md = (cur or {}).get("content_md") or ""
+        merged_md, mode_used = _merge_policy_section(
+            current_md, style_md, scope=scope, mode=mode,
+        )
+        style_marker = "## Approved style learning"
+        out["sections"]["style"] = {
+            "scope": scope,
+            "current_md": current_md,
+            "proposed_section_md": style_md,
+            "merged_md": merged_md,
+            "merge_mode_used": mode_used,
+            "merge_effect": _section_merge_effect(
+                current_md, marker=style_marker, mode=mode_used,
+            ),
+            "current_chars": len(current_md),
+            "merged_chars": len(merged_md),
+            "delta_chars": len(merged_md) - len(current_md),
+        }
+
+    if strategy_md.strip():
+        cur_s = pol.get_policy(conn, scope=learning_store.REPLY_STRATEGY_SCOPE, env=env)
+        current_s = (cur_s or {}).get("content_md") or ""
+        merged_s, mode_used_s = _merge_policy_section(
+            current_s,
+            strategy_md,
+            scope=learning_store.REPLY_STRATEGY_SCOPE,
+            mode=mode,
+        )
+        strat_marker = "## Approved strategy learning"
+        out["sections"]["strategy"] = {
+            "scope": learning_store.REPLY_STRATEGY_SCOPE,
+            "current_md": current_s,
+            "proposed_section_md": strategy_md,
+            "merged_md": merged_s,
+            "merge_mode_used": mode_used_s,
+            "merge_effect": _section_merge_effect(
+                current_s, marker=strat_marker, mode=mode_used_s,
+            ),
+            "current_chars": len(current_s),
+            "merged_chars": len(merged_s),
+            "delta_chars": len(merged_s) - len(current_s),
+        }
+
+    is_outcome = scope == learning_store.OUTCOME_STRATEGY_SCOPE
+    if is_outcome and combined:
+        cur_o = pol.get_policy(
+            conn, scope=learning_store.OUTCOME_STRATEGY_SCOPE, env=env,
+        )
+        current_o = (cur_o or {}).get("content_md") or ""
+        merged_o = merge_outcome_policy_content(current_o, combined, mode=mode)
+        out["sections"]["outcome"] = {
+            "scope": learning_store.OUTCOME_STRATEGY_SCOPE,
+            "current_md": current_o,
+            "proposed_section_md": combined,
+            "merged_md": merged_o,
+            "merge_mode_used": mode,
+            "merge_effect": _section_merge_effect(
+                current_o, marker=OUTCOME_LEARNING_MARKER, mode=mode,
+            ),
+            "current_chars": len(current_o),
+            "merged_chars": len(merged_o),
+            "delta_chars": len(merged_o) - len(current_o),
+        }
+
+    return out
+
+
+def _merge_policy_section(
+    current_md: str, section: str, *, scope: str, mode: str,
+) -> tuple[str, str]:
+    """Merge one section; return (merged_md, mode_used)."""
+    if mode == "llm_compress":
+        try:
+            return consolidate_policy_llm(current_md, section, scope=scope), "llm_compress"
+        except Exception:
+            if scope == learning_store.REPLY_STRATEGY_SCOPE:
+                return merge_strategy_policy_content(current_md, section, mode="append"), "append_fallback"
+            if scope == learning_store.OUTCOME_STRATEGY_SCOPE:
+                return merge_outcome_policy_content(current_md, section, mode="append"), "append_fallback"
+            return merge_style_policy_content(current_md, section, mode="append"), "append_fallback"
+    if scope == learning_store.REPLY_STRATEGY_SCOPE:
+        return merge_strategy_policy_content(current_md, section, mode=mode), mode
+    if scope == learning_store.OUTCOME_STRATEGY_SCOPE:
+        return merge_outcome_policy_content(current_md, section, mode=mode), mode
+    return merge_style_policy_content(current_md, section, mode=mode), mode
+
+
+def list_style_approval_markers(
+    conn,
+    *,
+    env: str,
+    days: int = 90,
+) -> list[dict[str, Any]]:
+    """Approved style-learning batches for trend chart annotations."""
+    cutoff = learning_store._parse_event_ts(
+        (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=max(1, days))).isoformat()
+    )
+    rows = conn.execute(
+        """SELECT fact_value, captured_at FROM kol_facts_latest
+            WHERE fact_namespace='approval'
+              AND fact_key=?
+              AND env=?""",
+        (learning_store.STYLE_LEARNING_APPROVAL_FACT, env),
+    ).fetchall()
+    markers: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            val = json.loads(row["fact_value"]) if row["fact_value"] else {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(val, dict) or val.get("decision") != "approved":
+            continue
+        at = row["captured_at"]
+        dt = learning_store._parse_event_ts(at)
+        if cutoff and dt and dt < cutoff:
+            continue
+        markers.append({
+            "at": at,
+            "scope": val.get("scope"),
+            "sample_count": val.get("sample_count"),
+            "owner_user_id": val.get("owner_user_id"),
+        })
+    markers.sort(key=lambda m: str(m.get("at") or ""))
+    return markers
 
 
 def propose_style_learning_approval(
@@ -411,31 +1053,33 @@ def propose_style_learning_approval(
             "scope": scope,
         }
 
-    events = learning_store.list_learning_events(
-        conn, env=env, event_types=("draft_edit_learning",), limit=limit,
+    gathered = _gather_edited_for_style_proposal(
+        conn, env=env, scope=scope, owner_user_id=owner_user_id, limit=limit,
     )
-    consumed = list_consumed_edit_event_ids(conn, env=env)
-    fresh = [e for e in events if int(e.get("id") or 0) not in consumed]
-    edited = _edited_events(fresh)
-    edited.sort(key=lambda e: int(e.get("id") or 0))
-    if not edited:
+    edited_available: list[dict[str, Any]] = gathered["edited_available"]
+    if not edited_available:
         return {
             "skipped": True,
             "reason": "no new edited sent bodies",
-            "events_seen": len(events),
+            "events_seen": gathered["events_seen"],
         }
-    if len(edited) < threshold:
+    if len(edited_available) < threshold:
         return {
             "skipped": True,
             "reason": "below_style_learning_batch_threshold",
-            "pending_edits": len(edited),
+            "pending_edits": len(edited_available),
             "batch_threshold": threshold,
             "scope": scope,
         }
 
-    batch = edited[:threshold]
+    batch = _select_edit_batch(
+        edited_available,
+        threshold=threshold,
+        order=_batch_order(),
+        min_distinct=_min_distinct_identities(),
+    )
     style_md, strategy_md, llm_used = distill_edit_learning_llm(
-        conn, batch, style_scope=scope, env=env,
+        conn, batch, style_scope=scope, env=env, owner_user_id=owner_user_id,
     )
     anchor_id = resolve_learning_anchor_identity_id(conn, env=env, events=batch)
     event_ids = [int(e["id"]) for e in batch if e.get("id") is not None]
@@ -450,6 +1094,11 @@ def propose_style_learning_approval(
         if e.get("campaign_id")
     }
     distinct_campaign_ids.discard("")
+    distinct_operator_ids = sorted({
+        int((e.get("payload") or {}).get("operator_user_id"))
+        for e in batch
+        if (e.get("payload") or {}).get("operator_user_id") is not None
+    })
     combined_md = style_md
     if strategy_md.strip():
         combined_md = f"{style_md.rstrip()}\n\n{strategy_md.strip()}\n"
@@ -467,6 +1116,7 @@ def propose_style_learning_approval(
         "sample_count": len(batch),
         "sample_identity_count": len(distinct_identity_ids),
         "sample_campaign_count": len(distinct_campaign_ids),
+        "sample_operator_ids": distinct_operator_ids,
         "batch_threshold": threshold,
         "llm_used": llm_used,
         "opened_by": updated_by,
@@ -484,9 +1134,11 @@ def propose_style_learning_approval(
         "identity_id": anchor_id,
         "scope": scope,
         "llm_used": llm_used,
+        "sample_identity_count": len(distinct_identity_ids),
+        "sample_operator_ids": distinct_operator_ids,
         "sample_count": len(batch),
         "batch_threshold": threshold,
-        "remaining_edits": max(0, len(edited) - len(batch)),
+        "remaining_edits": max(0, len(edited_available) - len(batch)),
         "source_event_ids": event_ids,
         "pending": True,
     }
@@ -517,13 +1169,33 @@ def apply_approved_style_proposal(
     if not style_md and not strategy_md:
         raise ValueError("proposal missing style/strategy markdown")
 
+    mode = _merge_mode()
+
+    def _merge(current_md: str, section: str, *, kind: str) -> tuple[str, str]:
+        """Return (merged_md, mode_used). llm_compress falls back deterministically."""
+        if mode == "llm_compress":
+            try:
+                return consolidate_policy_llm(current_md, section, scope=kind), "llm_compress"
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "llm_compress merge failed for %s; falling back to append", kind,
+                    exc_info=True,
+                )
+                if kind == learning_store.REPLY_STRATEGY_SCOPE:
+                    return merge_strategy_policy_content(current_md, section, mode="append"), "append_fallback"
+                return merge_style_policy_content(current_md, section, mode="append"), "append_fallback"
+        if kind == learning_store.REPLY_STRATEGY_SCOPE:
+            return merge_strategy_policy_content(current_md, section, mode=mode), mode
+        return merge_style_policy_content(current_md, section, mode=mode), mode
+
     style_policy_env = env if scope in pol.ENV_SCOPED_POLICIES else None
     current_style = pol.get_policy(
         conn, scope=scope, owner_user_id=owner_user_id, env=style_policy_env,
     )
-    merged_style = merge_style_policy_content(
-        (current_style or {}).get("content_md") or "",
-        style_md,
+    merged_style, style_mode = _merge(
+        (current_style or {}).get("content_md") or "", style_md, kind=scope,
     )
     style_row = pol.put_policy(
         conn,
@@ -541,9 +1213,10 @@ def apply_approved_style_proposal(
             scope=learning_store.REPLY_STRATEGY_SCOPE,
             env=env,
         )
-        merged_strat = merge_strategy_policy_content(
+        merged_strat, _strat_mode = _merge(
             (current_strat or {}).get("content_md") or "",
             strategy_md,
+            kind=learning_store.REPLY_STRATEGY_SCOPE,
         )
         strat_row = pol.put_policy(
             conn,
@@ -565,6 +1238,7 @@ def apply_approved_style_proposal(
         "version": style_row.get("version"),
         "policy_id": style_row.get("id"),
         "merged_chars": len(merged_style),
+        "merge_mode": style_mode,
         "strategy_policy": strategy_result,
     }
 

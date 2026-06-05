@@ -77,17 +77,33 @@ def _parse_ts(raw: Any) -> Optional[_dt.datetime]:
     return dt
 
 
+PROMOTABLE_SCOPES: Final[tuple[str, ...]] = (
+    learning_store.REPLY_STRATEGY_SCOPE,
+    learning_store.OUTCOME_STRATEGY_SCOPE,
+)
+
+
+def _ref_filename(goal: str, scope: str) -> str:
+    """Distinct learned-reference filename per source scope (avoid collisions)."""
+    if scope == learning_store.OUTCOME_STRATEGY_SCOPE:
+        return f"{goal}.outcome.md"
+    return f"{goal}.md"
+
+
 def _strategy_versions(
-    conn: sqlite3.Connection, *, env: str,
+    conn: sqlite3.Connection,
+    *,
+    env: str,
+    scope: str = learning_store.REPLY_STRATEGY_SCOPE,
 ) -> list[dict[str, Any]]:
-    """All ``reply_strategy`` policy versions (oldest first) with content."""
+    """All policy versions for ``scope`` (oldest first) with content."""
     rows = conn.execute(
         """SELECT version, updated_at, content_md
              FROM policy_documents
             WHERE scope=? AND owner_user_id IS NULL
               AND COALESCE(env, 'LIVE')=?
             ORDER BY version ASC""",
-        (learning_store.REPLY_STRATEGY_SCOPE, env),
+        (scope, env),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -115,6 +131,7 @@ def select_promotable_strategy(
     goal: str,
     min_approvals: int = DEFAULT_MIN_APPROVALS,
     min_age_days: int = DEFAULT_MIN_AGE_DAYS,
+    scope: str = learning_store.REPLY_STRATEGY_SCOPE,
     now: Optional[_dt.datetime] = None,
 ) -> dict[str, Any]:
     """Assess whether a goal's strategy section is stable enough to promote.
@@ -142,7 +159,7 @@ def select_promotable_strategy(
             f"goal {goal!r} is not promotable; choose from {PROMOTABLE_GOALS}",
         )
     skill = goal_to_skill(goal)
-    versions = _strategy_versions(conn, env=env)
+    versions = _strategy_versions(conn, env=env, scope=scope)
     with_goal = [
         v for v in versions if f"## {goal}".lower() in (v.get("content_md") or "").lower()
     ]
@@ -188,29 +205,45 @@ def render_learned_reference_md(
     approvals: int,
     first_seen: Optional[str],
     latest_version: Optional[int],
+    scope: str = learning_store.REPLY_STRATEGY_SCOPE,
     now: Optional[_dt.datetime] = None,
 ) -> str:
     """Render the advisory playbook markdown for ``references/learned/<goal>.md``."""
     stamp = _now(now).date().isoformat()
+    source_label = (
+        "outcome_strategy (collaboration retrospectives)"
+        if scope == learning_store.OUTCOME_STRATEGY_SCOPE
+        else "reply_strategy (operator edit learning)"
+    )
+    intro = (
+        "> Auto-promoted from repeatedly-approved collaboration outcome guidance."
+        if scope == learning_store.OUTCOME_STRATEGY_SCOPE
+        else "> Auto-promoted from repeatedly-approved operator edits."
+    )
     header = (
         f"{_AUTO_HEADER} — do not edit by hand.\n"
-        f"     Source: reply_strategy policy (env={env}, version={latest_version}).\n"
+        f"     Source: {source_label} (env={env}, version={latest_version}).\n"
         f"     Approvals={approvals} · first_approved={first_seen} · promoted={stamp}.\n"
         "     Retract by deleting this file + running `sync skills`. -->"
     )
     return (
         f"{header}\n\n"
         f"# Learned playbook — {goal} (advisory)\n\n"
-        "> Auto-promoted from repeatedly-approved operator edits. **Advisory "
-        "only.** This skill's HARD rules, fact ownership, the pricing engine, "
-        "and escalation gates always win on conflict. Never use a line below "
-        "to invent facts/numbers or bypass a gate.\n\n"
+        f"{intro} **Advisory only.** This skill's HARD rules, fact ownership, "
+        "the pricing engine, and escalation gates always win on conflict. "
+        "Never use a line below to invent facts/numbers or bypass a gate.\n\n"
         f"{section_md.strip()}\n"
     )
 
 
-def learned_reference_path(skills_root: Path, *, skill: str, goal: str) -> Path:
-    return skills_root / skill / LEARNED_REL_DIR / f"{goal}.md"
+def learned_reference_path(
+    skills_root: Path,
+    *,
+    skill: str,
+    goal: str,
+    scope: str = learning_store.REPLY_STRATEGY_SCOPE,
+) -> Path:
+    return skills_root / skill / LEARNED_REL_DIR / _ref_filename(goal, scope)
 
 
 def promote_strategy_to_skill(
@@ -220,6 +253,7 @@ def promote_strategy_to_skill(
     goal: str,
     min_approvals: int = DEFAULT_MIN_APPROVALS,
     min_age_days: int = DEFAULT_MIN_AGE_DAYS,
+    scope: str = learning_store.REPLY_STRATEGY_SCOPE,
     skills_root: Optional[Path] = None,
     dry_run: bool = True,
     triggered_by: str = "kol_bridge_tool:promote-strategy",
@@ -227,10 +261,16 @@ def promote_strategy_to_skill(
 ) -> dict[str, Any]:
     """Promote a stabilized strategy section into the owning skill (audited).
 
+    ``scope`` selects the source policy: ``reply_strategy`` (default) or
+    ``outcome_strategy`` (collaboration-outcome guidance, written to a distinct
+    ``<goal>.outcome.md`` reference).
+
     When ``dry_run`` is True (default), returns the proposed markdown + target
     path without writing and without an audit row. When False, writes the file
     and records a ``promote_strategy`` row in ``kol_learning_job_runs``.
     """
+    if scope not in PROMOTABLE_SCOPES:
+        raise PromoteError(f"scope {scope!r} not promotable; choose {PROMOTABLE_SCOPES}")
     root = skills_root or default_skills_root()
     assessment = select_promotable_strategy(
         conn,
@@ -238,9 +278,12 @@ def promote_strategy_to_skill(
         goal=goal,
         min_approvals=min_approvals,
         min_age_days=min_age_days,
+        scope=scope,
         now=now,
     )
-    target = learned_reference_path(root, skill=assessment["skill"], goal=goal)
+    target = learned_reference_path(
+        root, skill=assessment["skill"], goal=goal, scope=scope,
+    )
     rel_target = str(target)
     rendered = ""
     if assessment["section_md"]:
@@ -251,6 +294,7 @@ def promote_strategy_to_skill(
             approvals=assessment["approvals"],
             first_seen=assessment["first_seen"],
             latest_version=assessment["latest_version"],
+            scope=scope,
             now=now,
         )
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
@@ -338,6 +382,7 @@ __all__ = [
     "DEFAULT_MIN_APPROVALS",
     "LEARNED_REL_DIR",
     "PROMOTABLE_GOALS",
+    "PROMOTABLE_SCOPES",
     "PROMOTE_JOB_NAME",
     "PromoteError",
     "default_skills_root",

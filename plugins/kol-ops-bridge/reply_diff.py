@@ -61,12 +61,18 @@ def build_edit_learning_payload(
     child_skill: str | None = None,
     goal: str | None = None,
     sent_message_id: str | None = None,
+    operator_user_id: int | None = None,
 ) -> dict[str, Any]:
-    """Build a ``draft_edit_learning`` event payload."""
+    """Build a ``draft_edit_learning`` event payload.
+
+    ``operator_user_id`` attributes the edit to the operator whose mailbox
+    sent it, so ``user_style`` learning can be calibrated per operator
+    instead of a single global owner.
+    """
     distance = compute_edit_distance(agent_body, sent_body)
     norm_agent = normalize_email_body(agent_body)
     norm_sent = normalize_email_body(sent_body)
-    return {
+    payload: dict[str, Any] = {
         "agent_body": agent_body,
         "sent_body": sent_body,
         "normalized_agent_body": norm_agent,
@@ -77,3 +83,6 @@ def build_edit_learning_payload(
         "goal": goal or "",
         "sent_message_id": sent_message_id or "",
     }
+    if operator_user_id is not None and int(operator_user_id) > 0:
+        payload["operator_user_id"] = int(operator_user_id)
+    return payload

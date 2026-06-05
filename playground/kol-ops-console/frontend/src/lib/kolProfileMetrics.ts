@@ -12,6 +12,14 @@ export type KolProfileMetrics = {
   audienceAuthenticity: string | null;
   audienceQuality: string | null;
   genderSkew: string | null;
+  ageDistribution: string | null;
+  adultsSplit: string | null;
+  audienceLanguages: string | null;
+  audienceTypes: string | null;
+  audiencePositivePct: string | null;
+  promoAttractiveness: string | null;
+  promoInterestedPct: string | null;
+  promoProfessionalism: string | null;
   topInterests: string | null;
   followersSource: string | null;
   followersIsEstimate: boolean;
@@ -108,7 +116,18 @@ export function pickKolProfileMetrics(
     ?? formatAuthenticityDisplay(facts['identity.nox_audience_quality']);
 
   const genderSkew = pickString(facts['identity.nox_gender_skew']);
-
+  const ageDistribution = pickString(facts['identity.nox_audience_age_distribution']);
+  const adultsSplit = pickString(facts['identity.nox_audience_adults_split']);
+  const audienceLanguages = pickString(facts['identity.nox_audience_languages_top']);
+  const audienceTypes = pickString(facts['identity.nox_audience_types_top']);
+  const audiencePositivePct =
+    formatPercent(facts['identity.nox_audience_positive_pct'])
+    ?? formatMetric(facts['identity.nox_audience_positive_pct']);
+  const promoAttractiveness = formatMetric(facts['identity.nox_audience_promo_attractiveness']);
+  const promoInterestedPct =
+    formatPercent(facts['identity.nox_audience_promo_interested_pct'])
+    ?? formatMetric(facts['identity.nox_audience_promo_interested_pct']);
+  const promoProfessionalism = formatMetric(facts['identity.nox_audience_promo_professionalism']);
   const topInterests = pickString(facts['identity.nox_audience_interests_top']);
 
   return {
@@ -121,6 +140,14 @@ export function pickKolProfileMetrics(
     audienceAuthenticity,
     audienceQuality,
     genderSkew,
+    ageDistribution,
+    adultsSplit,
+    audienceLanguages,
+    audienceTypes,
+    audiencePositivePct,
+    promoAttractiveness,
+    promoInterestedPct,
+    promoProfessionalism,
     topInterests,
     followersSource,
     followersIsEstimate: followersSource === 'inferred_views_ratio',

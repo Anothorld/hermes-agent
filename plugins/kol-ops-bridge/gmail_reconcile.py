@@ -71,6 +71,7 @@ def _build_edit_payload(
     row: dict[str, Any],
     thread_id: str,
     gmail_draft: dict[str, Any],
+    operator_user_id: Optional[int] = None,
 ) -> Optional[dict[str, Any]]:
     approval_value = row.get("value") if isinstance(row.get("value"), dict) else {}
     draft_obj = approval_value.get("draft") if isinstance(approval_value.get("draft"), dict) else {}
@@ -94,6 +95,7 @@ def _build_edit_payload(
         child_skill=child_skill,
         goal=goal,
         sent_message_id=sent_message_id,
+        operator_user_id=operator_user_id,
     )
 
 
@@ -138,6 +140,7 @@ def _process_sent_reply_row(
 
     edit_payload = _build_edit_payload(
         gmail=gmail, row=row, thread_id=str(thread_id), gmail_draft=gmail_draft,
+        operator_user_id=mailbox_user_id,
     )
 
     event_id: Optional[int] = None

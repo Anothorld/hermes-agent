@@ -94,7 +94,7 @@ def _run_diligence_cli(
         "--lang",
         lang,
         "--dimensions",
-        "profile,audience,content",
+        "profile,audience,content,cooperation",
         "--audit-campaign-id",
         campaign_id,
         "--audit-identity-id",

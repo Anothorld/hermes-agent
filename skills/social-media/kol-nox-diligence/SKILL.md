@@ -13,7 +13,9 @@ diligence for specific `identity_id`(s). Uses `nox_kol_tool.py` (not raw
 ## When to Use
 
 - Console `POST /kols/{id}/nox-diligence` (or batch `identity_ids[]`).
-- **Not** Launch discovery, **not** inbound `kol-reply-dispatcher`.
+- **Not** inbound `kol-reply-dispatcher`.
+- Discovery may pre-fetch **`audience` only** (`gate=discovery_qualify`); Gate A
+  reuses that cache and fetches only missing dimensions.
 
 ## Prerequisites
 
@@ -84,7 +86,7 @@ python plugins/nox-kol-bridge/scripts/nox_kol_tool.py diligence-pack \
   --nox-creator-id '<id>' \
   --platform <youtube|tiktok|instagram> \
   --url '<channel_url>' \
-  --dimensions profile,audience,content \
+  --dimensions profile,audience,content,cooperation \
   --lang en \
   --audit-campaign-id <cid> --audit-identity-id <id>
 ```
@@ -96,7 +98,8 @@ If only URL/handle is known, omit `--nox-creator-id` and pass `--platform` + `--
 **Cache is built in** — there is no `cache-lookup` subcommand. Re-run
 `diligence-pack`; when `cache_hit: true`, report `api_calls: 0` and stop.
 
-TikTok/Instagram: do **not** add `--include-cooperation` unless operator asked.
+Gate A default includes **cooperation** (4 API calls). Instagram/TikTok may return
+partial pricing — still fetch it; Console shows **—** for missing fields.
 
 ### 4 — Persist CAL facts
 

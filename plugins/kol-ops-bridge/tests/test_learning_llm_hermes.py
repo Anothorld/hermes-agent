@@ -54,11 +54,13 @@ def test_uses_hermes_call_llm_when_no_override(bridge_pkg, monkeypatch):
     monkeypatch.delenv("KOL_LEARNING_LLM_DISABLE_HERMES", raising=False)
     hermes_rt = _load_hermes_runtime(bridge_pkg)
 
+    monkeypatch.setattr(llm, "_resolve_hermes_runtime", lambda: None)
     monkeypatch.setattr(
         llm,
         "_invoke_openai_compatible",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("openai fallback")),
     )
+    monkeypatch.setattr(llm, "_openai_sdk_available", lambda: True)
     monkeypatch.setattr(
         hermes_rt,
         "invoke_via_hermes_call_llm",
@@ -68,3 +70,28 @@ def test_uses_hermes_call_llm_when_no_override(bridge_pkg, monkeypatch):
 
     sys.modules[f"{_PKG_NAME}.internal.learning_hermes_runtime"] = hermes_rt
     assert llm.invoke_learning_llm("distill me") == "hermes-markdown"
+
+
+def test_hermes_http_runtime_before_call_llm(bridge_pkg, monkeypatch):
+    llm = bridge_pkg.learning_llm
+    monkeypatch.delenv("KOL_LEARNING_LLM_API_KEY", raising=False)
+    monkeypatch.setattr(
+        llm,
+        "_resolve_hermes_runtime",
+        lambda: {
+            "base_url": "https://example.test/v1",
+            "api_key": "k",
+            "model": "m",
+        },
+    )
+    monkeypatch.setattr(
+        llm,
+        "_invoke_openai_compatible",
+        lambda prompt, **kw: "http-ok" if kw.get("api_key") == "k" else "bad",
+    )
+    monkeypatch.setattr(
+        llm,
+        "_openai_sdk_available",
+        lambda: (_ for _ in ()).throw(AssertionError("call_llm")),
+    )
+    assert llm.invoke_learning_llm("x") == "http-ok"

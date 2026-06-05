@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Final, Mapping, Optional
 
 from . import cal  # type: ignore[import-not-found]
+from . import discovery_skip  # type: ignore[import-not-found]
 
 # Keys allowed in ``identity_facts`` payloads (base + provenance triples).
 _DISCOVERY_BASE_KEYS: Final[tuple[str, ...]] = (
@@ -43,19 +44,56 @@ _DISCOVERY_BASE_KEYS: Final[tuple[str, ...]] = (
     "identity.nox_cache_hit",
     "identity.nox_api_calls_last",
     "identity.nox_followers",
+    "identity.nox_followers_source",
     "identity.nox_engagement_rate",
     "identity.nox_avg_views",
+    "identity.nox_median_views",
+    "identity.nox_wave",
+    "identity.nox_avg_active_days",
+    "identity.nox_view_per_followers",
+    "identity.nox_performance_levels",
+    "identity.nox_benchmark_ranks",
     "identity.nox_country",
     "identity.nox_score",
+    "identity.nox_score_breakdown",
     "identity.nox_platform",
+    "identity.nox_channel_handle",
     "identity.nox_top_region",
     "identity.nox_audience_authenticity",
+    "identity.nox_audience_authenticity_range",
     "identity.nox_audience_quality_score",
     "identity.nox_gender_skew",
+    "identity.nox_audience_age_distribution",
+    "identity.nox_audience_languages_top",
+    "identity.nox_audience_types_top",
+    "identity.nox_audience_adults_split",
+    "identity.nox_audience_positive_pct",
+    "identity.nox_audience_promo_attractiveness",
+    "identity.nox_audience_promo_interested_pct",
+    "identity.nox_audience_promo_professionalism",
     "identity.nox_audience_interests_top",
     "identity.nox_content_tags_top",
+    "identity.nox_content_tags_all",
+    "identity.nox_content_format_counts",
+    "identity.nox_content_engagement_split",
     "identity.nox_benchmark_rank",
     "identity.nox_channel_url",
+    "identity.nox_cooperation_score",
+    "identity.nox_cooperation_pros",
+    "identity.nox_cooperation_cons",
+    "identity.nox_cooperation_price_estimate",
+    "identity.nox_cooperation_first_price_range",
+    "identity.nox_cooperation_final_price_range",
+    "identity.nox_cooperation_avg_response_hours",
+    "identity.nox_cooperation_contact_efficiency",
+    "identity.nox_cooperation_ad_video_stats",
+    "identity.nox_cooperation_brands_top",
+    "identity.nox_cooperation_confirmation_pct",
+    "identity.nox_cooperation_start_contact_pct",
+    "identity.nox_cooperation_promotion_online_pct",
+    "identity.nox_cooperation_active_period",
+    "identity.nox_cooperation_brand_video_engagement_rate",
+    "identity.nox_dispute_types",
     "identity.nox_dispute_count",
     "identity.nox_diligence_dimensions",
     "identity.nox_diligence_lang",
@@ -203,6 +241,10 @@ def ingest_confirmed_candidate(
     if identity_id is None:
         raise RuntimeError("upsert_identity failed")
 
+    discovery_skip.assert_discovery_not_skipped(
+        identity_id=int(identity_id), env=env,
+    )
+
     written_facts: list[str] = []
     skipped_facts: list[str] = []
     if facts_in:
@@ -230,6 +272,8 @@ def ingest_confirmed_candidate(
         candidate_status=candidate.get("candidate_status") or "discovered",
         payload=candidate.get("payload"),
         env=env,
+        enforce_outreach_cooldown=False,
+        enforce_discovery_skip=False,
     )
     if candidate_id is None:
         raise RuntimeError("upsert_candidate failed")
