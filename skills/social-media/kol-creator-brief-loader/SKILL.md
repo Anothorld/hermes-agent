@@ -51,6 +51,13 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-facts \
 Inspect the returned `facts` dict for these 6 brief keys plus full
 provenance triples (`_source`, `_discovered_at`, `_discovered_url`):
 
+**Veedcrawl index (passive, zero-cost).** If present, use
+`identity.veedcrawl_recent_reels_stats` (list of `{url, views, likes}`) to rank
+hero Reels before any browser/metadata calls. This is written by discovery or
+prior `veedcrawl_instagram_profile` / `veedcrawl_metadata` runs with
+`identity_id`. Full API JSON is in `identity.veedcrawl_storage_ref` blobs — do not
+fetch blobs in this skill; use the index only.
+
 - `identity.content_pillars`
 - `identity.signature_hooks`
 - `identity.voice_descriptors`
@@ -93,11 +100,12 @@ than twice.
    page (`a[href*='/reel/']` or `a[href*='/p/']`). Capture their URLs.
 
 #### Signal B — Hero-Reel captions
-1. Rank candidate Reels by available signal: when
-   `veedcrawl_metadata(url=...)` is in your toolset, call it for each
-   collected Reel URL and pick the **top 3 by view count**. When
-   `veedcrawl_metadata` is NOT available, pick the **first 3 Reels** the
-   profile surfaces (they are the most recent and usually load first).
+1. Rank candidate Reels by available signal in this priority:
+   (a) `identity.veedcrawl_recent_reels_stats` from Step 1 if URLs overlap;
+   (b) else `veedcrawl_metadata(url=...)` when in toolset — read `response.views`
+   / `response.viewCount` from the persist envelope;
+   (c) else the **first 3 Reels** the profile surfaces. Pick **top 3 by view
+   count** for hero-Reel review.
 2. For each of the 3 hero Reels: `browser_navigate(reel_url)` and
    `browser_console(...)` to extract the caption text + any visible
    hashtags.

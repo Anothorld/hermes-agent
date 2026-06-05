@@ -1,7 +1,8 @@
 """Veedcrawl integration plugin — bundled, auto-loaded.
 
-Registers 6 tools (``account``, ``metadata``, ``transcript``, ``extract``,
-``profile``, ``job``) into the ``veedcrawl`` toolset. Each tool is gated by
+Registers Veedcrawl tools into the ``veedcrawl`` toolset. Discovery tools
+(``metadata``, ``extract``, ``instagram_profile``, ``search_social_videos``)
+embed kol-ops-bridge monthly persist via ``fetch_with_persist``. Each tool is gated by
 ``_check_veedcrawl_available()`` — when ``VEEDCRAWL_API_KEY`` (or
 ``X_API_KEY``) is unset, the tools remain registered but the runtime check
 prevents dispatch.
@@ -18,6 +19,8 @@ from plugins.veedcrawl.tools import (
     VEEDCRAWL_JOB_SCHEMA,
     VEEDCRAWL_METADATA_SCHEMA,
     VEEDCRAWL_PROFILE_SCHEMA,
+    VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA,
+    VEEDCRAWL_SEARCH_SCHEMA,
     VEEDCRAWL_TRANSCRIPT_SCHEMA,
     _check_veedcrawl_available,
     _handle_account,
@@ -25,16 +28,20 @@ from plugins.veedcrawl.tools import (
     _handle_job,
     _handle_metadata,
     _handle_profile,
+    _handle_instagram_profile,
+    _handle_search,
     _handle_transcript,
 )
 
 _TOOLS = (
-    ("veedcrawl_account",    VEEDCRAWL_ACCOUNT_SCHEMA,    _handle_account,    "🪪"),
-    ("veedcrawl_metadata",   VEEDCRAWL_METADATA_SCHEMA,   _handle_metadata,   "📝"),
-    ("veedcrawl_transcript", VEEDCRAWL_TRANSCRIPT_SCHEMA, _handle_transcript, "🎙️"),
-    ("veedcrawl_extract",    VEEDCRAWL_EXTRACT_SCHEMA,    _handle_extract,    "🧪"),
-    ("veedcrawl_profile",    VEEDCRAWL_PROFILE_SCHEMA,    _handle_profile,    "👤"),
-    ("veedcrawl_job",        VEEDCRAWL_JOB_SCHEMA,        _handle_job,        "🔁"),
+    ("veedcrawl_account",             VEEDCRAWL_ACCOUNT_SCHEMA,             _handle_account,             "🪪"),
+    ("veedcrawl_metadata",            VEEDCRAWL_METADATA_SCHEMA,            _handle_metadata,            "📝"),
+    ("veedcrawl_transcript",          VEEDCRAWL_TRANSCRIPT_SCHEMA,          _handle_transcript,          "🎙️"),
+    ("veedcrawl_extract",             VEEDCRAWL_EXTRACT_SCHEMA,             _handle_extract,             "🧪"),
+    ("veedcrawl_profile",             VEEDCRAWL_PROFILE_SCHEMA,             _handle_profile,             "👤"),
+    ("veedcrawl_instagram_profile",   VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA,   _handle_instagram_profile,   "📸"),
+    ("veedcrawl_search_social_videos", VEEDCRAWL_SEARCH_SCHEMA,             _handle_search,              "🔍"),
+    ("veedcrawl_job",                 VEEDCRAWL_JOB_SCHEMA,                 _handle_job,                 "🔁"),
 )
 
 

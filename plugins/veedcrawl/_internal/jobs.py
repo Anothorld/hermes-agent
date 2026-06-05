@@ -52,11 +52,13 @@ def finalise_job(
             "_cached": False,
         }
 
+    api_response = _strip_private(payload)
     finalised = {
-        "job_id": str(payload.get("jobId") or ""),
+        "job_id": str(payload.get("jobId") or payload.get("job_id") or ""),
         "status": "completed",
-        "result_json": payload.get("resultJson"),
+        "result_json": payload.get("resultJson") or payload.get("result_json"),
         "credits_used": cost,
+        "api_response": api_response,
         "_rate_limit_remaining": rate_limit.parse_remaining(headers),
         "_cached": False,
     }
@@ -71,11 +73,12 @@ def run_async_job(
     poll_path_prefix: str,
     cost: int,
     cache_params: dict[str, Any],
-    request_body: dict[str, Any],
+    request_body: Optional[dict[str, Any]],
     wait: bool,
     timeout_s: float,
     force_refresh: bool,
     job_id: Optional[str],
+    submit_params: Optional[dict[str, Any]] = None,
     request: Callable[..., tuple[dict[str, Any], Mapping[str, str]]],
     ensure_credits: Callable[[int], None],
     sleep: Callable[[float], None],
@@ -102,8 +105,12 @@ def run_async_job(
     # Guard credits before submitting (paid call).
     ensure_credits(cost)
 
-    body = {k: v for k, v in request_body.items() if v is not None}
-    submit_payload, submit_headers = request("POST", submit_path, json_body=body)
+    if submit_params is not None:
+        params = {k: v for k, v in submit_params.items() if v is not None}
+        submit_payload, submit_headers = request("POST", submit_path, params=params)
+    else:
+        body = {k: v for k, v in (request_body or {}).items() if v is not None}
+        submit_payload, submit_headers = request("POST", submit_path, json_body=body)
     new_job_id = str(submit_payload.get("jobId") or "")
     if not new_job_id:
         raise VeedcrawlAPIError(

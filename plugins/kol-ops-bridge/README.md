@@ -160,7 +160,7 @@ Use dedicated projection commands such as
 Cross-campaign **confirmed outreach sends** (`outreach.sent` events and
 `offer.outreach_sent_at` facts) drive two behaviors:
 
-1. **Discovery block** — `add-candidate` returns HTTP 409
+1. **Discovery block (14-day cooldown)** — `add-candidate` returns HTTP 409
    `outreach_cooldown_active` when the identity was outreached in the last
    14 days. Skills should pre-filter with:
 
@@ -169,9 +169,44 @@ Cross-campaign **confirmed outreach sends** (`outreach.sent` events and
      --env LIVE --plain
    ```
 
-2. **Console tags** — `GET /identities/outreach-touch?identity_ids=1,2,3`
+2. **Discovery block (prior collab)** — `add-candidate` and
+   `ingest-confirmed-candidate` return HTTP 409 `discovery_skip_active` when
+   the identity has `last_outcome` in
+   `competitor | success | aborted | legacy_collab`. Skills should pre-filter with:
+
+   ```bash
+   python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-discovery-skip-handles \
+     --env LIVE
+   ```
+
+   Response is JSON: `items[]` with `{handle, reason}` per row (omit `--plain` so
+   `reason` is available for operator logs).
+
+3. **Console tags** — `GET /identities/outreach-touch?identity_ids=1,2,3`
    enriches shortlist rows and KOL detail with `prior_outreach_touch`
    (`last_touch_at`, `within_cooldown`, optional `last_touch_campaign_id`).
+
+### KOL registry (metrics table)
+
+`GET /kol-registry?env=LIVE&limit=50&offset=0` returns every identity in
+`campaign_candidates` (Agent discovery only; legacy red-list imports are
+excluded). Each row includes `internal_touch_count` (row matches across
+**all sheets** in ``曾触达列表.xlsx`` — +1 per matching spreadsheet row;
+fallback ``data/prior_touch_allowlist.json``),
+`followers` /
+`target_spu` / `ig_url`, and batched Nox/identity facts for the console
+**红人列表** on `/metrics`.
+
+By default the bridge reads ``~/Documents/曾触达列表.xlsx`` when present
+(new spreadsheet rows apply on the next registry request; mtime-cached).
+Bundled ``data/prior_touch_allowlist.json`` is the fallback on servers
+without that path. Override with ``KOL_PRIOR_TOUCH_ALLOWLIST_XLSX`` /
+``KOL_PRIOR_TOUCH_ALLOWLIST_JSON``. Refresh the JSON bundle after updates:
+
+```bash
+python plugins/kol-ops-bridge/scripts/import_prior_touch_allowlist.py \
+  ~/Documents/曾触达列表.xlsx
+```
 
 ### Confirmed-candidate ingest guardrails
 
@@ -210,6 +245,27 @@ Allowed identity facts include `identity.nox_creator_id`,
 `identity.nox_diligence_verdict`, `identity.nox_diligence_at`, and monitor IDs.
 `identity.email_source` may be `noxinfluencer_api` when contacts came from Nox.
 
+### Veedcrawl persist (discovery supplement)
+
+See `docs/kol-veedcrawl-integration.md` and plugin `plugins/veedcrawl/`.
+Monthly cache + blobs live at `$HERMES_HOME/kol-ops-bridge/veedcrawl_cache/`.
+The veedcrawl plugin calls `veedcrawl_persist.fetch_with_persist()` so one tool
+invocation atomically hits cache, calls REST, and stores the full JSON response.
+
+Allowed identity index facts include `identity.veedcrawl_profile_followers`,
+`identity.veedcrawl_recent_reels_stats`, `identity.veedcrawl_cache_month`,
+`identity.veedcrawl_cache_key`, `identity.veedcrawl_storage_ref` (alias
+`identity.veedcrawl_blob_ref`), and `identity.veedcrawl_extract_summary`.
+Metadata cache keys are SHA-256 hashed in CAL to avoid URL length limits.
+Blobs are the source of truth; facts are summaries for skills and the console.
+
+Ops CLI (non-agent path):
+
+```bash
+python plugins/kol-ops-bridge/scripts/veedcrawl_cache_tool.py cache-stats
+python plugins/kol-ops-bridge/scripts/veedcrawl_cache_tool.py cache-lookup --cache-key 'profile:ig:handle:limit=12'
+```
+
 ## Toolized deterministic skill steps
 
 Several KOL skill steps used to be model-generated reasoning. They are now
@@ -243,7 +299,9 @@ The `/logic/*` endpoints above (except reply-draft persist) are pure (no DB
 read/write) and need no bridge
 key. `persist-reply-draft` writes CAL (event + `approval.reply_draft` fact in
 one call, after enriching `to` / `Re:`-subject / `thread_id`) and requires the
-key like every other mutating route.
+key like every other mutating route. Child `body` must be **new prose only** —
+``On … wrote:`` / ``>`` quote blocks are stripped at persist time (bridge re-adds
+one Gmail quote on approve).
 
 **Thread anchors on `approval.reply_draft`:** every write must carry at least
 one of `draft.thread_id`, `source_message_id`, top-level `thread_id`, or
@@ -266,6 +324,20 @@ deletes the old Gmail `draftId` (via `gmail delete-draft`) and clears stale
 `offer.gmail_draft_id` / `offer.gmail_thread_id`. Outcome is recorded on
 `chase_supersede.orphan_gmail_discard` and in `kol_reply_draft_superseded`.
 Failures are logged but do not block supersede.
+
+**Gmail draft on approve:** `POST /approvals/.../approve` for `approval.reply_draft`
+creates an HTML draft in the correct thread (Reply-all Cc + `In-Reply-To`).
+Before calling Gmail, the bridge verifies `thread_id` against the operator mailbox
+(`gmail_thread_resolve.py`): synthetic tokens (e.g. `proactive-followup:…`) and
+message ids mistaken for thread ids are rejected or corrected so
+`drafts.create` does not return `400 Invalid thread id value`.
+**Initial cold/re-engagement outreach** (`kol-cold-outreach`, anchors
+`draft:outreach_{campaign}_{identity}` / `outreach_{campaign}_{identity}`) skips
+thread attach — Gmail creates a new standalone draft with no `threadId`.
+Quoted history uses Gmail's `gmail_quote` / `blockquote type="cite"` so the
+web UI shows the collapsible **…** block (not a fully expanded plain-text
+``>`` thread). Only the **latest inbound message body** is quoted — nested
+``On … wrote:`` blocks from the KOL's email are stripped first (`gmail_reply_envelope.py`).
 
 ```bash
 # Pricing: returns {mode_decided, target_number, lower/upper_bound,

@@ -22,7 +22,7 @@ from plugins.veedcrawl._internal.errors import (
 )
 
 
-def decode_response(response: httpx.Response) -> dict[str, Any]:
+def decode_response(response: httpx.Response) -> Any:
     """Return the JSON payload (or a wrapped text body) from ``response``."""
     if response.status_code == 204 or not response.content:
         return {}

@@ -93,27 +93,68 @@ All candidates must meet:
 | Reel ER | ≥ 3%, using `(likes + comments) / views` |
 | Account type | individual personal blogger, not agency/media/brand |
 | Self-commerce (furniture only) | NOT a furniture seller themselves — DISCARD if bio, link-in-bio (Linktree/Beacons/Stan etc.), pinned posts, or any of the last 10-15 Reels promote their own furniture brand, furniture DTC store, furniture dropshipping, or a persistent furniture storefront (e.g. Amazon shop / LTK / Shop My where furniture is a recurring category, not a one-off affiliate post). Non-furniture self-commerce (fashion / beauty / food / kitchenware / decor accessories / tech / pet) does NOT trigger this rule — those creators are fine and often better at branded-content execution. |
-| Operator do-not-contact list | DISCARD if the handle appears in the bridge's do-not-contact set (operators flag accounts as `competitor` etc. via the console's archive modal). Fetch the set ONCE at run start (see **Pre-discovery do-not-contact pull** below) and match candidate handles against it before any per-profile qualification. |
+| Prior-collab skip list | DISCARD if the handle appears in the bridge discovery skip set: `competitor` (竞品不合作), `success` (已合作完成), `aborted` (主动叫停), `legacy_collab` (历史合作). Fetch ONCE at run start (see **Pre-discovery skip pull** below) and match before any per-profile qualification. 曾触达列表仅用于指标页的触达次数，**不**触发发现跳过。 |
 | 14-day outreach cooldown | DISCARD if we already sent a confirmed outreach email to this handle within the last **14 days** (cross-campaign). Fetch the cooldown handle set ONCE at run start (see **Pre-discovery outreach cooldown pull** below). The bridge also hard-rejects `add-candidate` with `outreach_cooldown_active` if you skip the pre-check. |
 | Competitor deals | no active exclusive direct competitor deal; past one-off competitor collab is a positive flag |
 | Scores | Match ≥ 70 and Showcase ≥ 50 |
 
 Before applying the follower threshold, normalize any locale-specific shorthand to an absolute count. Treat `K/k = 1,000`, `M = 1,000,000`, `B = 1,000,000,000`, `万/w = 10,000`, and `亿 = 100,000,000`. Example: `73.8万` = `738,000`, so it PASSES the `≥ 100k` gate; `4.6万` = `46,000`, so it fails.
 
-## Pre-discovery do-not-contact pull
-Before the first seed search, pull the operator-maintained do-not-contact list ONCE per run from the bridge and keep it in memory for the rest of the run. These are accounts that operators have manually archived via the console with reasons like `competitor` (self-selling furniture, brand-owned account, etc.) — they must never reappear in a shortlist regardless of how good their content looks.
+## Nox audience screen (optional)
+When the gateway brief includes `nox_discovery_enabled: true` and
+`campaign_config_file:` (LIVE + `nox_quota_enabled`), run the **audience
+screen** for each candidate **after** the profile visit passes handle /
+follower pre-checks and **before** loading multiple Reels for ER/views scoring.
+
+Purpose: discard creators whose **audience geography/demographics** fail the
+US/CA mandate early — saves browser turns and keeps quota for viable handles.
+
+Full procedure, CLI, persistence, and discard rules:
+`references/nox-audience-screen.md`.
+
+Summary:
+1. Once per run: `quota-snapshot` (stop Nox on auth/quota exhaustion).
+2. Per handle: check CAL `identity.nox_cache_month` + `identity.nox_top_region`
+   first; on miss call `diligence-pack --gate discovery_qualify --dimensions audience`.
+3. **Always persist** Nox facts via `upsert-identity` + `write-facts-multi`
+   (even when discarding) so the monthly cache and CAL stay aligned.
+4. On audience discard, log `nox_audience_discard: @handle — <reason>` and skip Reels.
+5. When Nox is disabled or inconclusive, fall back to browser-only region signals.
+
+Gate A shortlist diligence later reuses cached `audience` and only fetches
+missing dimensions — discovery must not run the full four-dimension pack.
+
+## Pre-discovery skip pull
+Before the first seed search, pull the bridge **discovery skip** handle set ONCE per run and keep it in memory. This union covers:
+
+| `reason` (from CLI) | Operator meaning |
+| ------------------- | ---------------- |
+| `competitor` | 竞品 — 不合作 |
+| `success` | 已合作完成 / 达成合作 |
+| `aborted` | 主动叫停 |
+| `legacy_collab` | 历史合作（系统归档） |
 
 ```bash
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-relationships \
-  --env LIVE --last-outcome competitor --limit 1000
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-discovery-skip-handles \
+  --env <TEST|LIVE>
 ```
 
-Extract `items[*].primary_handle` (lowercased) into a set. Repeat for any other do-not-contact outcomes if the operator adds new ones (today: only `competitor`). During qualification, before issuing `browser_navigate` to a candidate profile, lowercase-compare the handle against this set — if matched, log a one-line skip and move on. **Do not** spend tool turns measuring views/ER on a do-not-contact handle.
+Parse the JSON stdout (do **not** use `--plain` — that drops `reason`). Build an in-memory
+`handle → reason` map from `items[*]`:
 
-If the bridge call itself fails (network, auth), do NOT silently proceed with an empty list — that would defeat the operator gate. Report `do_not_contact_pull_failed: <reason>` and either retry once or stop the run; treat it like a pre-flight gate failure.
+- `handle` = lowercase, strip leading `@`
+- `reason` = `items[i].reason` verbatim (`competitor` | `success` | `aborted` | `legacy_collab`)
+- If the same handle appears more than once, keep the first `reason` encountered
+
+During qualification, before `browser_navigate`, look up the candidate handle in this map —
+if present, log `skip_prior_collab: @handle — <reason>` (use the mapped `reason`, not a guess)
+and move on. **Do not** spend tool turns on skipped handles. The bridge also hard-rejects
+`ingest-confirmed-candidate` with HTTP 409 `discovery_skip_active` if you skip this pre-check.
+
+If the bridge call fails (network, auth), do NOT silently proceed with an empty set — report `discovery_skip_pull_failed: <reason>` and retry once or stop the run (same severity as the outreach-cooldown gate).
 
 ## Pre-discovery outreach cooldown pull
-Before the first seed search (right after the do-not-contact pull), fetch every handle we outreached within the last **14 days** across **all** campaigns. Discovery must skip them even if they look like a perfect fit.
+Before the first seed search (right after the skip pull), fetch every handle we outreached within the last **14 days** across **all** campaigns. Discovery must skip them even if they look like a perfect fit.
 
 ```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-outreach-cooldown-handles \
@@ -124,7 +165,7 @@ Lowercase each line into a set. During qualification, before `browser_navigate`,
 
 Handles outreached **more than 14 days ago** may be discovered again, but the console shortlist and KOL detail page will still show an **曾触达** tag with how long ago — operators use that context when approving.
 
-If this bridge call fails, report `outreach_cooldown_pull_failed: <reason>` and retry once or stop the run (same severity as the do-not-contact gate).
+If this bridge call fails, report `outreach_cooldown_pull_failed: <reason>` and retry once or stop the run (same severity as the skip pull gate).
 
 ## Prior runs handling
 If the brief contains a `# prior_runs` block, **read it BEFORE generating any seeds**. Each entry lists what an earlier round of this same campaign generation already tried (`attempted_angles`, `remediation_attempted`), where it fell short (`floor_unmet_reason`, `diversity_floor_unmet`, `underserved_verticals`), pending ingests (`pending_ingests`), and what to explore next (`next_round_focus`). Rules, in priority order:
@@ -151,6 +192,38 @@ Maintain a prioritized queue and cover at least **2 discovery surfaces** unless 
 - **Following / Suggested / Similar**: expand from qualified profiles, applying ≥ 100k and NA checks before enqueueing. **Cross-vertical jump rule:** in every 3-hop expansion chain, AT LEAST ONE hop must land on a creator whose primary vertical differs from the seed's vertical (verify via their last 10-15 Reels content theme, not just bio). Prefer hops that follow a visible cross-vertical collab (a home creator collab'd with a foodie → enqueue the foodie). Pure same-vertical chains beyond hop 2 are not allowed; if IG's similar-accounts panel only surfaces same-vertical handles for two hops in a row, abandon the chain and switch surface — that's the algorithm telling you the bubble is closed.
 - **Public web (Google / TikTok / Reddit) — co-primary surface, not just fallback**: required, NOT only when IG search blocks. IG's similar-accounts engine is structurally same-vertical, so this is the primary lever for surfacing creators that IG won't recommend to you. Run NA-scoped queries against the buyer-moment and cross-vertical seeds — e.g. `"first apartment tour" instagram reels`, `"streamer setup" creator NA 100k`, `site:tiktok.com cozy bookshelf US`, `reddit r/InteriorDesign favorite non-designer home creators`. MUST be invoked when (a) IG seed search returns < 5 distinct vertical sources after 2 hashtags, OR (b) the running persisted-candidate pool is ≥ 70% concentrated in one vertical (designer / interior / home-decor). Cross-verify each surfaced handle on IG before qualifying. Treat this surface as cheap insurance against the bubble — invoke it early, not only after IG breaks.
 - **Reference expansion**: if user supplies winners, inspect 5-10 Reels, extract the conversion mechanism, then expand through following/similar/commenters even outside home vertical.
+
+### Veedcrawl supplement (optional — does NOT replace browser discovery)
+
+When the `veedcrawl` toolset is enabled, use native Hermes plugin tools only
+(`veedcrawl_*`). **Forbidden:** `mcp_veedcrawl_*`, direct REST/curl,
+`execute_code` API calls. Browser discovery surfaces above remain **primary**;
+at least **2 surfaces must be browser-based** (hashtag, comment mining,
+following/similar, or public web). Veedcrawl search alone cannot satisfy the
+≥2-surface rule.
+
+| Supplement use | Tool | Per-run cap | Browser still required |
+|---|---|---|---|
+| Seed queue expansion | `veedcrawl_search_social_videos` (`q`, `platform=instagram`, `limit`≤20) | **3 calls** | Yes — `browser_navigate` registration + qualification |
+| Pre-screen followers/reels | `veedcrawl_instagram_profile` | same handles as profile visits | Yes — bio/region/self-sell checks |
+| Reel view/like stats | `veedcrawl_metadata` | free; prefer over reel page load | Yes — covers, showcase, comment mining |
+| Showcase semantics thin | `veedcrawl_extract` | **10 calls** | Yes — does not replace profile gate |
+
+**Tool response shape.** Discovery tools return a persist envelope. Read business
+data from `response`; use `cache_hit`, `persisted`, and `api_calls` in run
+diagnostics. If `persisted: false` or `ok: false`, fall back to browser for that
+signal — do not treat as success.
+
+**Order of operations:** run browser discovery first (or in parallel), then
+optionally enqueue handles from `veedcrawl_search_social_videos` (log as
+`veedcrawl_search:<q>` in `attempted_angles`). Per handle: optional
+`veedcrawl_instagram_profile` → **mandatory** `browser_navigate` profile → reel
+scoring. Pass `identity_id` + `env` on profile/metadata/extract when the handle
+is already ingested so CAL gets `identity.veedcrawl_*` index facts.
+
+When veedcrawl is unavailable, continue with **pure browser** — do not abort.
+
+See `references/veedcrawl-tools.md` for parameters and cache semantics.
 
 Lateral expansion from seed results is capped at **3 hops**. One failed hashtag, browser session, selector, or extraction call never ends the run; switch surface or seed.
 
@@ -267,8 +340,8 @@ Minimum evidence when reachable:
 - measure 10-15 recent Reels per qualified creator;
 - run `browser_navigate` to every candidate's profile URL (`https://www.instagram.com/<handle>/`) at least once in this run — this is the hard registration gate the orchestrator skill enforces before allowing `shortlist_ready`;
 - use screenshots (`browser_snapshot` / `browser_vision`) and extract numbers via `browser_console(expression="...")` from the rendered page;
-- when `veedcrawl_metadata(url=...)` is in your toolset, prefer it for per-Reel facts because it is free; when it is NOT in your toolset (e.g. the active agent profile has not enabled the veedcrawl plugin), fall back to `browser_navigate` on the Reel URL plus `browser_console`/`browser_vision` to read view counts, likes and dates. Do not abort the run because veedcrawl is unavailable;
-- use `veedcrawl_extract(url=..., prompt=...)` only when the user explicitly requests paid/deep extraction.
+- when `veedcrawl_metadata` is in your toolset, prefer it for per-Reel view/like/date facts (read `response` from the envelope); on `persisted: false` or missing fields, fall back to `browser_navigate` on the Reel URL plus `browser_console`/`browser_vision`. Do not abort the run because veedcrawl is unavailable;
+- use `veedcrawl_extract` when showcase scoring still lacks semantic signal after metadata + browser covers/captions (on-demand during Reel review, ≤10/run). Also honor explicit operator requests for paid extraction.
 
 **Partial Reel-cover load is acceptable (soft).** IG's Reel grid thumbnails frequently fail to render for transient reasons (CDN flakes, lazy-load delays, IG throttling, viewport virtualization) — this is normal and does NOT mean the candidate is unjudgeable. Rules:
 - Judge showcase fit from whatever covers DID load. **6+ visible covers out of 12-15** is enough to assess content theme, scene fit, and on-camera style; do not gate qualification on a full grid.
@@ -543,6 +616,8 @@ Used only when brief explicitly says `browser_mode: cloud` (default is `local-ch
 
 ## References
 - `references/bridge-cli-json-payloads.md` — exact kol_bridge_tool JSON field names and per-candidate persistence order for rediscovery runs.
+- `references/veedcrawl-tools.md` — plugin tool names, persist envelope, monthly cache, per-run budgets.
+- `references/veedcrawl-api.md` — REST endpoints (search/profile/metadata/extract), MCP vs plugin.
 
 ## Pitfalls
 - For bridge CLI persistence, do not guess JSON keys per subcommand. `upsert-identity` expects `primary_handle`; `write-facts-multi` should be called with `--identity-id`; `add-candidate` is safest with `identity_id` already embedded in the JSON payload. Prefer file-backed `@/tmp/*.json` payloads.
@@ -560,7 +635,10 @@ Used only when brief explicitly says `browser_mode: cloud` (default is `local-ch
 - Do not include Reels posted within the last 72h in averages.
 - Do not compare follower thresholds against locale-formatted shorthand until you have normalized it to an absolute count. `73.8万` is `738,000`, not `73.8k`.
 - Do not keep commenters with < 100k followers.
-- Do not call `veedcrawl_extract` without explicit request and both `url` + `prompt`.
+- Do not use Veedcrawl search/profile as the only discovery path — browser surfaces are mandatory.
+- Do not call `mcp_veedcrawl_*` or bypass plugin tools for discovery.
+- Do not ignore `persisted: false` on veedcrawl tool results — fall back to browser.
+- Do not call `veedcrawl_extract` without both `url` + `prompt` (on-demand showcase gap or explicit operator request).
 - **Local Mode — never** issue a `follow / like / comment / save / DM / share` action, even when a snapshot lists it as the easiest-looking element. The skill is read-only on the main account.
 - **Local Mode — never** retry a URL that returned a checkpoint/captcha; never refresh hoping it resolves. Stop the run instead.
 - **Local Mode — never** skip the `ipinfo.io` pre-flight, even if the previous run in the same hermes session passed it (VPN state can flip mid-session).

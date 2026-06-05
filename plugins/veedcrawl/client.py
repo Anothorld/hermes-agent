@@ -109,7 +109,7 @@ class VeedcrawlClient:
         params: Optional[dict[str, Any]] = None,
         json_body: Optional[dict[str, Any]] = None,
         _retried_429: bool = False,
-    ) -> tuple[dict[str, Any], httpx.Headers]:
+    ) -> tuple[Any, httpx.Headers]:
         try:
             response = self._http.request(method, path, params=params, json=json_body)
         except httpx.TransportError as exc:
@@ -193,6 +193,7 @@ class VeedcrawlClient:
             raise VeedcrawlAPIError(
                 "must provide either 'username' or 'url'", status_code=400,
             )
+        limit = max(1, min(int(limit), 24))
         params: dict[str, Any] = {"limit": limit}
         if username:
             params["username"] = username.lstrip("@")
@@ -210,6 +211,40 @@ class VeedcrawlClient:
         cache.put("profile", cache_key, _strip_private(payload), ttl_s=_CACHE_TTL_PROFILE)
         return payload
 
+    def search_social_videos(
+        self,
+        *,
+        q: str,
+        platform: Optional[str] = None,
+        limit: int = 6,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        """``GET /v1/search`` — synchronous array response (REST, documented free)."""
+        query = (q or "").strip()
+        if not query:
+            raise VeedcrawlAPIError("search requires non-empty q", status_code=400)
+        limit = max(1, min(int(limit), 20))
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if platform:
+            params["platform"] = str(platform).strip().lower()
+        cache_key = {"q": query, **params}
+        if not force_refresh:
+            cached = cache.get("search", cache_key)
+            if cached is not None:
+                if isinstance(cached, list):
+                    return cached
+                if isinstance(cached, dict) and isinstance(cached.get("items"), list):
+                    return cached["items"]
+        payload, headers = self._request("GET", "/v1/search", params=params)
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            items = payload["items"]
+        else:
+            items = []
+        cache.put("search", cache_key, items, ttl_s=_CACHE_TTL_METADATA)
+        return items
+
     def transcript(  # async job
 
         self,
@@ -223,13 +258,17 @@ class VeedcrawlClient:
         job_id: Optional[str] = None,
     ) -> dict[str, Any]:
         cost = _COST_TRANSCRIPT_NATIVE if mode == "native" else _COST_TRANSCRIPT_GENERATE
+        submit_params = {"url": url, "mode": mode}
+        if lang:
+            submit_params["lang"] = lang
         return jobs.run_async_job(
             endpoint="transcript",
             submit_path="/v1/transcript",
             poll_path_prefix="/v1/transcript/",
             cost=cost,
             cache_params={"url": url, "mode": mode, "lang": lang},
-            request_body={"url": url, "mode": mode, "lang": lang},
+            submit_params=submit_params,
+            request_body=None,
             wait=wait,
             timeout_s=timeout_s,
             force_refresh=force_refresh,

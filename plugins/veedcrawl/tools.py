@@ -9,11 +9,12 @@ released between agent turns.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from tools.registry import tool_error, tool_result
 
 from plugins.veedcrawl.client import VeedcrawlClient, resolve_api_key
+from plugins.veedcrawl._internal.bridge_persist import fetch_with_persist
 from plugins.veedcrawl._internal.errors import VeedcrawlError
 
 # --------------------------------------------------------------------- gating
@@ -42,6 +43,23 @@ VEEDCRAWL_ACCOUNT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_PERSIST_SCHEMA_PROPS: dict[str, Any] = {
+    "env": {
+        "type": "string",
+        "enum": ["TEST", "LIVE"],
+        "default": "LIVE",
+        "description": "CAL / audit environment for optional identity facts.",
+    },
+    "identity_id": {
+        "type": "integer",
+        "description": "When set, write identity.veedcrawl_* index facts to CAL.",
+    },
+    "handle": {
+        "type": "string",
+        "description": "IG handle for CAL fact attribution (optional).",
+    },
+}
+
 VEEDCRAWL_METADATA_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -51,9 +69,10 @@ VEEDCRAWL_METADATA_SCHEMA: dict[str, Any] = {
         },
         "force_refresh": {
             "type": "boolean",
-            "description": "Bypass the 24h cache.",
+            "description": "Bypass the monthly persist cache.",
             "default": False,
         },
+        **_PERSIST_SCHEMA_PROPS,
     },
     "required": ["url"],
     "additionalProperties": False,
@@ -144,6 +163,7 @@ VEEDCRAWL_EXTRACT_SCHEMA: dict[str, Any] = {
                 "extraction result without spending new credits."
             ),
         },
+        **_PERSIST_SCHEMA_PROPS,
     },
     "oneOf": [
         {"required": ["url", "prompt"]},
@@ -193,18 +213,140 @@ VEEDCRAWL_PROFILE_SCHEMA: dict[str, Any] = {
         "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 50,
+            "maximum": 24,
             "default": 12,
-            "description": "Max recent posts to include.",
+            "description": "Max recent posts to include (REST hard cap 24).",
         },
         "force_refresh": {"type": "boolean", "default": False},
+        **_PERSIST_SCHEMA_PROPS,
     },
     "required": ["platform"],
     "additionalProperties": False,
 }
 
+VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "username": {
+            "type": "string",
+            "description": "IG handle without @ (mutually exclusive with url).",
+        },
+        "url": {
+            "type": "string",
+            "description": "Profile URL (mutually exclusive with username).",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 24,
+            "default": 12,
+            "description": "Max recent posts (REST hard cap 24).",
+        },
+        "force_refresh": {"type": "boolean", "default": False},
+        **_PERSIST_SCHEMA_PROPS,
+    },
+    "additionalProperties": False,
+}
+
+VEEDCRAWL_SEARCH_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "q": {
+            "type": "string",
+            "description": "Search query (buyer-moment or cross-vertical phrase).",
+        },
+        "platform": {
+            "type": "string",
+            "description": "Optional platform filter, e.g. instagram.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 6,
+            "description": "Max results (REST hard cap 20).",
+        },
+        "force_refresh": {"type": "boolean", "default": False},
+        **_PERSIST_SCHEMA_PROPS,
+    },
+    "required": ["q"],
+    "additionalProperties": False,
+}
+
 
 # --------------------------------------------------------------------- helpers
+
+def _job_lookup_envelope(
+    *,
+    operation: str,
+    job_id: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize async job lookup into the discovery persist envelope shape."""
+    return {
+        "ok": True,
+        "operation": operation,
+        "cache_month": None,
+        "cache_key": f"job:{job_id}",
+        "cache_hit": False,
+        "api_calls": 0,
+        "persisted": False,
+        "blob_ref": None,
+        "storage_ref": None,
+        "identity_facts_written": False,
+        "response": response,
+        "job_lookup": True,
+    }
+
+
+def _persist_kwargs(args: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "env": str(args.get("env") or "LIVE"),
+        "force_refresh": bool(args.get("force_refresh")),
+    }
+    identity_id = args.get("identity_id")
+    if identity_id is not None:
+        out["identity_id"] = int(identity_id)
+    handle = args.get("handle")
+    if isinstance(handle, str) and handle.strip():
+        out["handle"] = handle.strip().lstrip("@")
+    return out
+
+
+def _wrap_persisted(
+    operation: str,
+    request_builder: Callable[[dict[str, Any]], dict[str, Any]],
+    fetch_builder: Callable[[VeedcrawlClient, dict[str, Any]], Any],
+) -> Callable[..., str]:
+    """Run fetch_with_persist and return the unified envelope."""
+
+    def _runner(arguments: dict[str, Any] | None = None, **_: Any) -> str:
+        args = dict(arguments or {})
+        try:
+            request = request_builder(args)
+            with VeedcrawlClient() as client:
+                envelope = fetch_with_persist(
+                    operation=operation,
+                    request=request,
+                    fetch_fn=lambda: fetch_builder(client, args),
+                    **_persist_kwargs(args),
+                )
+        except VeedcrawlError as exc:
+            return tool_error(str(exc), **exc.to_payload())
+        except (TypeError, ValueError) as exc:
+            return tool_error(str(exc), code="bad_request")
+        except Exception as exc:  # pragma: no cover - defensive
+            return tool_error(f"unexpected veedcrawl error: {exc}", code="internal_error")
+        if not envelope.get("ok"):
+            return tool_error(
+                str(envelope.get("error") or "veedcrawl fetch failed"),
+                code="upstream_error",
+                persisted=envelope.get("persisted"),
+            )
+        return tool_result(envelope)
+
+    return _runner
+
 
 def _wrap_errors(fn: Callable[[VeedcrawlClient, dict[str, Any]], dict[str, Any]]) -> Callable[..., str]:
     """Convert ``VeedcrawlError`` raises into ``tool_error`` JSON."""
@@ -245,88 +387,262 @@ def _require(args: dict[str, Any], key: str, *, hint: str = "") -> str:
     return str(value)
 
 
-@_wrap_errors
-def _handle_metadata(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
-    url = _require(
-        args,
-        "url",
-        hint="veedcrawl_metadata fetches video facts by URL only; it does not accept job_id.",
-    )
+def _metadata_request(args: dict[str, Any]) -> dict[str, Any]:
+    return {"url": _require(args, "url", hint="veedcrawl_metadata requires url.")}
+
+
+def _metadata_fetch(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
     return client.metadata(
-        url=url,
-        force_refresh=bool(args.get("force_refresh")),
+        url=str(args["url"]),
+        force_refresh=True,
     )
 
 
-@_wrap_errors
-def _handle_transcript(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
-    job_id = args.get("job_id")
-    if job_id:
-        return client.lookup_job(endpoint="transcript", job_id=str(job_id))
-    url = _require(
-        args,
-        "url",
-        hint="Provide either url=<video URL> to start a new job or job_id=<id> to fetch an existing one.",
-    )
-    return client.transcript(
-        url=url,
-        mode=str(args.get("mode") or "auto"),
-        lang=args.get("lang"),
-        wait=bool(args.get("wait", True)),
-        timeout_s=float(args.get("timeout_s") or 180.0),
-        force_refresh=bool(args.get("force_refresh")),
-    )
+_handle_metadata = _wrap_persisted(
+    "get_video_metadata",
+    _metadata_request,
+    _metadata_fetch,
+)
 
 
-@_wrap_errors
-def _handle_extract(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
-    job_id = args.get("job_id")
-    if job_id:
-        return client.lookup_job(endpoint="extract", job_id=str(job_id))
+def _handle_transcript(arguments: dict[str, Any] | None = None, **_: Any) -> str:
+    args = dict(arguments or {})
+    try:
+        job_id = args.get("job_id")
+        if job_id:
+            with VeedcrawlClient() as client:
+                payload = client.lookup_job(endpoint="transcript", job_id=str(job_id))
+            return tool_result(
+                _job_lookup_envelope(
+                    operation="get_video_transcript",
+                    job_id=str(job_id),
+                    response=payload,
+                )
+            )
+        url = _require(
+            args,
+            "url",
+            hint="Provide either url=<video URL> to start a new job or job_id=<id> to fetch an existing one.",
+        )
+        with VeedcrawlClient() as client:
+            payload = client.transcript(
+                url=url,
+                mode=str(args.get("mode") or "auto"),
+                lang=args.get("lang"),
+                wait=bool(args.get("wait", True)),
+                timeout_s=float(args.get("timeout_s") or 180.0),
+                force_refresh=bool(args.get("force_refresh")),
+            )
+    except VeedcrawlError as exc:
+        return tool_error(str(exc), **exc.to_payload())
+    except (TypeError, ValueError) as exc:
+        return tool_error(str(exc), code="bad_request")
+    except Exception as exc:  # pragma: no cover
+        return tool_error(f"unexpected veedcrawl error: {exc}", code="internal_error")
+    return tool_result(payload)
+
+
+def _parse_extract_schema(args: dict[str, Any]) -> Optional[dict[str, Any]]:
     schema = args.get("schema")
+    if schema is None:
+        return None
     if isinstance(schema, str):
-        # Tolerate stringified JSON Schemas from less-strict callers.
         try:
             schema = json.loads(schema)
         except json.JSONDecodeError as exc:
             raise ValueError(f"schema must be JSON Schema object, not string: {exc}") from exc
-    url = _require(
-        args,
-        "url",
-        hint="Provide either url+prompt to start a new job or job_id=<id> to fetch an existing one.",
-    )
-    prompt = _require(
-        args,
-        "prompt",
-        hint="Provide either url+prompt to start a new job or job_id=<id> to fetch an existing one.",
-    )
-    return client.extract(
-        url=url,
-        prompt=prompt,
-        schema=schema,
-        lang=args.get("lang"),
-        wait=bool(args.get("wait", True)),
-        timeout_s=float(args.get("timeout_s") or 180.0),
-        force_refresh=bool(args.get("force_refresh")),
-    )
+    return schema if isinstance(schema, dict) else None
 
 
-@_wrap_errors
-def _handle_job(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
-    endpoint = _require(args, "endpoint")
-    job_id = _require(args, "job_id")
-    return client.lookup_job(endpoint=endpoint, job_id=job_id)
+def _handle_extract(arguments: dict[str, Any] | None = None, **_: Any) -> str:
+    args = dict(arguments or {})
+    try:
+        job_id = args.get("job_id")
+        if job_id:
+            with VeedcrawlClient() as client:
+                payload = client.lookup_job(endpoint="extract", job_id=str(job_id))
+            return tool_result(
+                _job_lookup_envelope(
+                    operation="extract_from_video",
+                    job_id=str(job_id),
+                    response=payload,
+                )
+            )
+        schema = _parse_extract_schema(args)
+        url = _require(
+            args,
+            "url",
+            hint="Provide either url+prompt to start a new job or job_id=<id> to fetch an existing one.",
+        )
+        prompt = _require(
+            args,
+            "prompt",
+            hint="Provide either url+prompt to start a new job or job_id=<id> to fetch an existing one.",
+        )
+        request = {"url": url, "prompt": prompt, "schema": schema, "lang": args.get("lang")}
+
+        def _fetch(client: VeedcrawlClient, _args: dict[str, Any]) -> dict[str, Any]:
+            return client.extract(
+                url=url,
+                prompt=prompt,
+                schema=schema,
+                lang=args.get("lang"),
+                wait=bool(args.get("wait", True)),
+                timeout_s=float(args.get("timeout_s") or 180.0),
+                force_refresh=True,
+            )
+
+        with VeedcrawlClient() as client:
+            envelope = fetch_with_persist(
+                operation="extract_from_video",
+                request=request,
+                fetch_fn=lambda: _fetch(client, args),
+                **_persist_kwargs(args),
+            )
+    except VeedcrawlError as exc:
+        return tool_error(str(exc), **exc.to_payload())
+    except (TypeError, ValueError) as exc:
+        return tool_error(str(exc), code="bad_request")
+    except Exception as exc:  # pragma: no cover
+        return tool_error(f"unexpected veedcrawl error: {exc}", code="internal_error")
+    if not envelope.get("ok"):
+        return tool_error(
+            str(envelope.get("error") or "veedcrawl extract failed"),
+            code="upstream_error",
+            persisted=envelope.get("persisted"),
+        )
+    return tool_result(envelope)
 
 
-@_wrap_errors
-def _handle_profile(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
+_JOB_ENDPOINT_OPERATIONS: dict[str, str] = {
+    "extract": "extract_from_video",
+    "transcript": "get_video_transcript",
+}
+
+
+def _handle_job(arguments: dict[str, Any] | None = None, **_: Any) -> str:
+    args = dict(arguments or {})
+    try:
+        endpoint = _require(args, "endpoint")
+        job_id = _require(args, "job_id")
+        with VeedcrawlClient() as client:
+            payload = client.lookup_job(endpoint=endpoint, job_id=job_id)
+        operation = _JOB_ENDPOINT_OPERATIONS.get(endpoint, f"job_{endpoint}")
+        return tool_result(
+            _job_lookup_envelope(
+                operation=operation,
+                job_id=job_id,
+                response=payload,
+            )
+        )
+    except VeedcrawlError as exc:
+        return tool_error(str(exc), **exc.to_payload())
+    except (TypeError, ValueError) as exc:
+        return tool_error(str(exc), code="bad_request")
+    except Exception as exc:  # pragma: no cover
+        return tool_error(f"unexpected veedcrawl error: {exc}", code="internal_error")
+
+
+def _profile_request(args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "platform": str(args["platform"]),
+        "username": args.get("username"),
+        "url": args.get("url"),
+        "limit": int(args.get("limit") or 12),
+    }
+
+
+def _profile_fetch(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
     return client.profile(
         platform=str(args["platform"]),
         username=args.get("username"),
         url=args.get("url"),
         limit=int(args.get("limit") or 12),
-        force_refresh=bool(args.get("force_refresh")),
+        force_refresh=True,
     )
+
+
+def _handle_profile(arguments: dict[str, Any] | None = None, **_: Any) -> str:
+    args = dict(arguments or {})
+    try:
+        platform = str(args.get("platform") or "").lower()
+        if platform not in {"instagram", "tiktok"}:
+            raise ValueError("platform must be instagram or tiktok")
+        operation = (
+            "get_instagram_profile" if platform == "instagram" else "get_tiktok_profile"
+        )
+        request = _profile_request(args)
+        with VeedcrawlClient() as client:
+            envelope = fetch_with_persist(
+                operation=operation,
+                request=request,
+                fetch_fn=lambda: _profile_fetch(client, args),
+                **_persist_kwargs(args),
+            )
+    except VeedcrawlError as exc:
+        return tool_error(str(exc), **exc.to_payload())
+    except (TypeError, ValueError) as exc:
+        return tool_error(str(exc), code="bad_request")
+    except Exception as exc:  # pragma: no cover
+        return tool_error(f"unexpected veedcrawl error: {exc}", code="internal_error")
+    if not envelope.get("ok"):
+        return tool_error(
+            str(envelope.get("error") or "veedcrawl profile failed"),
+            code="upstream_error",
+            persisted=envelope.get("persisted"),
+        )
+    return tool_result(envelope)
+
+
+def _instagram_profile_request(args: dict[str, Any]) -> dict[str, Any]:
+    if not (args.get("username") or args.get("url")):
+        raise ValueError("veedcrawl_instagram_profile requires username or url")
+    return {
+        "username": args.get("username"),
+        "url": args.get("url"),
+        "limit": int(args.get("limit") or 12),
+    }
+
+
+def _instagram_profile_fetch(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, Any]:
+    return client.profile(
+        platform="instagram",
+        username=args.get("username"),
+        url=args.get("url"),
+        limit=int(args.get("limit") or 12),
+        force_refresh=True,
+    )
+
+
+_handle_instagram_profile = _wrap_persisted(
+    "get_instagram_profile",
+    _instagram_profile_request,
+    _instagram_profile_fetch,
+)
+
+
+def _search_request(args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "q": _require(args, "q"),
+        "platform": args.get("platform"),
+        "limit": int(args.get("limit") or 6),
+    }
+
+
+def _search_fetch(client: VeedcrawlClient, args: dict[str, Any]) -> list[dict[str, Any]]:
+    return client.search_social_videos(
+        q=str(args["q"]),
+        platform=args.get("platform"),
+        limit=int(args.get("limit") or 6),
+        force_refresh=True,
+    )
+
+
+_handle_search = _wrap_persisted(
+    "search_social_videos",
+    _search_request,
+    _search_fetch,
+)
 
 
 # Public exports consumed by ``__init__.register``.
@@ -336,12 +652,16 @@ __all__ = (
     "VEEDCRAWL_TRANSCRIPT_SCHEMA",
     "VEEDCRAWL_EXTRACT_SCHEMA",
     "VEEDCRAWL_PROFILE_SCHEMA",
+    "VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA",
+    "VEEDCRAWL_SEARCH_SCHEMA",
     "VEEDCRAWL_JOB_SCHEMA",
     "_handle_account",
     "_handle_metadata",
     "_handle_transcript",
     "_handle_extract",
     "_handle_profile",
+    "_handle_instagram_profile",
+    "_handle_search",
     "_handle_job",
     "_check_veedcrawl_available",
 )

@@ -1,6 +1,6 @@
 name: veedcrawl
 version: 0.2.0
-description: "Veedcrawl video intelligence — 6 tools (account, metadata, transcript, extract, profile, job) over the Veedcrawl REST API. Wraps async transcript/extract jobs with built-in polling, response caching, rate-limit recovery, and credit guardrails. Use ``veedcrawl_job`` (or transcript/extract with job_id alone) to fetch results of an earlier async submission without spending new credits. Auth via the VEEDCRAWL_API_KEY env var (X_API_KEY also accepted)."
+description: "Veedcrawl video intelligence — 8 tools over the Veedcrawl REST API. Discovery tools (metadata, extract, instagram_profile, search_social_videos) embed kol-ops-bridge monthly persist. Async transcript/extract jobs poll internally. Auth via VEEDCRAWL_API_KEY (X_API_KEY also accepted)."
 author: agent_prj
 kind: backend
 provides_tools:
@@ -9,4 +9,6 @@ provides_tools:
   - veedcrawl_transcript
   - veedcrawl_extract
   - veedcrawl_profile
+  - veedcrawl_instagram_profile
+  - veedcrawl_search_social_videos
   - veedcrawl_job

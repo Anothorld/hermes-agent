@@ -4,20 +4,25 @@ Native [Veedcrawl](https://veedcrawl.com) integration for Hermes. Veedcrawl is a
 video-intelligence REST API that turns public YouTube / TikTok / Instagram /
 X / Facebook URLs into metadata, transcripts, and structured AI extractions.
 
-This plugin exposes **6 agent tools** that mirror Veedcrawl's official MCP
-surface. Async jobs (`/v1/transcript`, `/v1/extract`) are polled inside the
-client so agents see synchronous semantics.
+This plugin exposes **8 agent tools** against the official Veedcrawl REST API.
+Discovery tools embed **monthly persist** via `kol-ops-bridge` `fetch_with_persist`
+(one tool call = cache lookup + API + full JSON blob). Async jobs
+(`/v1/transcript`, `/v1/extract`) are polled inside the client.
+
+**Production discovery uses these plugin tools, not MCP.**
 
 ## Tools
 
-| Tool | Endpoint(s) | Cost | Notes |
+| Tool | Endpoint(s) | Cost | Persist envelope |
 | --- | --- | --- | --- |
-| `veedcrawl_account` | `/v1/me`, `/health` | 0 | Probe + remaining credits |
-| `veedcrawl_metadata` | `GET /v1/metadata` | 0 | Free first-pass video facts (URL only) |
-| `veedcrawl_transcript` | `POST /v1/transcript` (+ poll) | 1 native / 5 whisper | `mode`: `native` \| `generate` \| `auto` — also accepts `job_id` alone to fetch an existing result |
-| `veedcrawl_extract` | `POST /v1/extract` (+ poll) | 10 | Custom prompt, optional JSON Schema — also accepts `job_id` alone to fetch an existing result |
-| `veedcrawl_profile` | `/v1/{instagram,tiktok}/profile` | 0 | `platform`: `instagram` \| `tiktok` |
-| `veedcrawl_job` | `GET /v1/{transcript,extract}/{job_id}` | 0 | Look up the result of an earlier async job by id |
+| `veedcrawl_account` | `/v1/me`, `/health` | 0 | No |
+| `veedcrawl_metadata` | `GET /v1/metadata` | 0 | Yes |
+| `veedcrawl_search_social_videos` | `GET /v1/search` | 0 | Yes |
+| `veedcrawl_instagram_profile` | `GET /v1/instagram/profile` | 0 | Yes |
+| `veedcrawl_profile` | `/v1/{instagram,tiktok}/profile` | 0 | Yes |
+| `veedcrawl_transcript` | `POST /v1/transcript?url=...` (+ poll) | 1 native / 5 whisper | Plugin TTL cache only |
+| `veedcrawl_extract` | `POST /v1/extract` (+ poll) | 10 | Yes |
+| `veedcrawl_job` | `GET /v1/{transcript,extract}/{job_id}` | 0 | No |
 
 Key management (`/v1/keys`) is intentionally **not exposed** — keys are an
 operator concern, not an agent concern.
@@ -51,17 +56,18 @@ credits or hammer the API:
 - **Rate-limit recovery** — `429` responses are retried exactly once after
   sleeping until `X-RateLimit-Reset` (+ jitter). A second `429` surfaces as a
   structured `rate_limited` error.
-- **Response cache** — `metadata` / `profile` responses and completed
-  `transcript` / `extract` jobs are cached at
-  `~/.hermes/cache/veedcrawl/<endpoint>/<sha256>.json`. TTLs:
-
-  | Endpoint | TTL |
-  | --- | --- |
-  | `metadata` | 24 h |
-  | `profile` | 6 h |
-  | `transcript`, `extract` | permanent (idempotent) |
-
-  Pass `force_refresh: true` on a tool call to bypass the cache.
+- **Monthly persist cache (discovery)** — `metadata`, `search`, `profile`,
+  and completed `extract` responses are stored under
+  `$HERMES_HOME/kol-ops-bridge/veedcrawl_cache/` (SQLite + blobs, month =
+  Asia/Shanghai `YYYY-MM`). Tool responses include `cache_hit`, `persisted`,
+  `blob_ref`, `storage_ref` (always set when persisted — blob path or
+  `sqlite:{month}:{key}`). Optional `identity_id` writes `identity.veedcrawl_*`
+  CAL index facts. Extract blobs include `api_response` (full completed poll JSON).
+  See `agent_prj/docs/kol-veedcrawl-integration.md`.
+- **Short TTL plugin cache** — still used inside the HTTP client for
+  `metadata` / `profile` (24 h / 6 h) and completed async jobs at
+  `~/.hermes/cache/veedcrawl/`. Discovery handlers bypass this when the monthly
+  cache misses (`force_refresh` on API fetch).
 
 ## Example
 

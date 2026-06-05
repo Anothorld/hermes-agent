@@ -59,6 +59,7 @@ from .campaign_nox_integration import (
     pick_nox_fields,
 )
 from .goals import GOALS, Context, all_goals
+from . import outreach_touch
 from . import reply_draft
 from . import reply_chase
 from .schema import FACT_NAMESPACES, GOAL_NAMES, recreate_all
@@ -485,6 +486,635 @@ def list_archived_kols(
     }
 
 
+_OUTREACH_TOUCH_EVENT_TYPES: Final[tuple[str, ...]] = (
+    "outreach.sent",
+    "outbound_draft_created",
+)
+
+_LEGACY_COLLAB_IMPORTED: Final[str] = "legacy.collab_imported"
+_LEGACY_CAMPAIGN_PREFIX: Final[str] = "legacy-redlist-"
+
+KOL_REGISTRY_FACT_KEYS: Final[tuple[str, ...]] = (
+    "identity.followers",
+    "identity.follower_count",
+    "identity.nox_followers",
+    "identity.social_links",
+    "identity.primary_email_from_legacy",
+    "identity.legacy_import_id",
+    "identity.nox_avg_views",
+    "identity.avg_views",
+    "offer.sku_locked",
+    "offer.legacy_product_text",
+    "identity.nox_top_region",
+    "identity.region",
+    "identity.nox_country",
+    "identity.nox_gender_skew",
+    "identity.nox_audience_age_distribution",
+    "identity.nox_audience_adults_split",
+    "identity.nox_audience_languages_top",
+    "identity.nox_audience_types_top",
+    "identity.nox_audience_authenticity",
+    "identity.nox_audience_authenticity_range",
+    "identity.nox_audience_quality_score",
+    "identity.nox_audience_positive_pct",
+    "identity.nox_audience_promo_attractiveness",
+    "identity.nox_audience_promo_interested_pct",
+    "identity.nox_audience_promo_professionalism",
+    "identity.nox_audience_interests_top",
+    "identity.veedcrawl_profile_followers",
+    "identity.veedcrawl_recent_reels_stats",
+    "identity.veedcrawl_cache_month",
+    "identity.veedcrawl_fetched_at",
+)
+
+
+_SPU_TOUCH_FACT_KEYS: Final[tuple[str, ...]] = (
+    "offer.proposed_skus",
+    "offer.sku_locked",
+    "offer.legacy_product_text",
+)
+
+
+def _first_nonempty_sku(value: Any) -> str | None:
+    """Extract the first real SKU/SPU from a fact value (skip booleans)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, list):
+        for item in value:
+            text = str(item).strip()
+            if text and text.lower() not in ("true", "false", "null"):
+                return text
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s or s.lower() in ("true", "false", "null"):
+            return None
+        try:
+            return _first_nonempty_sku(json.loads(s))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return s
+    text = str(value).strip()
+    return text or None
+
+
+def _spu_from_campaign_id(campaign_id: str | None) -> str | None:
+    """Best-effort SKU prefix from ``SKU-YYYYMMDD`` campaign ids."""
+    if not campaign_id:
+        return None
+    cid = campaign_id.strip()
+    match = re.match(r"^([^-]+)-(\d{8})$", cid)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _resolve_touch_spu(
+    facts: Mapping[str, Any],
+    campaign_id: str | None,
+) -> str:
+    """Stable dedupe key: one count per SPU per identity."""
+    for key in ("offer.proposed_skus", "offer.sku_locked"):
+        spu = _first_nonempty_sku(facts.get(key))
+        if spu:
+            return spu.upper()
+    legacy = facts.get("offer.legacy_product_text")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy.strip().upper()
+    from_campaign = _spu_from_campaign_id(campaign_id)
+    if from_campaign:
+        return from_campaign.upper()
+    return f"cid:{campaign_id or 'unknown'}"
+
+
+def _batch_campaign_offer_facts(
+    conn: Any,
+    pairs: Iterable[tuple[int, str]],
+    *,
+    env: str,
+) -> dict[tuple[int, str], dict[str, Any]]:
+    """Offer facts scoped to (identity_id, campaign_id) touch pairs."""
+    unique = sorted({(int(i), str(c)) for i, c in pairs if c})
+    if not unique:
+        return {}
+    key_ph = ",".join("?" * len(_SPU_TOUCH_FACT_KEYS))
+    pair_sql = " OR ".join("(identity_id=? AND campaign_id=?)" for _ in unique)
+    flat: list[Any] = [env]
+    for iid, cid in unique:
+        flat.extend([iid, cid])
+    flat.extend(_SPU_TOUCH_FACT_KEYS)
+    rows = conn.execute(
+        f"""SELECT identity_id, campaign_id, fact_key, fact_value
+              FROM kol_facts_latest
+             WHERE env=?
+               AND ({pair_sql})
+               AND fact_key IN ({key_ph})""",
+        flat,
+    ).fetchall()
+    out: dict[tuple[int, str], dict[str, Any]] = {}
+    for r in rows:
+        pair = (int(r["identity_id"]), str(r["campaign_id"]))
+        out.setdefault(pair, {})[r["fact_key"]] = _decode_fact_value(r["fact_value"])
+    return out
+
+
+def _batch_outreach_touch_counts(
+    conn: Any,
+    identity_ids: list[int],
+    *,
+    env: str,
+) -> dict[int, int]:
+    """Count distinct SPUs touched (sent mail or draft) per identity.
+
+    Registry callers must pass results through
+    ``prior_touch_allowlist.gate_internal_touch_count`` before exposing
+    ``internal_touch_count`` to operators.
+    """
+    if not identity_ids:
+        return {}
+    id_ph = ",".join("?" * len(identity_ids))
+    et_ph = ",".join("?" * len(_OUTREACH_TOUCH_EVENT_TYPES))
+    event_rows = conn.execute(
+        f"""SELECT DISTINCT identity_id, campaign_id
+              FROM kol_conversation_events
+             WHERE env=? AND identity_id IN ({id_ph})
+               AND event_type IN ({et_ph})""",
+        (env, *identity_ids, *_OUTREACH_TOUCH_EVENT_TYPES),
+    ).fetchall()
+    if not event_rows:
+        return {}
+    pairs = [(int(r["identity_id"]), str(r["campaign_id"] or "")) for r in event_rows]
+    facts_by_pair = _batch_campaign_offer_facts(conn, pairs, env=env)
+    spus_by_identity: dict[int, set[str]] = {}
+    for iid, cid in pairs:
+        facts = facts_by_pair.get((iid, cid), {})
+        spu_key = _resolve_touch_spu(facts, cid or None)
+        spus_by_identity.setdefault(iid, set()).add(spu_key)
+    return {iid: len(spus) for iid, spus in spus_by_identity.items()}
+
+
+def _registry_fact_is_true(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("true", "1"):
+            return True
+        if s in ("false", "0", "", "null"):
+            return False
+    try:
+        decoded = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        decoded = value
+    return decoded is True
+
+
+def _batch_registry_pipeline_flags(
+    conn: Any,
+    identity_ids: list[int],
+    *,
+    env: str,
+) -> dict[int, dict[str, bool]]:
+    """Per-identity outreach pipeline flags for the metrics registry table."""
+    if not identity_ids:
+        return {}
+    id_ph = ",".join("?" * len(identity_ids))
+    out: dict[int, dict[str, bool]] = {
+        iid: {"has_initial_outreach_draft": False, "has_inbound_reply": False}
+        for iid in identity_ids
+    }
+    for row in conn.execute(
+        f"""SELECT identity_id,
+                   MAX(CASE
+                         WHEN event_type = 'kol_initial_outreach_draft_ready' THEN 1
+                         WHEN event_type = 'outbound_draft_created' AND goal = 'outreach' THEN 1
+                         ELSE 0
+                       END) AS has_initial_draft,
+                   MAX(CASE WHEN event_type = 'kol_inbound_reply' THEN 1 ELSE 0 END)
+                       AS has_reply
+              FROM kol_conversation_events
+             WHERE env=? AND identity_id IN ({id_ph})
+          GROUP BY identity_id""",
+        (env, *identity_ids),
+    ):
+        iid = int(row["identity_id"])
+        out[iid] = {
+            "has_initial_outreach_draft": bool(row["has_initial_draft"]),
+            "has_inbound_reply": bool(row["has_reply"]),
+        }
+    for row in conn.execute(
+        f"""SELECT identity_id, fact_value
+              FROM kol_facts_latest
+             WHERE env=? AND identity_id IN ({id_ph})
+               AND fact_key = 'offer.outreach_draft_created'""",
+        (env, *identity_ids),
+    ):
+        if _registry_fact_is_true(row["fact_value"]):
+            iid = int(row["identity_id"])
+            out[iid]["has_initial_outreach_draft"] = True
+    return out
+
+
+def _pick_instagram_url(
+    facts: Mapping[str, Any],
+    *,
+    platform: Any,
+    handle: Any,
+) -> str | None:
+    """Prefer stored social links (legacy import), else guess from handle."""
+    links = facts.get("identity.social_links")
+    if isinstance(links, list):
+        for raw in links:
+            if not isinstance(raw, str):
+                continue
+            url = raw.strip()
+            if "instagram.com" in url.lower():
+                return url
+    return _guess_profile_url(platform, handle)
+
+
+def _resolve_registry_email(
+    primary_email: Any,
+    facts: Mapping[str, Any],
+) -> str | None:
+    if isinstance(primary_email, str) and primary_email.strip():
+        return primary_email.strip()
+    legacy = facts.get("identity.primary_email_from_legacy")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy.strip()
+    return None
+
+
+def _resolve_registry_followers(facts: Mapping[str, Any]) -> Any:
+    for key in (
+        "identity.nox_followers",
+        "identity.followers",
+        "identity.follower_count",
+    ):
+        value = facts.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _resolve_registry_avg_views(facts: Mapping[str, Any]) -> Any:
+    for key in ("identity.nox_avg_views", "identity.avg_views"):
+        value = facts.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _resolve_registry_target_spu(facts: Mapping[str, Any]) -> str | None:
+    """Target SPU from offer facts (legacy import or modern lock)."""
+    locked = facts.get("offer.sku_locked")
+    if isinstance(locked, list):
+        for item in locked:
+            text = str(item).strip()
+            if text:
+                return text
+    if isinstance(locked, str) and locked.strip():
+        return locked.strip()
+    legacy_text = facts.get("offer.legacy_product_text")
+    if isinstance(legacy_text, str) and legacy_text.strip():
+        return legacy_text.strip()
+    return None
+
+
+def _batch_registry_facts(
+    conn: Any,
+    identity_ids: list[int],
+    *,
+    env: str,
+    fact_keys: Iterable[str],
+) -> dict[int, dict[str, Any]]:
+    """Merge identity-level + most-recent campaign facts per key (legacy-safe)."""
+    keys = [str(k) for k in fact_keys if k]
+    if not identity_ids or not keys:
+        return {i: {} for i in identity_ids}
+    id_ph = ",".join("?" * len(identity_ids))
+    key_ph = ",".join("?" * len(keys))
+    out: dict[int, dict[str, Any]] = {i: {} for i in identity_ids}
+
+    ident_rows = conn.execute(
+        f"""SELECT identity_id, fact_key, fact_value
+              FROM kol_facts_latest
+             WHERE env=? AND campaign_id IS NULL
+               AND identity_id IN ({id_ph})
+               AND fact_key IN ({key_ph})""",
+        (env, *identity_ids, *keys),
+    ).fetchall()
+    for r in ident_rows:
+        out[int(r["identity_id"])][r["fact_key"]] = _decode_fact_value(r["fact_value"])
+
+    camp_rows = conn.execute(
+        f"""SELECT identity_id, fact_key, fact_value, captured_at, id
+              FROM kol_facts_latest
+             WHERE env=? AND campaign_id IS NOT NULL
+               AND identity_id IN ({id_ph})
+               AND fact_key IN ({key_ph})
+          ORDER BY identity_id, fact_key, captured_at DESC, id DESC""",
+        (env, *identity_ids, *keys),
+    ).fetchall()
+    seen: set[tuple[int, str]] = set()
+    for r in camp_rows:
+        pair = (int(r["identity_id"]), str(r["fact_key"]))
+        if pair in seen:
+            continue
+        seen.add(pair)
+        out[pair[0]][pair[1]] = _decode_fact_value(r["fact_value"])
+    return out
+
+
+def _registry_search_clause(q: Optional[str]) -> tuple[str, list[Any]]:
+    if not q or not q.strip():
+        return "", []
+    like = f"%{q.strip()}%"
+    return (
+        " AND (LOWER(i.primary_handle) LIKE LOWER(?) "
+        "OR LOWER(i.display_name) LIKE LOWER(?) "
+        "OR LOWER(i.primary_email) LIKE LOWER(?))",
+        [like, like, like],
+    )
+
+
+def _registry_pool_cte() -> str:
+    """Shared CTE: Agent discovery candidates only (``campaign_candidates``)."""
+    return """
+        WITH pool AS (
+            SELECT c.identity_id AS identity_id,
+                   c.created_at AS seen_at,
+                   c.campaign_id AS campaign_id
+              FROM campaign_candidates c
+             WHERE c.env = ? AND c.identity_id IS NOT NULL
+        ),
+        agg AS (
+            SELECT identity_id,
+                   MIN(seen_at) AS first_discovered_at,
+                   MAX(seen_at) AS last_seen_at,
+                   0 AS has_legacy_import,
+                   1 AS has_discovery
+              FROM pool
+             GROUP BY identity_id
+        ),
+        ranked_camp AS (
+            SELECT p.identity_id,
+                   p.campaign_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY p.identity_id
+                       ORDER BY p.seen_at DESC
+                   ) AS rn
+              FROM pool p
+        )
+    """
+
+
+def _registry_source_clause(source: Optional[str]) -> tuple[str, list[Any]]:
+    norm = (source or "all").strip().lower()
+    if norm == "legacy":
+        # Legacy imports are excluded from the registry pool.
+        return " AND 1 = 0", []
+    return "", []
+
+
+def _registry_order_clause(
+    sort: Optional[str] = None,
+    order: Optional[str] = None,
+) -> str:
+    """SQL ``ORDER BY`` for registry list (default: ingested_at desc)."""
+    sort_norm = (sort or "ingested_at").strip().lower()
+    order_norm = (order or "desc").strip().lower()
+    direction = "ASC" if order_norm == "asc" else "DESC"
+    tie_break = "ASC" if direction == "DESC" else "DESC"
+    if sort_norm in ("ingested_at", "first_discovered_at", "created_at"):
+        return (
+            f" ORDER BY a.first_discovered_at {direction}, "
+            f"a.identity_id {tie_break}"
+        )
+    return f" ORDER BY a.first_discovered_at DESC, a.identity_id DESC"
+
+
+def list_discovered_kol_registry(
+    *,
+    env: str = "LIVE",
+    q: Optional[str] = None,
+    source: Optional[str] = None,
+    sort: Optional[str] = None,
+    order: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Paginated registry of KOLs discovered via Agent campaigns.
+
+    Pool = ``campaign_candidates`` only (one row per ``identity_id``).
+    Legacy red-list imports are intentionally excluded from this view.
+    """
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    search_sql, search_args = _registry_search_clause(q)
+    source_sql, source_args = _registry_source_clause(source)
+    order_sql = _registry_order_clause(sort, order)
+    pool_cte = _registry_pool_cte()
+    pool_args: list[Any] = [env]
+    base_where = f"i.env = ?{search_sql}{source_sql}"
+    base_args = pool_args + [env] + search_args + source_args
+    sort_norm = (sort or "ingested_at").strip().lower()
+    order_norm = (order or "desc").strip().lower()
+
+    with _connect() as conn:
+        total_row = conn.execute(
+            f"""{pool_cte}
+                SELECT COUNT(*) AS n
+                  FROM agg a
+                  JOIN kol_identity i ON i.id = a.identity_id
+                 WHERE {base_where}""",
+            base_args,
+        ).fetchone()
+        counts_row = conn.execute(
+            f"""{pool_cte}
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN a.has_discovery = 1 THEN 1 ELSE 0 END) AS discovery,
+                       SUM(CASE WHEN a.has_legacy_import = 1 THEN 1 ELSE 0 END) AS legacy
+                  FROM agg a
+                  JOIN kol_identity i ON i.id = a.identity_id
+                 WHERE i.env = ?{search_sql}""",
+            pool_args + [env] + search_args,
+        ).fetchone()
+        rows = conn.execute(
+            f"""{pool_cte}
+                SELECT a.identity_id AS identity_id,
+                       a.first_discovered_at AS first_discovered_at,
+                       a.last_seen_at AS last_seen_at,
+                       a.has_legacy_import AS has_legacy_import,
+                       a.has_discovery AS has_discovery,
+                       rc.campaign_id AS latest_campaign_id,
+                       i.primary_handle AS primary_handle,
+                       i.display_name AS display_name,
+                       i.platform AS platform,
+                       i.primary_email AS primary_email
+                  FROM agg a
+                  JOIN kol_identity i ON i.id = a.identity_id
+             LEFT JOIN ranked_camp rc
+                    ON rc.identity_id = a.identity_id AND rc.rn = 1
+                 WHERE {base_where}
+              {order_sql}
+                 LIMIT ? OFFSET ?""",
+            base_args + [limit, offset],
+        ).fetchall()
+        ids = [int(r["identity_id"]) for r in rows]
+        pipeline_by_id = _batch_registry_pipeline_flags(conn, ids, env=env)
+        facts_by_id = _batch_registry_facts(
+            conn, ids, env=env, fact_keys=KOL_REGISTRY_FACT_KEYS,
+        )
+
+    try:
+        from . import prior_touch_allowlist as _pta
+    except ImportError:
+        import prior_touch_allowlist as _pta  # type: ignore[no-redef]
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        iid = int(row["identity_id"])
+        handle = row["primary_handle"]
+        platform = row["platform"]
+        facts = facts_by_id.get(iid, {})
+        email = _resolve_registry_email(row["primary_email"], facts)
+        touch_count = _pta.get_internal_touch_count(handle=handle, email=email)
+        pipeline = pipeline_by_id.get(iid, {})
+        items.append({
+            "identity_id": iid,
+            "handle": handle,
+            "display_name": row["display_name"],
+            "platform": platform,
+            "email": email,
+            "ig_url": _pick_instagram_url(
+                facts, platform=platform, handle=handle,
+            ),
+            "internal_touch_count": touch_count,
+            "has_initial_outreach_draft": bool(
+                pipeline.get("has_initial_outreach_draft"),
+            ),
+            "has_inbound_reply": bool(pipeline.get("has_inbound_reply")),
+            "target_spu": _resolve_registry_target_spu(facts),
+            "latest_campaign_id": row["latest_campaign_id"],
+            "first_discovered_at": row["first_discovered_at"],
+            "has_legacy_import": bool(row["has_legacy_import"]),
+            "has_discovery": bool(row["has_discovery"]),
+            "followers": _resolve_registry_followers(facts),
+            "avg_views": _resolve_registry_avg_views(facts),
+            "audience_facts": facts,
+        })
+    return {
+        "total": int(total_row["n"]) if total_row else 0,
+        "limit": limit,
+        "offset": offset,
+        "items": items,
+        "env": env,
+        "source": (source or "all").lower(),
+        "sort": sort_norm if sort_norm in (
+            "ingested_at", "first_discovered_at", "created_at",
+        ) else "ingested_at",
+        "order": order_norm if order_norm in ("asc", "desc") else "desc",
+        "counts": {
+            "total": int(counts_row["total"]) if counts_row else 0,
+            "discovery": int(counts_row["discovery"] or 0) if counts_row else 0,
+            "legacy": int(counts_row["legacy"] or 0) if counts_row else 0,
+        },
+    }
+
+
+def aggregate_kol_registry_funnel(
+    *,
+    env: str = "LIVE",
+    days: Optional[int] = None,
+) -> dict[str, Any]:
+    """Funnel metrics for the gate-metrics dashboard.
+
+    * **kol_candidate_adoption_rate** — share of eligible discoveries that
+      reached initial outreach draft (approve), excluding prior-collab KOLs
+      on the legacy 曾触达 allowlist.
+    * **initial_outreach_reply_rate** — share of initial-draft KOLs with an
+      inbound reply (``kol_inbound_reply``).
+    """
+    env_norm = env.upper()
+    pool_cte = _registry_pool_cte()
+    pool_args: list[Any] = [env_norm]
+    time_sql = ""
+    time_args: list[Any] = []
+    if days is not None and int(days) > 0:
+        cutoff = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=int(days))
+        ).isoformat(timespec="seconds")
+        time_sql = " AND a.first_discovered_at >= ?"
+        time_args = [cutoff]
+
+    try:
+        from . import prior_touch_allowlist as _pta
+    except ImportError:
+        import prior_touch_allowlist as _pta  # type: ignore[no-redef]
+
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""{pool_cte}
+                SELECT a.identity_id AS identity_id,
+                       i.primary_handle AS primary_handle,
+                       i.primary_email AS primary_email
+                  FROM agg a
+                  JOIN kol_identity i ON i.id = a.identity_id
+                 WHERE i.env = ?{time_sql}""",
+            pool_args + [env_norm] + time_args,
+        ).fetchall()
+        ids = [int(r["identity_id"]) for r in rows]
+        pipeline_by_id = _batch_registry_pipeline_flags(conn, ids, env=env_norm)
+        facts_by_id = _batch_registry_facts(
+            conn,
+            ids,
+            env=env_norm,
+            fact_keys=("identity.primary_email_from_legacy",),
+        )
+
+    discovered_total = len(rows)
+    prior_collab_excluded = 0
+    initial_outreach_draft_count = 0
+    initial_outreach_reply_count = 0
+
+    for row in rows:
+        iid = int(row["identity_id"])
+        facts = facts_by_id.get(iid, {})
+        email = _resolve_registry_email(row["primary_email"], facts)
+        if _pta.is_prior_touch_allowlisted(
+            handle=row["primary_handle"], email=email,
+        ):
+            prior_collab_excluded += 1
+            continue
+        pipeline = pipeline_by_id.get(iid, {})
+        if not pipeline.get("has_initial_outreach_draft"):
+            continue
+        initial_outreach_draft_count += 1
+        if pipeline.get("has_inbound_reply"):
+            initial_outreach_reply_count += 1
+
+    eligible_total = discovered_total - prior_collab_excluded
+    adoption_rate = (
+        initial_outreach_draft_count / eligible_total
+        if eligible_total else 0.0
+    )
+    reply_rate = (
+        initial_outreach_reply_count / initial_outreach_draft_count
+        if initial_outreach_draft_count else 0.0
+    )
+    return {
+        "env": env_norm,
+        "window_days": int(days) if days else None,
+        "discovered_total": discovered_total,
+        "prior_collab_excluded": prior_collab_excluded,
+        "eligible_total": eligible_total,
+        "initial_outreach_draft_count": initial_outreach_draft_count,
+        "initial_outreach_reply_count": initial_outreach_reply_count,
+        "kol_candidate_adoption_rate": adoption_rate,
+        "initial_outreach_reply_rate": reply_rate,
+    }
+
+
 def get_reusable_facts(identity_id: int) -> dict[str, Any]:
     """Identity-level facts a re-engagement skill can plausibly reuse."""
     ident = get_identity(identity_id) or {}
@@ -680,6 +1310,98 @@ def get_campaign_config(campaign_id: str, *, env: Optional[str] = None) -> Optio
     return flatten_nox_into_config(out)
 
 
+def batch_global_outreach_touch(
+    identity_ids: Iterable[int],
+    *,
+    env: str = "LIVE",
+) -> dict[int, dict[str, Any]]:
+    """Cross-campaign last outreach send per identity (for UI tags / cooldown)."""
+
+    def _do() -> dict[int, dict[str, Any]]:
+        with _connect() as conn:
+            return outreach_touch.batch_global_outreach_touch(
+                conn, identity_ids, env=env,
+            )
+
+    return _safe("batch_global_outreach_touch", _do) or {}
+
+
+def list_outreach_cooldown_handles(
+    *,
+    env: str = "LIVE",
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    """Handles blocked from discovery by the 14-day outreach cooldown."""
+
+    def _do() -> list[dict[str, Any]]:
+        with _connect() as conn:
+            return outreach_touch.list_cooldown_handles(conn, env=env, limit=limit)
+
+    return _safe("list_outreach_cooldown_handles", _do) or []
+
+
+def list_discovery_skip_handles(
+    *,
+    env: str = "LIVE",
+    limit: int = 10_000,
+) -> list[dict[str, Any]]:
+    """Handles blocked from discovery by archived ``last_outcome`` values."""
+
+    def _do() -> list[dict[str, Any]]:
+        from . import discovery_skip as _ds
+
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def _add(handle: Any, reason: str) -> None:
+            if len(items) >= limit:
+                return
+            norm = _ds.normalize_skip_handle(handle)
+            if not norm or norm in seen:
+                return
+            seen.add(norm)
+            items.append({"handle": norm, "reason": reason})
+
+        outcomes = sorted(_ds.DISCOVERY_SKIP_OUTCOMES)
+        placeholders = ",".join("?" * len(outcomes))
+        with _connect() as conn:
+            rows = conn.execute(
+                f"""SELECT i.primary_handle AS primary_handle,
+                           r.last_outcome AS last_outcome
+                      FROM kol_identity i
+                      JOIN kol_relationship r ON r.identity_id = i.id
+                     WHERE i.env = ?
+                       AND r.last_outcome IN ({placeholders})
+                  ORDER BY i.primary_handle""",
+                [env, *outcomes],
+            ).fetchall()
+        for row in rows:
+            _add(row["primary_handle"], str(row["last_outcome"]))
+        return items[:limit]
+
+    return _safe("list_discovery_skip_handles", _do) or []
+
+
+def _assert_outreach_cooldown_clear(*, identity_id: int, env: str) -> None:
+    with _connect() as conn:
+        touches = outreach_touch.batch_global_outreach_touch(
+            conn, [identity_id], env=env,
+        )
+    touch = touches.get(identity_id)
+    if touch and touch.get("within_cooldown"):
+        raise outreach_touch.OutreachCooldownActive(
+            identity_id=identity_id,
+            last_touch_at=str(touch["last_touch_at"]),
+            last_touch_campaign_id=touch.get("last_touch_campaign_id"),
+        )
+
+
+def _assert_discovery_not_skipped(*, identity_id: int, env: str) -> None:
+    from . import discovery_skip as _ds
+
+    _ds.assert_discovery_not_skipped(identity_id=identity_id, env=env)
+
+
 def upsert_candidate(
     *,
     campaign_id: str,
@@ -691,7 +1413,15 @@ def upsert_candidate(
     review_reason: Optional[str] = None,
     payload: Optional[Mapping[str, Any]] = None,
     env: str = "LIVE",
+    enforce_outreach_cooldown: bool = True,
+    enforce_discovery_skip: bool = True,
 ) -> Optional[int]:
+    if identity_id is not None:
+        if enforce_discovery_skip:
+            _assert_discovery_not_skipped(identity_id=int(identity_id), env=env)
+        if enforce_outreach_cooldown:
+            _assert_outreach_cooldown_clear(identity_id=int(identity_id), env=env)
+
     def _do() -> int:
         with _connect() as conn:
             now = _now()
@@ -701,15 +1431,19 @@ def upsert_candidate(
             ).fetchone()
             payload_json = _j(payload or {})
             if existing:
+                clear_selection = candidate_status in ("discovered", "shortlisted")
                 conn.execute(
                     """UPDATE campaign_candidates SET
                           source = ?, discovery_score = COALESCE(?, discovery_score),
                           relationship_status = ?, candidate_status = ?,
                           review_reason = COALESCE(?, review_reason),
-                          payload_json = ?, updated_at = ?
+                          payload_json = ?, updated_at = ?,
+                          selected_by = CASE WHEN ? THEN NULL ELSE selected_by END,
+                          selected_at = CASE WHEN ? THEN NULL ELSE selected_at END
                        WHERE id = ?""",
                     (source, discovery_score, relationship_status, candidate_status,
-                     review_reason, payload_json, now, existing["id"]),
+                     review_reason, payload_json, now,
+                     clear_selection, clear_selection, existing["id"]),
                 )
                 return int(existing["id"])
             conn.execute(
@@ -739,6 +1473,27 @@ def list_candidates(campaign_id: str, *, env: str = "LIVE") -> list[dict[str, An
         d["payload"] = _jl(d.pop("payload_json", "{}"), {})
         out.append(d)
     return out
+
+
+def _guess_profile_url(platform: Any, handle: Any) -> str | None:
+    """Best-effort public profile URL when CAL has no stored profile link."""
+    if not isinstance(handle, str):
+        return None
+    h = handle.strip().lstrip("@")
+    if not h:
+        return None
+    p = (str(platform).strip().lower() if platform else "") or "instagram"
+    if p == "tiktok":
+        return f"https://www.tiktok.com/@{h}"
+    if p == "youtube":
+        return f"https://www.youtube.com/@{h}"
+    if p in {"twitter", "x"}:
+        return f"https://x.com/{h}"
+    if p == "facebook":
+        return f"https://www.facebook.com/{h}"
+    if p == "threads":
+        return f"https://www.threads.net/@{h}"
+    return f"https://www.instagram.com/{h}/"
 
 
 def list_candidate_handles(campaign_id: str, *, env: str = "LIVE") -> list[dict[str, Any]]:
@@ -776,8 +1531,10 @@ def list_candidate_handles(campaign_id: str, *, env: str = "LIVE") -> list[dict[
         if isinstance(handle, str):
             handle = handle.strip().lstrip("@")
             item["handle"] = handle or None
-        if item.get("handle"):
-            item["profile_url"] = f"https://www.instagram.com/{item['handle']}/"
+        platform = item.get("platform")
+        handle = item.get("handle")
+        if handle:
+            item["profile_url"] = _guess_profile_url(platform, handle)
         else:
             item["profile_url"] = None
         item["payload"] = payload
@@ -822,13 +1579,17 @@ def set_candidate_status(
         with _connect() as conn:
             now = _now()
             qmarks = ",".join("?" * len(ids))
+            clear_selection = candidate_status in ("discovered", "shortlisted")
             cur = conn.execute(
                 f"""UPDATE campaign_candidates
                        SET candidate_status=?,
                            review_reason=COALESCE(?, review_reason),
-                           updated_at=?
+                           updated_at=?,
+                           selected_by = CASE WHEN ? THEN NULL ELSE selected_by END,
+                           selected_at = CASE WHEN ? THEN NULL ELSE selected_at END
                      WHERE campaign_id=? AND env=? AND identity_id IN ({qmarks})""",
-                [candidate_status, review_reason, now, campaign_id, env, *ids],
+                [candidate_status, review_reason, now,
+                 clear_selection, clear_selection, campaign_id, env, *ids],
             )
             return cur.rowcount or 0
 
@@ -1111,6 +1872,33 @@ def _require_iso8601(*, key: str, value: Any) -> None:
         raise FactNamespaceError(f"{key} must be ISO-8601 timestamp") from exc
 
 
+def _validate_positive_int(*, key: str, value: Any) -> None:
+    if not isinstance(value, int) or value <= 0:
+        raise FactNamespaceError(f"{key} must be a positive int")
+
+
+def _validate_non_negative_int(*, key: str, value: Any) -> None:
+    if not isinstance(value, int) or value < 0:
+        raise FactNamespaceError(f"{key} must be a non-negative int")
+
+
+def _validate_object_list(
+    *,
+    key: str,
+    value: Any,
+    min_items: int,
+    max_items: int,
+) -> None:
+    if not isinstance(value, list):
+        raise FactNamespaceError(f"{key} must be a list")
+    n = len(value)
+    if n < min_items or n > max_items:
+        raise FactNamespaceError(f"{key} must contain {min_items}-{max_items} items")
+    for idx, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise FactNamespaceError(f"{key}[{idx}] must be an object")
+
+
 def _validate_string_list(
     *,
     key: str,
@@ -1291,6 +2079,21 @@ _FACT_SHAPE_VALIDATORS: Final[dict[str, Callable[[Any], None]]] = {
     "identity.personal_site_url": lambda v: _require_url(
         key="identity.personal_site_url", value=v,
     ),
+    "identity.profile_og_image_url": lambda v: _require_url(
+        key="identity.profile_og_image_url", value=v,
+    ),
+    "identity.profile_og_source_url": lambda v: _require_url(
+        key="identity.profile_og_source_url", value=v,
+    ),
+    "identity.profile_og_title": lambda v: _require_non_empty_string(
+        key="identity.profile_og_title", value=v, max_len=300,
+    ),
+    "identity.profile_og_description": lambda v: _require_non_empty_string(
+        key="identity.profile_og_description", value=v, max_len=600,
+    ),
+    "identity.profile_og_fetched_at": lambda v: _require_iso8601(
+        key="identity.profile_og_fetched_at", value=v,
+    ),
     "identity.hero_post_url_source": _validate_discovery_source,
     "identity.hero_post_note_source": _validate_discovery_source,
     "identity.recommendation_reason_source": _validate_discovery_source,
@@ -1388,6 +2191,45 @@ _FACT_SHAPE_VALIDATORS: Final[dict[str, Callable[[Any], None]]] = {
     ),
     "identity.personal_site_url_discovered_url": lambda v: _require_url(
         key="identity.personal_site_url_discovered_url", value=v,
+    ),
+    "identity.veedcrawl_cache_month": lambda v: _require_non_empty_string(
+        key="identity.veedcrawl_cache_month", value=v, max_len=7,
+    ),
+    "identity.veedcrawl_cache_key": lambda v: _require_non_empty_string(
+        key="identity.veedcrawl_cache_key", value=v, max_len=256,
+    ),
+    "identity.veedcrawl_fetched_at": lambda v: _require_iso8601(
+        key="identity.veedcrawl_fetched_at", value=v,
+    ),
+    "identity.veedcrawl_storage_ref": lambda v: _require_non_empty_string(
+        key="identity.veedcrawl_storage_ref", value=v, max_len=500,
+    ),
+    "identity.veedcrawl_blob_ref": lambda v: _require_non_empty_string(
+        key="identity.veedcrawl_blob_ref", value=v, max_len=500,
+    ),
+    "identity.veedcrawl_profile_handle": lambda v: _require_non_empty_string(
+        key="identity.veedcrawl_profile_handle", value=v, max_len=64,
+    ),
+    "identity.veedcrawl_profile_followers": lambda v: _validate_positive_int(
+        key="identity.veedcrawl_profile_followers", value=v,
+    ),
+    "identity.veedcrawl_last_reel_views": lambda v: _validate_non_negative_int(
+        key="identity.veedcrawl_last_reel_views", value=v,
+    ),
+    "identity.veedcrawl_last_reel_likes": lambda v: _validate_non_negative_int(
+        key="identity.veedcrawl_last_reel_likes", value=v,
+    ),
+    "identity.veedcrawl_last_reel_url": lambda v: _require_url(
+        key="identity.veedcrawl_last_reel_url", value=v, allowed_hosts=("instagram.com",),
+    ),
+    "identity.veedcrawl_extract_summary": lambda v: _require_non_empty_string(
+        key="identity.veedcrawl_extract_summary", value=v, max_len=4000,
+    ),
+    "identity.veedcrawl_recent_reels_stats": lambda v: _validate_object_list(
+        key="identity.veedcrawl_recent_reels_stats", value=v, min_items=1, max_items=24,
+    ),
+    "identity.veedcrawl_search_authors": lambda v: _validate_string_list(
+        key="identity.veedcrawl_search_authors", value=v, min_items=1, max_items=20, item_max_len=64,
     ),
 }
 
@@ -2662,6 +3504,8 @@ def archive_collab(
     delivery_quality: Optional[float] = None,
     negotiation_style: Optional[str] = None,
     decided_by: str = "skill:archival-writer",
+    env: str = "LIVE",
+    run_outcome_retro: bool = True,
 ) -> Optional[int]:
     """Push thread-level archival facts into identity-level relationship,
     and write an ``approval.archival_outcome`` fact tying it to the
@@ -2692,7 +3536,27 @@ def archive_collab(
             "approval.followups_pending": False,
         },
         source=decided_by,
+        env=env,
     )
+    if run_outcome_retro:
+        try:
+            from . import learning_outcome
+
+            with _connect() as conn:
+                learning_outcome.analyze_one_collab_outcome(
+                    conn,
+                    identity_id=identity_id,
+                    campaign_id=campaign_id,
+                    env=env,
+                    outcome=outcome,
+                    updated_by=f"archive:{decided_by}",
+                )
+        except Exception:
+            log.warning(
+                "Tier1 collab outcome retro failed after archive_collab",
+                exc_info=True,
+                extra={"identity_id": identity_id, "campaign_id": campaign_id},
+            )
     return identity_id
 
 
@@ -2806,6 +3670,8 @@ __all__ = [
     "latest_facts_for",
     "list_campaigns",
     "list_candidates",
+    "aggregate_kol_registry_funnel",
+    "list_discovered_kol_registry",
     "list_escalations",
     "list_events",
     "list_pending_approvals",
