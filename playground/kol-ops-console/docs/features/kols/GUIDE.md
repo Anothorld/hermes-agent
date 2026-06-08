@@ -30,11 +30,41 @@
 | GET/PATCH | `/facts`, `/facts/multi` | CAL 事实 |
 | GET | `/identities/{id}/goals` | 目标/泳道进度 |
 | GET | `/kols/{id}/communication-history` | 绑定邮箱线程 |
-| POST | `/kols/{id}/discover-email` | Nox Gate B → `kol-email-discovery`（Tier 1 WebSearch/WebFetch，Tier 2 仅 `browser_*`；**禁止** `veedcrawl_*`、`delegate_task`、`mcp_chrome_devtools_*`；guard 在 `kol-email-discover:*` 会话硬拦；gateway instructions 含 `terminal_safety` + no-hang） |
-| POST | `/kols/{id}/discover-social-links` | `kol-social-link-discovery`（同上 CLI/terminal 契约；browser 用 Tier 2 no-hang 纪律） |
+| POST | `/kols/{id}/discover-email` | Nox Gate B（需 `campaign_id` + LIVE + `nox_quota_enabled`）→ `kol-email-discovery`（Tier 1 本地 Chrome Google 搜索 + 结果页 `browser_*`；Tier 2 JS 页面；**禁止** `web_search`/`web_extract`、`veedcrawl_*`、`delegate_task`、`mcp_chrome_devtools_*`；guard 在 `kol-email-discover:*` 硬拦） |
+| POST | `/kols/{id}/discover-social-links` | `kol-social-link-discovery`（Tier 1 本地 Chrome Google + 结果页；Tier 2 JS 页面；**禁止** `web_search`/`web_extract`；browser no-hang 纪律） |
 | POST | `/kols/{id}/email`, `/kols/{id}/nox-contacts`, `/kols/{id}/nox/*` | 手动邮箱 / 仅 Nox Gate B / 尽调与监测 |
 
-## 全网搜索邮箱（kol-email-discovery）— Tier 2 无挂起纪律（POVISON 686 修复）
+## 全网搜索邮箱（kol-email-discovery）
+
+### Tier 1：本地 Chrome Google 搜索（非 web_search）
+
+Tier 1 不再使用 `web_search` / `web_extract`。模型应：
+
+1. `browser_navigate` → `https://www.google.com/search?q=<URL 编码后的查询>`
+2. `browser_snapshot` 读 SERP，打开 creator-owned 结果 URL
+3. 对 link-in-bio、个人站 `/contact` 等同样用 `browser_navigate` + `browser_snapshot`
+
+`kol-bridge-agent-guard` 对 `kol-email-discover:*` **拦截** `web_search`/`web_extract` 以及 terminal HTTP 抓取，强制走本地 debug Chrome（`local-chrome-tab-pool` 自动启动）。
+
+### Nox Gate B — 何时跑、为何可能跳过
+
+| 触发路径 | Nox 行为 |
+|----------|----------|
+| Console `POST /kols/{id}/discover-email` 且 body 带 **`campaign_id`**、env=LIVE、campaign 配置 **`nox_quota_enabled: true`** | Console 端 **同步** 跑 `nox_kol_tool.py contacts --gate pre_outreach_confirm`（Gate B）。有邮箱则直接返回，不启 gateway；无邮箱则 brief 带 `gate_b_attempted: true`，gateway **不再重复** Nox |
+| 同上但 **未传 `campaign_id`** | Gate B **完全跳过**；gateway 仅靠 browser 发现 |
+| 活动审批 run（`kol-campaign:*` step 4a0） | 由 agent 在 gateway 上调用 `nox_kol_tool.py contacts`（非 Console 同步 Gate B）；与 discover-email API 是两条路径 |
+| brief 含 `gate_b_attempted: true` | Nox 已在 Console 跑过（含「API 无邮箱」）；agent 不得再调 Nox |
+
+常见「有 `nox_creator_id` 却没用 Nox 找邮箱」原因：
+
+1. **discover-email 未带 `campaign_id`**（测试 brief、批量 orchestrator 直启 `kol-email-discover:*` session）→ Gate B 不跑。
+2. Gate B **已跑但 Nox contacts API 无邮箱** → `gate_b_attempted: true`，agent 按设计不再调 Nox，转 browser。
+3. 审批 run 里模型 **跳过 step 4a0** 或 Nox CLI 失败 → 仅 browser tier 生效。
+4. 身份缺 `nox_creator_id` 且无 platform profile URL → `gate_b_eligible` 为 false。
+
+手动补跑：`POST /kols/{id}/nox-contacts`（需 LIVE + `campaign_id`）。
+
+### Tier 2 无挂起纪律（POVISON 686 修复）
 
 686 现象：浏览器**只开了一个空 `about:blank` 标签页，从未导航到任何网页**，run 随后挂住。根因不是页面加载超时（浏览器 CLI 本身有 60s 硬超时会 kill），而是：被强停的 run 不会执行 `cleanup_browser`，其 pool 标签页**泄漏**为孤儿 `about:blank`，在共享 debug Chrome 里越积越多、拖慢后续 CDP attach；叠加并行 email-discover 批量把 gateway 槽位/LLM 打满。
 
@@ -43,7 +73,7 @@
 - **技能 + brief 纪律**：Tier 2 一页一次、单次尝试，导航/快照报错或超时即记入 `tried` 继续，绝不重试同一 URL；用尽 8 页预算即返回 miss；Chrome 无法启动则 miss `browser_unavailable`。**绝不让 run 挂死**。
 - **并发**：一次只跑一个 `kol-email-discovery`，不要为多个身份并行浏览器发现（会饱和 gateway 槽位与共享 Chrome）。
 - **CLI 错误**：bridge CLI 失败路径在 **stdout** 输出 JSON；空 terminal + exit 2 应读 stdout 的 `error`/`hint`，禁止转 `execute_code`。
-- **工具误选（701）**：模型曾用 `delegate_task` 派子代理、子代理空参调用 `veedcrawl_*`（`bad_request`，未到 API）。`kol-bridge-agent-guard` 现对 `kol-email-discover:*` 拦截 `veedcrawl_*` 与 `delegate_task`；技能与 gateway instructions 同步写明 Tier 1/2 正路径。
+- **工具误选（701 / SEB8010）**：模型曾用 `delegate_task` 派子代理、子代理空参调用 `veedcrawl_*`（`bad_request`，未到 API）。`kol-bridge-agent-guard` 现对 `kol-email-discover:*` 拦截 `veedcrawl_*` 与 `delegate_task`；对 **`kol-campaign:*` 发现 run** 拦截 `delegate_task`（outreach/draft 除外）。Launch/rediscover brief 与 `instagram-kol-discovery` 技能同步写明：发现用 `browser_*`，批量靠 `/rediscover`。
 
 ## 列表性能（看板 / 审批 / 详情）
 

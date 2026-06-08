@@ -118,3 +118,64 @@ class TestGetCdpOverride:
 
         assert resolved == WS_URL
         mock_get.assert_called_once_with(VERSION_URL, timeout=10)
+
+
+class TestBrowserAvailabilityWithTabPool:
+    """Regression (POVISON 701): in local mode the whole browser_* toolset was
+    dropped from the model's tool list because ``check_browser_requirements``
+    only recognised the agent-browser-bundled Chromium or BROWSER_CDP_URL — not
+    the local-chrome-tab-pool, which seeds a real debug Chrome at call time.
+    The model then reported 'I don't have browser_navigate' and fell back to
+    terminal scraping."""
+
+    def _local_mode(self, browser_tool, monkeypatch):
+        monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+        monkeypatch.setattr(browser_tool, "_get_cdp_override", lambda: "")
+        monkeypatch.setattr(browser_tool, "_find_agent_browser", lambda: "agent-browser")
+        monkeypatch.setattr(
+            browser_tool, "_requires_real_termux_browser_install", lambda cmd: False
+        )
+        monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: None)
+        monkeypatch.setattr(browser_tool, "_using_lightpanda_engine", lambda: False)
+        # No bundled Chromium and no live debug Chrome — the tab pool is the
+        # only browser path.
+        monkeypatch.setattr(browser_tool, "_chromium_installed", lambda: False)
+        monkeypatch.setattr(browser_tool, "_probe_local_cdp", lambda *a, **k: None)
+
+    def test_available_when_launcher_present_and_env_unset(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+
+        self._local_mode(browser_tool, monkeypatch)
+        monkeypatch.delenv("LOCAL_CHROME_TAB_POOL", raising=False)
+        monkeypatch.setattr(
+            browser_tool, "_locate_local_chrome_launcher", lambda: __file__
+        )
+        assert browser_tool.check_browser_requirements() is True
+
+    def test_unavailable_when_pool_disabled_and_no_live_chrome(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+
+        self._local_mode(browser_tool, monkeypatch)
+        monkeypatch.setenv("LOCAL_CHROME_TAB_POOL", "0")
+        monkeypatch.setattr(
+            browser_tool, "_locate_local_chrome_launcher", lambda: __file__
+        )
+        assert browser_tool.check_browser_requirements() is False
+
+    def test_available_when_live_debug_chrome_even_if_pool_disabled(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+
+        self._local_mode(browser_tool, monkeypatch)
+        monkeypatch.setenv("LOCAL_CHROME_TAB_POOL", "0")
+        monkeypatch.setattr(
+            browser_tool, "_probe_local_cdp", lambda *a, **k: WS_URL
+        )
+        assert browser_tool.check_browser_requirements() is True
+
+    def test_unavailable_when_no_launcher_no_chromium(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+
+        self._local_mode(browser_tool, monkeypatch)
+        monkeypatch.delenv("LOCAL_CHROME_TAB_POOL", raising=False)
+        monkeypatch.setattr(browser_tool, "_locate_local_chrome_launcher", lambda: None)
+        assert browser_tool.check_browser_requirements() is False

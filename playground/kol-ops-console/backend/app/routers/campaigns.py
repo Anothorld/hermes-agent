@@ -120,13 +120,15 @@ _LAUNCH_INSTRUCTIONS = (
     "   the master playbook; for a fresh launch the next step is\n"
     "   kol-discovery-to-outreach-router -> Instagram KOL discovery.\n"
     "3. `skill_view(name='instagram-kol-discovery')` and then EXECUTE\n"
-    "   discovery using the built-in BrowserUse tools — `browser_navigate`,\n"
-    "   `browser_snapshot`, `browser_get_images`, `browser_click`,\n"
-    "   `browser_type`, `vision_analyze`. The discovery skill is NOT\n"
-    "   optional and must produce at least `discovery_target_count`\n"
+    "   discovery using built-in `browser_*` on local debug Chrome —\n"
+    "   `browser_navigate`, `browser_snapshot`, `browser_get_images`,\n"
+    "   `browser_click`, `browser_type`, `vision_analyze`. The discovery\n"
+    "   skill is NOT optional and must produce at least `discovery_target_count`\n"
     "   raw candidates (which is set to 2-4x `headcount_target`).\n"
-    "   Do NOT use the `mcp_chrome_devtools_*` family — those are flaky\n"
-    "   here; stick to `browser_*`.\n"
+    "   Do NOT call `delegate_task` for discovery — browse and persist in\n"
+    "   THIS run; quantity shortfalls trigger console `/rediscover` auto-\n"
+    "   retries, not subagents. Do NOT use the `mcp_chrome_devtools_*`\n"
+    "   family — those are flaky here; stick to `browser_*`.\n"
     "   NOX AUDIENCE SCREEN (optional — when brief has\n"
     "   `nox_discovery_enabled: true` and `campaign_config_file:`):\n"
     "   After each profile passes follower/handle pre-checks and BEFORE\n"
@@ -248,10 +250,11 @@ _APPROVAL_INSTRUCTIONS = (
     "       via `upsert-identity` + `identity.email_source=noxinfluencer_api`.\n"
     "       Skip kol-email-discovery when email is now present.\n"
     "   a) Only when Nox is disabled or returns no email: invoke\n"
-    "      `kol-email-discovery` (still no batch browser crawl for 15 KOLs;\n"
-    "      process identities sequentially — never parallel browser discovery).\n"
-    "      Tier 2 browser: one page, single attempt; navigate/snapshot error\n"
-    "      or timeout → record in `tried` and move on; never hang the run.\n"
+    "      `kol-email-discovery` (process identities sequentially).\n"
+    "      Tier 1: local Chrome Google via `browser_navigate` to\n"
+    "      google.com/search — NOT web_search/web_extract. Tier 2 browser:\n"
+    "      one page, single attempt; navigate/snapshot error or timeout →\n"
+    "      record in `tried` and move on; never hang the run.\n"
     "      The skill returns `{found: true, email, source, tier, ...}` on\n"
     "      hit (and has already persisted `primary_email` + provenance\n"
     "      facts) or `{found: false, tried: [...]}` on miss.\n"
@@ -377,11 +380,9 @@ def _resolve_browser_mode() -> str:
     Controls whether the kol-discovery skill applies cloud or local-chrome
     safety rules (pacing, forbidden actions, per-run caps).
 
-    Defaults to ``local-chrome`` because Browser Use cloud Browser-Use cloud
-    profiles routinely lose IG login state and Browser Use 5xx outages have
-    been observed in prod; the user's debug-Chrome profile is the reliable
-    path for IG-heavy work. Set ``KOL_BROWSER_MODE=cloud`` to opt back into
-    the cloud backend for an individual campaign run.
+    Defaults to ``local-chrome`` — KOL discovery skills use local debug Chrome
+    via ``browser_*`` tools only. The user's debug-Chrome profile is the
+    reliable path for IG-heavy work.
     """
     raw = (os.environ.get("KOL_BROWSER_MODE") or "").strip().lower()
     if raw in _VALID_BROWSER_MODES:

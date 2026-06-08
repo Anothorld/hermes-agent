@@ -25,6 +25,32 @@ Browser Instagram discovery remains primary. These Hermes **plugin** tools
 - `handle`: IG handle for fact attribution
 - `force_refresh`: bypass monthly persist cache (still writes new blob)
 
+## Canonical call examples (required shape)
+
+**Never call with `{}`.** The plugin `pre_tool_call` hook blocks incomplete args.
+Copy these payloads; substitute handle / reel URL / `identity_id` from the run.
+
+| Tool | Example args (pass as the tool `arguments` object) |
+|---|---|
+| `veedcrawl_search_social_videos` | `{"q": "streamer setup room tour instagram", "platform": "instagram", "limit": 12}` |
+| `veedcrawl_instagram_profile` | `{"username": "kathypicos", "limit": 12, "env": "LIVE"}` |
+| `veedcrawl_instagram_profile` + CAL | `{"username": "kathypicos", "limit": 12, "env": "LIVE", "identity_id": 42, "handle": "kathypicos"}` |
+| `veedcrawl_metadata` | `{"url": "https://www.instagram.com/reel/ABC123xyz/"}` |
+| `veedcrawl_extract` | `{"url": "https://www.instagram.com/reel/ABC123xyz/", "prompt": "Summarize furniture/room styling and on-camera demo quality in this Reel."}` |
+| `veedcrawl_profile` (TikTok only) | `{"platform": "tiktok", "username": "creator_handle", "limit": 12}` |
+| `veedcrawl_job` (poll prior job) | `{"endpoint": "extract", "job_id": "<id from prior extract call>"}` |
+
+### Failure examples (do not repeat)
+
+| Bad call | Why it fails |
+|---|---|
+| `veedcrawl_instagram_profile` with `{}` | Missing `username` or `url` |
+| `veedcrawl_search_social_videos` with `{}` | Missing `q` |
+| `veedcrawl_profile` with `{"username": "foo"}` | Missing `platform` |
+| `veedcrawl_extract` with `{"url": "https://…"}` | Missing `prompt` |
+
+On block/hook message, fix the args and retry once — do not retry the same empty payload.
+
 ## Response envelope
 
 ```json

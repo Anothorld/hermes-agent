@@ -148,6 +148,33 @@ def test_blocks_delegate_task_on_email_discover():
     assert "browser_navigate" in out["message"]
 
 
+def test_blocks_delegate_task_on_campaign_discovery():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "delegate_task",
+        {
+            "goal": "Search the public web for 150 Instagram handles",
+            "toolsets": ["web", "veedcrawl"],
+        },
+        task_id="kol-campaign:LIVE:SEB8010-20260608",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "browser_navigate" in out["message"]
+    assert "delegate_task" in out["message"].lower()
+
+
+def test_allows_delegate_task_on_outreach_session():
+    """Outreach runs may still use other tools; delegate is not blanket-blocked."""
+    h = _hooks()
+    out = h.pre_tool_call(
+        "delegate_task",
+        {"goal": "draft follow-up"},
+        task_id="kol-campaign-outreach:LIVE:POVISON-TS-8319",
+    )
+    assert out is None
+
+
 def test_blocks_execute_code_browser_workaround_on_email_discover():
     h = _hooks()
     out = h.pre_tool_call(
@@ -157,6 +184,20 @@ def test_blocks_execute_code_browser_workaround_on_email_discover():
     )
     assert out is not None
     assert out["action"] == "block"
+
+
+def test_blocks_web_search_on_email_discover():
+    """Tier 1 must use browser Google, not web_search/web_extract."""
+    h = _hooks()
+    for tool in ("web_search", "web_extract"):
+        out = h.pre_tool_call(
+            tool,
+            {"query": "tammymerecka email contact"},
+            task_id="kol-email-discover:LIVE:701",
+        )
+        assert out is not None, tool
+        assert out["action"] == "block"
+        assert "google.com/search" in out["message"]
 
 
 def test_blocks_terminal_duckduckgo_scrape_on_email_discover():
@@ -189,7 +230,7 @@ def test_blocks_terminal_urllib_fetch_on_email_discover():
         )
         assert out is not None, cmd
         assert out["action"] == "block"
-        assert "web_search" in out["message"] or "web_extract" in out["message"]
+        assert "browser_navigate" in out["message"] or "browser_google" in out["message"] or "google.com/search" in out["message"]
 
 
 def test_allows_bridge_cli_terminal_on_email_discover():

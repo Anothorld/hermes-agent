@@ -45,6 +45,21 @@ _TOOLS = (
 )
 
 
+def _load_hooks():
+    import importlib.util
+    from pathlib import Path
+
+    hooks_path = Path(__file__).resolve().with_name("hooks.py")
+    module_name = "hermes_plugins.veedcrawl.hooks"
+    spec = importlib.util.spec_from_file_location(module_name, hooks_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load hooks from {hooks_path}")
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "hermes_plugins.veedcrawl"
+    spec.loader.exec_module(module)
+    return module
+
+
 def register(ctx) -> None:
     """Register all Veedcrawl tools. Called once by the plugin loader."""
     for name, schema, handler, emoji in _TOOLS:
@@ -56,3 +71,5 @@ def register(ctx) -> None:
             check_fn=_check_veedcrawl_available,
             emoji=emoji,
         )
+    hooks = _load_hooks()
+    ctx.register_hook("pre_tool_call", hooks.pre_tool_call)

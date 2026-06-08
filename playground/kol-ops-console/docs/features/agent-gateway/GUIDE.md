@@ -101,6 +101,10 @@ Tool mcp_chrome_devtools_navigate_page returned error:
    - **`kol-email-discover:*` 额外拦截**：`veedcrawl_*`（视频/Profile 补充工具，非邮箱发现）、
      `delegate_task`（子代理空参误调 veedcrawl 浪费 iteration）、`execute_code` 浏览器绕过、
      `terminal` DuckDuckGo/HTML 抓取。Tier 2 只允许内置 `browser_*`。
+   - **`kol-campaign:*` 发现 run 额外拦截 `delegate_task`**（2026-06-08 SEB8010）：
+     模型曾把「公网搜 150 handles」整包 `delegate_task` 出去，子代理空参循环 `veedcrawl_*`
+     且 LLM 挂起，父 run 同步卡在 `delegate_task` 数分钟。发现必须在**当前 run** 用
+     `browser_*` + CAL 持久化；数量不足靠 Console `/rediscover` 自动重试，不靠子代理。
 3. **运维提醒**：机器重置或重做 WSL 配置后，若再 `hermes mcp add chrome_devtools`，务必指向**可达**的 CDP；
    本机标准浏览器路径就是内置 `browser_*` + tab-pool，不需要 chrome-devtools MCP。
 
@@ -185,6 +189,69 @@ browser:
 
 > 经验法则：skill/brief 里出现的每个工具名都必须与运行时真实工具名**逐字一致**；名字错了模型不会报错，
 > 而是悄悄改用 terminal/execute_code 等通用工具绕路。
+
+## 第五层：browser_* / web_* 工具被可用性检查整组剔除（POVISON 701 终因）
+
+改对工具名后，模型直接说「我的 toolset 里没有 browser_navigate」——而且是真的。用 agent 的真实
+`get_tool_definitions(enabled_toolsets=api_server)` 复现，发现 toolset「已启用」但**最终工具表里
+browser_\* 和 web_\* 全被剔除**。原因是每个工具的 `check_fn` 返回 False：
+
+- `tools/browser_tool.py::check_browser_requirements()` → False：local 模式下它只认
+  ① `BROWSER_CDP_URL`（tab-pool 模式不设）② cloud provider（已设 `local`）③ agent-browser **自带
+  Chromium**（`_chromium_installed()` 为 False——我们用的是真实 debug Chrome 走 CDP，从没装自带 Chromium）。
+  **它完全不认 tab-pool**，于是判 browser 不可用 → 整组 `browser_*` 从工具表消失。
+- `tools/web_tools.py::check_web_api_key()` → False：exa/tavily/firecrawl/searxng/brave-free/**ddgs**
+  没有任何一个后端可用 → `web_search`/`web_extract` 也被剔除。
+
+结果：模型既没有 Tier 2 的 `browser_*`，也没有 Tier 1 的 `web_*`，只能退回 `terminal` urllib/curl。
+（前几层修的工具名/guard 都对，但工具压根没被暴露，是更底层的原因。）
+
+### 修复
+
+1. **browser 可用性认 tab-pool**（核心 `check_browser_requirements`，已评审）：local 模式下新增
+   `_local_debug_chrome_available()` —— ① debug Chrome 已在线（`_probe_local_cdp()`）或 ② 启动脚本
+   `start-debug-chrome.sh` 存在且 `LOCAL_CHROME_TAB_POOL` 未显式关闭 → 判可用（tab-pool 会在首个
+   `browser_*` 调用时自启 Chrome 并 seed page-level CDP）。普通安装（无脚本、无 Chromium）行为不变。
+2. **web 后端**：给 **gateway 实际使用的 framework Python 3.14** 装 `ddgs`（DuckDuckGo，无需 API key），
+   使 `web_search`/`web_extract` 可用。验证：`get_tool_definitions` 现在含 `browser_navigate`、
+   `browser_snapshot`、`web_search`、`web_extract`。
+
+> 注意：gateway 跑的是系统 framework Python（**不是** repo venv），依赖要装到那个解释器。
+> 关键自检法：用 `get_tool_definitions(enabled_toolsets=_get_platform_tools(cfg,'api_server'))` 打印
+> 「Final tool selection」，确认目标工具真的在最终表里——「toolset 已启用」不等于「工具已暴露」。
+>
+> **check 顺序**：`check_browser_requirements()` 必须在 cloud-provider 分支**之前**检查
+> `_local_debug_chrome_available()`。否则 default profile 里残留的 `browser-use`（未配置 API key）
+> 会让 `provider.is_configured()` 返回 False 并提前退出，即使 kol-orchestrator profile 已设
+> `cloud_provider: local` 且 tab-pool 可用。
+
+## 第六层：tab-pool seed 死锁（POVISON 701 空 tab 后永久卡住）
+
+日志表现为：`Tab pool acquired tab …` 之后**再也没有** `tool browser_navigate completed`，run 一直
+running 直到 gateway 重启。根因是 `local-chrome-tab-pool/hooks.py::_seed_browser_session` 在持有
+`browser_tool._cleanup_lock` 时调用了 `_update_session_activity()`（它也会抢同一把非可重入锁）→
+**死锁**。tab 已在 Chrome 里打开（about:blank），但 browser 工具 handler 永远进不去。
+
+### 修复
+
+在锁内直接写 `_session_last_activity[session_key] = time.time()`，不再嵌套调用
+`_update_session_activity()`。
+
+## 第七层：Tier 1 改为本地 Chrome Google（非 web_search）
+
+**策略变更（2026-06）：** `kol-email-discovery` Tier 1 不再使用 `web_search` / `web_extract`。
+Google 搜索与结果页抓取统一走 **本地 debug Chrome**：
+
+- `browser_navigate` → `https://www.google.com/search?q=<encoded_query>`
+- `browser_snapshot` 读 SERP → 打开 creator-owned 结果 URL（同样 `browser_*`）
+- Tier 2 仍为 JS 页面（Instagram bio、Linktree/Beacons 懒加载）
+
+**guard：** `kol-bridge-agent-guard` 对 `kol-email-discover:*` 拦截 `web_search`/`web_extract` 以及
+terminal HTTP 抓取，提示改用 `browser_navigate` + Google URL。
+
+**Nox Gate B：** 仍由 Console `discover-email` 在 gateway 前同步跑（需 `campaign_id` + LIVE +
+`nox_quota_enabled`）。brief 带 `gate_b_attempted: true` 时 gateway 不再重复 Nox。详见
+[kols GUIDE §Nox Gate B](../kols/GUIDE.md)。
 
 ## Bridge CLI（所有 gateway run）
 

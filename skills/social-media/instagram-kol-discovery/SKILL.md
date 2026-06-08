@@ -2,7 +2,7 @@
 name: instagram-kol-discovery
 description: Generic North America Instagram KOL discovery framework for any furniture product. First interprets the product brief, persona, and research documents to identify the buyer's real purchase driver, then dynamically routes to the right creator archetypes, seed terms, and scoring weights before crawling.
 trigger: When user asks to find Instagram KOLs/influencers for any furniture product (sofa, bed, dining, storage, media console, cabinet, designer pieces, etc.), interpret a product brief / persona / research doc, route to the correct purchase-driver category, generate seeds dynamically, and qualify candidates against the framework.
-tags: ["instagram", "kol", "influencer", "furniture", "home", "veedcrawl", "cloud browser"]
+tags: ["instagram", "kol", "influencer", "furniture", "home", "veedcrawl", "local-chrome"]
 ---
 
 ## Goal
@@ -18,7 +18,17 @@ Hard defaults:
 ## Step 0 — Interpret the Brief
 Before browsing, extract a compact **Campaign Context** from user input, product docs, research, or visible product claims:
 
-- **Browser Mode**: `local-chrome` (default, CDP-attached local Chrome) or `cloud` (Browser Use). Read from the brief's `browser_mode:` field (NOT the `mode:` field — that carries env `LIVE`/`TEST`), then user message, then default to `local-chrome`. In `cloud` mode the runtime auto-falls-back to CDP local Chrome (auto-starting the debug profile if needed) when Browser Use returns 5xx; a hard failure is surfaced only when both cloud AND local-Chrome auto-start are unavailable. Browser mode governs the pre-flight gate, pacing, and failure handling — see **Mode Detection And Local Chrome Mode**.
+- **Browser stack**: **local debug Chrome only** via built-in `browser_*`
+  tools (`browser_navigate`, `browser_snapshot`, `browser_click`,
+  `browser_console`, `browser_get_images`, `vision_analyze`). The
+  `local-chrome-tab-pool` plugin auto-starts debug Chrome on the first
+  call — do not open a browser manually. Do NOT use Browser Use cloud,
+  `mcp_chrome_devtools_*`, `web_search`/`web_extract`, or **`delegate_task`**
+  (discovery runs in the parent session; batching uses console `/rediscover`,
+  not subagents). Brief may carry
+  `browser_mode: local-chrome` (always treat as local-chrome). Do not
+  confuse with the brief's `mode:` field — that is campaign env
+  (`LIVE` / `TEST`). See **Local Chrome (`browser_*` tools)** below.
 - **Product**: category, key features, materials/mechanisms/tech, price tier.
 - **Buyer**: likely age/life stage, household, home status, pain points, competitive alternatives.
 - **Purchase driver**: one Primary Driver and 1-2 Secondary Drivers from the routing table.
@@ -225,7 +235,48 @@ is already ingested so CAL gets `identity.veedcrawl_*` index facts.
 
 When veedcrawl is unavailable, continue with **pure browser** — do not abort.
 
-See `references/veedcrawl-tools.md` for parameters and cache semantics.
+**Canonical tool calls (copy args exactly — never invoke with `{}`).**
+Empty-arg calls are blocked by the plugin hook and waste iterations.
+
+1. **Seed expansion** — `veedcrawl_search_social_videos` (≤3/run):
+```json
+{"q": "cozy living room makeover instagram reels", "platform": "instagram", "limit": 12}
+```
+```json
+{"q": "first apartment tour furniture NA creator", "platform": "instagram", "limit": 12}
+```
+
+2. **Pre-screen profile** — `veedcrawl_instagram_profile` (prefer over `veedcrawl_profile` for IG):
+```json
+{"username": "kathypicos", "limit": 12, "env": "LIVE"}
+```
+When the handle is already ingested, add CAL attribution:
+```json
+{"username": "kathypicos", "limit": 12, "env": "LIVE", "identity_id": 42, "handle": "kathypicos"}
+```
+
+3. **Reel stats** — `veedcrawl_metadata` (prefer over loading the reel page):
+```json
+{"url": "https://www.instagram.com/reel/ABC123xyz/", "env": "LIVE", "identity_id": 42, "handle": "kathypicos"}
+```
+
+4. **Showcase gap** — `veedcrawl_extract` (≤10/run; **both** `url` + `prompt` required):
+```json
+{
+  "url": "https://www.instagram.com/reel/ABC123xyz/",
+  "prompt": "Does this Reel show furniture placement, room styling, or a large home product demo? Reply with scene type, product category if visible, and on-camera demo quality (1-10).",
+  "env": "LIVE",
+  "identity_id": 42,
+  "handle": "kathypicos"
+}
+```
+
+5. **TikTok cross-check only** — `veedcrawl_profile` (IG handles use #2 instead):
+```json
+{"platform": "tiktok", "username": "creator_handle", "limit": 12, "env": "LIVE"}
+```
+
+See `references/veedcrawl-tools.md` for parameters, cache semantics, and failure examples.
 
 Lateral expansion from seed results is capped at **3 hops**. One failed hashtag, browser session, selector, or extraction call never ends the run; switch surface or seed.
 
@@ -569,60 +620,49 @@ For every group, show **3-5 recommended bloggers** where the search surface allo
 
 Also include: discarded candidates with failing criterion, optional reference override if any, assumptions from Brief Fallback, search coverage (reviewed total, High-match total, surfaces used/blocked), and vertical-diversity stats (designer share, full vertical distribution, list of cross-vertical seeds and public-web queries attempted, plus any mid-run rebalancing actions taken).
 
-## Mode Detection And Local Chrome Mode
-The browser tool surface (`browser_navigate / click / snapshot / console / vision`) routes through one of two backends, picked at the worker process by the presence of `BROWSER_CDP_URL`:
+## Local Chrome (`browser_*` tools)
 
-- **Cloud Mode** (default, no `BROWSER_CDP_URL`): goes through Browser Use cloud — built-in US residential proxy, ephemeral session per task, `BROWSER_USE_PROFILE_ID` for IG login persistence. See **Cloud Mode (Browser Use) Notes** below.
-- **Local Chrome Mode** (`BROWSER_CDP_URL` set, typically via `/browser connect` after the user runs `playground/local-chrome-debug/start-debug-chrome.sh`): drives the user's real Chrome over CDP. Exit IP, IG login, and account identity belong to the user — there is no sandbox.
+All Instagram discovery uses **local debug Chrome** through built-in
+`browser_*` tools. The runtime attaches via CDP (`local-chrome-tab-pool`);
+on first call it auto-launches debug Chrome via `start-debug-chrome.sh` if
+CDP is not already up. Isolated profile: `~/.hermes/local-chrome-debug-profile`.
 
-You cannot inspect the active backend at runtime, so the brief's **`browser_mode:`** field is authoritative. Default to `local-chrome` when unset. Do not confuse with the brief's `mode:` field — that is the campaign env (`LIVE` / `TEST`), unrelated to browser backend selection.
+**Forbidden:** Browser Use cloud, `mcp_chrome_devtools_*`, `web_search`,
+`web_extract`, terminal HTTP scraping. Tool names are exactly
+`browser_navigate`, `browser_snapshot`, `browser_click`, `browser_console`,
+`browser_get_images`, `browser_type`, `vision_analyze`.
 
-**Cloud-to-CDP auto-fallback** (always on for both modes): when the Browser Use API returns 5xx / connection errors, the runtime probes `http://127.0.0.1:9222`; if no debug Chrome is running it auto-launches one via `start-debug-chrome.sh` and routes subsequent calls through CDP. Tool responses for the rescued session carry `fallback_from_cloud=true` plus `fallback_mode=cdp` (already running) or `fallback_mode=cdp_autostart` (we launched it). If both fail you'll see a `RuntimeError("Cloud provider ... failed ... and local debug Chrome could not be reached or auto-started")` — stop the run, tell the user to manually run `playground/local-chrome-debug/start-debug-chrome.sh` and log into Instagram once in that isolated profile, then retry. Auto-started Chrome uses an isolated profile (`~/.hermes/local-chrome-debug-profile`) which starts logged out on first run.
+If `browser_navigate` raises that local debug Chrome could not be reached
+or auto-started, stop the run with `mode_gate_blocked: browser_unavailable`
+and tell the operator to run `playground/local-chrome-debug/start-debug-chrome.sh`,
+log into Instagram once in that profile, then retry.
 
-### Pre-flight gate (mandatory in Local Mode, optional in Cloud Mode)
+### Pre-flight gate (mandatory)
 First tool call of the run, before any IG URL:
 1. `browser_navigate("https://ipinfo.io/json", timeout=30)`
 2. `browser_console(expression="document.body.innerText")` — parse JSON, read `country`.
-3. If `country != "US"` → stop the run immediately and return `mode_gate_blocked: non-US exit (got <country>)`. Do not navigate to instagram.com, do not retry — surface to the user so they can fix their VPN.
+3. If `country != "US"` → stop immediately and return `mode_gate_blocked: non-US exit (got <country>)`. Do not navigate to instagram.com.
 4. If `country == "US"` → log the org/IP in the run report and proceed.
 
-### Local Chrome Mode — conservative rules (main-account protection)
-This is the default browser mode (used when brief says `browser_mode: local-chrome` or omits the field). The agent is operating the user's primary Instagram session. Treat every action as visible to IG's risk system.
+### Conservative rules (main-account protection)
+The agent operates the user's Instagram session in debug Chrome. Treat every
+action as visible to IG's risk system.
 
-- **Pacing**: insert a random `2-4s` pause between candidate profiles; `1-2s` between reels within the same profile. No concurrent profile/reel browsing.
-- **Per-run caps**: at most **40 distinct profiles** and **200 reel page loads** per skill invocation. On hitting either cap, stop and deliver partial results; tell the user to resume in a new run.
-- **Forbidden actions** (never issue these clicks/inputs, even by accident): `follow`, `unfollow`, `like`, `save`, `comment`, `send DM`, `share`, `subscribe`, any form submission, any login-page interaction. Read-only navigation, screenshots, `browser_console` JS extraction, and scrolling are allowed.
-- **Login assumption**: the user has already logged into their main IG account inside the debug-Chrome profile. Never navigate to `/accounts/login/`, `/accounts/signup/`, or any auth flow. Never type credentials.
-- **Risk-page response**: if you encounter a checkpoint, captcha, "Suspicious login attempt", "Action blocked", "Try again later", or any consent/age-gate interstitial → stop immediately, return `mode_gate_blocked: rate_limited`. Do not refresh, do not switch accounts, do not retry the offending URL.
-- **Metadata source preference**: when `veedcrawl_metadata` is available, prefer it over loading the reel page in the user's browser — every IG page load on the main account costs risk budget.
+- **Pacing**: random `2-4s` pause between candidate profiles; `1-2s` between reels within the same profile. No concurrent profile/reel browsing.
+- **Per-run caps**: at most **40 distinct profiles** and **200 reel page loads** per invocation. On hitting either cap, stop and deliver partial results.
+- **Forbidden actions**: `follow`, `unfollow`, `like`, `save`, `comment`, send DM, `share`, `subscribe`, any form submission, any login-page interaction. Read-only navigation, snapshots, `browser_console` extraction, and scrolling are allowed.
+- **Login assumption**: user already logged into IG in the debug-Chrome profile. Never navigate to auth flows or type credentials.
+- **Risk-page response**: checkpoint, captcha, "Action blocked", etc. → stop with `mode_gate_blocked: rate_limited`. Do not refresh or retry.
+- **Metadata preference**: when `veedcrawl_metadata` is available, prefer it over loading reel pages in the user's browser.
 
-### Cloud Mode — when this section applies
-Used only when brief explicitly says `browser_mode: cloud` (default is `local-chrome`). All current Cloud Browser Notes below apply; pre-flight gate is recommended but not mandatory (Browser Use already pins US).
+### Browser reliability rules
 
-## Cloud Mode (Browser Use) Notes
-- Set `BROWSER_USE_API_KEY`; optional `BROWSER_USE_PROFILE_ID` preserves Instagram login state. Browser Use `/browsers` has no `keepAlive`; reuse by not stopping the session.
-- Keep default US proxy for Instagram; do not disable it.
-- Act when visible, avoid redundant screenshots/snapshots, wait only 1-2 seconds unless needed.
-- If hashtag pages time out, switch to public-web seed creators + Similar accounts. If Instagram fails 3 consecutive times, document the blocker and fall back.
-
-### Browser Reliability Rules (learned from agent.log failures)
-
-**Apply in both modes:**
-- **Always re-snapshot after navigation**: any `browser_navigate`, `browser_click` that triggers a route change, or page reload **invalidates all `@eXX` refs**. Before the next `browser_click` / `browser_type`, you MUST call `browser_snapshot` and use refs from the new snapshot. Reusing a ref across pages will surface as `Unknown ref: eXX` and waste a tool turn.
-- **Stop retrying the same call**: if `browser_navigate` to the same URL fails twice, do NOT issue a third identical call. Switch tactic — see mode-specific tactic order below. The runtime emits `same_tool_failure_warning` at count=3 — treat that as a hard stop signal.
-
-**Cloud Mode only:**
-- **Navigation timeout**: the default 60s is too short for Browser Use free tier on IG / heavy SPA pages. Pass `timeout=150` (or higher) on `browser_navigate` for first-load of `instagram.com/*`, `xiaohongshu.com/*`, or any infinite-scroll feed. Subsequent in-SPA navigation can use the default.
-- **Retry tactic order (cloud)**: (a) change `wait_until` (`domcontentloaded` instead of `load`), (b) try the public/non-login URL variant, (c) `cleanup_browser(task_id)` then retry once to force a fresh cloud session, (d) fall back to `veedcrawl_extract` or public-web search.
-- **CDP closed / channel errors**: when you see `CDP response channel closed`, `Could not compute box model`, or `Failed to take screenshot ... CDP response channel closed`, the cloud session is dead. Call `cleanup_browser(task_id)` once, then re-issue the navigate; the next tool call will auto-create a new Browser Use session. Do not keep clicking on the dead session.
-- **Element-not-found loops**: `Could not locate element with role=...` usually means the page hasn't finished rendering or the element is inside a virtualized list. Resolve by: snapshot → scroll once → snapshot again, instead of retrying the same click.
-- **Cloud provider failure (4xx transient / 5xx)**: `BrowserUseProvider failed (...)` triggers the cloud-to-CDP auto-fallback described above. When you observe `fallback_from_cloud=true` with `fallback_mode in {cdp, cdp_autostart}`, **don't change strategy** — continue with the same plan, just note the marker in the run report. If instead `browser_navigate` raises `RuntimeError("... and local debug Chrome could not be reached or auto-started")`, **stop the run** and surface to the user — repeated cloud calls won't recover.
-
-**Local Chrome Mode only:**
-- **Default navigation timeout is fine** — the local Chrome is much faster than the Browser Use free tier. Don't pad `timeout` unless you have evidence of slow loads.
-- **Retry tactic order (local)**: (a) snapshot → scroll once → snapshot again to handle virtualized lists, (b) try the public/non-login URL variant, (c) **move on to the next candidate**. Never run `cleanup_browser` (it would drop the user's attached CDP session), never repeatedly hit the same profile — repeat probes on the main account are exactly what IG flags.
-- **No CDP "channel closed" recovery**: if CDP truly drops, the user needs to re-run the launcher script and re-issue `/browser connect`. Surface this as `mode_gate_blocked: cdp_lost` and stop.
-- **Element-not-found** → one snapshot/scroll/snapshot retry, then skip the candidate. Do NOT keep clicking.
+- **Always re-snapshot after navigation**: any `browser_navigate`, `browser_click` that changes route, or reload **invalidates all `@eXX` refs**. Call `browser_snapshot` before the next click/type.
+- **Stop retrying the same call**: if `browser_navigate` to the same URL fails twice, switch tactic. `same_tool_failure_warning` at count=3 is a hard stop.
+- **Default navigation timeout is fine** for local Chrome — don't pad `timeout` unless you have evidence of slow loads.
+- **Retry tactic order**: (a) snapshot → scroll once → snapshot for virtualized lists, (b) try public/non-login URL variant, (c) **move on to next candidate**. Never run `cleanup_browser` (drops the attached CDP session). Never repeatedly hit the same profile.
+- **CDP lost**: if CDP truly drops, surface `mode_gate_blocked: cdp_lost` and stop — operator re-runs the launcher script.
+- **Element-not-found** → one snapshot/scroll/snapshot retry, then skip the candidate.
 
 ## References
 - `references/bridge-cli-json-payloads.md` — exact kol_bridge_tool JSON field names and per-candidate persistence order for rediscovery runs.
@@ -630,6 +670,7 @@ Used only when brief explicitly says `browser_mode: cloud` (default is `local-ch
 - `references/veedcrawl-api.md` — REST endpoints (search/profile/metadata/extract), MCP vs plugin.
 
 ## Pitfalls
+- Do not call `delegate_task` to batch discovery (e.g. "search public web for 150 handles"). Subagents lose the campaign tab-pool session, loop on empty `veedcrawl_*` args, and block the parent run for minutes. Browse and persist in the current run; let the console auto-fire `/rediscover` when the quantity floor is unmet.
 - For bridge CLI persistence, do not guess JSON keys per subcommand. `upsert-identity` expects `primary_handle`; `write-facts-multi` should be called with `--identity-id`; `add-candidate` is safest with `identity_id` already embedded in the JSON payload. Prefer file-backed `@/tmp/*.json` payloads.
 - To inspect persisted candidate handles/counts, call `list-candidate-handles --env <TEST|LIVE> --campaign-id <id> --plain`; do not pipe `list-candidates` through generated `python -c` snippets.
 - Do not default to home/decor creators just because the product is furniture.
@@ -648,7 +689,12 @@ Used only when brief explicitly says `browser_mode: cloud` (default is `local-ch
 - Do not use Veedcrawl search/profile as the only discovery path — browser surfaces are mandatory.
 - Do not call `mcp_veedcrawl_*` or bypass plugin tools for discovery.
 - Do not ignore `persisted: false` on veedcrawl tool results — fall back to browser.
+- Do not call any `veedcrawl_*` tool with an empty object `{}` or missing
+  required fields — the hook blocks it. Always pass the canonical JSON from
+  **Veedcrawl supplement → Canonical tool calls** (at minimum: `q` for search,
+  `username` or `url` for profile, `url` for metadata, `url`+`prompt` for extract).
 - Do not call `veedcrawl_extract` without both `url` + `prompt` (on-demand showcase gap or explicit operator request).
-- **Local Mode — never** issue a `follow / like / comment / save / DM / share` action, even when a snapshot lists it as the easiest-looking element. The skill is read-only on the main account.
-- **Local Mode — never** retry a URL that returned a checkpoint/captcha; never refresh hoping it resolves. Stop the run instead.
-- **Local Mode — never** skip the `ipinfo.io` pre-flight, even if the previous run in the same hermes session passed it (VPN state can flip mid-session).
+- Do not use `veedcrawl_profile` for Instagram when `veedcrawl_instagram_profile` is available — use `{"username": "<handle>"}`.
+- **Local Chrome — never** issue a `follow / like / comment / save / DM / share` action, even when a snapshot lists it as the easiest-looking element. The skill is read-only on the main account.
+- **Local Chrome — never** retry a URL that returned a checkpoint/captcha; never refresh hoping it resolves. Stop the run instead.
+- **Local Chrome — never** skip the `ipinfo.io` pre-flight, even if the previous run in the same hermes session passed it (VPN state can flip mid-session).

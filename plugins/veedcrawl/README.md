@@ -45,6 +45,14 @@ gate prevents dispatch — `hermes tools` will list them as unavailable.
 
 ## Guardrails
 
+**Pre-dispatch argument validation** (`hooks.py` + `_internal/arg_validate.py`):
+incomplete tool calls (empty `{}`, missing `username`/`q`/`url`, etc.) are
+blocked in `pre_tool_call` before handlers run. The model receives an example
+JSON payload instead of a generic `bad_request`. JSON schemas also mark
+required fields (`oneOf` / `allOf`) so capable models see constraints up front.
+This does not replace session guards (e.g. `kol-email-discover:*` blocks all
+`veedcrawl_*` — email discovery must use `WebSearch` / `browser_*`).
+
 The client enforces three protections so agents cannot accidentally burn
 credits or hammer the API:
 

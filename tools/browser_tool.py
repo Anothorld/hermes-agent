@@ -2122,7 +2122,16 @@ def _run_browser_command(
     # Local mode with no Chromium on disk: fail fast with an actionable
     # message instead of hanging for _command_timeout seconds per call.
     # Skip when engine=lightpanda — LP doesn't need Chromium for navigation.
-    if _is_local_mode() and not _chromium_installed() and _get_browser_engine() != "lightpanda":
+    # Also skip when a CDP path is already available (``BROWSER_CDP_URL``,
+    # tab-pool page CDP seeded in ``_active_sessions``, etc.) — those flows
+    # attach to real debug Chrome, not agent-browser's bundled Chromium.
+    if (
+        _is_local_mode()
+        and not _chromium_installed()
+        and _get_browser_engine() != "lightpanda"
+        and not _get_cdp_override()
+        and not _local_debug_chrome_available()
+    ):
         if _running_in_docker():
             hint = (
                 "Chromium browser is missing. You're running in Docker — pull "
@@ -3895,11 +3904,15 @@ def check_browser_requirements() -> bool:
     if _requires_real_termux_browser_install(browser_cmd):
         return False
 
-    # In cloud mode, also require provider credentials. Cloud browsers
-    # don't need a local Chromium binary.
-    provider = _get_cloud_provider()
-    if provider is not None:
-        return provider.is_configured()
+    # Local debug-Chrome via the tab pool: check **before** the cloud-provider
+    # branch. When ``HERMES_HOME`` falls back to the default profile, an
+    # unconfigured ``browser-use`` provider makes ``is_configured()`` False and
+    # the old ordering returned False before this branch ran — dropping the
+    # whole ``browser_*`` toolset (POVISON 701: model claimed no
+    # ``browser_navigate``). Tab-pool / debug Chrome is a fully local path and
+    # must win over a broken cloud config.
+    if _local_debug_chrome_available():
+        return True
 
     # Local mode with Lightpanda can provide text/navigation tools without a
     # local Chromium install. Chrome fallback, screenshots, and browser_vision
@@ -3907,12 +3920,48 @@ def check_browser_requirements() -> bool:
     if _using_lightpanda_engine():
         return True
 
+    # In cloud mode, also require provider credentials. Cloud browsers
+    # don't need a local Chromium binary.
+    provider = _get_cloud_provider()
+    if provider is not None:
+        return provider.is_configured()
+
     # Local Chrome mode: agent-browser needs a Chromium build on disk. Without
     # it the CLI hangs on first use until the command timeout fires.
     if not _chromium_installed():
         return False
 
     return True
+
+
+def _local_debug_chrome_available() -> bool:
+    """Return True when a local debug Chrome path can serve ``browser_*``.
+
+    Two signals, neither of which requires the agent-browser bundled Chromium:
+
+    1. The ``local-chrome-tab-pool`` plugin is enabled (env
+       ``LOCAL_CHROME_TAB_POOL`` truthy, default on). The pool auto-starts a
+       real debug Chrome and seeds a per-task page-level CDP session on the
+       first ``browser_*`` call, so the tools are usable even though Chrome is
+       not yet running at availability-check time.
+    2. A debug Chrome is already reachable on the default CDP port (covers
+       manually launched debug Chrome without ``BROWSER_CDP_URL`` set).
+
+    Mirrors the tab pool's own ``_truthy_env`` default so the two stay in sync.
+    """
+    # A debug Chrome already listening on the CDP port → usable right now.
+    if _probe_local_cdp() is not None:
+        return True
+    # Pool explicitly disabled by the operator → do not advertise on the
+    # autostart signal alone.
+    raw = os.environ.get("LOCAL_CHROME_TAB_POOL")
+    if raw is not None and raw.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    # The debug-Chrome launcher being present means the tab pool can auto-start
+    # a real Chrome on the first ``browser_*`` call, so the tools are usable
+    # even though nothing is running yet. Absent launcher → fall through to the
+    # bundled-Chromium check (original behaviour for vanilla installs).
+    return _locate_local_chrome_launcher() is not None
 
 
 def check_browser_vision_requirements() -> bool:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -93,7 +94,10 @@ def _seed_browser_session(task_id: str, tab_info: Dict[str, str]) -> bool:
             browser_tool._active_sessions[session_key] = _make_session_info(
                 session_key, tab_info
             )
-            browser_tool._update_session_activity(session_key)
+            # Update activity inline — ``_update_session_activity`` also takes
+            # ``_cleanup_lock`` and would deadlock here (POVISON 701: tab
+            # acquired, then run hung forever with no browser_navigate log).
+            browser_tool._session_last_activity[session_key] = time.time()
             seeded = True
     return seeded
 

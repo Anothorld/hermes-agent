@@ -1,6 +1,6 @@
 ---
 name: kol-social-link-discovery
-description: Searches the public web for a KOL's social-platform profile URLs (TikTok, YouTube, Facebook, X/Twitter, Threads, Linktree/Beacons, personal site) and persists each newly resolved URL as a reusable `identity.<platform>_profile_url` fact. Mirrors `kol-email-discovery`'s tiered browsing (Google + WebFetch first, BrowserUse fallback) and verification rules. Does NOT overwrite existing non-empty URL facts. On total miss, returns `{found: false, tried: [...]}` — does NOT open an escalation (missing social URLs are non-blocking for outreach).
+description: Searches the public web for a KOL's social-platform profile URLs (TikTok, YouTube, Facebook, X/Twitter, Threads, Linktree/Beacons, personal site) and persists each newly resolved URL as a reusable `identity.<platform>_profile_url` fact. Mirrors `kol-email-discovery`'s tiered browsing (local Chrome Google search + result pages first, then `browser_*` for JS-gated surfaces) and verification rules. Does NOT overwrite existing non-empty URL facts. On total miss, returns `{found: false, tried: [...]}` — does NOT open an escalation (missing social URLs are non-blocking for outreach).
 trigger: Invoked by the web detail page's "🔍 搜索社交主页" button via `POST /kols/{id}/discover-social-links`. Not auto-chained from the orchestrator — `kol-email-discovery` already captures these URLs as a side effect when it browses link-in-bio / personal-site pages, so this skill exists to cover KOLs whose email is already known (and so won't trigger email-discovery).
 tags: ["kol", "enrichment", "social-links", "profile-url", "quick-link", "post-discovery"]
 ---
@@ -31,11 +31,10 @@ miss list verbatim.
 - **Single-shot per (identity, env):** if every target fact key is
   already non-empty, abort and return
   `{"skipped": "already_has_all_social_links"}`. Do NOT re-verify.
-- **Web tools only.** Public surfaces only: link-in-bio aggregators,
-  the creator's personal/portfolio site, their media kit / press page,
-  public Facebook profile/Page About sections, public agency rosters.
-  No paid enrichment APIs, no LinkedIn scraping, no databroker
-  lookups, no behind-login data.
+- **Local Chrome only.** Public surfaces via built-in `browser_*` tools
+  (`browser_navigate`, `browser_snapshot`, etc.) on local debug Chrome
+  (auto-started by `local-chrome-tab-pool`). Never `web_search` /
+  `web_extract`, never `mcp_chrome_devtools_*`, never terminal HTTP scraping.
 
 ## Target fact keys
 Each one is a string URL. Write the URL value plus its provenance
@@ -104,31 +103,42 @@ If `missing_keys` is empty, abort with
 Use `primary_handle`, `display_name`, `region`, `language`, `platform`
 from the identity row for search disambiguation.
 
-### Step 2 — Tier 1: Google Search + WebSearch + WebFetch
-Same browsing toolkit as `kol-email-discovery`. Run the discovery paths
-below in order; do NOT stop on first hit — keep crawling until either
-all `missing_keys` are resolved or the budget cap (8 page loads) is
-exhausted. Record each query in `tried` as `GoogleSearch:"..."` or
-`WebSearch:"..."`.
+### Step 2 — Tier 1: Local Chrome Google search + result pages
+Same browsing toolkit as `kol-email-discovery`. Use built-in `browser_*` on
+local debug Chrome — do **not** use `web_search`, `web_extract`, or terminal
+HTTP. Run the paths below in order; do NOT stop on first hit — keep crawling
+until either all `missing_keys` are resolved or the budget cap (8 page loads)
+is exhausted. Record each Google query in `tried` as `browser_google:"..."`.
 
-#### Path A — Google search queries
+#### Path A — Google search via browser
+
+For each query:
+
+```
+browser_navigate url="https://www.google.com/search?q=<encoded_query>"
+browser_snapshot
+```
+
+Query list:
 
 1. `"<handle>" (tiktok OR youtube OR facebook OR linktree OR linktr.ee OR beacons.ai)`
-2. `"<display_name>" "<region>" (site:tiktok.com OR site:youtube.com OR site:facebook.com)` (only if `display_name` is present and the handle didn't disambiguate)
+2. `"<display_name>" "<region>" (site:tiktok.com OR site:youtube.com OR site:facebook.com)` (only if `display_name` present)
 3. `(site:linktr.ee OR site:beacons.ai OR site:bio.link OR site:lnk.bio OR site:solo.to) "<handle>"`
 4. `"<handle>" site:tiktok.com`
 5. `"<handle>" site:youtube.com`
 6. `"<handle>" site:facebook.com`
 7. `"<handle>" "official site" OR "personal site"`
 
-#### Path B — Fetch promising result URLs
+#### Path B — Open promising result URLs
 
-For each promising result URL, call `WebFetch(url,
-"List every social-media profile link and personal-site link visible on
-this page that visibly belongs to the creator. Reply as URL: <url>,
-PLATFORM: <name>, EVIDENCE: <one-line reason it belongs to them>.")`.
+For each promising URL:
 
-Aggregate URLs across pages. Common surfaces:
+```
+browser_navigate url="<url>"
+browser_snapshot
+```
+
+Extract social links from the snapshot. Aggregate URLs across pages. Common surfaces:
 - `linktr.ee/<handle>`, `beacons.ai/<handle>`, `bio.link/<handle>`,
   `lnk.bio/<handle>`, `solo.to/<handle>`, `linkin.bio/<handle>` —
   these are gold (a single page typically lists every platform).
@@ -147,14 +157,16 @@ Map extracted URLs to target keys by domain:
   `solo.to/...`, `linkin.bio/...` → `identity.linktree_url`
 - Anything else with creator-name evidence → `identity.personal_site_url`
 
-### Step 3 — Tier 2: BrowserUse fallback
+### Step 3 — Tier 2: Local Chrome for JS-gated surfaces
 Only invoke when Step 2 left ≥1 key in `missing_keys`. Reserved for
-surfaces WebFetch cannot render (IG bio behind JS, Beacons/Linktree
+surfaces that need full JS render (IG bio behind JS, Beacons/Linktree
 pages that gate links behind a click, personal sites that lazy-load).
 
-Use built-in BrowserUse tools — `browser_navigate`, `browser_snapshot`,
-`browser_get_images`, `browser_click`, `vision_analyze`. Do NOT use the
-`mcp_chrome_devtools_*` family.
+Use built-in `browser_*` on local debug Chrome — `browser_navigate`,
+`browser_snapshot`, `browser_get_images`, `browser_click`, `vision_analyze`.
+Do NOT use `mcp_chrome_devtools_*`, `web_search`, or `web_extract`.
+Local debug Chrome auto-starts on the first `browser_*` call; do not open
+a browser manually.
 
 Browse sequence (continue across all targets, stop on budget):
 1. `https://www.instagram.com/<handle>/` — snapshot bio + link-in-bio
@@ -240,7 +252,7 @@ Single JSON object, no prose, no markdown:
     {"key": "identity.youtube_profile_url", "url": "https://www.youtube.com/@kolchannel", "source": "linktree", "discovered_url": "https://linktr.ee/kol_handle"}
   ],
   "still_missing": ["identity.facebook_profile_url", "identity.threads_profile_url"],
-  "tried": ["GoogleSearch:\"@handle\" tiktok", "https://linktr.ee/kol_handle", "https://www.instagram.com/kol_handle/"]
+  "tried": ["browser_google:\"@handle\" tiktok", "https://linktr.ee/kol_handle", "https://www.instagram.com/kol_handle/"]
 }
 ```
 
@@ -266,8 +278,8 @@ the buttons for those platforms.
 ## Examples
 
 ### Success — link-in-bio gold mine
-`@cozyhome_emma`. Google Search surfaces `linktr.ee/cozyhome_emma`.
-WebFetch on that page lists TikTok (`@cozyhome_emma_tt`), YouTube
+`@cozyhome_emma`. Tier 1 browser Google surfaces `linktr.ee/cozyhome_emma`.
+`browser_navigate` + `browser_snapshot` on that page lists TikTok (`@cozyhome_emma_tt`), YouTube
 (`@cozyhomeemma`), Pinterest (skipped — not in target set), and a
 personal site `cozyhome.studio`. Five keys resolve in one Tier 1
 fetch. Returns `{"found": true, "resolved": [5 entries], "still_missing": ["identity.facebook_profile_url", "identity.threads_profile_url"]}`.

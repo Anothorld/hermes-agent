@@ -47,20 +47,39 @@ def test_pre_tool_call_seeds_browser_session(hooks_env, monkeypatch):
         },
     )
 
-    fake_browser = SimpleNamespace(
-        _cleanup_lock=mock.Mock(
-            __enter__=mock.Mock(return_value=None),
-            __exit__=mock.Mock(return_value=False),
-        ),
-        _active_sessions={},
-        _update_session_activity=mock.Mock(),
-    )
-    monkeypatch.setitem(sys.modules, "tools.browser_tool", fake_browser)
+    from tools import browser_tool
+
+    browser_tool._active_sessions.clear()
+    browser_tool._session_last_activity.clear()
 
     result = hooks.pre_tool_call("browser_navigate", {}, task_id="run-1")
     assert result is None
-    assert "run-1" in fake_browser._active_sessions
-    assert fake_browser._active_sessions["run-1"]["features"]["tab_pool"] is True
+    assert "run-1" in browser_tool._active_sessions
+    assert browser_tool._active_sessions["run-1"]["features"]["tab_pool"] is True
+    assert "run-1" in browser_tool._session_last_activity
+
+
+def test_seed_session_does_not_deadlock_on_real_cleanup_lock(hooks_env, monkeypatch):
+    """Regression: seeding must not call _update_session_activity under _cleanup_lock."""
+    hooks = hooks_env
+    monkeypatch.setattr(
+        hooks.tab_pool,
+        "acquire",
+        lambda task_id: {
+            "target_id": "T42",
+            "cdp_url": "ws://127.0.0.1:9222/devtools/page/T42",
+        },
+    )
+
+    from tools import browser_tool
+
+    browser_tool._active_sessions.clear()
+    browser_tool._session_last_activity.clear()
+
+    result = hooks.pre_tool_call("browser_navigate", {}, task_id="run-deadlock")
+    assert result is None
+    assert "run-deadlock" in browser_tool._active_sessions
+    assert "run-deadlock" in browser_tool._session_last_activity
 
 
 def test_pre_tool_call_blocks_when_session_already_claimed(hooks_env, monkeypatch):
@@ -74,17 +93,14 @@ def test_pre_tool_call_blocks_when_session_already_claimed(hooks_env, monkeypatc
         },
     )
 
-    fake_browser = SimpleNamespace(
-        _cleanup_lock=mock.Mock(
-            __enter__=mock.Mock(return_value=None),
-            __exit__=mock.Mock(return_value=False),
-        ),
-        _active_sessions={
-            "run-2": {"cdp_url": "ws://browser-level", "features": {}},
-        },
-        _update_session_activity=mock.Mock(),
-    )
-    monkeypatch.setitem(sys.modules, "tools.browser_tool", fake_browser)
+    from tools import browser_tool
+
+    browser_tool._active_sessions.clear()
+    browser_tool._session_last_activity.clear()
+    browser_tool._active_sessions["run-2"] = {
+        "cdp_url": "ws://browser-level",
+        "features": {},
+    }
 
     result = hooks.pre_tool_call("browser_snapshot", {}, task_id="run-2")
     assert result is not None
@@ -93,28 +109,28 @@ def test_pre_tool_call_blocks_when_session_already_claimed(hooks_env, monkeypatc
 
 def test_cleanup_wrapper_releases_only_bare_task(hooks_env, monkeypatch):
     hooks = hooks_env
+    monkeypatch.setattr(hooks.tab_pool, "is_enabled", lambda: True)
     released = []
     monkeypatch.setattr(
         hooks.tab_pool, "release", lambda task_id: released.append(task_id) or True
     )
+
+    from tools import browser_tool
 
     calls = []
 
     def original_cleanup(task_id=None):
         calls.append(task_id)
 
-    fake_browser = SimpleNamespace(
-        cleanup_browser=original_cleanup,
-        _tab_pool_cleanup_wrapped=False,
-    )
-    monkeypatch.setitem(sys.modules, "tools.browser_tool", fake_browser)
+    monkeypatch.setattr(browser_tool, "cleanup_browser", original_cleanup, raising=False)
+    browser_tool._tab_pool_cleanup_wrapped = False
     hooks._CLEANUP_WRAPPED = False
     hooks.install_cleanup_wrapper()
 
-    fake_browser.cleanup_browser("task-z::local")
+    browser_tool.cleanup_browser("task-z::local")
     assert calls == ["task-z::local"]
     assert released == []
 
-    fake_browser.cleanup_browser("task-z")
+    browser_tool.cleanup_browser("task-z")
     assert calls == ["task-z::local", "task-z"]
     assert released == ["task-z"]

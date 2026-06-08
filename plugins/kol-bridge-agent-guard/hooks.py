@@ -97,16 +97,41 @@ def _email_discover_session(session_id: str, task_id: str = "") -> bool:
     return sid.startswith("kol-email-discover:")
 
 
+def _campaign_discovery_session(session_id: str, task_id: str = "") -> bool:
+    """Launch / rediscover runs (``kol-campaign:LIVE:...``), not outreach/draft."""
+    sid = _session_key(session_id, task_id)
+    if not sid.startswith("kol-campaign"):
+        return False
+    return not _browser_blocked_session(session_id, task_id)
+
+
 def _email_discover_workaround_message(kind: str) -> str:
     return (
-        f"{kind} is disabled for kol-email-discover runs. Use the EXACT tool "
-        "names — there is no WebSearch/WebFetch/GoogleSearch and no CLI "
-        "web-search subcommand. Tier 1: call `web_search` (search) and "
-        "`web_extract` (fetch+read a URL). Tier 2 (JS-gated: Instagram, "
-        "Linktree, Beacons): call `browser_navigate` then `browser_snapshot` "
-        "directly (Chrome auto-starts). Never use terminal curl/urllib/"
-        "requests HTTP fetching, veedcrawl_*, delegate_task, execute_code "
-        "browser imports, or mcp_chrome_devtools_* as a substitute."
+        f"{kind} is disabled for kol-email-discover runs. Tier 1 Google search "
+        "and all page fetches use local debug Chrome: `browser_navigate` to "
+        "`https://www.google.com/search?q=...` (URL-encode the query), then "
+        "`browser_snapshot`; open result URLs with the same tools. Tier 2 "
+        "(JS-gated: Instagram, Linktree, Beacons): `browser_navigate` + "
+        "`browser_snapshot`. Do NOT use `web_search`, `web_extract`, terminal "
+        "curl/urllib/requests HTTP, veedcrawl_*, delegate_task, execute_code "
+        "browser imports, or mcp_chrome_devtools_* as substitutes."
+    )
+
+
+def _campaign_discovery_workaround_message(kind: str) -> str:
+    return (
+        f"{kind} is disabled for kol-campaign discovery runs. Execute Instagram "
+        "discovery in THIS run with local debug Chrome (`browser_navigate`, "
+        "`browser_snapshot`, `browser_click`, `browser_console`, "
+        "`browser_get_images`, `vision_analyze`) per "
+        "`instagram-kol-discovery` SKILL.md. Persist each qualified handle "
+        "via kol_bridge_tool.py before moving on. For quantity shortfalls, "
+        "finish with `floor_unmet_reason` + `attempted_angles` and let the "
+        "console auto-fire `/rediscover` — do NOT spawn subagents. "
+        "Veedcrawl calls must include full args (e.g. "
+        '`{"q": "luxury home decor", "platform": "instagram"}` for '
+        "veedcrawl_search_social_videos). Do NOT use delegate_task, "
+        "mcp_chrome_devtools_*, or terminal HTTP scraping as substitutes."
     )
 
 
@@ -173,7 +198,19 @@ def pre_tool_call(
             ),
         }
 
+    if _campaign_discovery_session(session_id, task_id):
+        if tool_name == "delegate_task":
+            return {
+                "action": "block",
+                "message": _campaign_discovery_workaround_message("delegate_task"),
+            }
+
     if _email_discover_session(session_id, task_id):
+        if tool_name in ("web_search", "web_extract"):
+            return {
+                "action": "block",
+                "message": _email_discover_workaround_message(tool_name),
+            }
         if _is_veedcrawl_tool(tool_name):
             return {
                 "action": "block",

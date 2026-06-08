@@ -196,19 +196,25 @@ VEEDCRAWL_JOB_SCHEMA: dict[str, Any] = {
 
 VEEDCRAWL_PROFILE_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": (
+        "Fetch IG or TikTok profile + recent posts. Requires platform and "
+        "either username or url — never call with an empty object."
+    ),
     "properties": {
         "platform": {
             "type": "string",
             "enum": ["instagram", "tiktok"],
-            "description": "Profile data source.",
+            "description": "Profile data source (required).",
         },
         "username": {
             "type": "string",
-            "description": "Handle without leading @ (mutually exclusive with url).",
+            "minLength": 1,
+            "description": "Handle without leading @ (required unless url is set).",
         },
         "url": {
             "type": "string",
-            "description": "Profile URL (mutually exclusive with username).",
+            "minLength": 1,
+            "description": "Profile URL (required unless username is set).",
         },
         "limit": {
             "type": "integer",
@@ -220,20 +226,29 @@ VEEDCRAWL_PROFILE_SCHEMA: dict[str, Any] = {
         "force_refresh": {"type": "boolean", "default": False},
         **_PERSIST_SCHEMA_PROPS,
     },
-    "required": ["platform"],
+    "allOf": [
+        {"required": ["platform"]},
+        {"oneOf": [{"required": ["username"]}, {"required": ["url"]}]},
+    ],
     "additionalProperties": False,
 }
 
 VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": (
+        "Fetch Instagram profile + recent posts. Requires username or url — "
+        "never call with an empty object."
+    ),
     "properties": {
         "username": {
             "type": "string",
-            "description": "IG handle without @ (mutually exclusive with url).",
+            "minLength": 1,
+            "description": "IG handle without @ (required unless url is set).",
         },
         "url": {
             "type": "string",
-            "description": "Profile URL (mutually exclusive with username).",
+            "minLength": 1,
+            "description": "Profile URL (required unless username is set).",
         },
         "limit": {
             "type": "integer",
@@ -245,15 +260,21 @@ VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA: dict[str, Any] = {
         "force_refresh": {"type": "boolean", "default": False},
         **_PERSIST_SCHEMA_PROPS,
     },
+    "oneOf": [
+        {"required": ["username"]},
+        {"required": ["url"]},
+    ],
     "additionalProperties": False,
 }
 
 VEEDCRAWL_SEARCH_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": "Search public social videos. Requires non-empty q.",
     "properties": {
         "q": {
             "type": "string",
-            "description": "Search query (buyer-moment or cross-vertical phrase).",
+            "minLength": 1,
+            "description": "Search query (buyer-moment or cross-vertical phrase). Required.",
         },
         "platform": {
             "type": "string",
@@ -544,8 +565,13 @@ def _handle_job(arguments: dict[str, Any] | None = None, **_: Any) -> str:
 
 
 def _profile_request(args: dict[str, Any]) -> dict[str, Any]:
+    platform = str(args.get("platform") or "").lower()
+    if platform not in {"instagram", "tiktok"}:
+        raise ValueError("platform must be instagram or tiktok")
+    if not (args.get("username") or args.get("url")):
+        raise ValueError("veedcrawl_profile requires platform and (username or url)")
     return {
-        "platform": str(args["platform"]),
+        "platform": platform,
         "username": args.get("username"),
         "url": args.get("url"),
         "limit": int(args.get("limit") or 12),
@@ -565,13 +591,11 @@ def _profile_fetch(client: VeedcrawlClient, args: dict[str, Any]) -> dict[str, A
 def _handle_profile(arguments: dict[str, Any] | None = None, **_: Any) -> str:
     args = dict(arguments or {})
     try:
-        platform = str(args.get("platform") or "").lower()
-        if platform not in {"instagram", "tiktok"}:
-            raise ValueError("platform must be instagram or tiktok")
+        request = _profile_request(args)
+        platform = request["platform"]
         operation = (
             "get_instagram_profile" if platform == "instagram" else "get_tiktok_profile"
         )
-        request = _profile_request(args)
         with VeedcrawlClient() as client:
             envelope = fetch_with_persist(
                 operation=operation,
