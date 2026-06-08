@@ -87,6 +87,28 @@ def test_blocks_mcp_chrome_on_kol_session_via_task_id():
     assert "mcp_chrome_devtools" in out["message"]
 
 
+def test_blocks_mcp_chrome_on_campaign_draft_session():
+    """Regression: ``kol-campaign-draft:`` must also block mcp_chrome.
+
+    The old ``kol-campaign:`` (trailing colon) prefix did not match
+    ``kol-campaign-draft:LIVE:...``, so redraft runs could loop on the dead
+    chrome-devtools MCP endpoint (POVISON stuck-run incident).
+    """
+    h = _hooks()
+    for task in (
+        "kol-campaign-draft:LIVE:POVISON-TS-8319-20260603",
+        "kol-campaign-outreach:LIVE:POVISON-TS-8319",
+    ):
+        out = h.pre_tool_call(
+            "mcp_chrome_devtools_navigate_page",
+            {"url": "https://example.com/"},
+            task_id=task,
+        )
+        assert out is not None, task
+        assert out["action"] == "block"
+        assert "mcp_chrome_devtools" in out["message"]
+
+
 def test_allows_browser_on_email_discover_session():
     h = _hooks()
     out = h.pre_tool_call(

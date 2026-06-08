@@ -71,6 +71,63 @@
 
 并发发现仍建议串行（见 kols GUIDE）以降低 IG 风控/槽位压力。
 
+## 「开了空标签页就卡死」的真正元凶（chrome_devtools MCP 指向死地址）
+
+> 这是 686/690/694 反复卡死的**实际根因**。前面 A/B/C + agent-browser/tab-pool
+> 全部针对内置 `browser_*` 路径，但卡死的 run 走的是**另一条路**。
+
+`kol-orchestrator` profile 的 `config.yaml` 里曾挂着一个 `chrome_devtools` MCP server，
+`--browserUrl http://10.30.80.118:9223`——一个早期 WSL/Windows 环境遗留的**远程不可达地址**。
+每次 gateway 启动都会注册它的 **29 个 `mcp_chrome_devtools_*` 工具**，模型常优先选 `mcp_chrome_devtools_navigate_page`：
+
+```
+Tool mcp_chrome_devtools_navigate_page returned error:
+  "Failed to fetch browser webSocket URL from
+   http://10.30.80.118:9223/json/version: fetch failed"
+```
+
+撞 MCP `timeout: 180s` × 反复重试 + GLM 偶发空响应 → run「只开了空 `about:blank` 就卡几分钟」。
+（tab-pool 在本地 9222 开的空标签页只是表象，真正的导航发去了那个死地址。）
+
+### 根治
+
+1. **删除死掉的 MCP server**（根因）：从 profile `config.yaml` 的 `mcp_servers` 移除 `chrome_devtools`，
+   重启 gateway。重启后日志应为 `MCP: registered 6 tool(s) from 1 server(s)`（仅 `veedcrawl`），
+   29 个 `mcp_chrome_devtools_*` 工具从工具集消失，模型只能走已验证可用的 `browser_*`。
+   - **不要**改指向本地 9222：同一 CDP 端口不能被两个客户端共用（tab-pool 已占用），见 `skills/mcp/native-mcp/SKILL.md`。
+2. **guard 纵深防御**（`plugins/kol-bridge-agent-guard/hooks.py`）：对所有 KOL session 拦截
+   `mcp_chrome_devtools_*`。注意前缀用裸 `kol-campaign`（无冒号），否则 `kol-campaign-draft:` /
+   `kol-campaign-outreach:` 会漏拦（曾导致 redraft run 仍能撞死 MCP）。
+3. **运维提醒**：机器重置或重做 WSL 配置后，若再 `hermes mcp add chrome_devtools`，务必指向**可达**的 CDP；
+   本机标准浏览器路径就是内置 `browser_*` + tab-pool，不需要 chrome-devtools MCP。
+
+## 调试 Chrome「CDP 退化」也会卡空标签页（POVISON 694 第二层）
+
+删掉死 MCP 后 694 仍卡空标签页——这次是**本地调试 Chrome 的 CDP 退化**：长时间运行（本例 3h）后，
+Chrome 仍能回 `/json/version`（HTTP），但**任何 CDP WebSocket 升级都返回 `HTTP 500`**。
+现象链：
+
+- tab-pool 的 `probe_chrome()` 只看 HTTP `/json/version` → 误判 Chrome 健康 → 照常开 `about:blank` 页签；
+- 但 `agent-browser` 连 page-level CDP ws 时拿到 500 → 网关侧 daemon 路径**卡住**（CLI 一次性调用则秒失败）；
+- run 停在空标签页，要等 A/C 兜底 20–30 分钟才被回收。
+
+### 修复（`plugins/local-chrome-tab-pool/internal/tab_pool.py`）
+
+- 新增 `cdp_ws_healthy()`：用 stdlib `socket` 对 browser-level ws 做一次 RFC-6455 握手，只看状态行——
+  `101`=健康，`500`/拒绝/超时=退化（不依赖 `websockets` 库）。
+- `ensure_chrome_running()` 改为「HTTP 通 **且** CDP ws 健康」才放行；探测到退化（HTTP 通但 ws 不健康）
+  即对启动脚本执行 **`restart`**（先杀掉坏实例再起），起完再校验 CDP 健康，仍不健康则报错。
+
+### 关键运维约束（务必知道）
+
+调试 Chrome 必须由**能长存的属主**启动：用户终端、launchd，或**网关进程内的 tab-pool autostart**
+（`ensure_chrome_running` 在网关进程里 spawn，Chrome 成为网关后代而存活）。**不要**用一次性脚本/工具调用去起它——
+那种子进程会随调用结束被进程组清理杀掉（只活几秒），正是「起来又没了」的原因。手动恢复：
+
+```bash
+playground/local-chrome-debug/start-debug-chrome.sh restart   # 在持久终端里
+```
+
 ## Bridge CLI（所有 gateway run）
 
 Console brief / instructions 注入 `bridge_agent_contract.py`：

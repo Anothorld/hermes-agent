@@ -9,12 +9,15 @@ do not cross-talk while cookies/login state stay shared.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+import socket
 import subprocess
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -126,6 +129,52 @@ def probe_chrome() -> bool:
         return False
 
 
+def cdp_ws_healthy(timeout: float = 3.0) -> bool:
+    """Return True when Chrome's CDP **WebSocket** actually accepts a connection.
+
+    A long-lived debug Chrome can degrade into a state where it still answers
+    ``/json/version`` (plain HTTP) yet every CDP WebSocket *upgrade* returns
+    ``HTTP 500``. ``probe_chrome`` (HTTP-only) cannot see this, so the pool keeps
+    opening ``about:blank`` tabs that ``agent-browser`` can never attach to — the
+    run opens an empty tab and hangs (POVISON 694 incident).
+
+    We perform a minimal RFC-6455 handshake against the browser-level
+    ``webSocketDebuggerUrl`` and inspect only the HTTP status line: ``101`` means
+    the CDP socket is alive; anything else (``500``, connection refused, timeout)
+    means degraded. We never send/recv CDP frames — the status line is enough and
+    keeps this dependency-free (stdlib ``socket`` only).
+    """
+    try:
+        version = _http_json(f"{_base_http_url()}/json/version", timeout=2.0)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return False
+    ws_url = str(version.get("webSocketDebuggerUrl") or "").strip()
+    if not ws_url:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(ws_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or _debug_port()
+        path = parsed.path or "/"
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(request.encode("ascii"))
+            status_line = sock.recv(64)
+        return b" 101 " in status_line or status_line.startswith(b"HTTP/1.1 101")
+    except (OSError, ValueError) as exc:
+        logger.debug("Tab pool CDP ws health probe failed: %s", exc)
+        return False
+
+
 def _close_target_id(target_id: str) -> None:
     """Best-effort close of a CDP target by id (orphan cleanup)."""
     if not target_id:
@@ -140,52 +189,78 @@ def _close_target_id(target_id: str) -> None:
         logger.debug("Tab pool orphan close for %s failed: %s", target_id, exc)
 
 
+def _run_launcher(verb: str) -> None:
+    """Invoke ``start-debug-chrome.sh <verb>`` (``start`` or ``restart``).
+
+    Always passes ``DEBUG_CHROME_SKIP_ENV=1``: the pool drives per-run
+    page-level tabs directly, so writing ``BROWSER_CDP_URL`` would flip the next
+    restart into shared-connection mode and disable the pool.
+    """
+    script = _launcher_script()
+    if script is None:
+        raise RuntimeError(
+            "Local Chrome tab pool: debug Chrome is not running and "
+            "start-debug-chrome.sh was not found. Set HERMES_LOCAL_CHROME_LAUNCHER "
+            "or install playground/local-chrome-debug/start-debug-chrome.sh."
+        )
+    logger.info("Tab pool running debug Chrome launcher: %s %s", script, verb)
+    try:
+        result = subprocess.run(
+            ["bash", str(script), verb],
+            timeout=_AUTOLAUNCH_TIMEOUT_S,
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "DEBUG_CHROME_SKIP_ENV": "1"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Local Chrome {verb} timed out after {_AUTOLAUNCH_TIMEOUT_S:.0f}s"
+        ) from exc
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip().splitlines()
+        tail = stderr[-1] if stderr else "(no stderr)"
+        raise RuntimeError(
+            f"Local Chrome {verb} failed (exit {result.returncode}): {tail}"
+        )
+
+
 def ensure_chrome_running() -> None:
-    """Start (or reuse) the shared debug Chrome via ``start-debug-chrome.sh``."""
-    if probe_chrome():
+    """Ensure a **CDP-healthy** shared debug Chrome is running.
+
+    Fast path: Chrome answers HTTP *and* its CDP WebSocket accepts connections.
+    A degraded Chrome (HTTP up, WS returns 500) is force-restarted so navigation
+    can attach — otherwise the run opens a blank tab and hangs (POVISON 694).
+    """
+    if probe_chrome() and cdp_ws_healthy():
         return
 
     with _autolaunch_lock:
-        if probe_chrome():
+        if probe_chrome() and cdp_ws_healthy():
             return
 
-        script = _launcher_script()
-        if script is None:
-            raise RuntimeError(
-                "Local Chrome tab pool: debug Chrome is not running and "
-                "start-debug-chrome.sh was not found. Set HERMES_LOCAL_CHROME_LAUNCHER "
-                "or install playground/local-chrome-debug/start-debug-chrome.sh."
+        # HTTP up but CDP socket degraded → restart (kill the broken instance
+        # first); otherwise it never recovers and every navigate stalls.
+        degraded = probe_chrome() and not cdp_ws_healthy()
+        if degraded:
+            logger.warning(
+                "Tab pool: debug Chrome CDP WebSocket is degraded "
+                "(HTTP /json/version up but WS upgrade fails) — restarting Chrome"
             )
-
-        logger.info("Tab pool auto-starting debug Chrome via %s", script)
-        try:
-            # DEBUG_CHROME_SKIP_ENV: launch Chrome but do NOT write
-            # BROWSER_CDP_URL. The pool drives per-run page-level tabs directly;
-            # writing a shared browser endpoint would flip the next restart into
-            # shared-connection mode and disable the pool.
-            result = subprocess.run(
-                ["bash", str(script), "start"],
-                timeout=_AUTOLAUNCH_TIMEOUT_S,
-                capture_output=True,
-                text=True,
-                check=False,
-                env={**os.environ, "DEBUG_CHROME_SKIP_ENV": "1"},
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"Local Chrome autostart timed out after {_AUTOLAUNCH_TIMEOUT_S:.0f}s"
-            ) from exc
-
-        if result.returncode != 0:
-            stderr = (result.stderr or "").strip().splitlines()
-            tail = stderr[-1] if stderr else "(no stderr)"
-            raise RuntimeError(
-                f"Local Chrome autostart failed (exit {result.returncode}): {tail}"
-            )
+        _run_launcher("restart" if degraded else "start")
 
         if not probe_chrome():
             raise RuntimeError(
-                f"Local Chrome autostart finished but port {_debug_port()} is not ready"
+                f"Local Chrome (re)start finished but port {_debug_port()} is not ready"
+            )
+        if not cdp_ws_healthy():
+            raise RuntimeError(
+                "Local Chrome (re)start finished but the CDP WebSocket is still "
+                "unhealthy (port {0} answers HTTP but rejects WS upgrades). "
+                "Restart it manually: "
+                "playground/local-chrome-debug/start-debug-chrome.sh restart".format(
+                    _debug_port()
+                )
             )
 
 

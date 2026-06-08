@@ -13,7 +13,11 @@ logger = logging.getLogger(__name__)
 
 HookResult = Optional[Union[None, Dict[str, str]]]
 
-_KOL_SESSION_PREFIXES = ("kol-campaign:", "kol-reply:", "kol-email-discover:", "kol-nox-")
+# NOTE: use bare ``kol-campaign`` (no colon) so it also matches the
+# ``kol-campaign-draft:`` and ``kol-campaign-outreach:`` task ids the Console
+# emits — a trailing colon here let those slip past the mcp-chrome block and
+# loop on the dead chrome-devtools MCP endpoint (POVISON stuck-run incident).
+_KOL_SESSION_PREFIXES = ("kol-campaign", "kol-reply:", "kol-email-discover:", "kol-nox-")
 
 # Post-approval / reply / Nox batch: Nox API + bridge CLI only — no browser crawl.
 # ``kol-email-discover:`` is intentionally excluded: Console「全网搜索邮箱」runs

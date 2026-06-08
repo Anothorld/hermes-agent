@@ -84,6 +84,7 @@ def test_acquire_creates_tab(tab_pool, monkeypatch):
 
     monkeypatch.setattr(tab_pool, "_http_json", fake_http_json)
     monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(tab_pool, "cdp_ws_healthy", lambda timeout=3.0: True)
 
     info = tab_pool.acquire("task-abc")
     assert info["target_id"] == "TAB1"
@@ -132,6 +133,7 @@ def test_release_closes_tab(tab_pool, monkeypatch):
 
     monkeypatch.setattr(tab_pool, "_http_json", fake_http_json)
     monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(tab_pool, "cdp_ws_healthy", lambda timeout=3.0: True)
 
     tab_pool.acquire("task-x")
     assert tab_pool.release("task-x") is True
@@ -216,21 +218,60 @@ def test_ensure_chrome_autostarts(tab_pool, monkeypatch, tmp_path):
     script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
     script.chmod(0o755)
 
-    probes = iter([False, False, True])
-
-    def fake_probe():
-        return next(probes)
-
+    state = {"up": False}  # launcher brings Chrome up (HTTP + healthy CDP)
     runs = []
 
     def fake_run(cmd, **kwargs):
         runs.append(cmd)
+        state["up"] = True
         return mock.Mock(returncode=0, stderr="")
 
-    monkeypatch.setattr(tab_pool, "probe_chrome", fake_probe)
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: state["up"])
+    monkeypatch.setattr(tab_pool, "cdp_ws_healthy", lambda timeout=3.0: state["up"])
     monkeypatch.setattr(tab_pool, "_launcher_script", lambda: script)
     monkeypatch.setattr(tab_pool.subprocess, "run", fake_run)
 
     tab_pool.ensure_chrome_running()
     assert runs and runs[0][0] == "bash"
-    assert str(script) in runs[0][1]
+    assert runs[0][1] == str(script)
+    assert runs[0][2] == "start"  # cold start, not a restart
+
+
+def test_ensure_chrome_restarts_when_cdp_degraded(tab_pool, monkeypatch, tmp_path):
+    """HTTP up but CDP WebSocket unhealthy → force a launcher *restart*.
+
+    Regression for POVISON 694: a long-lived Chrome answered /json/version
+    while every WS upgrade 500'd, so the pool opened blank tabs that could
+    never attach and the run hung on an empty tab.
+    """
+    script = tmp_path / "start-debug-chrome.sh"
+    script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    state = {"healthy": False}  # HTTP always up; CDP recovers only after restart
+    runs = []
+
+    def fake_run(cmd, **kwargs):
+        runs.append(cmd)
+        state["healthy"] = True
+        return mock.Mock(returncode=0, stderr="")
+
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(tab_pool, "cdp_ws_healthy", lambda timeout=3.0: state["healthy"])
+    monkeypatch.setattr(tab_pool, "_launcher_script", lambda: script)
+    monkeypatch.setattr(tab_pool.subprocess, "run", fake_run)
+
+    tab_pool.ensure_chrome_running()
+    assert runs and runs[0][2] == "restart"
+
+
+def test_cdp_ws_healthy_false_when_socket_unreachable(tab_pool, monkeypatch):
+    # /json/version resolves but the advertised ws port is closed → unhealthy.
+    monkeypatch.setattr(
+        tab_pool,
+        "_http_json",
+        lambda url, *, method="GET", timeout=10.0: {
+            "webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools/browser/DEAD"
+        },
+    )
+    assert tab_pool.cdp_ws_healthy(timeout=0.5) is False
