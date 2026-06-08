@@ -34,6 +34,8 @@ flowchart LR
 
 **启动**：仓库根 `hermes-agent/playground/kol-ops-console/start.sh`（或分别起 bridge、uvicorn、`npm run dev`）。
 
+**本地开发踩坑**：在 macOS 上若用 `http://localhost:5173` 打开前端，浏览器会把 API 打到 `http://localhost:8765`；部分机器上 **Logi Options+** 等软件已占用 `[::1]:8765`，而 Console 监听在 `0.0.0.0:8765`，结果页签显示「网络不通」。前端 `api.ts` 已对 `localhost` 改用 `127.0.0.1`；也可直接访问 `http://127.0.0.1:5173`。另需保证 **bridge :8080** 在跑，否则 REST 会 502。
+
 | 进程 | 默认端口 | 入口 |
 |------|----------|------|
 | Frontend (Vite) | 5173 | `frontend/src/main.tsx` → `App.tsx` |

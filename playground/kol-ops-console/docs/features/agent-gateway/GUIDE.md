@@ -98,6 +98,9 @@ Tool mcp_chrome_devtools_navigate_page returned error:
 2. **guard 纵深防御**（`plugins/kol-bridge-agent-guard/hooks.py`）：对所有 KOL session 拦截
    `mcp_chrome_devtools_*`。注意前缀用裸 `kol-campaign`（无冒号），否则 `kol-campaign-draft:` /
    `kol-campaign-outreach:` 会漏拦（曾导致 redraft run 仍能撞死 MCP）。
+   - **`kol-email-discover:*` 额外拦截**：`veedcrawl_*`（视频/Profile 补充工具，非邮箱发现）、
+     `delegate_task`（子代理空参误调 veedcrawl 浪费 iteration）、`execute_code` 浏览器绕过、
+     `terminal` DuckDuckGo/HTML 抓取。Tier 2 只允许内置 `browser_*`。
 3. **运维提醒**：机器重置或重做 WSL 配置后，若再 `hermes mcp add chrome_devtools`，务必指向**可达**的 CDP；
    本机标准浏览器路径就是内置 `browser_*` + tab-pool，不需要 chrome-devtools MCP。
 
@@ -154,6 +157,34 @@ browser:
 
 > 系统性加固建议（核心受限区，需批准）：在 `tools/browser_tool.py` 的云 `create_session()` 外层加硬超时，
 > 这样即便日后误把 `cloud_provider` 切回云端，也不会再无限挂死。
+
+## 第四层：错误的工具名让模型弃用 browser/web 工具（POVISON 701）
+
+空标签页不卡了，但模型**通篇用 `terminal` + `python urllib`/`curl` 抓网页**，嘴上说
+`browser_navigate` 却从不真正调用。根因不是工具缺失（`browser_*`、`web_search`、
+`web_extract` 都已在 api_server toolset 注册），而是 **skill / brief 引用了不存在的工具名**：
+
+- `kol-email-discovery/SKILL.md` 与 `kols.py` 的 brief 写的是 `WebSearch` / `WebFetch` /
+  `GoogleSearch`；
+- 系统里**根本没有这些工具**，真实名是 `web_search`（搜索）/ `web_extract`（取页）；
+- 模型找不到这些名字 → 它甚至去试 `kol-bridge-cli web-search`（报 `invalid choice`）→
+  退而用 `terminal` urllib/curl 自己抓 beacons/bio.link/Instagram，整个流程退化成「全 terminal」，
+  Tier 2 的 `browser_navigate` 也只剩口头。
+
+### 修复
+
+1. **改对工具名**：skill + brief 全部 `WebSearch/WebFetch/GoogleSearch` → `web_search`/`web_extract`，
+   并显式声明「没有 WebSearch/WebFetch，找不到搜索工具就是用 `web_search`，不要退回 terminal HTTP」。
+2. **guard 扩展**（`kol-bridge-agent-guard`）：对 `kol-email-discover:*` 拦 `terminal` 里的
+   `curl`/`wget`/`urllib`/`requests`/`httpx` 取页与搜索引擎/link-in-bio HTML 抓取，提示改用
+   `web_search`/`web_extract`/`browser_navigate`。
+3. **skills_sync（已修）**：`tools/skills_sync.py` 曾把 `SKILLS_DIR`/`MANIFEST_FILE` 在 import 时绑定首个
+   `HERMES_HOME`，导致 `playground/learning/sync_skills.py` 循环改 `HERMES_HOME` 时 profile 目录不同步。
+   现已改为每次调用时通过 `get_hermes_home()` 解析路径。同步后 agent 的 `skill_view` 读
+   `~/.hermes/profiles/kol-orchestrator/skills/**`（或当前 profile 的 skills 目录）。
+
+> 经验法则：skill/brief 里出现的每个工具名都必须与运行时真实工具名**逐字一致**；名字错了模型不会报错，
+> 而是悄悄改用 terminal/execute_code 等通用工具绕路。
 
 ## Bridge CLI（所有 gateway run）
 

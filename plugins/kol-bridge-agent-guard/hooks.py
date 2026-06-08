@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -31,6 +32,27 @@ _BROWSER_BLOCKED_SESSION_PREFIXES = (
 
 _BROWSER_TOOL_PREFIX = "browser_"
 _MCP_CHROME_TOOL_PREFIX = "mcp_chrome_devtools_"
+_VEEDCRAWL_TOOL_PREFIX = "veedcrawl_"
+
+# ``execute_code`` / ``terminal`` workarounds that bypass Tier-2 ``browser_*``
+# (POVISON 701: model spawned delegate_task, imported hermes_tools in
+# execute_code, and curled DuckDuckGo HTML instead of browser_navigate).
+_EXEC_CODE_BROWSER_WORKAROUND_RE = re.compile(
+    r"(?is)"
+    r"hermes_tools|"
+    r"\bbrowser_(?:navigate|snapshot|click|get_images)\b|"
+    r"\bplaywright\b|\bselenium\b|\bpyppeteer\b",
+)
+_TERMINAL_SCRAPE_WORKAROUND_RE = re.compile(
+    r"(?is)"
+    # search-engine / link-in-bio HTML scraping
+    r"duckduckgo\.com|google\.com/search|bing\.com/search|"
+    r"beacons\.ai|linktr\.ee|bio\.link|lnk\.bio|solo\.to|instagram\.com|"
+    # generic HTTP-fetch-from-terminal substitutes for web_extract / browser_*
+    r"\bcurl\b|\bwget\b|"
+    r"urllib\.request|urlopen\b|\brequests\.(?:get|post)\b|"
+    r"httpx\.|http\.client",
+)
 
 
 def _guard_enabled() -> bool:
@@ -64,6 +86,28 @@ def _is_browser_tool(tool_name: str) -> bool:
 
 def _is_mcp_chrome_tool(tool_name: str) -> bool:
     return tool_name.startswith(_MCP_CHROME_TOOL_PREFIX)
+
+
+def _is_veedcrawl_tool(tool_name: str) -> bool:
+    return tool_name.startswith(_VEEDCRAWL_TOOL_PREFIX)
+
+
+def _email_discover_session(session_id: str, task_id: str = "") -> bool:
+    sid = _session_key(session_id, task_id)
+    return sid.startswith("kol-email-discover:")
+
+
+def _email_discover_workaround_message(kind: str) -> str:
+    return (
+        f"{kind} is disabled for kol-email-discover runs. Use the EXACT tool "
+        "names — there is no WebSearch/WebFetch/GoogleSearch and no CLI "
+        "web-search subcommand. Tier 1: call `web_search` (search) and "
+        "`web_extract` (fetch+read a URL). Tier 2 (JS-gated: Instagram, "
+        "Linktree, Beacons): call `browser_navigate` then `browser_snapshot` "
+        "directly (Chrome auto-starts). Never use terminal curl/urllib/"
+        "requests HTTP fetching, veedcrawl_*, delegate_task, execute_code "
+        "browser imports, or mcp_chrome_devtools_* as a substitute."
+    )
 
 
 def _load_contract():
@@ -128,6 +172,32 @@ def pre_tool_call(
                 "Do not fall back to MCP after a connection error."
             ),
         }
+
+    if _email_discover_session(session_id, task_id):
+        if _is_veedcrawl_tool(tool_name):
+            return {
+                "action": "block",
+                "message": _email_discover_workaround_message(tool_name),
+            }
+        if tool_name == "delegate_task":
+            return {
+                "action": "block",
+                "message": _email_discover_workaround_message("delegate_task"),
+            }
+        if tool_name == "execute_code":
+            code = _extract_text(tool_name, args)
+            if _EXEC_CODE_BROWSER_WORKAROUND_RE.search(code):
+                return {
+                    "action": "block",
+                    "message": _email_discover_workaround_message("execute_code"),
+                }
+        if tool_name == "terminal":
+            cmd = _extract_text(tool_name, args)
+            if _TERMINAL_SCRAPE_WORKAROUND_RE.search(cmd):
+                return {
+                    "action": "block",
+                    "message": _email_discover_workaround_message("terminal scrape"),
+                }
 
     if _is_browser_tool(tool_name) and _browser_blocked_session(session_id, task_id):
         return {

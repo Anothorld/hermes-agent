@@ -5,24 +5,24 @@ from unittest.mock import patch
 
 from tools.skills_sync import (
     _get_bundled_dir,
+    _manifest_file,
     _read_manifest,
     _read_skill_name,
+    _skills_dir,
     _write_manifest,
     _discover_bundled_skills,
     _compute_relative_dest,
     _dir_hash,
     sync_skills,
     reset_bundled_skill,
-    MANIFEST_FILE,
-    SKILLS_DIR,
 )
 
 
 class TestReadWriteManifest:
     def test_read_missing_manifest(self, tmp_path):
         with patch(
-            "tools.skills_sync.MANIFEST_FILE",
-            tmp_path / "nonexistent",
+            "tools.skills_sync._manifest_file",
+            return_value=tmp_path / "nonexistent",
         ):
             result = _read_manifest()
         assert result == {}
@@ -31,7 +31,7 @@ class TestReadWriteManifest:
         manifest_file = tmp_path / ".bundled_manifest"
         entries = {"skill-a": "abc123", "skill-b": "def456", "skill-c": "789012"}
 
-        with patch("tools.skills_sync.MANIFEST_FILE", manifest_file):
+        with patch("tools.skills_sync._manifest_file", return_value=manifest_file):
             _write_manifest(entries)
             result = _read_manifest()
 
@@ -41,7 +41,7 @@ class TestReadWriteManifest:
         manifest_file = tmp_path / ".bundled_manifest"
         entries = {"zebra": "hash1", "alpha": "hash2", "middle": "hash3"}
 
-        with patch("tools.skills_sync.MANIFEST_FILE", manifest_file):
+        with patch("tools.skills_sync._manifest_file", return_value=manifest_file):
             _write_manifest(entries)
 
         lines = manifest_file.read_text().strip().splitlines()
@@ -53,7 +53,7 @@ class TestReadWriteManifest:
         manifest_file = tmp_path / ".bundled_manifest"
         manifest_file.write_text("skill-a\nskill-b\n")
 
-        with patch("tools.skills_sync.MANIFEST_FILE", manifest_file):
+        with patch("tools.skills_sync._manifest_file", return_value=manifest_file):
             result = _read_manifest()
 
         assert result == {"skill-a": "", "skill-b": ""}
@@ -62,7 +62,7 @@ class TestReadWriteManifest:
         manifest_file = tmp_path / ".bundled_manifest"
         manifest_file.write_text("skill-a:hash1\n\n  \nskill-b:hash2\n")
 
-        with patch("tools.skills_sync.MANIFEST_FILE", manifest_file):
+        with patch("tools.skills_sync._manifest_file", return_value=manifest_file):
             result = _read_manifest()
 
         assert result == {"skill-a": "hash1", "skill-b": "hash2"}
@@ -72,7 +72,7 @@ class TestReadWriteManifest:
         manifest_file = tmp_path / ".bundled_manifest"
         manifest_file.write_text("old-skill\nnew-skill:abc123\n")
 
-        with patch("tools.skills_sync.MANIFEST_FILE", manifest_file):
+        with patch("tools.skills_sync._manifest_file", return_value=manifest_file):
             result = _read_manifest()
 
         assert result == {"old-skill": "", "new-skill": "abc123"}
@@ -196,8 +196,8 @@ class TestSyncSkills:
         from contextlib import ExitStack
         stack = ExitStack()
         stack.enter_context(patch("tools.skills_sync._get_bundled_dir", return_value=bundled))
-        stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
-        stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+        stack.enter_context(patch("tools.skills_sync._skills_dir", return_value=skills_dir))
+        stack.enter_context(patch("tools.skills_sync._manifest_file", return_value=manifest_file))
         return stack
 
     def test_fresh_install_copies_all(self, tmp_path):
@@ -383,7 +383,7 @@ class TestSyncSkills:
             result = sync_skills(quiet=True)
 
         assert "removed-skill" in result["cleaned"]
-        with patch("tools.skills_sync.MANIFEST_FILE", manifest_file):
+        with patch("tools.skills_sync._manifest_file", return_value=manifest_file):
             manifest = _read_manifest()
         assert "removed-skill" not in manifest
 
@@ -428,7 +428,7 @@ class TestSyncSkills:
         )
 
         # Manifest must NOT contain the skill — it was never synced from bundled.
-        with patch("tools.skills_sync.MANIFEST_FILE", manifest_file):
+        with patch("tools.skills_sync._manifest_file", return_value=manifest_file):
             manifest = _read_manifest()
         assert "new-skill" not in manifest, (
             "Collision path wrote bundled_hash to the manifest even though "
@@ -620,8 +620,8 @@ class TestResetBundledSkill:
         from contextlib import ExitStack
         stack = ExitStack()
         stack.enter_context(patch("tools.skills_sync._get_bundled_dir", return_value=bundled))
-        stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
-        stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+        stack.enter_context(patch("tools.skills_sync._skills_dir", return_value=skills_dir))
+        stack.enter_context(patch("tools.skills_sync._manifest_file", return_value=manifest_file))
         return stack
 
     def test_reset_clears_stuck_user_modified_flag(self, tmp_path):
@@ -732,3 +732,44 @@ class TestResetBundledSkill:
             post_manifest = _read_manifest()
             assert "google-workspace" in post_manifest
         assert (skills_dir / "productivity" / "google-workspace" / "SKILL.md").exists()
+
+class TestHermesHomeResolution:
+    def test_manifest_file_follows_hermes_home(self, tmp_path, monkeypatch):
+        home_a = tmp_path / "profile_a"
+        home_b = tmp_path / "profile_b"
+        home_a.mkdir()
+        home_b.mkdir()
+
+        monkeypatch.setenv("HERMES_HOME", str(home_a))
+        assert _manifest_file() == home_a / "skills" / ".bundled_manifest"
+
+        monkeypatch.setenv("HERMES_HOME", str(home_b))
+        assert _manifest_file() == home_b / "skills" / ".bundled_manifest"
+
+    def test_sync_skills_uses_current_hermes_home(self, tmp_path, monkeypatch):
+        """Changing HERMES_HOME between calls must sync into each home separately."""
+        bundled_root = tmp_path / "bundled"
+        skill_dir = bundled_root / "demo" / "sync-test-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: sync-test-skill\n---\n# Sync test\n",
+            encoding="utf-8",
+        )
+        home_a = tmp_path / "homes" / "home_a"
+        home_b = tmp_path / "homes" / "home_b"
+        home_a.mkdir(parents=True)
+        home_b.mkdir(parents=True)
+
+        monkeypatch.setenv("HERMES_BUNDLED_SKILLS", str(bundled_root))
+
+        monkeypatch.setenv("HERMES_HOME", str(home_a))
+        result_a = sync_skills(quiet=True)
+
+        monkeypatch.setenv("HERMES_HOME", str(home_b))
+        result_b = sync_skills(quiet=True)
+
+        dest = Path("skills") / "demo" / "sync-test-skill" / "SKILL.md"
+        assert (home_a / dest).exists()
+        assert (home_b / dest).exists()
+        assert "sync-test-skill" in result_a["copied"]
+        assert "sync-test-skill" in result_b["copied"]

@@ -119,6 +119,94 @@ def test_allows_browser_on_email_discover_session():
     assert out is None
 
 
+def test_blocks_veedcrawl_on_email_discover():
+    h = _hooks()
+    for tool in (
+        "veedcrawl_instagram_profile",
+        "veedcrawl_search_social_videos",
+        "veedcrawl_extract",
+    ):
+        out = h.pre_tool_call(
+            tool,
+            {"username": "tammymerecka"},
+            task_id="kol-email-discover:LIVE:701",
+        )
+        assert out is not None, tool
+        assert out["action"] == "block"
+        assert "veedcrawl" in out["message"].lower()
+
+
+def test_blocks_delegate_task_on_email_discover():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "delegate_task",
+        {"task": "find email for tammymerecka"},
+        task_id="kol-email-discover:LIVE:701",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "browser_navigate" in out["message"]
+
+
+def test_blocks_execute_code_browser_workaround_on_email_discover():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "execute_code",
+        {"code": "from hermes_tools import terminal\n# browser_navigate ig"},
+        task_id="kol-email-discover:LIVE:701",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_blocks_terminal_duckduckgo_scrape_on_email_discover():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "curl -sL 'https://html.duckduckgo.com/html/?q=tammymerecka+email' "
+                "-o /tmp/ddg.html"
+            ),
+        },
+        task_id="kol-email-discover:LIVE:701",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_blocks_terminal_urllib_fetch_on_email_discover():
+    """Regression (POVISON 701): model used `terminal python3 urllib` to scrape
+    beacons.ai/bio.link/Instagram instead of web_extract / browser_navigate."""
+    h = _hooks()
+    for cmd in (
+        "python3 -c \"import urllib.request; urllib.request.urlopen('https://beacons.ai/tammymerecka')\"",
+        "python3 -c \"import requests; requests.get('https://bio.link/tammymerecka')\"",
+        "wget -q https://www.instagram.com/tammymerecka/ -O /tmp/ig.html",
+    ):
+        out = h.pre_tool_call(
+            "terminal", {"command": cmd}, task_id="kol-email-discover:LIVE:701"
+        )
+        assert out is not None, cmd
+        assert out["action"] == "block"
+        assert "web_search" in out["message"] or "web_extract" in out["message"]
+
+
+def test_allows_bridge_cli_terminal_on_email_discover():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli "
+                "get-identity --identity-id 701 --env LIVE"
+            ),
+        },
+        task_id="kol-email-discover:LIVE:701",
+    )
+    assert out is None
+
+
 def test_allows_browser_on_discovery_session():
     h = _hooks()
     out = h.pre_tool_call(

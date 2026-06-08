@@ -1,6 +1,6 @@
 ---
 name: kol-email-discovery
-description: Finds a KOL's outreach email when CAL has no `identity.primary_email`, prioritizing the creator's personal collab/business inbox over talent-agency or MCN mailboxes. Tries Google Search + WebFetch first, then BrowserUse for JS surfaces. Writes `primary_email` + provenance on hit; returns `{"found": false, "tried": [...]}` on miss — never guesses.
+description: Finds a KOL's outreach email when CAL has no `identity.primary_email`, prioritizing the creator's personal collab/business inbox over talent-agency or MCN mailboxes. Tries `web_search` + `web_extract` first, then built-in `browser_*` for JS surfaces. Writes `primary_email` + provenance on hit; returns `{"found": false, "tried": [...]}` on miss — never guesses.
 trigger: Invoked by the post-approval orchestrator (web `approve-shortlist` agent run, or chat-side "approve KOLs ..." flow) for each approved identity whose `identity.primary_email` is empty. Also invocable on demand when the operator says "find an email for @<handle>".
 tags: ["kol", "outreach", "enrichment", "email", "contact-discovery", "pre-draft"]
 ---
@@ -42,6 +42,19 @@ escalation, not invention.
   agency/management inbox. Do not stop at the first verified address
   when that address is agency-classified and cheaper creator-owned
   paths (IG bio, link-in-bio, personal `/contact`) remain untried.
+- **Forbidden tools (hard).** This skill is not
+  `instagram-kol-discovery`. Never call `veedcrawl_*` (video search /
+  IG profile metrics — they do not return outreach emails and empty-arg
+  calls waste iterations). Never `delegate_task` a subagent for web
+  search — run Tier 1/2 yourself in this session. Never
+  `mcp_chrome_devtools_*`. Never `execute_code` with browser/hermes_tools
+  imports or `terminal` curl/urllib/requests HTTP fetching (DuckDuckGo,
+  Google, beacons.ai, bio.link, Instagram, any web page) as a Tier 1 or
+  browser substitute. The ONLY web tools are `web_search` (search) and
+  `web_extract` (fetch+read a URL); the ONLY browser tools are built-in
+  `browser_*`. There is no `WebSearch`/`WebFetch`/`GoogleSearch` tool —
+  use the exact names `web_search` / `web_extract`. Tier 1 = `web_search`
+  / `web_extract`; Tier 2 = built-in `browser_*` only.
 
 ## Inputs
 1. `identity_id` (mandatory).
@@ -64,12 +77,12 @@ Use:
 - `display_name`, `region`, `language` — disambiguation for noisy
   search results.
 
-### Step 2 — Tier 1: Google Search + WebSearch + WebFetch
+### Step 2 — Tier 1: `web_search` + `web_extract`
 Cheap, fast, and covers ~70-80% of public creators. Run discovery in
-**surface-priority order** (creator-owned first, agency last). Use Google
-Search directly when a browser/search tool is available; otherwise run
-the same query strings through `WebSearch`. Record each query in `tried`
-as `GoogleSearch:"..."` or `WebSearch:"..."`.
+**surface-priority order** (creator-owned first, agency last). Run the
+query strings below through the `web_search` tool (NOT terminal curl, NOT
+a search subcommand of any CLI). Record each query in `tried` as
+`web_search:"..."`.
 
 Maintain two in-memory candidate slots while crawling (never written
 until Step 4a):
@@ -121,7 +134,7 @@ spray broad translations that bury the identity signal.
 
 #### Path B — Fetch promising result URLs
 
-For each promising result URL, call `WebFetch(url,
+For each promising result URL, call `web_extract(url,
 "Extract any email addresses associated with this creator and the
 surrounding context that shows the address belongs to them.")`
 
@@ -224,7 +237,7 @@ Durable state in CAL is the source of truth; in-memory notes are not.
 
 ### Step 3 — Tier 2: BrowserUse fallback
 Only invoke when Step 2 returns no verified hit. Tier 2 is reserved
-for surfaces that WebFetch cannot render (Instagram bio behind JS,
+for surfaces that `web_extract` cannot render (Instagram bio behind JS,
 Beacons/Linktree pages that gate email behind a click, personal sites
 that lazy-load contact blocks).
 
@@ -257,6 +270,11 @@ Rules:
   fan out browser discovery for multiple identities in parallel — it
   saturates gateway run slots and the shared Chrome, which is what made
   686 appear stuck.
+- **No workarounds (hard).** Tier 2 = call `browser_navigate` /
+  `browser_snapshot` directly. Forbidden on this run: `delegate_task`
+  (sub-agents), `execute_code` importing `hermes_tools` or browser APIs,
+  `mcp_chrome_devtools_*`, and `terminal curl` HTML scraping (DuckDuckGo
+  / Google HTML). The guard blocks these; use the built-in browser tools.
 
 Browse sequence (prefer personal; hold agency as fallback):
 1. `https://www.instagram.com/<handle>/` — snapshot bio text + the
@@ -382,7 +400,7 @@ Agency fallback example (only after creator-owned surfaces exhausted):
   "email_class": "agency",
   "tier": 1,
   "discovered_url": "https://example-agency.com/talent/janedoe",
-  "tried": ["https://linktr.ee/janedoe", "https://www.instagram.com/janedoe/", "https://janedoe.com/contact", "GoogleSearch:\"@janedoe\" talent management", "https://example-agency.com/talent/janedoe"]
+  "tried": ["https://linktr.ee/janedoe", "https://www.instagram.com/janedoe/", "https://janedoe.com/contact", "web_search:\"@janedoe\" talent management", "https://example-agency.com/talent/janedoe"]
 }
 ```
 
@@ -398,8 +416,8 @@ campaign-level operator notes). This skill returns the miss verbatim:
   "env": "TEST",
   "found": false,
   "tried": [
-    "GoogleSearch:\"@handle\" email contact",
-    "WebSearch:\"@handle\" email contact",
+    "web_search:\"@handle\" email contact",
+    "web_extract:https://example.com/contact",
     "https://www.facebook.com/handle/about",
     "https://linktr.ee/handle",
     "https://www.instagram.com/handle/",
@@ -433,6 +451,15 @@ Use this as a shape check; keep keys stable and return JSON only:
 ```
 
 ## Pitfalls
+- Never call `veedcrawl_instagram_profile` / `veedcrawl_search_social_videos`
+  / other `veedcrawl_*` for email lookup — use `web_search`/`web_extract` then
+  `browser_navigate` on `instagram.com/<handle>/` for JS-gated bios.
+- The web/browser tools have EXACT names: `web_search`, `web_extract`,
+  `browser_navigate`, `browser_snapshot`. There is no `WebSearch`,
+  `WebFetch`, or `GoogleSearch`. If you "can't find" a search tool, it is
+  `web_search` — do NOT fall back to `terminal` curl/urllib to fetch pages.
+- Never spawn `delegate_task` to "search the web for email" — the guard
+  blocks it and the subagent lacks the session brief anyway.
 - Never construct an email from a name + a guessed domain
   (`firstname@brand-domain`). Operator policy: miss > guess.
 - Never persist an **agency** inbox while creator-owned surfaces (IG bio,

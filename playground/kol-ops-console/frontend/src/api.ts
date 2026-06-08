@@ -1,7 +1,12 @@
 function defaultApiBase(): string {
-  if (typeof window === 'undefined') return 'http://localhost:8765';
+  if (typeof window === 'undefined') return 'http://127.0.0.1:8765';
   const { protocol, hostname } = window.location;
-  return `${protocol}//${hostname}:8765`;
+  // On macOS, ``localhost`` often resolves to ``::1`` first. Another
+  // local service (e.g. Logi Options+) may already listen on [::1]:8765
+  // while the console binds 0.0.0.0:8765 — API calls then hit the wrong
+  // process and the UI shows「网络不通」. Prefer IPv4 loopback.
+  const apiHost = hostname === 'localhost' ? '127.0.0.1' : hostname;
+  return `${protocol}//${apiHost}:8765`;
 }
 
 export const API_BASE: string =
