@@ -3088,6 +3088,29 @@ def persist_reply_draft(
             },
         ]
 
+    # Initial-outreach (cold / re-engagement first touch) drafts are sent as a
+    # standalone Gmail draft with no inbound thread to quote, so the approve
+    # path never wraps the body in HTML. ``enrich_envelope`` also strips any
+    # HTML the skill authored. Normalize the original child body to HTML here so
+    # the persisted + sent draft always renders paragraphs and clickable
+    # product links instead of a plain-text marketing blob (POVISON 683).
+    if reply_draft.is_initial_outreach_draft(
+        {
+            "primary_goal": body.primary_goal,
+            "child_skill": child_skill,
+            "draft": child_envelope,
+            "source_message_id": body.source_message_id,
+        },
+        campaign_id=body.campaign_id,
+        identity_id=body.identity_id,
+    ):
+        html_body = reply_draft.to_html_email_body(
+            str(child_envelope.get("body") or merged.get("body") or ""),
+        )
+        if html_body:
+            merged["body"] = html_body
+            merged["html"] = True
+
     event_payload = reply_draft.build_draft_event_payload(
         source_message_id=body.source_message_id,
         primary_lane=body.primary_lane,
@@ -3585,6 +3608,13 @@ def get_policy(
 ) -> dict[str, Any]:
     if scope not in _POLICY_SCOPES:
         raise HTTPException(status_code=404, detail="unknown scope")
+    # Reads must degrade gracefully: a ``user_style`` lookup without an owner
+    # id simply has no personal document yet (e.g. a redraft run that has no
+    # operator user id in scope). Return an empty policy instead of a 400 so
+    # the email-style loader's "no personal style" fallback engages rather than
+    # derailing the whole drafting run (POVISON 683 user_style 400 detour).
+    if scope == "user_style" and owner_user_id is None:
+        return {"policy": None}
     owner = _resolve_owner(scope, owner_user_id)
     with cal._connect() as conn:  # type: ignore[attr-defined]
         row = _policies.get_policy(

@@ -57,8 +57,11 @@ def _first_positional(argv: list[str]) -> Optional[str]:
 def _die_cli(error: str, *, hint: str, **fields: object) -> None:
     payload: dict[str, object] = {"error": error, "hint": hint, **fields}
     payload.setdefault("canonical_cli", CANONICAL_CLI_REL)
-    sys.stderr.write(json.dumps(payload, ensure_ascii=False))
-    sys.stderr.write("\n")
+    line = json.dumps(payload, ensure_ascii=False)
+    # Agents only see terminal stdout — emit there so the hint is never lost.
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    sys.stderr.write(line + "\n")
     raise SystemExit(2)
 
 
@@ -172,6 +175,19 @@ class KolBridgeToolParser(argparse.ArgumentParser):
 
     def error(self, message: str) -> None:  # noqa: D102 — argparse API
         hint = hint_for_argparse_error(message, self._guard_argv)
+        # Emit a machine-readable error on stdout first: argparse's own usage
+        # dump goes to stderr, which the agent's terminal tool does not show.
+        # Without this, a malformed subcommand looked like empty output and the
+        # agent abandoned the CLI for ad-hoc execute_code (POVISON recovery).
+        payload: dict[str, object] = {
+            "error": "invalid_cli_args",
+            "detail": message,
+            "canonical_cli": CANONICAL_CLI_REL,
+        }
+        if hint:
+            payload["hint"] = hint
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
         if hint:
             sys.stderr.write(f"\nHint: {hint}\n")
         super().error(message)

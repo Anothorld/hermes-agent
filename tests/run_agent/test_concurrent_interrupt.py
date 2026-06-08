@@ -121,6 +121,52 @@ def test_concurrent_preflight_interrupt_skips_all(monkeypatch):
 
 
 
+def test_concurrent_batch_wallclock_abandons_hung_tool(monkeypatch):
+    """A tool that never returns must not spin the batch loop forever — the
+    wall-clock ceiling abandons it, synthesizes a timeout result, and lets the
+    run continue (POVISON 686 heartbeat-masking fix)."""
+    from agent import tool_executor
+
+    monkeypatch.setattr(tool_executor, "_TOOL_BATCH_WALLCLOCK_S", 1)
+    agent = _make_agent(monkeypatch)
+    # Extra stubs for the post-execution result loop.
+    agent._tool_guardrails = MagicMock()
+    agent._tool_guardrails.before_call.return_value = MagicMock(allows_execution=True)
+    agent._append_guardrail_observation = lambda name, args, result, failed=False: result
+    agent._record_file_mutation_result = lambda *a, **k: None
+    agent._tool_result_content_for_active_model = lambda name, result: result
+    agent._subdirectory_hints.check_tool_call = lambda *a, **k: ""
+
+    release = threading.Event()
+
+    def _invoke(name, *a, **k):
+        if name == "slow_tool":
+            # Block until the test releases us (abandoned thread exits cleanly
+            # so pytest's atexit join doesn't hang on a long sleep).
+            release.wait(timeout=30)
+            return '{"ok": true}'
+        return '{"ok": true}'
+
+    agent._invoke_tool = _invoke
+
+    tc1 = _FakeToolCall("slow_tool", call_id="tc_slow")
+    tc2 = _FakeToolCall("fast_tool", call_id="tc_fast")
+    msg = _FakeAssistantMsg([tc1, tc2])
+    messages: list = []
+
+    start = time.time()
+    try:
+        agent._execute_tool_calls_concurrent(msg, messages, "test_task")
+        elapsed = time.time() - start
+        # Poll granularity is 5s; with a 1s ceiling we break on the first poll.
+        assert elapsed < 12, f"batch did not abandon the hung tool promptly ({elapsed:.1f}s)"
+        contents = {m["tool_call_id"]: str(m["content"]) for m in messages}
+        assert "wall-clock limit" in contents.get("tc_slow", ""), contents
+        assert "ok" in contents.get("tc_fast", ""), contents
+    finally:
+        release.set()
+
+
 def test_clear_interrupt_clears_worker_tids(monkeypatch):
     """After clear_interrupt(), stale worker-tid bits must be cleared so the
     next turn's tools — which may be scheduled onto recycled tids — don't

@@ -11,7 +11,10 @@
 |------|-----------|
 | 活动页「启动 Agent」等 | `ProductDetailPage`, `KolDetailPage` |
 | `/campaigns/:cid/transcript` | `AgentTranscriptPage.tsx`, `AgentTranscriptPanel.tsx` |
-| 全局浮层 | `components/agent-dock/*`, `gateway-approval/GatewayApprovalDock.tsx` |
+| 顶栏 **命令待批** 徽章 | `gateway-approval/GatewayApprovalNavBadge.tsx` |
+| 全局浮层（右侧 amber 面板） | `components/agent-dock/*`, `gateway-approval/GatewayApprovalDock.tsx` |
+
+当 Agent 的 `terminal` 命令命中 Hermes dangerous-command 规则时，gateway 会把 run 设为 `waiting_for_approval` 并发出 `approval.request` SSE 事件。Console 后端 watcher 订阅这些事件；若 SSE 漏帧（Console 重启、订阅竞态），每 5s 还会轮询 gateway run 状态做兜底。操作员在顶栏点 **命令待批** 或等浮层自动弹出，选择「本次允许 / 本会话允许 / 永久允许 / 拒绝」。
 
 ## 关键文件
 
@@ -33,6 +36,49 @@
 - [campaigns](../campaigns/GUIDE.md) — 启动参数、brief
 - [nox](../nox/GUIDE.md) — `nox_dispatch.py` 组 brief
 - [live-events](../live-events/GUIDE.md) — gateway 审批 WS 事件
+
+## Run 防挂死（核心三层兜底，POVISON 686 修复）
+
+为防止单个 run「永久 running」占住 gateway 槽位（686：浏览器只开了空 `about:blank` 标签页、run 卡 ~6 分钟才被手动停），核心侧加了三层兜底（均属受限 core，已评审改动）：
+
+| 层 | 文件 | 行为 |
+|----|------|------|
+| **A 工具批次时钟** | `agent/tool_executor.py` | 并发工具批次有 wall-clock 上限（默认 1200s，`HERMES_TOOL_BATCH_TIMEOUT_S`）。超限即合成 timeout 工具结果、**停止 30s 心跳**、`shutdown(wait=False)` 放弃挂死 future，让 run 继续而非空转。心跳曾掩盖 gateway 回收，这是根因。 |
+| **B 导航硬校验** | `tools/browser_tool.py` `browser_navigate` | `open` 报成功但仍停在 `about:blank`/空 → 判失败（`blank_tab_no_op`），让模型记 miss/换策略，不把空标签页当已加载页。 |
+| **C 无进展看门狗** | `gateway/platforms/api_server.py` `_watchdog_stuck_runs` / `_stuck_run_ids` | 每 60s 扫描；`running` 且 `agent._last_activity_ts`（事件 **或** 工具心跳）超时无进展（默认 1800s，`HERMES_RUN_NO_PROGRESS_TIMEOUT_S`，0 关闭）→ interrupt + 置 `failed` + 发 `run.failed`。**跳过 `waiting_for_approval`**（合法等操作员）与终态/queued。 |
+
+注：浏览器子进程本身有 60s 硬超时、CDP supervisor 10/15s 上限；A/B/C 是覆盖「工具内超时之外」的批次/导航/整 run 层兜底。长工具（构建、子代理）靠心跳保活，看门狗只杀真正静默的 run。
+
+## 浏览器并发与「卡死」真因（POVISON 686/690 最终定位）
+
+**真因不是 page-level CDP，也不是 tab-pool 设计** —— 实测并发 page-level daemon 导航均成功（~3s）。真因是 **`agent-browser` 没装成本地二进制**：`_find_agent_browser()` 回退到 `npx agent-browser`，而 npx **每次调用都重新安装** agent-browser（`not found and will be installed`，每次 ~3.5s）。一次发现要几十次 browser 调用 × 重装，并发 run 同时 npm 安装 → 锁/网络竞争 → 卡死。
+
+### 修复
+
+1. **装成真二进制**（关键）：`npm install -g agent-browser`（落在 gateway PATH 的 `~/.nvm/.../bin`）。`_find_agent_browser()` 优先取 PATH → 不再每次 npx 重装（`--version` 从 ~3.5s 降到 ~0.9s）。**这是浏览器可靠运行的前提，机器重置后需重装。**
+2. **tab-pool 恢复**（每 run 独占页签、并发不串台）：`LOCAL_CHROME_TAB_POOL=1`，不设 `BROWSER_CDP_URL`。
+
+### 两种互斥模式（由 `BROWSER_CDP_URL` 决定）
+
+| 模式 | 配置 | 适用 | 隔离 |
+|------|------|------|------|
+| **tab-pool（推荐）** | `LOCAL_CHROME_TAB_POOL=1`，**不设** `BROWSER_CDP_URL` | 并发 run | 每 run 一个 page 页签，共享同一登录 Chrome；agent 自动起/复用 9222 |
+| **共享连接** | `BROWSER_CDP_URL=http://127.0.0.1:9222`（**http 发现式**，非 ws GUID） | 单 run 串行 | 单页签共享，需串行 |
+
+- `BROWSER_CDP_URL` 用 **`http://127.0.0.1:9222`**（不是 `ws://…/devtools/browser/<GUID>`）：GUID 每次启动会变、易失效；http 形式由 hermes 在连接时解析为实时 ws，Chrome 同端口重启后**无需 rebind、无需重启 gateway**。`start-debug-chrome.sh` 现在写 http 形式。
+- 防互相踩：tab-pool 检测到外部 `BROWSER_CDP_URL`（http 或 browser-level ws）时**自动让位**；其 autostart 用 `DEBUG_CHROME_SKIP_ENV=1` 启动 Chrome、**不写** `BROWSER_CDP_URL`，避免下次重启误切到共享模式。
+- tab-pool 关闭/让位时仍会 **autostart Chrome**（`hooks.py` 共享模式下也调 `ensure_chrome_running`），所以 agent 都能自主开浏览器。
+
+并发发现仍建议串行（见 kols GUIDE）以降低 IG 风控/槽位压力。
+
+## Bridge CLI（所有 gateway run）
+
+Console brief / instructions 注入 `bridge_agent_contract.py`：
+
+- **`terminal_safety`**：绝对路径 `kol-bridge-cli`；禁止 bare `cd hermes-agent`、相对 `plugins/…`
+- **stdout 错误契约**：CLI 失败输出 JSON 到 stdout；agent 若看到空 terminal + exit 2，应解析 stdout 的 `error`/`hint`，不得改用 `execute_code`（guard 会拦）
+
+详见 `agent_prj/docs/kol-bridge-agent-tooling.md`。
 
 ## 注意
 

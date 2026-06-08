@@ -114,13 +114,16 @@ def cmd_persist_initial_outreach_draft(args: argparse.Namespace) -> None:
             import json
             import sys
 
-            sys.stderr.write(json.dumps({
+            _line = json.dumps({
                 "error": "invalid_cli_args",
                 "hint": (
                     f"child_envelope.{key} must be a non-empty string "
                     "(recipient email goes in `to` for cold outreach)."
                 ),
-            }, ensure_ascii=False) + "\n")
+            }, ensure_ascii=False) + "\n"
+            sys.stdout.write(_line)
+            sys.stdout.flush()
+            sys.stderr.write(_line)
             raise SystemExit(2)
     source_message_id = f"draft:outreach_{campaign_id}_{identity_id}"
     thread_id = f"outreach_{campaign_id}_{identity_id}"

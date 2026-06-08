@@ -10,7 +10,16 @@ import re
 from typing import Iterable
 
 CANONICAL_CLI_REL = "plugins/kol-ops-bridge/scripts/kol_bridge_tool.py"
-CLI_INVOCATION = f"python {CANONICAL_CLI_REL}"
+CLI_WRAPPER_REL = "plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+CLI_PYTHON = "python3"
+CLI_INVOCATION = f"{CLI_PYTHON} {CANONICAL_CLI_REL}"
+
+
+def cli_invocation_abs(repo_root: str) -> str:
+    """Absolute-path bridge CLI wrapper for gateway briefs (macOS-safe)."""
+    from pathlib import Path
+
+    return str(Path(repo_root).expanduser().resolve() / CLI_WRAPPER_REL)
 
 AGENT_BRIDGE_CONTRACT_LINES: tuple[str, ...] = (
     "Bridge agent hard rules (mandatory):",
@@ -138,8 +147,24 @@ _AGENT_LINT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         ),
         (
             "Do not `cd` into hermes-agent/ alone (loads AGENTS.md noise). "
-            f"Run: {CLI_INVOCATION} ... with absolute script path from any cwd."
+            "Run kol-bridge-cli with absolute path from any cwd."
         ),
+    ),
+    (
+        "bare_python_bridge",
+        re.compile(
+            r"(?:^|[;&|]\s*)python\s+(?:plugins/)?kol-ops-bridge/",
+            re.I | re.M,
+        ),
+        "macOS has no bare `python`. Use absolute path to kol-bridge-cli (or python3 + absolute kol_bridge_tool.py).",
+    ),
+    (
+        "relative_bridge_cli_path",
+        re.compile(
+            r"(?:^|[;&|]\s*)python3?\s+plugins/kol-ops-bridge/scripts/kol[_-]bridge",
+            re.I | re.M,
+        ),
+        "Terminal cwd is often $HOME — relative plugins/... fails silently. Use absolute kol-bridge-cli path.",
     ),
 )
 
@@ -306,14 +331,21 @@ def reply_dispatcher_cli_rules() -> str:
     ])
 
 
-def terminal_safety_rules() -> str:
+def terminal_safety_rules(*, repo_root: str | None = None) -> str:
     """Terminal hygiene for gateway runs (avoids AGENTS.md harness injection)."""
+    cli = cli_invocation_abs(repo_root) if repo_root else CLI_WRAPPER_REL
     return "\n".join([
         "# terminal_safety (mandatory)",
-        f"Bridge CLI: {CLI_INVOCATION} <subcommand> --env <env> ...",
+        f"Bridge CLI: {cli} <subcommand> --env <env> ...",
+        "Always invoke the absolute kol-bridge-cli wrapper — never bare `python`, never relative `plugins/...` from $HOME.",
         "Do NOT run bare `cd .../hermes-agent` (triggers doc injection, empty stdout).",
         "Do NOT use inline shell JSON for write-event; use `cat > /tmp/event.json` then `--json @/tmp/event.json`.",
-        "One subcommand per terminal call; never `python -c` + subprocess wrappers.",
+        "One subcommand per terminal call; never `python3 -c` + subprocess wrappers.",
+        (
+            "CLI failures print one JSON line on **stdout** (mirrored to stderr for humans). "
+            "Empty terminal output with exit 2 means read stdout for `error`/`hint` — "
+            "never abandon the CLI for execute_code."
+        ),
     ])
 
 

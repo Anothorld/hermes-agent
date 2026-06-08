@@ -9,11 +9,17 @@ We intentionally keep this small: only the read endpoint we need is wired.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 from typing import Any, Optional
 
 import httpx
 
 from .config import get_settings
+
+# Mirrors ``APIServerAdapter._MAX_CONCURRENT_RUNS`` in gateway api_server.
+GATEWAY_MAX_CONCURRENT_RUNS = 10
 
 
 class GatewayError(RuntimeError):
@@ -21,6 +27,38 @@ class GatewayError(RuntimeError):
         super().__init__(f"gateway {status}: {detail}")
         self.status = status
         self.detail = detail
+
+
+_CONCURRENT_RUNS_RE = re.compile(
+    r"too many concurrent runs",
+    re.IGNORECASE,
+)
+
+
+def is_gateway_concurrency_limit(exc: GatewayError) -> bool:
+    """True when the gateway refused ``POST /v1/runs`` due to run slots."""
+    if exc.status == 429 and _CONCURRENT_RUNS_RE.search(exc.detail):
+        return True
+    if _CONCURRENT_RUNS_RE.search(exc.detail):
+        return True
+    try:
+        payload = json.loads(exc.detail)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    err = payload.get("error")
+    if not isinstance(err, dict):
+        return False
+    message = str(err.get("message") or "")
+    code = str(err.get("code") or "")
+    return (
+        _CONCURRENT_RUNS_RE.search(message) is not None
+        or (
+            code == "rate_limit_exceeded"
+            and _CONCURRENT_RUNS_RE.search(message) is not None
+        )
+    )
 
 
 # Run lifecycle status values that mean "still doing work".
@@ -101,6 +139,54 @@ class GatewayClient:
             raise GatewayError(r.status_code, r.text)
         return r.json()
 
+    async def start_run_with_retry(
+        self,
+        *,
+        retries: int = 2,
+        retry_delay_sec: float = 1.5,
+        concurrency_retries: int = 8,
+        concurrency_retry_delay_sec: float = 5.0,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Like :meth:`start_run`, retrying transient and concurrency errors.
+
+        Transport blips (502/503/504) use short linear backoff. Gateway
+        ``429 Too many concurrent runs`` uses longer waits so an in-flight
+        draft/outreach run can finish and free a slot before we surface
+        an operator-facing error.
+        """
+        last_exc: GatewayError | None = None
+        transport_attempt = 0
+        concurrency_attempt = 0
+        while True:
+            try:
+                return await self.start_run(**kwargs)
+            except GatewayError as exc:
+                last_exc = exc
+                if (
+                    is_gateway_concurrency_limit(exc)
+                    and concurrency_attempt < concurrency_retries
+                ):
+                    concurrency_attempt += 1
+                    await asyncio.sleep(
+                        min(
+                            concurrency_retry_delay_sec * concurrency_attempt,
+                            15.0,
+                        )
+                    )
+                    continue
+                if (
+                    exc.status in (502, 503, 504)
+                    and transport_attempt < retries
+                ):
+                    transport_attempt += 1
+                    await asyncio.sleep(retry_delay_sec * transport_attempt)
+                    continue
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise GatewayError(502, "gateway start_run failed without detail")
+
     async def resolve_approval(
         self, run_id: str, *, choice: str,
     ) -> dict[str, Any]:
@@ -121,6 +207,85 @@ class GatewayClient:
         if r.status_code >= 400:
             raise GatewayError(r.status_code, r.text)
         return r.json()
+
+    async def find_latest_approval_request(
+        self,
+        run_id: str,
+        *,
+        timeout_sec: float = 8.0,
+    ) -> Optional[dict[str, Any]]:
+        """Return the latest ``approval.request`` event from a run's SSE replay.
+
+        Used by :mod:`gateway_approval_watcher` as a fallback when the
+        long-lived SSE subscription missed the frame (late watcher start,
+        reconnect race, or console restart while a run is already blocked).
+        """
+        url = f"{self._base}/v1/runs/{run_id}/events"
+        headers = {**self._headers, "Accept": "text/event-stream"}
+        latest: Optional[dict[str, Any]] = None
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=5.0, read=timeout_sec, write=5.0, pool=5.0),
+            ) as client:
+                async with client.stream("GET", url, headers=headers) as resp:
+                    if resp.status_code >= 400:
+                        return None
+                    event_name = "message"
+                    data_lines: list[str] = []
+                    async for raw in resp.aiter_lines():
+                        if raw == "":
+                            if not data_lines:
+                                event_name = "message"
+                                continue
+                            try:
+                                payload = json.loads("\n".join(data_lines))
+                            except json.JSONDecodeError:
+                                data_lines = []
+                                event_name = "message"
+                                continue
+                            inner = event_name
+                            if inner == "message":
+                                inner = str(payload.get("event") or "message")
+                            if inner == "approval.request":
+                                latest = payload
+                            data_lines = []
+                            event_name = "message"
+                            continue
+                        if raw.startswith(":"):
+                            continue
+                        if raw.startswith("event:"):
+                            event_name = raw[6:].strip() or "message"
+                        elif raw.startswith("data:"):
+                            data_lines.append(raw[5:].lstrip())
+        except httpx.HTTPError:
+            return latest
+        return latest
+
+    async def drain_run_events(self, run_id: str) -> None:
+        """Consume ``GET /v1/runs/{id}/events`` until the stream closes.
+
+        Gateway counts each started run against ``_MAX_CONCURRENT_RUNS``
+        until something reads the SSE feed (or the 300s orphan sweep).
+        Fire-and-forget callers (email discovery, recovery scripts) must
+        drain so slots free promptly when the agent finishes.
+        """
+        url = f"{self._base}/v1/runs/{run_id}/events"
+        headers = {**self._headers, "Accept": "text/event-stream"}
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("GET", url, headers=headers) as resp:
+                    if resp.status_code >= 400:
+                        return
+                    async for _ in resp.aiter_bytes():
+                        pass
+        except httpx.HTTPError:
+            return
+
+    def schedule_drain_run_events(self, run_id: str) -> None:
+        """Background drain — safe to call right after ``start_run`` returns."""
+        if not run_id:
+            return
+        asyncio.create_task(self.drain_run_events(run_id))
 
     async def stop_run(self, run_id: str) -> dict[str, Any]:
         """POST ``/v1/runs/{id}/stop`` — interrupt a running agent.

@@ -214,8 +214,10 @@ data from `response`; use `cache_hit`, `persisted`, and `api_calls` in run
 diagnostics. If `persisted: false` or `ok: false`, fall back to browser for that
 signal — do not treat as success.
 
-**Order of operations:** run browser discovery first (or in parallel), then
-optionally enqueue handles from `veedcrawl_search_social_videos` (log as
+**Order of operations:** run browser discovery first; veedcrawl search/profile
+calls may interleave with browser work on **different** handles, but never open
+parallel `browser_navigate` sessions or fan out multiple browser tabs in one run.
+Then optionally enqueue handles from `veedcrawl_search_social_videos` (log as
 `veedcrawl_search:<q>` in `attempted_angles`). Per handle: optional
 `veedcrawl_instagram_profile` → **mandatory** `browser_navigate` profile → reel
 scoring. Pass `identity_id` + `env` on profile/metadata/extract when the handle
@@ -416,6 +418,14 @@ Then replay buffered rows:
 ```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py replay-ingest-buffer --limit 50
 ```
+
+## Bridge CLI (gateway runs)
+
+- Use absolute **`kol-bridge-cli`** from the gateway brief `# terminal_safety`
+  block (terminal cwd is often `$HOME`). From `hermes-agent/` repo root in a
+  local shell, `python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py` works.
+- CLI failures emit JSON on **stdout**; empty output + exit 2 → read stdout for
+  `error`/`hint` — never `execute_code` + subprocess.
 
 Rules:
 - One handle per ingest call; never accumulate unpersisted candidates in memory.

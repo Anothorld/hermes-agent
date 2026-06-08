@@ -19,11 +19,26 @@ Before drafting, load dispatch context and read:
 
 Weave hints naturally; do not repeat rejected phrasing.
 
+## Style + brief preambles (mandatory)
+
+Build the prompt header before drafting (see
+`references/shared/style-and-brief-preambles.md`): invoke
+`kol-email-style-loader` (pass `--owner-user-id <current_user_id>` when the run
+carries one; `user_style` without an owner returns an empty block, never an
+error), then `kol-creator-brief-loader`. Loader failures must not block drafting.
+
 ## Output
 
 Return subject/body/to in `child_envelope`. Parent run persists via
-`persist-initial-outreach-draft` (cold/first-touch after shortlist) or
+`persist-initial-outreach-draft` (first-touch after shortlist) or
 `persist-reply-draft` when replying in an existing Gmail thread.
+
+**Body format (hard):** HTML only — every paragraph in `<p>…</p>`, the product
+as a real `<a href="<product_url>">…</a>` link (never plain text or a bare URL).
+Set `html: true` and `kind: initial_outreach`. The body is sent verbatim as the
+operator's Gmail draft; a plain-text paragraph or missing product link is a
+defect (POVISON 683). Apply `humanizer` in email mode as the final pass,
+preserving the HTML structure and product link.
 
 Use native **terminal** for bridge CLI — never `execute_code` + subprocess or HTTP.
 
@@ -31,3 +46,4 @@ Use native **terminal** for bridge CLI — never `execute_code` + subprocess or 
 
 - Do not treat repeat KOLs like cold prospects — acknowledge history briefly.
 - Do not open with pricing before scope unless `learning_hints` allow it for this goal.
+- Do not return a plain-text body or omit the product `<a href>` link — HTML is required.

@@ -18,11 +18,13 @@ from ..campaign_id_norm import CampaignIdNormaliserMixin, norm_campaign_id
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
+from ..gateway_http import http_exception_from_gateway_start
 from ..nox_contacts_sync import attempt_gate_b_contacts
 from ..nox_diligence_sync import attempt_gate_a_diligence
 from ..nox_gate import materialize_campaign_config_file, require_nox_quota_enabled
 from ..nox_helpers import dedup_identity_ids_by_nox_creator
 from ..nox_quota import assert_nox_quota_available, raise_quota_exhausted
+from ..bridge_agent_contract_loader import gateway_contract_block, terminal_safety_rules
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
     get_inflight_run,
@@ -32,6 +34,25 @@ from ..run_registry import (
 router = APIRouter(prefix="/kols", tags=["kols"])
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[5])
+
+
+async def _start_detached_gateway_run(
+    gateway: GatewayClient,
+    *,
+    action_label: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Start a run, retry on gateway concurrency, and drain SSE in background."""
+    try:
+        run = await gateway.start_run_with_retry(**kwargs)
+    except GatewayError as exc:
+        raise http_exception_from_gateway_start(
+            exc, action_label=action_label,
+        ) from exc
+    run_id = run.get("run_id") if isinstance(run, dict) else None
+    if isinstance(run_id, str) and run_id:
+        gateway.schedule_drain_run_events(run_id)
+    return run
 
 
 def _env(env: str | None) -> str:
@@ -398,12 +419,11 @@ _DISCOVER_EMAIL_INSTRUCTIONS = (
     "loop over any other identity in this campaign.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    "- kol-ops-bridge base URL: http://127.0.0.1:8080/api/plugins/kol-ops-bridge\n"
-    "- Bridge auth header: X-Bridge-Key: $HERMES_KOL_OPS_BRIDGE_KEY\n"
+    f"{gateway_contract_block()}\n"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
-    "- ALL CAL writes go through the deterministic CLI:\n"
-    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/\n"
-    "      scripts/kol_bridge_tool.py <cmd> --env <env> ...\n"
+    "- CLI failures print JSON on **stdout**. Empty output + exit 2 → read\n"
+    "  stdout for `error`/`hint`; never fall back to execute_code.\n"
     "\n"
     "## Pipeline\n"
     "1. Read the identity row. If `primary_email` is already non-empty,\n"
@@ -419,12 +439,26 @@ _DISCOVER_EMAIL_INSTRUCTIONS = (
     "   email from public web sources (link-in-bio, personal site,\n"
     "   media kit) and writes `primary_email` via `upsert-identity`\n"
     "   plus provenance facts via `write-facts-multi`.\n"
+    "   **Browser tools:** Tier 2 may use built-in `browser_*` only.\n"
+    "   **NEVER** call `mcp_chrome_devtools_*` — it points at an unreachable\n"
+    "   remote CDP; do not \"fall back to browser_* per memory\" after MCP fails.\n"
+    "   Start with WebSearch/WebFetch (Tier 1) per the skill.\n"
     "3. On hit, report `{found: true, email, source, tier}`. On miss,\n"
     "   report `{found: false, tried: [...]}` and open a\n"
     "   `contact_email_not_found` escalation so the operator sees\n"
     "   exactly which sources were checked.\n"
     "4. Never invent an email address; heuristic guesses are\n"
     "   explicitly forbidden by the skill SOP.\n"
+    "\n"
+    "## Browser (Tier 2) — no-hang discipline\n"
+    "- Local debug Chrome auto-starts on the first `browser_*` call; do not\n"
+    "  open a browser yourself — just call `browser_navigate`.\n"
+    "- One page, single attempt. Never retry the same URL. If a navigate or\n"
+    "  snapshot errors/times out/returns nothing, record it in `tried` and\n"
+    "  move on — never loop on the same call.\n"
+    "- Spend the 8-page-load budget then return the miss envelope. A miss is\n"
+    "  a valid outcome; a hung run is not. If Chrome cannot be reached or\n"
+    "  auto-started, return a miss with reason_hint `browser_unavailable`.\n"
 )
 
 
@@ -602,15 +636,14 @@ async def discover_email(
         gate_b_attempted=gate_b_attempted,
         campaign_config_file=cfg_path,
     )
-    try:
-        run = await gateway.start_run(
-            input=brief,
-            instructions=_DISCOVER_EMAIL_INSTRUCTIONS,
-            # Per-identity namespace; not a campaign-wide resume.
-            session_id=f"kol-email-discover:{env}:{identity_id}",
-        )
-    except GatewayError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    run = await _start_detached_gateway_run(
+        gateway,
+        action_label="搜索邮箱",
+        input=brief,
+        instructions=_DISCOVER_EMAIL_INSTRUCTIONS,
+        # Per-identity namespace; not a campaign-wide resume.
+        session_id=f"kol-email-discover:{env}:{identity_id}",
+    )
     run_id = run.get("run_id") if isinstance(run, dict) else None
     if isinstance(run_id, str) and run_id and body.campaign_id:
         # Registering requires a campaign_id; for ad-hoc discovery
@@ -977,14 +1010,13 @@ async def nox_monitor(
         f"campaign_id: {body.campaign_id or ''}",
         f"campaign_config_file: {cfg_path}",
     ])
-    try:
-        run = await gateway.start_run(
-            input=brief,
-            instructions=_NOX_MONITOR_INSTRUCTIONS,
-            session_id=f"kol-nox-monitor:{body.env}:{identity_id}",
-        )
-    except GatewayError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    run = await _start_detached_gateway_run(
+        gateway,
+        action_label="启用 Nox 监测",
+        input=brief,
+        instructions=_NOX_MONITOR_INSTRUCTIONS,
+        session_id=f"kol-nox-monitor:{body.env}:{identity_id}",
+    )
     run_id = run.get("run_id") if isinstance(run, dict) else None
     write_audit(
         conn,
@@ -1143,12 +1175,11 @@ _DISCOVER_SOCIAL_LINKS_INSTRUCTIONS = (
     "Do NOT loop over any other identity in this campaign.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    "- kol-ops-bridge base URL: http://127.0.0.1:8080/api/plugins/kol-ops-bridge\n"
-    "- Bridge auth header: X-Bridge-Key: $HERMES_KOL_OPS_BRIDGE_KEY\n"
+    f"{gateway_contract_block()}\n"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
-    "- ALL CAL writes go through the deterministic CLI:\n"
-    f"    python {_REPO_ROOT}/plugins/kol-ops-bridge/\n"
-    "      scripts/kol_bridge_tool.py <cmd> --env <env> ...\n"
+    "- CLI failures print JSON on **stdout**. Empty output + exit 2 → read\n"
+    "  stdout for `error`/`hint`; never fall back to execute_code.\n"
     "\n"
     "## Pipeline\n"
     "1. Read the identity row and the current identity-namespace facts.\n"
@@ -1168,6 +1199,12 @@ _DISCOVER_SOCIAL_LINKS_INSTRUCTIONS = (
     "5. Never invent URLs; heuristic guesses (e.g. instagram.com/handle\n"
     "   when you never verified the page belongs to the creator) are\n"
     "   forbidden by the skill SOP.\n"
+    "\n"
+    "## Browser (when skill uses Tier 2) — no-hang discipline\n"
+    "- One page, single attempt. Never retry the same URL.\n"
+    "- Navigate/snapshot error or timeout → record in `tried` and move on.\n"
+    "- A miss is valid; a hung run is not. Return `browser_unavailable` on\n"
+    "  Chrome auto-start failure — do not loop.\n"
 )
 
 
@@ -1260,14 +1297,13 @@ async def discover_social_links(
         campaign_id=body.campaign_id,
         actor_email=user["email"],
     )
-    try:
-        run = await gateway.start_run(
-            input=brief,
-            instructions=_DISCOVER_SOCIAL_LINKS_INSTRUCTIONS,
-            session_id=f"kol-social-link-discover:{env}:{identity_id}",
-        )
-    except GatewayError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    run = await _start_detached_gateway_run(
+        gateway,
+        action_label="搜索社交链接",
+        input=brief,
+        instructions=_DISCOVER_SOCIAL_LINKS_INSTRUCTIONS,
+        session_id=f"kol-social-link-discover:{env}:{identity_id}",
+    )
     run_id = run.get("run_id") if isinstance(run, dict) else None
     if isinstance(run_id, str) and run_id and body.campaign_id:
         register_run(

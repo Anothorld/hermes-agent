@@ -29,6 +29,10 @@ def hooks_env(monkeypatch):
     hooks = _load_hooks_module()
     hooks.tab_pool._task_tabs.clear()
     monkeypatch.setenv("LOCAL_CHROME_TAB_POOL", "1")
+    # The pool steps aside when a browser-level shared CDP endpoint is set;
+    # isolate so these tests exercise the active-pool path regardless of the
+    # ambient environment.
+    monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     return hooks
 
 

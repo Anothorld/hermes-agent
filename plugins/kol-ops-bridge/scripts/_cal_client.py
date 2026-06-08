@@ -163,10 +163,20 @@ class CALClient:
 
 # ----------------------------------------------------------------- helpers
 def _die(error: str, **fields: Any) -> "Any":  # noqa: ANN401 — raises
-    """Print a stable JSON error to stderr and exit non-zero."""
+    """Print a stable JSON error and exit non-zero.
+
+    The primary consumer is the Hermes agent, which only sees the terminal
+    tool's **stdout**. Writing errors to stderr alone made every failure look
+    like empty output (``{"output": "", "exit_code": 2}``), so the agent could
+    not tell what went wrong and fell back to ad-hoc ``execute_code`` (POVISON
+    recovery incident). Emit on stdout so the failure is always visible; mirror
+    to stderr for human operators on a TTY.
+    """
     payload = {"error": error, **fields}
-    sys.stderr.write(json.dumps(payload, ensure_ascii=False))
-    sys.stderr.write("\n")
+    line = json.dumps(payload, ensure_ascii=False)
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    sys.stderr.write(line + "\n")
     raise SystemExit(2)
 
 

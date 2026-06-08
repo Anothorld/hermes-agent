@@ -2601,6 +2601,33 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 "error": "Blocked: redirect landed on a private/internal address",
             })
 
+        # Hard navigation verification (POVISON 686 empty-tab incident):
+        # agent-browser can report success while the tab stays on
+        # about:blank — a silent no-op over the pooled page CDP target.
+        # Treat "requested a real URL but landed on a blank tab" as a
+        # failure so the model records a miss / moves on instead of
+        # snapshotting an empty page and looping.
+        _requested = (url or "").strip().lower()
+        _landed = (final_url or "").strip().lower()
+        if (
+            _requested
+            and _requested not in ("about:blank", "chrome://newtab/")
+            and _landed in ("", "about:blank", "chrome://newtab/")
+        ):
+            logger.warning(
+                "browser_navigate: blank-tab no-op for %s (landed=%r task=%s)",
+                url, final_url, effective_task_id,
+            )
+            return json.dumps({
+                "success": False,
+                "error": (
+                    f"Navigation did not load the page for {url!r} — the browser "
+                    "stayed on a blank tab (CDP open returned no document). Record "
+                    "this URL as tried and continue; do not retry the same URL."
+                ),
+                "blank_tab_no_op": True,
+            })
+
         response = {
             "success": True,
             "url": final_url,

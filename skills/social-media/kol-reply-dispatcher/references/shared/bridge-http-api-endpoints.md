@@ -1,9 +1,11 @@
 # Bridge HTTP / CLI endpoints (kol-reply-dispatcher)
 
-Use **`kol_bridge_tool.py`** only — never `curl` ad hoc, never `import dispatch_router`,
+Use **`kol_bridge_tool.py`** (gateway runs: absolute **`kol-bridge-cli`** per brief
+`# terminal_safety`) — never `curl` ad hoc, never `import dispatch_router`,
 never `execute_code` for bridge I/O (facts, dispatch-context, email-conversation,
 persist-reply-draft, policies). Never hardcode `BRIDGE_KEY` in code. Base URL: `HERMES_KOL_OPS_BRIDGE_BASE`
-(default `http://127.0.0.1:8080/api/plugins/kol-ops-bridge`).
+(default `http://127.0.0.1:8080/api/plugins/kol-ops-bridge`). CLI failures emit
+JSON on **stdout**; empty output + exit 2 → parse stdout for `error`/`hint`.
 
 **`--env`:** pass **`LIVE`** for production KOL data or **`TEST`** for sandbox —
 not `prod` / `production` (CLI accepts those aliases and normalizes to `LIVE`).

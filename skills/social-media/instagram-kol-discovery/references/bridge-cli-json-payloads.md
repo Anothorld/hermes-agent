@@ -1,7 +1,25 @@
 # Bridge CLI JSON payloads (Instagram discovery)
 
-File-backed `@/tmp/*.json` payloads for `kol_bridge_tool.py`. Use **terminal**
+File-backed `@/tmp/*.json` payloads for the bridge CLI. Use **terminal**
 (one subcommand per call), not `execute_code` loops.
+
+## CLI invocation
+
+**Gateway runs** (terminal cwd often `$HOME`): use the absolute wrapper from the
+brief `# terminal_safety` block, e.g.:
+
+```bash
+<HERMES_AGENT_ROOT>/plugins/kol-ops-bridge/scripts/kol-bridge-cli <subcommand> --env LIVE ...
+```
+
+**Local shell** from `hermes-agent/` repo root:
+
+```bash
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py <subcommand> --env LIVE ...
+```
+
+CLI failures print one JSON line on **stdout** (`error`, `hint`). Empty terminal
+output with exit 2 means read stdout — never fall back to `execute_code`.
 
 ## ingest-confirmed-candidate — required shape
 

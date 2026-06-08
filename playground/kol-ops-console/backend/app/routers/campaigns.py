@@ -68,6 +68,7 @@ from ..discovery_gate import (
     _trigger_rediscover_internal,
 )
 from ..gateway_client import GatewayClient, GatewayError, RUNNING_STATES, TERMINAL_STATES
+from ..gateway_http import http_exception_from_gateway_start
 from ..variant_candidates import human_spec_text, resolve_campaign_variants
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
@@ -208,7 +209,7 @@ _APPROVAL_INSTRUCTIONS = (
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
     f"{gateway_contract_block()}\n"
-    f"{terminal_safety_rules()}\n"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
     "- Use the **terminal** tool for `kol_bridge_tool.py` (not execute_code+subprocess).\n"
@@ -237,14 +238,20 @@ _APPROVAL_INSTRUCTIONS = (
     "   open an escalation and do not draft for that KOL.\n"
     "4. ENRICHMENT (before any draft skill). For each approved identity\n"
     "   whose `primary_email` (from get-identity) is empty or null:\n"
+    "   **NO browser / Chrome DevTools MCP in this run** — discovery already\n"
+    "   finished. Email enrichment is API-only (Nox) then escalation on miss.\n"
     "   a0) If `campaign_config.nox_quota_enabled` is true, run\n"
     "       `kol-nox-diligence` contacts path first:\n"
-    "       `python plugins/nox-kol-bridge/scripts/nox_kol_tool.py contacts`\n"
-    "       `--env <env> --gate pre_outreach_confirm --nox-creator-id <id>`\n"
+    f"       `{_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py contacts`\n"
+    "       `--env <env> --gate pre_outreach_confirm --campaign-config-file ...`\n"
     "       (or platform+url). On hit with email_quality>=1, persist email\n"
     "       via `upsert-identity` + `identity.email_source=noxinfluencer_api`.\n"
-    "       Skip browser email-discovery when email is now present.\n"
-    "   a) invoke `kol-email-discovery` with identity_id, env, campaign_id.\n"
+    "       Skip kol-email-discovery when email is now present.\n"
+    "   a) Only when Nox is disabled or returns no email: invoke\n"
+    "      `kol-email-discovery` (still no batch browser crawl for 15 KOLs;\n"
+    "      process identities sequentially — never parallel browser discovery).\n"
+    "      Tier 2 browser: one page, single attempt; navigate/snapshot error\n"
+    "      or timeout → record in `tried` and move on; never hang the run.\n"
     "      The skill returns `{found: true, email, source, tier, ...}` on\n"
     "      hit (and has already persisted `primary_email` + provenance\n"
     "      facts) or `{found: false, tried: [...]}` on miss.\n"
@@ -277,14 +284,23 @@ _APPROVAL_INSTRUCTIONS = (
     "   env. For each approved safe repeat KOL WITH a verified email that\n"
     "   passed step 5, invoke `kol-reengagement-outreach`. (\"Invoke\"\n"
     "   means: read the SKILL.md and execute its Procedure yourself — see\n"
-    "   Runtime contract above.) Each child skill must return a draft\n"
-    "   envelope. Do NOT write `offer.outreach_sent=true` unless an email\n"
-    "   was actually sent; draft-only work writes draft-ready facts and\n"
-    "   pending approval records instead.\n"
+    "   Runtime contract above.) Before drafting each identity, build the\n"
+    "   prompt header: `kol-email-style-loader` (pass `--owner-user-id` from\n"
+    "   brief `approved_by_user_id` when present; blank → company_style only,\n"
+    "   user_style without owner returns empty — never an error) +\n"
+    "   `kol-creator-brief-loader`, then apply `humanizer` as the final pass.\n"
+    "   Each child skill must return a draft envelope with HTML body. Do NOT\n"
+    "   write `offer.outreach_sent=true` unless an email was actually sent;\n"
+    "   draft-only work writes draft-ready facts and pending approval records\n"
+    "   instead.\n"
     "7. Persist every returned initial outreach draft back to CAL before\n"
     "   reporting success. For each identity use ONLY:\n"
     "   `persist-initial-outreach-draft --env <env> --json @/tmp/outreach_persist_<id>.json`\n"
-    "   (child_envelope must include non-empty subject, body, to). This writes\n"
+    "   (`child_envelope` must include non-empty subject, body, to; body MUST\n"
+    "   be HTML — every paragraph in `<p>…</p>`, product as a real\n"
+    "   `<a href=\"<product_url>\">…</a>` link, `html: true`,\n"
+    "   `kind: initial_outreach`). Plain-text marketing copy or a missing\n"
+    "   product link is a defect (POVISON 683). This writes\n"
     "   the `kol_reply_draft_ready` event + `approval.reply_draft` atomically.\n"
     "   NEVER use `write-facts` / `write-facts-multi` on `approval.reply_draft`.\n"
     "   NEVER use urllib/curl/execute_code for bridge HTTP.\n"
@@ -2526,6 +2542,7 @@ def _compose_approval_brief(
     env: str,
     selected_rows: list[dict[str, Any]],
     actor_email: str,
+    actor_user_id: int | None = None,
     test_mode_to: str | None,
 ) -> str:
     lines = [
@@ -2533,6 +2550,7 @@ def _compose_approval_brief(
         f"campaign_id: {campaign_id}",
         f"mode: {env}",
         f"approved_by: {actor_email}",
+        f"approved_by_user_id: {actor_user_id if actor_user_id is not None else ''}",
         f"test_mode_to: {test_mode_to or ''}",
         "",
         "# selected_kols",
@@ -2553,12 +2571,19 @@ def _compose_approval_brief(
         "",
         gateway_contract_block(),
         "",
-        terminal_safety_rules(),
+        terminal_safety_rules(repo_root=_REPO_ROOT),
         "",
         "## Nox contacts (Gate B)",
         "If `campaign_config.nox_quota_enabled` is true, for each approved identity "
         "without `primary_email`, run `nox_kol_tool.py contacts --gate pre_outreach_confirm` "
         "with `--campaign-config-file` before browser email-discovery.",
+        "",
+        "## Draft format (initial outreach — POVISON 683)",
+        "Before `kol-cold-outreach` / `kol-reengagement-outreach`: "
+        "`kol-email-style-loader` (pass `--owner-user-id <approved_by_user_id>` when "
+        "set above; blank → company_style only) + `kol-creator-brief-loader`, then "
+        "`humanizer`. Persist `child_envelope.body` as HTML (`<p>` paragraphs, product "
+        "`<a href=\"<product_url>\">…</a>`, `html: true`, `kind: initial_outreach`).",
         "",
         approval_cli_checklist(
             campaign_id=campaign_id,
@@ -2796,7 +2821,7 @@ async def approve_shortlist(
         # every downstream draft skill that gates on
         # goals.outreach.status == "active".
         try:
-            await bridge.route_discovery(
+            route_out = await bridge.route_discovery(
                 campaign_id,
                 {
                     "env": body.env,
@@ -2813,11 +2838,8 @@ async def approve_shortlist(
             "identity_ids": identity_ids,
             "selected_by": f"web:{user['email']}",
             "env": body.env,
+            "route_discovery": route_out,
         }
-        try:
-            out = await bridge.approve_shortlist(campaign_id, payload)
-        except BridgeError as exc:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
         event_ids: list[int] = []
         for row in selected_rows:
             event = await bridge.write_event({
@@ -2842,16 +2864,35 @@ async def approve_shortlist(
             env=body.env,
             selected_rows=selected_rows,
             actor_email=user["email"],
+            actor_user_id=user.get("id"),
             test_mode_to=test_mode_to,
         )
         try:
-            run = await gateway.start_run(
+            run = await gateway.start_run_with_retry(
                 input=approval_brief,
                 instructions=_APPROVAL_INSTRUCTIONS,
-                session_id=f"kol-campaign:{body.env}:{campaign_id}",
+                session_id=f"kol-campaign-outreach:{body.env}:{campaign_id}",
             )
         except GatewayError as exc:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+            write_audit(
+                conn, actor_user_id=user["id"],
+                action="campaign.approve_shortlist_gateway_failed",
+                target=campaign_id,
+                payload={**payload, "selected_handles": body.selected_handles,
+                         "event_ids": event_ids, "error": str(exc)},
+            )
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                {
+                    "code": "approve_gateway_failed",
+                    "message": (
+                        "CAL was updated but the outreach agent run could not "
+                        "start — retry approve or contact engineering"
+                    ),
+                    "event_ids": event_ids,
+                    "detail": str(exc),
+                },
+            ) from exc
         new_run_id = run.get("run_id")
         # Approve overwrites ``run_id`` for status/display but MUST NOT
         # touch ``gate_run_id``; the discovery gate's pointer is owned
@@ -2869,7 +2910,7 @@ async def approve_shortlist(
                 env=body.env,
                 run_id=new_run_id,
                 kind="outreach",
-                session_id=f"kol-campaign:{body.env}:{campaign_id}",
+                session_id=f"kol-campaign-outreach:{body.env}:{campaign_id}",
                 dedup_key=dedup_key,
             )
         nox_contacts_batch = await dispatch_nox_contacts_batch(
@@ -2891,7 +2932,7 @@ async def approve_shortlist(
                      "nox_contacts_batch": nox_contacts_batch},
         )
         return {
-            **out,
+            **route_out,
             "run_id": new_run_id,
             "approved_count": len(identity_ids),
             "event_ids": event_ids,
@@ -2920,6 +2961,7 @@ def _compose_redraft_brief(
     identity_id: int,
     handle: str | None,
     actor_email: str,
+    actor_user_id: int | None = None,
     test_mode_to: str | None,
 ) -> str:
     lines = [
@@ -2927,6 +2969,7 @@ def _compose_redraft_brief(
         f"campaign_id: {campaign_id}",
         f"mode: {env}",
         f"requested_by: {actor_email}",
+        f"requested_by_user_id: {actor_user_id if actor_user_id is not None else ''}",
         f"test_mode_to: {test_mode_to or ''}",
         "",
         "# scope",
@@ -2959,13 +3002,22 @@ def _compose_redraft_brief(
         (
             "3. Determine outreach path from CAL (relationship.total_collabs "
             "/ identity.outreach_path). Invoke `kol-cold-outreach` (cold) "
-            "or `kol-reengagement-outreach` (repeat) for this identity."
+            "or `kol-reengagement-outreach` (repeat) for this identity. Build "
+            "the prompt header first: `kol-email-style-loader` (pass "
+            "`--owner-user-id <requested_by_user_id>` when present above; if "
+            "blank, load company_style only — user_style without an owner "
+            "returns an empty block, never an error) + `kol-creator-brief-loader`, "
+            "then apply `humanizer` as the final pass."
         ),
         (
             "4. Persist via `persist-initial-outreach-draft --env <env> "
             "--json @/tmp/outreach_persist_<id>.json` only (overwrites prior "
             "pending draft for this identity/campaign). NEVER write-facts on "
-            "approval.reply_draft."
+            "approval.reply_draft. The `child_envelope.body` MUST be HTML: "
+            "every paragraph in `<p>…</p>` and the product as a real "
+            "`<a href=\"<product_url>\">…</a>` link (set `html: true`, "
+            "`kind: initial_outreach`). A plain-text marketing paragraph or a "
+            "missing product link is a defect (POVISON 683)."
         ),
         (
             "5. Do NOT create Gmail drafts in this redraft run. Wait for console "
@@ -2979,7 +3031,7 @@ def _compose_redraft_brief(
         "",
         gateway_contract_block(),
         "",
-        terminal_safety_rules(),
+        terminal_safety_rules(repo_root=_REPO_ROOT),
         "",
         approval_cli_checklist(
             campaign_id=campaign_id,
@@ -3146,10 +3198,11 @@ async def redraft_outreach(
             identity_id=identity_id,
             handle=handle if isinstance(handle, str) else None,
             actor_email=user["email"],
+            actor_user_id=user.get("id"),
             test_mode_to=test_mode_to,
         )
         try:
-            run = await gateway.start_run(
+            run = await gateway.start_run_with_retry(
                 input=brief,
                 instructions=_APPROVAL_INSTRUCTIONS,
                 # Share the draft session namespace with refine/preview
@@ -3159,7 +3212,9 @@ async def redraft_outreach(
                 session_id=f"kol-campaign-draft:{env}:{campaign_id}",
             )
         except GatewayError as exc:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+            raise http_exception_from_gateway_start(
+                exc, action_label="生成待审批草稿",
+            ) from exc
         new_run_id = run.get("run_id") if isinstance(run, dict) else None
         if isinstance(new_run_id, str) and new_run_id:
             register_run(
@@ -3262,6 +3317,8 @@ class FollowupDraftBody(BaseModel):
 _FOLLOWUP_DRAFT_INSTRUCTIONS = (
     "You are drafting a PROACTIVE operator-topic follow-up for one KOL.\n"
     "This is NOT the inbound-reply dispatcher loop. Hard rules:\n"
+    f"{gateway_contract_block()}\n"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- Read the brief's operator_topic and treat it as the primary intent.\n"
     "- Invoke the `kol-proactive-followup` skill by reading its SKILL.md\n"
@@ -3287,6 +3344,7 @@ def _compose_followup_brief(
     identity_id: int,
     handle: str | None,
     actor_email: str,
+    actor_user_id: int | None = None,
     operator_topic: str,
     test_mode_to: str | None,
     gmail_sent_thread_id: str | None = None,
@@ -3297,6 +3355,7 @@ def _compose_followup_brief(
         f"campaign_id: {campaign_id}",
         f"mode: {env}",
         f"requested_by: {actor_email}",
+        f"requested_by_user_id: {actor_user_id if actor_user_id is not None else ''}",
         f"test_mode_to: {test_mode_to or ''}",
         f"identity_id: {identity_id}",
     ]
@@ -3322,9 +3381,17 @@ def _compose_followup_brief(
             "Report when approval.reply_draft is readable with decision=pending."
         ),
         "",
-        "## Runtime contract",
-        f"- Use {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py.",
-        "- Every CLI call MUST pass --env matching `mode` above.",
+        gateway_contract_block(),
+        "",
+        terminal_safety_rules(repo_root=_REPO_ROOT),
+        "",
+        "## Style",
+        (
+            "Before drafting: `kol-email-style-loader` (pass "
+            "`--owner-user-id <requested_by_user_id>` when set above) + "
+            "`kol-creator-brief-loader`, then `humanizer`. Follow "
+            "`kol-proactive-followup` format contract for reply-thread HTML."
+        ),
     ])
     return "\n".join(lines)
 
@@ -3482,6 +3549,7 @@ async def followup_draft(
             identity_id=identity_id,
             handle=handle if isinstance(handle, str) else None,
             actor_email=user["email"],
+            actor_user_id=user.get("id"),
             operator_topic=body.topic,
             test_mode_to=test_mode_to,
             gmail_sent_thread_id=(
@@ -3496,13 +3564,15 @@ async def followup_draft(
             ),
         )
         try:
-            run = await gateway.start_run(
+            run = await gateway.start_run_with_retry(
                 input=brief,
                 instructions=_FOLLOWUP_DRAFT_INSTRUCTIONS,
                 session_id=f"kol-campaign-draft:{env}:{campaign_id}",
             )
         except GatewayError as exc:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+            raise http_exception_from_gateway_start(
+                exc, action_label="生成跟进草稿",
+            ) from exc
         new_run_id = run.get("run_id") if isinstance(run, dict) else None
         if isinstance(new_run_id, str) and new_run_id:
             register_run(

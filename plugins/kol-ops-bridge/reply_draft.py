@@ -15,12 +15,69 @@ approve can append a single Gmail quote block.
 
 from __future__ import annotations
 
+import html as _html
+import re as _re
 from typing import Any, Mapping
 
 from . import gmail_thread_resolve
 from .gmail_reply_envelope import extract_message_content_without_quotes
 
 _RE_PREFIXES = ("re:", "re：")
+
+# Block-level markers that signal a body is already HTML. If any are present
+# we treat the body as authored HTML and leave it untouched (idempotent).
+_BLOCK_HTML_RE = _re.compile(
+    r"(?is)<\s*(?:p|div|br|ul|ol|li|table|tr|td|a|h[1-6]|blockquote|span|strong|em)\b",
+)
+_URL_RE = _re.compile(r"(https?://[^\s<>\"')]+)")
+_PARA_SPLIT_RE = _re.compile(r"\n\s*\n")
+
+
+def _linkify_and_escape(text: str) -> str:
+    """Escape plain text and turn bare http(s) URLs into ``<a href>`` links.
+
+    URLs are linked from the raw text (so query-string ``&`` is not double
+    escaped inside ``href``); the surrounding prose is HTML-escaped.
+    """
+    parts: list[str] = []
+    last = 0
+    for match in _URL_RE.finditer(text):
+        parts.append(_html.escape(text[last:match.start()]))
+        url = match.group(1)
+        href = _html.escape(url, quote=True)
+        parts.append(f'<a href="{href}">{_html.escape(url)}</a>')
+        last = match.end()
+    parts.append(_html.escape(text[last:]))
+    return "".join(parts)
+
+
+def to_html_email_body(body: str | None) -> str:
+    """Return an HTML email body for ``body``, idempotent for existing HTML.
+
+    Outbound (initial-outreach) drafts must be sent as HTML so the operator's
+    Gmail draft renders paragraphs and clickable product links. Skills should
+    already emit ``<p>``…; this is the deterministic safety net so a plain-text
+    marketing paragraph can never be persisted/sent as-is (POVISON 683 incident).
+
+    - If ``body`` already contains block-level HTML, it is returned unchanged.
+    - Otherwise plain text is escaped, split into ``<p>`` paragraphs on blank
+      lines (single newlines become ``<br>``), and bare URLs are linkified.
+    """
+    raw = (body or "").strip()
+    if not raw:
+        return ""
+    if _BLOCK_HTML_RE.search(raw):
+        return raw
+    html_paras: list[str] = []
+    for para in _PARA_SPLIT_RE.split(raw):
+        lines = [
+            _linkify_and_escape(line.strip())
+            for line in para.split("\n")
+            if line.strip()
+        ]
+        if lines:
+            html_paras.append("<p>" + "<br>".join(lines) + "</p>")
+    return "".join(html_paras)
 
 _PROACTIVE_FOLLOWUP_SKILLS = frozenset({
     "kol-proactive-followup",
@@ -272,5 +329,6 @@ __all__ = [
     "normalize_proactive_followup_thread",
     "build_draft_event_payload",
     "build_approval_fact_value",
+    "to_html_email_body",
     "ReplyDraftError",
 ]

@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # comfortable 30s for the rest of the handler. Plain reads stay
     # sub-second; this only matters for the Gmail-touching writes.
     bridge_timeout_sec: float = 60.0
+    # Approve-shortlist route-discovery runs select + recompute_goals per identity;
+    # 15+ KOL batches can exceed the default 60s bridge timeout.
+    bridge_approve_timeout_sec: float = 180.0
     # LLM style distill can take 2+ minutes (10 samples + Hermes call_llm).
     bridge_learning_timeout_sec: float = 300.0
 

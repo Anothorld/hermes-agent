@@ -244,7 +244,10 @@ def cmd_write_event(args: argparse.Namespace) -> None:
             "missing": missing,
             "canonical_cli": "plugins/kol-ops-bridge/scripts/kol_bridge_tool.py",
         }
-        sys.stderr.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        _line = json.dumps(payload, ensure_ascii=False) + "\n"
+        sys.stdout.write(_line)
+        sys.stdout.flush()
+        sys.stderr.write(_line)
         raise SystemExit(2)
     require_keys(body, "identity_id", "event_type", "actor")
     print_json(client_from_args(args).request(

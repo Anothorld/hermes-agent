@@ -151,7 +151,7 @@ Optional probe (same logic): `get-reply-chase-hint --identity-id ID --campaign-i
 For each `pending_replies[i]`, fetch the bundled context:
 
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
   --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
 ```
 
@@ -181,7 +181,7 @@ The classifier returns the JSON shape defined in its SKILL.md.
 Write every non-empty namespace from `facts_extracted` in a single call:
 
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
   --identity-id <identity_id> --env <TEST|LIVE> \
   --json '{"campaign_id":"<campaign_id>",
             "source":"email:<message_id>",
@@ -263,7 +263,7 @@ flagged, **immediately open an escalation for that lane and skip
 drafting** — do not invoke a child skill for that lane in Step 4/5:
 
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
   --identity-id <identity_id> --campaign-id "<campaign_id>" \
   --env <TEST|LIVE> \
   --json '{"rule_id": "<escalation_hint.matched_rule_id>",
@@ -295,7 +295,7 @@ Endpoint details: `references/shared/bridge-http-api-endpoints.md`.
 After Step 3 re-fetch, call the deterministic plan endpoint:
 
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py select-draftable-plan \
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py select-draftable-plan \
   --json '{"goals": <from dispatch_context.goals as name→row map>,
             "facts": <merge reusable_facts.facts + campaign_facts>,
             "signals": <classifier signals>,
@@ -365,7 +365,7 @@ drafting.
 Otherwise write **once**:
 
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
   --identity-id <identity_id> --env <TEST|LIVE> \
   --json '{"campaign_id":"<campaign_id>",
             "source":"fragment-merge:<message_id>",
@@ -406,7 +406,7 @@ Build `contributing` list for persistence:
 Use the toolized persist endpoint (enrichment + event + fact atomically):
 
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py persist-reply-draft \
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py persist-reply-draft \
   --env <TEST|LIVE> \
   --json '{
     "identity_id": <id>,
@@ -450,7 +450,7 @@ After Step 5.7 (or escalation-only outcome), apply the Gmail label
 inbox** that received the reply:
 
 ```
-python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py mark-reply-handled \
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py mark-reply-handled \
   --env <TEST|LIVE> \
   --message-id "<inbound_message_id>" \
   --identity-id <identity_id> \
@@ -560,6 +560,12 @@ skills only. **Never** use `execute_code` (including `subprocess` wrappers) or
   the turn with only `approval.pending_action_reply_needed` — the Bridge
   rejects that write. You **must** run Steps 4–5.7 and
   `persist-reply-draft` anchored to `latest_email.message_id`.
+- On macOS, **never** invoke bare `python` for bridge CLI — use `python3`
+  with the **absolute** path to `kol_bridge_tool.py` (see dispatcher
+  `_DISPATCHER_INSTRUCTIONS` / `bridge_agent_contract.cli_invocation_abs`).
+  Relative `plugins/...` from `$HOME` yields empty stdout and a stuck run.
+  CLI failures emit JSON on **stdout** (`error`/`hint`); empty output + exit 2
+  means read stdout — never fall back to `execute_code` (guard blocks it).
 - `flow_hint.kol_signaled_next_step` is guidance, not policy. Never
   override what the KOL actually wrote: if they asked a question on
   the current goal, the child skill must answer it even when the hint

@@ -152,6 +152,15 @@ class GatewayApprovalWatcher:
 
     async def _scan_once(self) -> None:
         assert self._settings is not None
+        # Reap completed subscriptions from the previous cycle before
+        # spawning replacements. Deferring this to scan start keeps
+        # ``_subs[run_id]`` awaitable in the same tick tests (and any
+        # caller) drive a single scan.
+        for run_id in list(self._subs):
+            task = self._subs[run_id]
+            if task.done():
+                self._subs.pop(run_id, None)
+
         rows = await asyncio.to_thread(_read_active_runs, self._settings.db_path)
         seen_run_ids: set[str] = set()
         for row in rows:
@@ -164,13 +173,109 @@ class GatewayApprovalWatcher:
             self._subs[run_id] = asyncio.create_task(
                 self._watch(run_id=run_id, kind=row["kind"], campaign_id=row["campaign_id"])
             )
-        # Reap completed subscriptions for runs that have left the
-        # active window (ended_at written by another path, or older than
-        # the scan cutoff).
-        for run_id in list(self._subs):
-            task = self._subs[run_id]
-            if task.done():
-                self._subs.pop(run_id, None)
+        await self._poll_waiting_approvals(rows)
+
+    async def _poll_waiting_approvals(self, rows: list[dict[str, Any]]) -> None:
+        """Fallback: surface approvals when gateway status says blocked.
+
+        The SSE subscription can miss ``approval.request`` if the console
+        backend restarted after the event was recorded, or if the watcher
+        task had not yet subscribed. Polling ``GET /v1/runs/{id}`` catches
+        ``waiting_for_approval`` and replays the event history once.
+        """
+        assert self._settings is not None and self._client is not None
+
+        base = self._settings.gateway_base.rstrip("/")
+        headers: dict[str, str] = {"Accept": "application/json"}
+        if self._settings.gateway_key:
+            headers["Authorization"] = f"Bearer {self._settings.gateway_key}"
+
+        async def _probe(row: dict[str, Any]) -> None:
+            run_id = str(row.get("run_id") or "")
+            if not run_id or run_id in self._pending:
+                return
+            try:
+                r = await self._client.get(  # type: ignore[union-attr]
+                    f"{base}/v1/runs/{run_id}",
+                    headers=headers,
+                    timeout=5.0,
+                )
+            except httpx.HTTPError:
+                return
+            if r.status_code >= 400:
+                return
+            info = r.json()
+            state = str(info.get("status") or "").lower()
+            if state != "waiting_for_approval":
+                return
+            payload = await self._fetch_approval_replay(run_id)
+            if payload is None:
+                # Status says blocked but we could not read details — still
+                # surface a placeholder so operators know to open transcript.
+                payload = {
+                    "command": "",
+                    "description": (
+                        "Agent 正在等待危险命令审批。"
+                        "请打开活动 transcript 查看完整命令，或稍后重试。"
+                    ),
+                    "pattern_key": "",
+                    "pattern_keys": [],
+                    "timestamp": _utcnow_iso(),
+                }
+            self._open(
+                run_id=run_id,
+                kind=str(row.get("kind") or ""),
+                campaign_id=str(row.get("campaign_id") or ""),
+                payload=payload,
+            )
+
+        await asyncio.gather(*(_probe(row) for row in rows if row.get("run_id")))
+
+    async def _fetch_approval_replay(self, run_id: str) -> Optional[dict[str, Any]]:
+        """One-shot SSE read to recover the latest approval.request frame."""
+        assert self._settings is not None and self._client is not None
+        url = f"{self._settings.gateway_base.rstrip('/')}/v1/runs/{run_id}/events"
+        headers: dict[str, str] = {"Accept": "text/event-stream"}
+        if self._settings.gateway_key:
+            headers["Authorization"] = f"Bearer {self._settings.gateway_key}"
+        latest: Optional[dict[str, Any]] = None
+        try:
+            async with self._client.stream("GET", url, headers=headers, timeout=8.0) as resp:
+                if resp.status_code >= 400:
+                    return None
+                event_name = "message"
+                data_lines: list[str] = []
+                async for raw in resp.aiter_lines():
+                    if raw == "":
+                        if not data_lines:
+                            event_name = "message"
+                            continue
+                        try:
+                            payload = json.loads("\n".join(data_lines))
+                        except json.JSONDecodeError:
+                            data_lines = []
+                            event_name = "message"
+                            continue
+                        inner = event_name
+                        if inner == "message":
+                            inner = str(payload.get("event") or "message")
+                        if inner == "approval.request":
+                            latest = payload
+                        elif inner in {"approval.responded", "run.completed", "run.failed", "run.cancelled"}:
+                            if latest is not None:
+                                return latest
+                        data_lines = []
+                        event_name = "message"
+                        continue
+                    if raw.startswith(":"):
+                        continue
+                    if raw.startswith("event:"):
+                        event_name = raw[6:].strip() or "message"
+                    elif raw.startswith("data:"):
+                        data_lines.append(raw[5:].lstrip())
+        except httpx.HTTPError:
+            return latest
+        return latest
 
     # ------------------------------------------------------------------ per-run SSE
 

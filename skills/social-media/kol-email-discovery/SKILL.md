@@ -232,6 +232,32 @@ Use the built-in BrowserUse tools — `browser_navigate`,
 `browser_snapshot`, `browser_get_images`, `browser_click`,
 `vision_analyze`. Do NOT use the `mcp_chrome_devtools_*` family.
 
+#### Tier 2 preflight + no-hang discipline (hard)
+Tier 2 must never hang the whole run (POVISON 686 incident). The local
+debug Chrome auto-starts on the first `browser_*` call (the
+`local-chrome-tab-pool` plugin runs `start-debug-chrome.sh`; cloud mode
+also auto-falls-back to CDP). You do **not** manually open a browser —
+just call `browser_navigate` and let the runtime launch Chrome.
+
+Rules:
+- **One page at a time, single attempt.** Never retry the same URL more
+  than once. If a `browser_navigate` / `browser_snapshot` errors, times
+  out, or returns no usable content, record the URL in `tried` and move
+  to the next surface — do **not** loop or re-issue the same call.
+- **Per-page wall-clock ~30s.** If a page has not yielded a snapshot in
+  roughly that window, abandon it (record in `tried`) and continue.
+- **Hard miss, never hang.** When the 8-load budget is spent or the
+  remaining surfaces all fail/timeout, return the Step 4b miss envelope
+  immediately. A miss is a valid outcome; a hung run is not.
+- **Autostart failure is a stop, not a retry.** If `browser_navigate`
+  raises that local debug Chrome could not be reached or auto-started,
+  return a miss with `reason_hint: "browser_unavailable"` — do not retry
+  in a loop.
+- **Concurrency:** run only one `kol-email-discovery` at a time. Do not
+  fan out browser discovery for multiple identities in parallel — it
+  saturates gateway run slots and the shared Chrome, which is what made
+  686 appear stuck.
+
 Browse sequence (prefer personal; hold agency as fallback):
 1. `https://www.instagram.com/<handle>/` — snapshot bio text + the
    link-in-bio URL if present. Bio emails are almost always personal.

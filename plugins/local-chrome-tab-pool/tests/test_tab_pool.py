@@ -30,13 +30,34 @@ def tab_pool(monkeypatch):
     return module
 
 
-def test_is_enabled_default_on(tab_pool):
+def test_is_enabled_default_on(tab_pool, monkeypatch):
+    monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     assert tab_pool.is_enabled() is True
 
 
 def test_is_enabled_can_disable(tab_pool, monkeypatch):
     monkeypatch.setenv("LOCAL_CHROME_TAB_POOL", "0")
+    monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     assert tab_pool.is_enabled() is False
+
+
+def test_is_enabled_defers_to_shared_cdp(tab_pool, monkeypatch):
+    monkeypatch.delenv("LOCAL_CHROME_TAB_POOL", raising=False)
+    # Browser-level ws shared endpoint → pool steps aside.
+    monkeypatch.setenv(
+        "BROWSER_CDP_URL", "ws://127.0.0.1:9222/devtools/browser/abc-123",
+    )
+    assert tab_pool.is_enabled() is False
+    # Stable HTTP discovery endpoint → also a shared endpoint → step aside.
+    monkeypatch.setenv("BROWSER_CDP_URL", "http://127.0.0.1:9222")
+    assert tab_pool.is_enabled() is False
+    # A page-level ws is a single target, not a shared endpoint → pool stays on.
+    monkeypatch.setenv(
+        "BROWSER_CDP_URL", "ws://127.0.0.1:9222/devtools/page/PAGE1",
+    )
+    assert tab_pool.is_enabled() is True
+    monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+    assert tab_pool.is_enabled() is True
 
 
 def test_normalize_task_id_strips_sidecar_suffix(tab_pool):
@@ -134,6 +155,60 @@ def test_release_normalizes_sidecar_task_id(tab_pool, monkeypatch):
     monkeypatch.setattr(tab_pool, "_http_json", fake_http_json)
     assert tab_pool.release("task-y::local") is True
     assert closed
+
+
+def test_reap_orphan_blank_tabs_closes_only_untracked_blanks(tab_pool, monkeypatch):
+    # One tracked pool tab must be preserved even though it's about:blank.
+    tab_pool._task_tabs["live"] = {
+        "target_id": "TRACKED",
+        "cdp_url": "ws://127.0.0.1:9222/devtools/page/TRACKED",
+    }
+    listing = [
+        {"type": "page", "id": "TRACKED", "url": "about:blank"},   # tracked → keep
+        {"type": "page", "id": "ORPHAN1", "url": "about:blank"},   # leaked → close
+        {"type": "page", "id": "ORPHAN2", "url": ""},              # leaked → close
+        {"type": "page", "id": "REALPAGE", "url": "https://ig.com/x"},  # real → keep
+        {"type": "background_page", "id": "BG", "url": "about:blank"},  # not page → keep
+    ]
+    closed = []
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: closed.append(tid))
+    monkeypatch.setattr(
+        tab_pool, "_http_json",
+        lambda url, *, method="GET", timeout=10.0: listing,
+    )
+
+    assert tab_pool.reap_orphan_blank_tabs() == 2
+    assert set(closed) == {"ORPHAN1", "ORPHAN2"}
+
+
+def test_reap_orphan_blank_tabs_noop_when_chrome_down(tab_pool, monkeypatch):
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: False)
+    monkeypatch.setattr(
+        tab_pool, "_http_json",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")),
+    )
+    assert tab_pool.reap_orphan_blank_tabs() == 0
+
+
+def test_acquire_reaps_orphans_before_creating(tab_pool, monkeypatch):
+    reaped = {"n": 0}
+
+    def fake_reap():
+        reaped["n"] += 1
+        return 1
+
+    monkeypatch.setattr(tab_pool, "reap_orphan_blank_tabs", fake_reap)
+    monkeypatch.setattr(
+        tab_pool, "_create_tab",
+        lambda: {"target_id": "T", "cdp_url": "ws://127.0.0.1/devtools/page/T"},
+    )
+    tab_pool._task_tabs.clear()
+    tab_pool.acquire("fresh-task")
+    assert reaped["n"] == 1
+    # Cached path must NOT reap again.
+    tab_pool.acquire("fresh-task")
+    assert reaped["n"] == 1
 
 
 def test_ensure_chrome_autostarts(tab_pool, monkeypatch, tmp_path):

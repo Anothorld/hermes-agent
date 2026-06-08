@@ -14,8 +14,11 @@ decision so the parent goal can continue (or escalate again).
 
 - **`--env` `TEST` or `LIVE`** on every bridge call.
 - **Bridge-only writes** — use `plugins/kol-ops-bridge/scripts/kol_bridge_tool.py`.
+  Gateway runs: absolute **`kol-bridge-cli`** per brief `# terminal_safety`.
 - **Tool choice:** use the native **`terminal`** tool (one subcommand per call).
   Do **not** wrap the CLI in `execute_code` + `subprocess`.
+- **CLI errors:** failures print JSON on **stdout**. Empty output + exit 2 means
+  read stdout for `error`/`hint` — never switch to `execute_code` (guard blocks it).
 - **Forbidden:** `execute_code`, `curl`, hand-rolled HTTP, hardcoded `BRIDGE_KEY`,
   reading `plugin_api.py` / `reply_draft.py` / `serve.py` / `cal.py`, direct `cal.db`,
   `search_files` under `plugins/kol-ops-bridge/`, PATCH `/escalations/{id}` after Console resolve.

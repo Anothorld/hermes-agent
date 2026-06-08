@@ -16,6 +16,7 @@ import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { dialog } from '../components/dialogs/useDialog';
 import { useEnvStore, toast } from '../lib/store';
 import { errorSummary } from '../lib/errors';
+import { runStateLabel, isRunStateActive } from '../lib/runStateLabels';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 
 type ProductVariant = {
@@ -169,9 +170,12 @@ function StatusPill({ s }: { s: CampaignRow['status'] }) {
 
 function RunStatePill({ s }: { s: string | null }) {
   if (!s) return null;
+  const label = runStateLabel(s);
   const cls =
-    s === 'running' || s === 'queued' || s === 'waiting_for_approval' || s === 'stopping'
-      ? 'bg-sky-100 text-sky-800'
+    isRunStateActive(s)
+      ? s === 'waiting_for_approval'
+        ? 'bg-amber-100 text-amber-900 ring-1 ring-amber-300'
+        : 'bg-sky-100 text-sky-800'
       : s === 'completed'
       ? 'bg-emerald-100 text-emerald-800'
       : s === 'failed'
@@ -179,7 +183,15 @@ function RunStatePill({ s }: { s: string | null }) {
       : s === 'cancelled'
       ? 'bg-amber-100 text-amber-800'
       : 'bg-slate-100 text-slate-700';
-  return <span className={`rounded px-2 py-0.5 text-xs ${cls}`} title="Gateway run_state">agent: {s}</span>;
+  const title =
+    s === 'waiting_for_approval'
+      ? 'Agent 被一条终端命令拦住，需要您在右侧「命令待批」浮层点允许/拒绝'
+      : `Gateway run_state: ${s}`;
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs ${cls}`} title={title}>
+      agent: {label}
+    </span>
+  );
 }
 
 function ReplyWatcherPanel({

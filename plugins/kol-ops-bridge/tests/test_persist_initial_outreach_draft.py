@@ -87,6 +87,68 @@ def test_persist_initial_outreach_via_api(cal_db, monkeypatch, bridge_pkg):
     assert facts["approval.reply_draft"]["draft"]["to"] == "kol@example.com"
 
 
+def _persist_outreach_body(plugin_api, cal_db, *, iid: str, raw_body: str) -> dict:
+    body = plugin_api.PersistReplyDraftBody(
+        identity_id=iid,
+        campaign_id="C-OUT",
+        env="TEST",
+        source_message_id="draft:outreach_C-OUT_{}".format(iid),
+        primary_lane="commerce",
+        primary_goal="outreach",
+        child_skill="kol-cold-outreach",
+        child_envelope={
+            "subject": "POVISON collab",
+            "body": raw_body,
+            "to": "kol@example.com",
+        },
+        latest_email={
+            "thread_id": f"outreach_C-OUT_{iid}",
+            "message_id": f"draft:outreach_C-OUT_{iid}",
+            "subject": "POVISON collab",
+        },
+    )
+    plugin_api.persist_reply_draft(body, x_bridge_key=None)
+    facts = cal_db.latest_facts_for(identity_id=iid, campaign_id="C-OUT", env="TEST")
+    return facts["approval.reply_draft"]["draft"]
+
+
+def test_plain_text_outreach_body_normalized_to_html(cal_db, monkeypatch, bridge_pkg):
+    """A plain-text marketing paragraph must never persist as-is (POVISON 683)."""
+    _ = bridge_pkg
+    plugin_api = _load_plugin_api()
+    monkeypatch.setattr(plugin_api, "_require_bridge_key", lambda _k: None)
+    iid = cal_db.upsert_identity(primary_handle="cold_plain", platform="instagram",
+                                 primary_email="kol@example.com")
+    cal_db.upsert_campaign_config(campaign_id="C-OUT", env="TEST", test_mode_to="t@x.com")
+
+    draft = _persist_outreach_body(
+        plugin_api, cal_db, iid=iid,
+        raw_body=(
+            "Hi McKenna,\n\nWe love your work. See https://www.povison.com/tv-stand "
+            "for the piece.\n\nBest,\nPOVISON Team"
+        ),
+    )
+    assert "<p>" in draft["body"]
+    assert draft["html"] is True
+    # Bare product URL must become a clickable link.
+    assert '<a href="https://www.povison.com/tv-stand">' in draft["body"]
+
+
+def test_html_outreach_body_preserved(cal_db, monkeypatch, bridge_pkg):
+    """An already-HTML body is kept verbatim (idempotent)."""
+    _ = bridge_pkg
+    plugin_api = _load_plugin_api()
+    monkeypatch.setattr(plugin_api, "_require_bridge_key", lambda _k: None)
+    iid = cal_db.upsert_identity(primary_handle="cold_html", platform="instagram",
+                                 primary_email="kol@example.com")
+    cal_db.upsert_campaign_config(campaign_id="C-OUT", env="TEST", test_mode_to="t@x.com")
+
+    html = '<p>Hi Mary,</p><p>We just launched <a href="https://x.com/s">the sofa</a>.</p>'
+    draft = _persist_outreach_body(plugin_api, cal_db, iid=iid, raw_body=html)
+    assert draft["body"] == html
+    assert draft["html"] is True
+
+
 def test_write_event_preflight_missing_identity():
     proc = subprocess.run(
         [
@@ -112,6 +174,32 @@ def test_write_event_preflight_missing_identity():
     assert payload["error"] == "invalid_cli_args"
     hint = payload.get("hint", "") + str(payload.get("missing", ""))
     assert "identity_id" in hint or "--identity-id" in hint
+
+
+def test_get_user_style_without_owner_returns_empty(cal_db, monkeypatch, bridge_pkg):
+    """user_style GET without an owner id must not 400-derail a drafting run."""
+    _ = bridge_pkg
+    plugin_api = _load_plugin_api()
+    monkeypatch.setattr(plugin_api, "_require_bridge_key", lambda _k: None)
+    out = plugin_api.get_policy("user_style", owner_user_id=None, env="LIVE")
+    assert out == {"policy": None}
+
+
+def test_put_user_style_without_owner_still_strict(cal_db, monkeypatch, bridge_pkg):
+    """Writes still require an owner id (no silent global personal style)."""
+    _ = bridge_pkg
+    import pytest as _pytest
+
+    from fastapi import HTTPException
+
+    plugin_api = _load_plugin_api()
+    monkeypatch.setattr(plugin_api, "_require_bridge_key", lambda _k: None)
+    body = plugin_api.PolicyPutBody(
+        content_md="x", updated_by="t", env="LIVE", owner_user_id=None,
+    )
+    with _pytest.raises(HTTPException) as exc:
+        plugin_api.put_policy("user_style", body, x_bridge_key=None)
+    assert exc.value.status_code == 400
 
 
 def test_cli_persist_initial_outreach_help():

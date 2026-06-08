@@ -4,6 +4,7 @@ import { setToken } from '../../api';
 import { dialog } from '../dialogs/useDialog';
 import { CampaignPicker } from './CampaignPicker';
 import { EnvSwitch } from './EnvSwitch';
+import { GatewayApprovalNavBadge } from '../gateway-approval/GatewayApprovalNavBadge';
 
 const ITEMS = [
   ['/products', '产品'],
@@ -75,6 +76,7 @@ export function GlobalNav() {
       <div className="mx-2 h-5 w-px bg-slate-200" aria-hidden />
       <CampaignPicker />
       <EnvSwitch />
+      <GatewayApprovalNavBadge />
       <div className="ml-auto flex items-center gap-2">
         <Link
           to="/products"

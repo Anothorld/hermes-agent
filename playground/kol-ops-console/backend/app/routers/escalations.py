@@ -23,6 +23,7 @@ from ..bridge_agent_contract_loader import (
     draft_preview_cli_checklist,
     gateway_contract_block,
     resume_cli_checklist,
+    terminal_safety_rules,
 )
 from ..run_registry import get_inflight_run, register_run
 
@@ -41,7 +42,8 @@ _BRIDGE_AGENT_HARD_RULES = gateway_contract_block() + "\n"
 _RESUME_INSTRUCTIONS = (
     "You are resuming a KOL outreach campaign after a web-console escalation "
     "was answered by the operator.\n"
-    f"{_BRIDGE_AGENT_HARD_RULES}\n"
+    f"{_BRIDGE_AGENT_HARD_RULES}"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"Repo root for file tools is {_REPO_ROOT}. "
     "Do NOT read or search under `plugins/kol-ops-bridge/` for API discovery. "
     "For bridge I/O use the native **terminal** tool with one "
@@ -58,7 +60,8 @@ _RESUME_INSTRUCTIONS = (
 _DRAFT_PREVIEW_INSTRUCTIONS = (
     "You are generating a PREVIEW email draft for an open KOL escalation. "
     "Hard rules:\n"
-    f"{_BRIDGE_AGENT_HARD_RULES}\n"
+    f"{_BRIDGE_AGENT_HARD_RULES}"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
     "- Use the **terminal** tool with `kol_bridge_tool.py` (not execute_code/curl).\n"
@@ -73,6 +76,10 @@ _DRAFT_PREVIEW_INSTRUCTIONS = (
     "  kol-contract-coordinator for contract_signing, "
     "  kol-deliverables-clarifier for deliverables_scope, etc.) and "
     "  invoke its draft branch with operator_answer + operator_facts.\n"
+    "- Before drafting: `kol-email-style-loader` (pass `--owner-user-id` from "
+    "  brief `requested_by_user_id` when present) + `kol-creator-brief-loader`, "
+    "  then `humanizer`. Follow that skill's body format contract (HTML for "
+    "  outreach-style drafts; reply-thread drafts per skill).\n"
     "- Write the resulting draft as a single ``approval.reply_draft`` "
     "  fact via ``kol_bridge_tool.py write-facts --namespace approval "
     "  --json @/tmp/draft.json``. The JSON body MUST set "
@@ -98,6 +105,7 @@ def _compose_draft_preview_brief(
     operator_answer: str,
     operator_facts: dict[str, Any],
     actor_email: str,
+    actor_user_id: int | None = None,
 ) -> str:
     return "\n".join([
         "# escalation_draft_preview",
@@ -108,6 +116,7 @@ def _compose_draft_preview_brief(
         f"goal: {escalation.get('goal') or ''}",
         f"reason: {escalation.get('reason') or ''}",
         f"requested_by: {actor_email}",
+        f"requested_by_user_id: {actor_user_id if actor_user_id is not None else ''}",
         "",
         "# operator_answer",
         operator_answer.strip(),
@@ -131,6 +140,7 @@ def _compose_draft_preview_brief(
             identity_id=escalation.get("identity_id") or 0,
             campaign_id=str(escalation.get("campaign_id") or ""),
             env=str(escalation.get("env") or "LIVE"),
+            operator_user_id=actor_user_id,
         ),
     ])
 
@@ -252,6 +262,7 @@ def _compose_resume_brief(
     operator_answer: str,
     operator_facts: dict[str, Any],
     actor_email: str,
+    actor_user_id: int | None = None,
     require_draft: bool = False,
 ) -> str:
     next_step_lines = [
@@ -277,7 +288,10 @@ def _compose_resume_brief(
             "for the active goal (kol-deliverables-clarifier for "
             "deliverables_scope, kol-compensation-negotiator for "
             "compensation_negotiation, kol-contract-coordinator for "
-            "contract_signing, etc.) and write exactly one "
+            "contract_signing, etc.). Before drafting: "
+            "`kol-email-style-loader` (pass `--owner-user-id` from brief "
+            "`requested_by_user_id` when present) + `kol-creator-brief-loader`, "
+            "then `humanizer`. Write exactly one "
             "approval.reply_draft fact via `kol_bridge_tool.py "
             "write-facts --namespace approval --json @/tmp/draft.json`. "
             "The JSON body MUST set campaign_id to the campaign_id "
@@ -295,6 +309,7 @@ def _compose_resume_brief(
         f"goal: {escalation.get('goal') or ''}",
         f"reason: {escalation.get('reason') or ''}",
         f"resumed_by: {actor_email}",
+        f"requested_by_user_id: {actor_user_id if actor_user_id is not None else ''}",
         "",
         "# operator_answer",
         operator_answer.strip(),
@@ -314,6 +329,7 @@ def _compose_resume_brief(
             campaign_id=str(escalation.get("campaign_id") or ""),
             env=str(escalation.get("env") or "LIVE"),
             require_draft=require_draft,
+            operator_user_id=actor_user_id,
         ),
     ])
 
@@ -555,6 +571,7 @@ async def resolve_escalation(
             operator_answer=body.operator_answer,
             operator_facts=body.operator_facts,
             actor_email=user["email"],
+            actor_user_id=user.get("id"),
             require_draft=require_draft,
         )
         try:
@@ -665,6 +682,7 @@ async def preview_draft(
         operator_answer=body.operator_answer,
         operator_facts=body.operator_facts,
         actor_email=user["email"],
+        actor_user_id=user.get("id"),
     )
     ensure_gateway_bridge_key()
     try:

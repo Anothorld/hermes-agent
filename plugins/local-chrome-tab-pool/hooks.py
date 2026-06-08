@@ -120,13 +120,27 @@ def pre_tool_call(
 ) -> HookResult:
     del args, session_id, tool_call_id
 
-    if not tab_pool.is_enabled():
-        return None
-
     if tool_name == "cleanup_browser":
         return None
 
     if not _is_browser_tool(tool_name):
+        return None
+
+    if not tab_pool.is_enabled():
+        # Pooling is off — typically because the operator wired a shared
+        # browser-level CDP endpoint (BROWSER_CDP_URL via start-debug-chrome.sh).
+        # Still autostart debug Chrome on demand so the agent can open pages
+        # without a human launching the browser, then let the shared connection
+        # bind (no page-tab seeding in this mode). ``ensure_chrome_running``
+        # is a no-op when Chrome is already listening.
+        if tab_pool._external_browser_cdp_configured():
+            try:
+                tab_pool.ensure_chrome_running()
+            except Exception as exc:  # noqa: BLE001 — never block the tool call
+                logger.warning(
+                    "Shared-CDP mode: debug Chrome autostart failed for task=%s: %s",
+                    task_id, exc,
+                )
         return None
 
     tid = tab_pool.normalize_task_id(task_id)

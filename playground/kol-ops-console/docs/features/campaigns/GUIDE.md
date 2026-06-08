@@ -58,7 +58,7 @@
 | **排除已入库** | 已在 `list-candidates` 池中的 handle 不会出现在 `resume_directives` |
 | **重置** | 操作员 `POST /campaigns/start` 将 `diagnostics_history` 置为 `[]` |
 
-Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingests` / `next_round_focus` 字段名，勿用「Next round should:」纯 prose）。
+Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingests` / `next_round_focus` 字段名，勿用「Next round should:」纯 prose）。Rediscover gateway instructions 含 `terminal_safety` + browser no-hang（单页单次、禁止并行 browser fan-out）。
 
 工程说明：[`agent_prj/docs/kol-discovery-auto-retry-resume.md`](../../../../../../../docs/kol-discovery-auto-retry-resume.md)。
 
@@ -86,18 +86,30 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 `POST /campaigns/{id}/approve-shortlist` 流程：
 
 1. 将操作员勾选的 handle 解析为 `identity_ids`
-2. **`route-discovery`（scoped）** — 仅对这批 `identity_ids` 写 `identity.outreach_path` 并 `select-candidates`；**不会**把池内其余 `discovered` 候选一并提升为已批准
-3. `select-candidates` + 写 `approved` 事件 + 拉起 post-approval gateway run
+2. **`route-discovery`（scoped）** — 仅对这批 `identity_ids` 写 `identity.outreach_path` 并 `select-candidates`；**不会**把池内其余 `discovered` 候选一并提升为已批准（**不再**重复调用 `select-candidates`，避免大批量超时）
+3. 写 `approved` 事件 + **带重试**拉起 post-approval gateway run（`bridge_approve_timeout_sec` 默认 180s；gateway 502/503/504 自动重试 2 次）
+
+若 CAL 已更新但 gateway 启动失败，audit 会记 `campaign.approve_shortlist_gateway_failed`；操作员可再次点击批准（idempotent）或联系工程。
 
 产品页「已批准 / 待审批」计数来自 CAL `candidate_status`（`selected_for_outreach` vs 其他）。若误批需用 bridge `set-candidate-status` 将多余行改回 `discovered`；若误移除 shortlist，可将 `rejected` 改回 `discovered` / `shortlisted`。
 
 ## Agent 短名单批准 run（outreach）
 
-Console `POST …/approve-shortlist` 拉起 gateway run；brief 含 `bridge_cli_checklist`：
+Console `POST …/approve-shortlist` 拉起 gateway run（session `kol-campaign-outreach:{env}:{id}`，与 discovery 的 `kol-campaign:` 分离）；brief 含 `bridge_cli_checklist`：
 
-- 只用 **terminal** + `kol_bridge_tool.py`（禁止 execute_code/curl/读 bridge 源码）
+- 只用 **terminal** + **绝对路径** `kol-bridge-cli`（禁止 bare `python`、禁止相对 `plugins/…`、禁止 execute_code/curl）
+- **禁止 browser / Chrome DevTools MCP** 做 post-approval 邮箱 enrichment（Nox API → 失败则 escalation；guard 在 outreach/reply/draft 前缀 block `browser_*`，**所有** `kol-*` session block `mcp_chrome_devtools_*`）
 - 冷触达草稿：`persist-initial-outreach-draft`（稳定 `draft:outreach_{campaign}_{identity}`）
-- 门控插件：`kol-bridge-agent-guard`（需重启 Hermes 后生效）
+
+### 草稿正文必须是 HTML（POVISON 683 根因修复）
+
+初邀/重起草稿正文是**直接写进 operator Gmail 草稿**的内容，必须是 HTML：每段 `<p>…</p>`，产品用真实 `<a href="<product_url>">…</a>` 链接，不能是纯文本营销段落，也不能是裸 URL。
+
+- **技能层**：`kol-cold-outreach` / `kol-reengagement-outreach` 先跑 `kol-email-style-loader`（带 `--owner-user-id`）+ `kol-creator-brief-loader`，再 `humanizer`，输出 `html:true` + `kind:initial_outreach`。
+- **Brief 层**：短名单批准 brief（`approved_by_user_id`）与 redraft brief（`requested_by_user_id`）均注入操作员 id，并要求 HTML + 产品链接 + style-loader/humanizer 流水线。
+- **Bridge 兜底（确定性）**：`POST /reply-drafts/persist` 对初邀草稿调用 `reply_draft.to_html_email_body()`——纯文本会被自动包成 `<p>` 并把裸 URL 转成 `<a href>`，同时置 `html:true`；已是 HTML 则原样保留（幂等）。因此纯文本营销段落**不可能再被持久化/发送**；产品链接无法由 Bridge 凭空生成，仍由技能/brief 保证。
+- **user_style**：`GET /policies/user_style` 无 `owner_user_id` 时返回空文档（不再 400），匹配 style-loader 的「无个人风格」回退。
+- 门控插件：`kol-bridge-agent-guard`（**修改后必须重启 Hermes gateway**；匹配 `task_id`，非空 `session_id`）
 
 详见 `agent_prj/docs/kol-bridge-agent-tooling.md`、skill `kol-cold-outreach`。
 
@@ -113,3 +125,17 @@ KOL 详情页 **主动跟进** → `POST /campaigns/{cid}/identities/{iid}/follo
 | 仅残留初邀审批记录（`child_skill=kol-cold-outreach` 等）且初邀已发出 | **不拦截** — 待审批页不会出现该历史记录，属正常 |
 
 生成后进入待审批；**批准后**在**原 Gmail 线程**内创建回复草稿（`Re:` 主题 + 引用上一封），不是另起新邮件。Brief 会注入 `gmail_sent_thread_id` / `gmail_thread_id`；bridge `persist-reply-draft` 会把合成 thread 锚点替换为真实线程 ID。旧 Gmail 草稿（含 `offer.gmail_draft_id`）不会自动删除，重复批准前请手动清理草稿箱。
+
+## 待审批草稿重生成（redraft-outreach）
+
+KOL 详情页 **生成待审批草稿** → `POST /campaigns/{cid}/identities/{iid}/redraft-outreach`（skill `kol-cold-outreach` / `kol-reengagement-outreach`）。
+
+| 冲突码 | 含义 |
+|--------|------|
+| `campaign_run_in_flight` | 该 campaign 另有 agent run 在跑（approve、rediscover 等） |
+| `redraft_inflight` | 同一 KOL 在 5 分钟内已触发过重生成 |
+| `approved_draft_exists` | Gmail 里仍有已审批未发送草稿，需 `discard_existing_approved_draft=true` |
+| `already_sent` | 初邀已发出，应走 follow-up |
+| `gateway_concurrency_limit` (429) | Hermes Gateway 同时运行 run 数达上限（默认 10）。Console 会自动重试约 40s；仍失败时提示等待或在 Agent 会话面板停止不需要的任务 |
+
+实现：`gateway_client.start_run_with_retry` + `gateway_http.http_exception_from_gateway_start`。

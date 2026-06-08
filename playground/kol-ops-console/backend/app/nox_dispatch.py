@@ -15,12 +15,15 @@ from .run_registry import get_inflight_run, register_run
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[4])
 
+_OUTREACH_SESSION_PREFIX = "kol-campaign-outreach"
+
 _NOX_CONTACTS_BATCH_INSTRUCTIONS = (
     "You are running Gate B Nox contacts for multiple KOLs after shortlist approval.\n"
-    f"- Nox: python {_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py\n"
-    f"- Bridge: python {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py\n"
+    f"- Nox: python3 {_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py\n"
+    f"- Bridge: {_REPO_ROOT}/plugins/kol-ops-bridge/scripts/kol-bridge-cli\n"
     "Process identity_ids in order. Skip if primary_email already set.\n"
     "Use contacts --gate pre_outreach_confirm with --campaign-config-file.\n"
+    "DO NOT use browser_* or mcp_chrome_devtools_* tools in this run.\n"
 )
 
 

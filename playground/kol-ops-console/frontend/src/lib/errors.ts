@@ -105,6 +105,11 @@ function extractDetail(body: string): string | null {
             '再继续 LIVE 尽调 / 查邮箱 / 补搜。'
           );
         }
+        if (inner.code === 'gateway_concurrency_limit') {
+          return typeof inner.message === 'string'
+            ? inner.message
+            : '当前 Agent 任务过多，请稍候再试或在 Agent 会话面板停止不需要的任务';
+        }
         if (typeof inner.detail === 'string') return inner.detail;
         if (typeof inner.message === 'string') {
           const hint = typeof inner.hint === 'string' ? ` ${inner.hint}` : '';

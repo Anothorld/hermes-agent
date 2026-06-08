@@ -48,8 +48,8 @@ def reply_dispatcher_cli_rules() -> str:
     return _contract_module().reply_dispatcher_cli_rules()
 
 
-def terminal_safety_rules() -> str:
-    return _contract_module().terminal_safety_rules()
+def terminal_safety_rules(**kwargs: Any) -> str:
+    return _contract_module().terminal_safety_rules(**kwargs)
 
 
 def approval_cli_checklist(**kwargs: Any) -> str:

@@ -2847,6 +2847,22 @@ class APIServerAdapter(BasePlatformAdapter):
     _MAX_CONCURRENT_RUNS = 10  # Prevent unbounded resource allocation
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
     _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
+
+    @staticmethod
+    def _no_progress_timeout() -> int:
+        """No-progress watchdog ceiling (seconds); 0 disables it.
+
+        A run stuck in ``running`` whose agent has made no activity (no events,
+        no heartbeats — ``agent._last_activity_ts``) for this long is treated as
+        hung and force-failed so it cannot occupy a slot forever (POVISON 686).
+        Generous default so legitimate long tools (builds, subagents) that
+        heartbeat are never reaped; override with
+        ``HERMES_RUN_NO_PROGRESS_TIMEOUT_S`` (set 0 to disable).
+        """
+        try:
+            return max(int(os.environ.get("HERMES_RUN_NO_PROGRESS_TIMEOUT_S", "1800")), 0)
+        except (TypeError, ValueError):
+            return 1800
     # Bound per-run event history. 5000 frames comfortably covers an hour
     # of typical agent activity; if a run overflows, the oldest frames are
     # dropped (reconnecting clients lose the head of the log but still
@@ -3590,6 +3606,74 @@ class APIServerAdapter(BasePlatformAdapter):
             for run_id in stale_statuses:
                 self._run_statuses.pop(run_id, None)
 
+    async def _watchdog_stuck_runs(self) -> None:
+        """Force-fail in-flight runs that have made no progress for too long.
+
+        Backstop for any stall the per-tool / per-batch timeouts miss (hung
+        tool, congested LLM, blocked hook). Uses ``agent._last_activity_ts``
+        which is bumped both by emitted events and by tool heartbeats, so a
+        legitimately long tool that heartbeats is never reaped — only a truly
+        silent run is. ``waiting_for_approval`` runs are explicitly skipped
+        (they legitimately wait for the operator).
+        """
+        while True:
+            await asyncio.sleep(60)
+            ceiling = self._no_progress_timeout()
+            if ceiling <= 0:
+                continue
+            now = time.time()
+            for run_id, idle in self._stuck_run_ids(now, ceiling):
+                agent = self._active_run_agents.get(run_id)
+                logger.error(
+                    "[api_server] run %s made no progress for %ds (last=%r) — "
+                    "force-failing via no-progress watchdog",
+                    run_id, idle,
+                    getattr(agent, "_last_activity_desc", None) if agent else None,
+                )
+                if agent is not None:
+                    try:
+                        agent.interrupt(f"No-progress watchdog: no activity for {idle}s")
+                    except Exception:
+                        pass
+                self._set_run_status(
+                    run_id, "failed", last_event="run.failed",
+                    error="no_progress_timeout",
+                )
+                self._record_event(run_id, {
+                    "event": "run.failed",
+                    "run_id": run_id,
+                    "timestamp": now,
+                    "error": "no_progress_timeout",
+                    "reason": f"no progress for {idle}s (watchdog)",
+                })
+                self._mark_run_done(run_id)
+
+    def _stuck_run_ids(self, now: float, ceiling: int) -> list:
+        """Return ``[(run_id, idle_seconds), ...]`` for in-flight runs that have
+        made no progress for longer than ``ceiling`` seconds.
+
+        A run qualifies only when: status is exactly ``running`` (never
+        ``queued`` / ``waiting_for_approval`` / ``stopping`` / terminal), an
+        agent + live task exist, and the agent's last activity (events OR tool
+        heartbeats) is older than the ceiling.
+        """
+        stuck: list = []
+        for run_id, status in list(self._run_statuses.items()):
+            if status.get("status") != "running":
+                continue
+            agent = self._active_run_agents.get(run_id)
+            task = self._active_run_tasks.get(run_id)
+            if agent is None or task is None or task.done():
+                continue
+            last = float(getattr(agent, "_last_activity_ts", 0) or 0)
+            # Before the agent's first activity tick, fall back to the last
+            # status change so a just-started run is never reaped early.
+            ref = max(last, float(status.get("updated_at", 0) or 0))
+            if ref <= 0 or (now - ref) <= ceiling:
+                continue
+            stuck.append((run_id, int(now - ref)))
+        return stuck
+
     # ------------------------------------------------------------------
     # BasePlatformAdapter interface
     # ------------------------------------------------------------------
@@ -3636,6 +3720,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 pass
             if hasattr(sweep_task, "add_done_callback"):
                 sweep_task.add_done_callback(self._background_tasks.discard)
+
+            # No-progress watchdog: force-fail in-flight runs that hang with no
+            # activity so they cannot occupy a run slot forever (POVISON 686).
+            watchdog_task = asyncio.create_task(self._watchdog_stuck_runs())
+            try:
+                self._background_tasks.add(watchdog_task)
+            except TypeError:
+                pass
+            if hasattr(watchdog_task, "add_done_callback"):
+                watchdog_task.add_done_callback(self._background_tasks.discard)
 
             # Refuse to start network-accessible without authentication
             if is_network_accessible(self._host) and not self._api_key:

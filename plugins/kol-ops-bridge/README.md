@@ -45,13 +45,17 @@ the external Web system uses to start / read / write KOL outreach state.
 | `python plugins/kol-ops-bridge/kol_bridge_tool.py` (no `scripts/`) | Shim forwards + stderr notice; or use canonical path | Always: `python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py` |
 | Running with no subcommand | Exit 2 + **Hint** pointing at `--help` | Add subcommand, e.g. `health`, `get-escalation` |
 | `get-escalation --campaign-id …` | Preflight **invalid_cli_args** JSON + hint | Use `--escalation-id` only; filter campaigns via `list-escalations --env LIVE` |
-| Swallowing stderr (`2>/dev/null`) | Hides hints and bridge errors | Keep stderr visible when debugging |
+| Empty terminal + exit 2 | Agent only sees **stdout** — stderr-only errors looked like blank output | Read the last stdout line for `{"error":...,"hint":...}`; all failure paths emit there |
+| Swallowing stderr (`2>/dev/null`) | Hides human-facing mirror only | Errors are on stdout first; keep stderr visible when debugging on a TTY |
 | Expecting direct SQLite | CLI only hits HTTP (`serve.py` must be up) | Start bridge / check `health` first |
 | Agent `execute_code` + `curl` + hardcoded `BRIDGE_KEY` | Bypasses CLI; leaks secrets | See **Agent bridge contract** below |
 
 ## Agent bridge contract (gateway / kol-orchestrator)
 
-Shared lint + brief text: `bridge_agent_contract.py`. Hermes hook:
+Shared lint + brief text: `bridge_agent_contract.py` (`CLI_INVOCATION` uses
+**`python3`**; gateway briefs should use absolute **`kol-bridge-cli`** via
+`cli_invocation_abs(repo_root)` — wrapper always resolves `python3` + absolute
+`kol_bridge_tool.py`). Hermes hook:
 `plugins/kol-bridge-agent-guard/` (blocks curl / source reads on `kol-*` sessions).
 
 **Cold outreach persist:** `persist-initial-outreach-draft` — stable

@@ -32,7 +32,11 @@ from .nox_gate import materialize_discovery_nox_config
 from .bridge_runtime import ensure_gateway_bridge_key
 from .campaign_locks import campaign_lock
 from .gateway_client import GatewayClient, GatewayError
-from .bridge_agent_contract_loader import discovery_cli_rules, gateway_contract_block
+from .bridge_agent_contract_loader import (
+    discovery_cli_rules,
+    gateway_contract_block,
+    terminal_safety_rules,
+)
 from .run_registry import get_inflight_run, register_run
 
 
@@ -58,8 +62,11 @@ REDISCOVERY_INSTRUCTIONS = (
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
     f"{gateway_contract_block()}\n"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"{discovery_cli_rules()}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
+    "- CLI failures print JSON on **stdout**. Empty output + exit 2 → read\n"
+    "  stdout for `error`/`hint`; never fall back to execute_code.\n"
     "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
     "- Use the **terminal** tool for `kol_bridge_tool.py` (not execute_code+subprocess).\n"
     "- Ingest JSON shape: `skills/social-media/instagram-kol-discovery/references/"
@@ -88,6 +95,10 @@ REDISCOVERY_INSTRUCTIONS = (
     "   `browser_snapshot`, `browser_get_images`, `browser_click`,\n"
     "   `browser_type`, `vision_analyze`. Do NOT use the\n"
     "   `mcp_chrome_devtools_*` family.\n"
+    "   **Browser no-hang:** one page at a time, single attempt per URL.\n"
+    "   Navigate/snapshot error or timeout → switch surface; never retry the\n"
+    "   same URL in a loop. A partial floor is acceptable; a hung run is not.\n"
+    "   Do not fan out parallel browser sessions in one run.\n"
     "   When the brief includes `nox_discovery_enabled: true` and\n"
     "   `campaign_config_file:`, run the Nox audience screen per the\n"
     "   discovery skill (after profile pre-check, before Reel deep dive).\n"

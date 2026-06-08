@@ -30,7 +30,19 @@
 | GET/PATCH | `/facts`, `/facts/multi` | CAL 事实 |
 | GET | `/identities/{id}/goals` | 目标/泳道进度 |
 | GET | `/kols/{id}/communication-history` | 绑定邮箱线程 |
-| POST | `/kols/{id}/discover`, `/email/*`, `/nox/*` | 发现/邮件/Nox |
+| POST | `/kols/{id}/discover-email` | Nox Gate B → `kol-email-discovery`（Tier 1 WebSearch/WebFetch，Tier 2 仅 `browser_*`；**禁止** `mcp_chrome_devtools_*`；gateway instructions 含 `terminal_safety` + no-hang） |
+| POST | `/kols/{id}/discover-social-links` | `kol-social-link-discovery`（同上 CLI/terminal 契约；browser 用 Tier 2 no-hang 纪律） |
+| POST | `/kols/{id}/email`, `/kols/{id}/nox-contacts`, `/kols/{id}/nox/*` | 手动邮箱 / 仅 Nox Gate B / 尽调与监测 |
+
+## 全网搜索邮箱（kol-email-discovery）— Tier 2 无挂起纪律（POVISON 686 修复）
+
+686 现象：浏览器**只开了一个空 `about:blank` 标签页，从未导航到任何网页**，run 随后挂住。根因不是页面加载超时（浏览器 CLI 本身有 60s 硬超时会 kill），而是：被强停的 run 不会执行 `cleanup_browser`，其 pool 标签页**泄漏**为孤儿 `about:blank`，在共享 debug Chrome 里越积越多、拖慢后续 CDP attach；叠加并行 email-discover 批量把 gateway 槽位/LLM 打满。
+
+修复：
+- **tab-pool 插件**（`plugins/local-chrome-tab-pool/internal/tab_pool.py`）：`acquire()` 前调用 `reap_orphan_blank_tabs()`，只关闭**未被 pool 跟踪且 url 为 `about:blank`** 的 page target——真实页面与在用标签页不受影响。
+- **技能 + brief 纪律**：Tier 2 一页一次、单次尝试，导航/快照报错或超时即记入 `tried` 继续，绝不重试同一 URL；用尽 8 页预算即返回 miss；Chrome 无法启动则 miss `browser_unavailable`。**绝不让 run 挂死**。
+- **并发**：一次只跑一个 `kol-email-discovery`，不要为多个身份并行浏览器发现（会饱和 gateway 槽位与共享 Chrome）。
+- **CLI 错误**：bridge CLI 失败路径在 **stdout** 输出 JSON；空 terminal + exit 2 应读 stdout 的 `error`/`hint`，禁止转 `execute_code`。
 
 ## 列表性能（看板 / 审批 / 详情）
 

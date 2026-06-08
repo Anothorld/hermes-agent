@@ -8,7 +8,7 @@
 |-----------|------|------------|
 | `shell/` | 全局导航、TEST/LIVE、活动选择、面包屑 | 跨模块 |
 | `agent-dock/` | Agent 会话浮层 | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |
-| `gateway-approval/` | Gateway 审批浮层 | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |
+| `gateway-approval/` | Gateway 命令审批浮层 + 顶栏徽章 | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |
 | `dialogs/` | 确认/输入/归档弹窗 | 跨模块 |
 | `feedback/` | Toast、错误提示 | §5 UI 规则 |
 | `inputs/` | 事实输入、KOL 搜索 | [kols](../../../docs/features/kols/GUIDE.md) |

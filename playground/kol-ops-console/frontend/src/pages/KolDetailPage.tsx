@@ -1203,6 +1203,8 @@ function RedraftPanel({
               ? '另一次生成正在进行中'
               : phase.code === 'campaign_run_in_flight'
               ? 'campaign 还有别的 agent run 在跑'
+              : phase.code === 'gateway_concurrency_limit'
+              ? 'Agent 任务已满，请稍候再试'
               : phase.code === 'already_sent'
               ? '邮件已经发出，无需再生成'
               : phase.code === 'approved_draft_exists'
@@ -1562,6 +1564,8 @@ function ProactiveFollowupPanel({
               ? '已有待审批草稿'
               : phase.code === 'followup_inflight'
               ? '另一次生成正在进行'
+              : phase.code === 'gateway_concurrency_limit'
+              ? 'Agent 任务已满，请稍候再试'
               : '生成失败'}
           </div>
           <p className="mt-0.5 break-words">{phase.message}</p>
@@ -2256,6 +2260,10 @@ function EmailPanel({
               ? '邮箱已经有了'
               : phase.code === 'discover_email_inflight'
               ? '已经有一个搜索在跑'
+              : phase.code === 'gateway_concurrency_limit'
+              ? 'Agent 任务已满，请稍后再试'
+              : phase.code === 'nox_quota_exhausted'
+              ? 'Nox 配额已用尽'
               : phase.code === 'email_already_set'
               ? '已有邮箱（需 override_existing=true 才能覆盖）'
               : phase.code === 'invalid_email' || phase.code === 'empty_email'

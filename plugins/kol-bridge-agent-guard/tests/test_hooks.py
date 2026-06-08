@@ -33,7 +33,7 @@ def test_blocks_execute_code_curl():
     assert payload["error"] == "bridge_agent_contract_violation"
 
 
-def test_allows_terminal_kol_bridge_tool():
+def test_blocks_bare_python_bridge_cli():
     h = _hooks()
     out = h.pre_tool_call(
         "terminal",
@@ -44,6 +44,65 @@ def test_allows_terminal_kol_bridge_tool():
             ),
         },
         session_id="kol-campaign:LIVE:SEB",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_allows_terminal_kol_bridge_cli_wrapper():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "/Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli "
+                "get-escalation --escalation-id 108 --env LIVE"
+            ),
+        },
+        session_id="kol-campaign:LIVE:SEB",
+    )
+    assert out is None
+
+
+def test_blocks_browser_on_outreach_session():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.instagram.com/foo/"},
+        task_id="kol-campaign-outreach:LIVE:POVISON-TS-8319",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_blocks_mcp_chrome_on_kol_session_via_task_id():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "mcp_chrome_devtools_navigate_page",
+        {"url": "https://www.instagram.com/foo/"},
+        task_id="kol-email-discover:LIVE:701",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "mcp_chrome_devtools" in out["message"]
+
+
+def test_allows_browser_on_email_discover_session():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.instagram.com/foo/"},
+        task_id="kol-email-discover:LIVE:701",
+    )
+    assert out is None
+
+
+def test_allows_browser_on_discovery_session():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.instagram.com/foo/"},
+        task_id="kol-campaign:LIVE:POVISON-TS-8319",
     )
     assert out is None
 

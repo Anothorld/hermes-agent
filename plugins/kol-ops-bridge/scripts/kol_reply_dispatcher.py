@@ -75,6 +75,10 @@ _GATEWAY_BASE = os.environ.get(
     "HERMES_GATEWAY_BASE", "http://127.0.0.1:8642"
 ).rstrip("/")
 _GATEWAY_KEY = os.environ.get("HERMES_GATEWAY_KEY")
+_HERMES_AGENT_ROOT = Path(__file__).resolve().parents[3]
+_BRIDGE_CLI_ABS = (
+    _HERMES_AGENT_ROOT / "plugins/kol-ops-bridge/scripts/kol_bridge_tool.py"
+)
 _DETACHED_MATCH_WINDOW_DAYS = 14
 _PERSONAL_EMAIL_DOMAINS = {
     "gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "aol.com",
@@ -631,9 +635,11 @@ _DISPATCHER_INSTRUCTIONS = (
     "(especially allow_autoflow / gate_budget / gate_contract / gate_payout). "
     "For idempotency labels, use only `kol_bridge_tool.py mark-reply-handled`; "
     "do not call Gmail label APIs or custom scripts directly. "
+    f"MANDATORY bridge CLI: python3 {_BRIDGE_CLI_ABS} <subcommand> --env <env> ... "
+    "Always use python3 (never bare `python`). Use this absolute path from any cwd. "
     "Routing/facts/drafts: use only kol_bridge_tool.py subcommands documented in "
     "kol-reply-dispatcher/references/shared/bridge-http-api-endpoints.md — "
-    "never import kol-ops-bridge Python modules or use terminal/execute_code "
+    "never import kol-ops-bridge Python modules or use execute_code "
     "for Bridge HTTP."
 )
 
@@ -1001,6 +1007,11 @@ def _process_message(
         return "skipped"
 
     session_id = f"kol-reply:{env}:{identity_id}:{msg.message_id}"
+    if retry_gateway_only:
+        # Prior runs on the canonical session_id leave a bloated state.db
+        # transcript (failed terminal loops). Use a fresh session so the
+        # recovery run starts clean instead of replaying ~70k tokens of noise.
+        session_id = f"{session_id}:retry-{_dt.datetime.now(_dt.timezone.utc):%Y%m%d%H%M%S}"
     input_text = json.dumps({
         "pending_replies": [
             _pending_reply_payload(

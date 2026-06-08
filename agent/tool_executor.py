@@ -56,6 +56,24 @@ logger = logging.getLogger(__name__)
 _MAX_TOOL_WORKERS = 8
 
 
+def _tool_batch_wallclock_seconds() -> int:
+    """Wall-clock ceiling for a concurrent tool batch.
+
+    A hung tool (or a blocking ``pre_tool_call`` hook) must not spin the
+    concurrent wait loop forever while its 30s heartbeat masks the stall from
+    the gateway's inactivity reaper (POVISON 686). Generous by default so it
+    only catches genuine infinite hangs, never legitimate long-running tools;
+    override with ``HERMES_TOOL_BATCH_TIMEOUT_S``.
+    """
+    try:
+        return max(int(os.environ.get("HERMES_TOOL_BATCH_TIMEOUT_S", "1200")), 60)
+    except (TypeError, ValueError):
+        return 1200
+
+
+_TOOL_BATCH_WALLCLOCK_S = _tool_batch_wallclock_seconds()
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so patches like ``run_agent._set_interrupt`` work."""
     import run_agent
@@ -285,12 +303,20 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         futures = []
         if runnable_calls:
             max_workers = min(len(runnable_calls), _MAX_TOOL_WORKERS)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Explicit executor (not a `with` block) so a hung tool future
+            # cannot make the context-manager exit block forever on
+            # shutdown(wait=True). On the wall-clock breach below we tear it
+            # down with wait=False so the run can proceed.
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            _batch_timed_out = False
+            try:
+                _future_to_index: dict = {}
                 for i, tc, name, args in runnable_calls:
                     # Propagate ContextVars (e.g. _approval_session_key); mirrors asyncio.to_thread.
                     ctx = contextvars.copy_context()
                     f = executor.submit(ctx.run, _run_tool, i, tc, name, args)
                     futures.append(f)
+                    _future_to_index[f] = i
 
                 # Wait for all to complete with periodic heartbeats so the
                 # gateway's inactivity monitor doesn't kill us during long
@@ -326,6 +352,44 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         concurrent.futures.wait(not_done, timeout=3.0)
                         break
 
+                    # Wall-clock ceiling: a tool (or its pre_tool_call hook)
+                    # that never returns must not spin this loop forever while
+                    # the 30s heartbeat below keeps masking the stall from the
+                    # gateway's inactivity reaper (POVISON 686). On breach,
+                    # synthesize a timeout result for each unfinished tool,
+                    # stop heartbeating, and abandon the workers so the agent
+                    # loop can continue to the next turn.
+                    if (time.time() - _conc_start) > _TOOL_BATCH_WALLCLOCK_S:
+                        _batch_timed_out = True
+                        _abandoned_names = []
+                        for f in not_done:
+                            f.cancel()
+                            idx = _future_to_index.get(f)
+                            if idx is None or results[idx] is not None:
+                                continue
+                            _to_name = parsed_calls[idx][1]
+                            _to_args = parsed_calls[idx][2]
+                            _abandoned_names.append(_to_name)
+                            results[idx] = (
+                                _to_name,
+                                _to_args,
+                                (
+                                    f"Error: tool '{_to_name}' exceeded the "
+                                    f"{_TOOL_BATCH_WALLCLOCK_S}s wall-clock limit and "
+                                    "was abandoned. The run continues — retry with a "
+                                    "narrower action if needed."
+                                ),
+                                time.time() - _conc_start,
+                                True,
+                                False,
+                            )
+                        logger.error(
+                            "tool batch exceeded %ds wall-clock; abandoned %d tool(s): %s",
+                            _TOOL_BATCH_WALLCLOCK_S, len(_abandoned_names),
+                            ", ".join(_abandoned_names[:5]),
+                        )
+                        break
+
                     _conc_elapsed = int(time.time() - _conc_start)
                     # Heartbeat every ~30s (6 × 5s poll intervals)
                     if _conc_elapsed > 0 and _conc_elapsed % 30 < 6:
@@ -338,6 +402,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                             f"concurrent tools running ({_conc_elapsed}s, "
                             f"{len(not_done)} remaining: {', '.join(_still_running[:3])})"
                         )
+            finally:
+                # Never block the run on a hung worker: on timeout drop the
+                # threads (they finish on their own — browser subprocesses are
+                # 60s-bounded), otherwise do the normal blocking join.
+                executor.shutdown(wait=not _batch_timed_out, cancel_futures=True)
     finally:
         if spinner:
             # Build a summary message for the spinner stop

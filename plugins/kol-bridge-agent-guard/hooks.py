@@ -15,6 +15,19 @@ HookResult = Optional[Union[None, Dict[str, str]]]
 
 _KOL_SESSION_PREFIXES = ("kol-campaign:", "kol-reply:", "kol-email-discover:", "kol-nox-")
 
+# Post-approval / reply / Nox batch: Nox API + bridge CLI only — no browser crawl.
+# ``kol-email-discover:`` is intentionally excluded: Console「全网搜索邮箱」runs
+# ``kol-email-discovery`` Tier 2 with built-in ``browser_*`` (never MCP Chrome).
+_BROWSER_BLOCKED_SESSION_PREFIXES = (
+    "kol-campaign-outreach:",
+    "kol-campaign-draft:",
+    "kol-nox-contacts-batch:",
+    "kol-reply:",
+)
+
+_BROWSER_TOOL_PREFIX = "browser_"
+_MCP_CHROME_TOOL_PREFIX = "mcp_chrome_devtools_"
+
 
 def _guard_enabled() -> bool:
     return os.environ.get("KOL_BRIDGE_AGENT_GUARD", "1").strip().lower() not in (
@@ -25,9 +38,28 @@ def _guard_enabled() -> bool:
     )
 
 
-def _kol_session(session_id: str) -> bool:
-    sid = (session_id or "").strip()
+def _session_key(session_id: str, task_id: str = "") -> str:
+    """Gateway runs pass ``task_id`` (e.g. kol-email-discover:LIVE:701); hooks
+    historically received empty ``session_id``. Prefer whichever is set."""
+    return (session_id or task_id or "").strip()
+
+
+def _kol_session(session_id: str, task_id: str = "") -> bool:
+    sid = _session_key(session_id, task_id)
     return any(sid.startswith(p) for p in _KOL_SESSION_PREFIXES)
+
+
+def _browser_blocked_session(session_id: str, task_id: str = "") -> bool:
+    sid = _session_key(session_id, task_id)
+    return any(sid.startswith(p) for p in _BROWSER_BLOCKED_SESSION_PREFIXES)
+
+
+def _is_browser_tool(tool_name: str) -> bool:
+    return tool_name.startswith(_BROWSER_TOOL_PREFIX)
+
+
+def _is_mcp_chrome_tool(tool_name: str) -> bool:
+    return tool_name.startswith(_MCP_CHROME_TOOL_PREFIX)
 
 
 def _load_contract():
@@ -74,10 +106,35 @@ def pre_tool_call(
     session_id: str = "",
     tool_call_id: str = "",
 ) -> HookResult:
-    del task_id, tool_call_id
+    del tool_call_id
 
     if not _guard_enabled():
         return None
+
+    sid = _session_key(session_id, task_id)
+
+    if _is_mcp_chrome_tool(tool_name) and _kol_session(session_id, task_id):
+        return {
+            "action": "block",
+            "message": (
+                "mcp_chrome_devtools_* is disabled for all KOL gateway sessions "
+                f"({sid or 'kol-*'}). The remote CDP endpoint is unreliable; use "
+                "built-in browser_* (discovery / kol-email-discovery Tier 2 only) "
+                "or kol-bridge-cli / nox_kol_tool.py for email enrichment. "
+                "Do not fall back to MCP after a connection error."
+            ),
+        }
+
+    if _is_browser_tool(tool_name) and _browser_blocked_session(session_id, task_id):
+        return {
+            "action": "block",
+            "message": (
+                "Browser tools are disabled for post-approval outreach, reply dispatch, "
+                "and Nox contact batch sessions. Use kol-bridge-cli / nox_kol_tool.py "
+                "(Nox contacts --gate pre_outreach_confirm when nox_quota_enabled). "
+                "Do not use browser_* for email lookup on outreach/reply runs."
+            ),
+        }
 
     try:
         contract = _load_contract()
@@ -96,7 +153,7 @@ def pre_tool_call(
         return None
 
     if tool_name in ("read_file", "search_files", "grep", "glob_file_search"):
-        if not _kol_session(session_id):
+        if not _kol_session(session_id, task_id):
             return None
         path = _extract_path(tool_name, args)
         norm = path.replace("\\", "/").lower()

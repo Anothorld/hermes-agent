@@ -31,7 +31,10 @@ returns or persists any subject/body.
    - `missing_facts` (list[str]): facts this email should help collect.
    - `next_action` (str): one-sentence summary of what this email must
      accomplish (e.g. "Counter-offer at $1500 + product bundle").
-2. `current_user_id` (int): owner of the personal style doc to load.
+2. `current_user_id` (int | optional): owner of the personal style doc to load.
+   When absent (no operator id in the run brief), skip the user_style fetch or
+   call `GET /policies/user_style` without `owner_user_id` — Bridge returns
+   `{"policy": null}` (not 400). Render P2 as `(no personal style configured)`.
 3. `bridge_base_url` (str): defaults to
    `http://localhost:<bridge_port>/api/plugins/kol-ops-bridge`.
 
@@ -81,8 +84,10 @@ mode to the subject and body. Keep P0 facts exact. The polished email should:
 2. Fetch `GET {bridge}/policies/company_style`.
    - If `policy` is null → use the empty-doc fallback string
      `(no company-wide style configured)`.
-3. Fetch `GET {bridge}/policies/user_style?owner_user_id={current_user_id}`.
-   - If null → use `(no personal style configured)`.
+3. Fetch `GET {bridge}/policies/user_style?owner_user_id={current_user_id}` when
+   `current_user_id` is set; otherwise `GET {bridge}/policies/user_style` (no query).
+   - Bridge returns `{"policy": null}` when missing or when no owner is given —
+     never 400. If null → use `(no personal style configured)`.
 4. Substitute the five blocks (P0 lines + company body + user body + the
   mandatory humanizer email polish block + the verbatim conflict-rules
   paragraph) into the template above.

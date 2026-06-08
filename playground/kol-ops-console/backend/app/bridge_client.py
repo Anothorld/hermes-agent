@@ -32,6 +32,7 @@ class BridgeClient:
         bridge_key = resolve_bridge_key(s)
         self._headers = {"X-Bridge-Key": bridge_key} if bridge_key else {}
         self._default_timeout = s.bridge_timeout_sec
+        self._approve_timeout = s.bridge_approve_timeout_sec
         self._learning_timeout = s.bridge_learning_timeout_sec
         self._client = httpx.AsyncClient(
             timeout=self._default_timeout,
@@ -343,12 +344,17 @@ class BridgeClient:
         )
 
     async def route_discovery(
-        self, campaign_id: str, body: dict[str, Any]
+        self,
+        campaign_id: str,
+        body: dict[str, Any],
+        *,
+        timeout_sec: float | None = None,
     ) -> dict[str, Any]:
         return await self._req(
             "POST",
             f"/campaigns/{campaign_id}/candidates/route-discovery",
             json=body,
+            timeout_sec=timeout_sec if timeout_sec is not None else self._approve_timeout,
         )
 
     # ------------------------------------------------------------ Policies

@@ -98,6 +98,10 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:  # pragma: no cover — defensive
-        sys.stderr.write(json.dumps({"error": "unexpected", "detail": str(exc)}))
-        sys.stderr.write("\n")
+        # Emit on stdout (agent's terminal channel) so an unexpected failure is
+        # never an invisible empty result; mirror to stderr for humans.
+        line = json.dumps({"error": "unexpected", "detail": str(exc)})
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        sys.stderr.write(line + "\n")
         raise

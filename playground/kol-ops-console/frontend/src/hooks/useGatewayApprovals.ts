@@ -135,7 +135,13 @@ export function useGatewayApprovals() {
                 it.run_id === ev.run_id ? { ...it, ...itemFromWire(ev) } : it,
               )
             : [...prev.items, itemFromWire(ev)];
-          if (!existed) setOpen(true);
+          if (!existed) {
+            setOpen(true);
+            toast.info(
+              'Agent 需要命令审批',
+              '有一条终端命令被安全策略拦住。请在右侧「命令待批」面板选择允许或拒绝。',
+            );
+          }
           // Drop any prior error row for the same run (a fresh request
           // means the previous failed resolve is stale).
           const nextErrors = new Map(prev.errors);

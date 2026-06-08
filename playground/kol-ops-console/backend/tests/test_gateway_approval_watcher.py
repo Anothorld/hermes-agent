@@ -236,14 +236,25 @@ class _FakeAsyncClient:
 
     def __init__(self, *, frames_by_run: dict[str, list[str]] | None = None,
                  status_by_run: dict[str, int] | None = None,
+                 run_status_by_run: dict[str, dict[str, Any]] | None = None,
                  default_status: int = 200, **_kw) -> None:
         self._frames = frames_by_run or {}
         self._statuses = status_by_run or {}
+        self._run_statuses = run_status_by_run or {}
         self._default_status = default_status
         self.calls: list[str] = []
 
-    async def aclose(self) -> None:
-        return None
+    async def get(self, url: str, headers: dict | None = None, timeout: float | None = None):
+        self.calls.append(url)
+        try:
+            rid = url.split("/v1/runs/")[1].split("/")[0]
+        except IndexError:
+            rid = ""
+        resp = _FakeJsonResponse(
+            status_code=200,
+            payload=self._run_statuses.get(rid, {"status": "running"}),
+        )
+        return resp
 
     def stream(self, method: str, url: str, headers: dict | None = None, **_kw):
         self.calls.append(url)
@@ -256,6 +267,18 @@ class _FakeAsyncClient:
         status = self._statuses.get(rid, self._default_status)
         lines = self._frames.get(rid, [])
         return _FakeStreamResponse(lines, status_code=status)
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _FakeJsonResponse:
+    def __init__(self, *, status_code: int, payload: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
 
 
 def _sse_lines(*frames: tuple[str, dict[str, Any]]) -> list[str]:
@@ -416,3 +439,35 @@ def test_db_read_filters_ended_and_old_runs(tmp_path: Path) -> None:
     rows = _read_active_runs(db)
     run_ids = {r["run_id"] for r in rows}
     assert run_ids == {"live-run"}
+
+
+@pytest.mark.asyncio
+async def test_poll_surfaces_waiting_for_approval_when_sse_missed(tmp_path: Path) -> None:
+    """GET /v1/runs/{id} fallback when status is waiting_for_approval."""
+    db = _seed_db(tmp_path, runs=[("r-poll", "CID-P", "redraft-outreach")])
+    w = GatewayApprovalWatcher()
+    w._settings = _make_settings(db_path=db)
+    w._client = _FakeAsyncClient(
+        frames_by_run={
+            "r-poll": _sse_lines(
+                ("approval.request", {
+                    "command": "python3 bridge.py campaigns redraft",
+                    "description": "redraft outreach",
+                    "pattern_key": "bridge",
+                    "pattern_keys": ["bridge"],
+                    "timestamp": 1700000001,
+                }),
+            ),
+        },
+        run_status_by_run={
+            "r-poll": {"status": "waiting_for_approval"},
+        },
+    )
+    q = w.subscribe()
+    await w._scan_once()
+    ev = await asyncio.wait_for(q.get(), timeout=2.0)
+    assert ev["event"] == "gateway_approval.request"
+    assert "redraft" in ev["command"]
+    snap, _ = w.snapshot()
+    assert len(snap) == 1
+    assert snap[0]["run_id"] == "r-poll"
