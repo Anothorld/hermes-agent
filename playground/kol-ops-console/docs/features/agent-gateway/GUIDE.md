@@ -128,6 +128,33 @@ Chrome 仍能回 `/json/version`（HTTP），但**任何 CDP WebSocket 升级都
 playground/local-chrome-debug/start-debug-chrome.sh restart   # 在持久终端里
 ```
 
+## 第三层：`cloud_provider: browser-use` 在国内机器上无限挂死（POVISON 701）
+
+删死 MCP、修 CDP 退化后，701 仍卡空标签页。`sample` 网关线程拿不到 Python 帧，但证据收敛到
+**profile `config.yaml` 的 `browser.cloud_provider: browser-use`**（`cdp_endpoint: wss://cloud.browser-use.com/v1`）：
+
+- 本机在国内（LLM 走国内 IP），而 **Browser-Use 是美国云**；
+- `browser_navigate` 一旦回落到 `BrowserUseProvider.create_session()`（`tools/browser_tool.py` `_get_session_info` 的云分支），
+  就发起到美国云的网络调用，**这条路径没有超时 → 无限阻塞**；
+- 现象与之吻合：卡死在 `_get_session_info`、**没有 spawn 任何 agent-browser 子进程、没有创建 socket 目录**。
+
+### 修复（运维配置）
+
+把 `browser.cloud_provider` 改为 **`local`**：
+
+```yaml
+browser:
+  cloud_provider: local   # 原 browser-use；本机有本地调试 Chrome，不该走美国云
+```
+
+- 命中 tab-pool seed → page-level CDP 驱动本地调试 Chrome（健康时实测 ~0.3s）；
+- 万一没命中 → `_create_local_session`（agent-browser 自带 Chromium，受 `command_timeout: 120` 约束，
+  缺 Chromium 则秒失败）——**无论如何不再有无超时的云调用**。
+- 改完需**重启网关**生效。
+
+> 系统性加固建议（核心受限区，需批准）：在 `tools/browser_tool.py` 的云 `create_session()` 外层加硬超时，
+> 这样即便日后误把 `cloud_provider` 切回云端，也不会再无限挂死。
+
 ## Bridge CLI（所有 gateway run）
 
 Console brief / instructions 注入 `bridge_agent_contract.py`：

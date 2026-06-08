@@ -1678,6 +1678,61 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     }
 
 
+# Hard wall-clock ceiling for the cloud provider's ``create_session`` network
+# call. The cloud SDKs have no internal deadline, so an unreachable cloud API
+# (e.g. US Browser-Use cloud from a network that cannot reach it) blocks the
+# whole agent run forever — the exact "opens a blank tab then hangs" symptom
+# that no per-tool timeout caught (the hang is *before* any agent-browser
+# subprocess spawns). Tunable via ``browser.cloud_session_timeout_s``.
+_DEFAULT_CLOUD_SESSION_TIMEOUT_S = 30
+
+
+def _cloud_session_timeout() -> int:
+    """Return the cloud ``create_session`` wall-clock timeout (seconds)."""
+    try:
+        from hermes_cli.config import read_raw_config
+        val = cfg_get(read_raw_config(), "browser", "cloud_session_timeout_s")
+        if val is not None:
+            return max(int(val), 5)
+    except Exception as exc:  # noqa: BLE001 — config best-effort
+        logger.debug("Could not read browser.cloud_session_timeout_s: %s", exc)
+    return _DEFAULT_CLOUD_SESSION_TIMEOUT_S
+
+
+def _create_cloud_session_with_timeout(
+    provider: Any,
+    task_id: str,
+    session_options: Optional[Mapping[str, Any]],
+    timeout_s: int,
+) -> Dict[str, Any]:
+    """Run ``provider.create_session`` with a hard wall-clock deadline.
+
+    Raises ``TimeoutError`` if the cloud call does not return within
+    ``timeout_s`` so the caller's existing cloud-failure fallback (probe /
+    auto-start local debug Chrome) takes over instead of hanging the run. The
+    abandoned worker thread is left to die on its own — we never block on it
+    (``shutdown(wait=False)``), so a wedged network call cannot stall the run.
+    """
+    import concurrent.futures
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="cloud-session"
+    )
+    future = executor.submit(
+        provider.create_session, task_id, session_options=session_options
+    )
+    try:
+        result = future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError as exc:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise TimeoutError(
+            f"Cloud browser provider create_session exceeded {timeout_s}s "
+            "(cloud API unreachable?) — abandoning and falling back to local Chrome"
+        ) from exc
+    executor.shutdown(wait=False)
+    return result
+
+
 _DEFAULT_LOCAL_CDP_PROBE_URL = "http://127.0.0.1:9222"
 _AUTOLAUNCH_TIMEOUT_S = 25.0
 _autolaunch_lock = threading.Lock()
@@ -1822,8 +1877,11 @@ def _get_session_info(
             session_info = _create_local_session(task_id)
         else:
             try:
-                session_info = provider.create_session(
-                    task_id, session_options=session_options
+                session_info = _create_cloud_session_with_timeout(
+                    provider,
+                    task_id,
+                    session_options,
+                    _cloud_session_timeout(),
                 )
                 # Validate cloud provider returned a usable session
                 if not session_info or not isinstance(session_info, dict):
