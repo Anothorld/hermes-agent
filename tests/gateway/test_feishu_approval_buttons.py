@@ -377,7 +377,9 @@ class TestResolveApproval:
         mock_resolve.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unauthorized_click_does_not_resolve(self):
+    async def test_unauthorized_click_does_not_resolve(self, monkeypatch):
+        monkeypatch.delenv("FEISHU_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
         adapter = _make_adapter()
         adapter._admins = {"ou_admin"}
         adapter._approval_state[5] = {
@@ -593,7 +595,9 @@ class TestCardActionCallbackResponse:
         assert "Old Name" not in card["elements"][0]["content"]
         assert "ou_expired" in card["elements"][0]["content"]
 
-    def test_rejects_approval_click_from_unauthorized_user(self, _patch_callback_card_types):
+    def test_rejects_approval_click_from_unauthorized_user(self, _patch_callback_card_types, monkeypatch):
+        monkeypatch.delenv("FEISHU_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
         adapter = _make_adapter()
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
@@ -614,6 +618,53 @@ class TestCardActionCallbackResponse:
         assert response is not None
         assert response.card is None
         mock_submit.assert_not_called()
+
+    def test_approval_click_allowed_when_feishu_allow_all_users(self, _patch_callback_card_types, monkeypatch):
+        """Regression: FEISHU_ALLOW_ALL_USERS must not be blocked by group allowlist gate."""
+        monkeypatch.setenv("FEISHU_ALLOW_ALL_USERS", "true")
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = set()
+        adapter._approval_state[7] = {
+            "session_key": "sess-7",
+            "message_id": "msg-7",
+            "chat_id": "oc_12345",
+        }
+        data = _make_card_action_data(
+            {"hermes_action": "approve_once", "approval_id": 7},
+            open_id="ou_anyone",
+        )
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is not None
+        assert "Approved once" in response.card.data["header"]["title"]["content"]
+
+    def test_approval_click_parses_string_json_action_value(self, _patch_callback_card_types):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_bob"}
+        adapter._approval_state[8] = {
+            "session_key": "sess-8",
+            "message_id": "msg-8",
+            "chat_id": "oc_12345",
+        }
+        data = _make_card_action_data({}, open_id="ou_bob")
+        data.event.action.value = json.dumps(
+            {"hermes_action": "approve_once", "approval_id": 8},
+            ensure_ascii=False,
+        )
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is not None
+        assert "Approved once" in response.card.data["header"]["title"]["content"]
 
     def test_rejects_approval_click_when_callback_chat_mismatches(self, _patch_callback_card_types):
         adapter = _make_adapter()
@@ -732,7 +783,9 @@ class TestCardActionCallbackResponse:
         assert response is not None
         assert response.card is None
 
-    def test_update_prompt_unauthorized_operator_returns_no_card(self, _patch_callback_card_types):
+    def test_update_prompt_unauthorized_operator_returns_no_card(self, _patch_callback_card_types, monkeypatch):
+        monkeypatch.delenv("FEISHU_ALLOW_ALL_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
         adapter = _make_adapter()
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)

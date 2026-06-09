@@ -162,6 +162,63 @@ class TestApprovalGate:
         assert ok is False
         assert "clarify" in msg
 
+
+class TestClarifyResolver:
+    def test_gateway_running_agent_resolver(self, monkeypatch):
+        resolver = _load_module("internal/clarify_resolver.py", "mysql_tools_clarify_resolver_test")
+
+        captured = {}
+
+        class _FakeAgent:
+            @staticmethod
+            def clarify_callback(question, choices):
+                captured["question"] = question
+                captured["choices"] = choices
+                return "批准本次执行"
+
+        class _FakeRunner:
+            _running_agents = {"feishu:chat:user": _FakeAgent()}
+            _agent_cache_lock = None
+            _agent_cache = None
+
+        import gateway.run as gateway_run
+
+        monkeypatch.setattr(gateway_run, "_gateway_runner_ref", lambda: _FakeRunner())
+        monkeypatch.setattr(
+            "tools.approval.get_current_session_key",
+            lambda default="": "feishu:chat:user",
+        )
+
+        cb = resolver.resolve_clarify_callback()
+        assert cb is not None
+        assert cb("审核?", ["批准本次执行", "拒绝"]) == "批准本次执行"
+        assert captured["question"] == "审核?"
+
+    def test_gateway_resolver_falls_back_to_agent_cache(self, monkeypatch):
+        resolver = _load_module("internal/clarify_resolver.py", "mysql_tools_clarify_resolver_test2")
+        import gateway.run as gateway_run
+
+        class _FakeAgent:
+            @staticmethod
+            def clarify_callback(_question, _choices):
+                return "ok"
+
+        class _FakeRunner:
+            _running_agents = {"feishu:chat:user": gateway_run._AGENT_PENDING_SENTINEL}
+            _agent_cache_lock = __import__("threading").Lock()
+            _agent_cache = {"feishu:chat:user": (_FakeAgent(), None)}
+
+        monkeypatch.setattr(gateway_run, "_gateway_runner_ref", lambda: _FakeRunner())
+        monkeypatch.setattr(
+            "tools.approval.get_current_session_key",
+            lambda default="": "feishu:chat:user",
+        )
+
+        cb = resolver.resolve_clarify_callback()
+        assert cb is not None
+        assert cb("q", None) == "ok"
+
+
 class TestDirectSqlGuard:
     def test_blocks_sql_executor_run(self):
         guard = _guard()

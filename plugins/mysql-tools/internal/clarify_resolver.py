@@ -21,6 +21,7 @@ def resolve_clarify_callback(explicit: Optional[Callable] = None) -> Optional[Ca
     for resolver in (
         _from_cli_active_agent,
         _from_tui_sessions,
+        _from_gateway_running_agent,
         _build_gateway_clarify_callback,
     ):
         try:
@@ -71,6 +72,60 @@ def _agent_clarify_callback(agent) -> Optional[Callable]:
         return None
     cb = getattr(agent, "clarify_callback", None)
     return cb if callable(cb) else None
+
+
+def _gateway_agent_for_session(runner, session_key: str):
+    """Return the live gateway agent for *session_key*, if any."""
+    if runner is None or not session_key:
+        return None
+
+    try:
+        from gateway.run import _AGENT_PENDING_SENTINEL
+    except ImportError:
+        _AGENT_PENDING_SENTINEL = object()
+
+    running = getattr(runner, "_running_agents", None) or {}
+    agent = running.get(session_key)
+    if agent is not None and agent is not _AGENT_PENDING_SENTINEL:
+        return agent
+
+    cache_lock = getattr(runner, "_agent_cache_lock", None)
+    cache = getattr(runner, "_agent_cache", None)
+    if cache_lock is not None and cache is not None:
+        with cache_lock:
+            cached = cache.get(session_key)
+            if cached:
+                return cached[0]
+    return None
+
+
+def _from_gateway_running_agent() -> Optional[Callable]:
+    """Gateway path: reuse clarify_callback wired on the running AIAgent.
+
+    Hermes gateway sets ``agent.clarify_callback`` inside ``run_sync`` but does
+    not pass it through ``handle_function_call`` kwargs for plugin tools.  Look
+    up the in-process ``GatewayRunner`` weakref and the session's running agent
+    (same pattern as ``tools/send_message_tool.py``).
+    """
+    try:
+        from tools.approval import get_current_session_key
+        from gateway.run import _gateway_runner_ref
+
+        runner = _gateway_runner_ref()
+        if runner is None:
+            return None
+
+        session_key = get_current_session_key(default="")
+        if not session_key:
+            from gateway.session_context import get_session_env
+
+            session_key = get_session_env("HERMES_SESSION_KEY", "")
+
+        agent = _gateway_agent_for_session(runner, session_key)
+        return _agent_clarify_callback(agent)
+    except Exception as exc:
+        logger.debug("gateway running-agent clarify lookup failed: %s", exc)
+        return None
 
 
 def _build_gateway_clarify_callback() -> Optional[Callable]:
