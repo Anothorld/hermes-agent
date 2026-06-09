@@ -61,6 +61,12 @@ to fill the required fields in chat.
 ## 3. Register the reply dispatcher cron
 
 Run once per machine. The dispatcher is the only cron job in this system.
+Ensure the bridge is running with the **inbound poller enabled** (Console Gmail
+page or `POST /gmail/inbound-poller/configure`). The poller — not the cron
+skill — sweeps Gmail; see
+`hermes-agent/skills/social-media/kol-reply-dispatcher/references/shared/inbound-poller-runtime.md`.
+Debug-only CLI: `plugins/kol-ops-bridge/scripts/kol_reply_dispatcher.py --env TEST`
+(requires bridge HTTP; agents must not use this for routine cron).
 
 ```
 cronjob(

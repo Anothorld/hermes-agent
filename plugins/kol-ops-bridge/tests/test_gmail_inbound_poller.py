@@ -65,3 +65,19 @@ def test_load_state_merges_file(inbound_poller_mod, tmp_path: Path):
     status = mod.get_status()
     assert status["running"] is True
     assert status["interval"] == 120
+
+
+def test_default_auto_start_disabled(inbound_poller_mod, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("KOL_OPS_GMAIL_INBOUND_AUTO_START", raising=False)
+    defaults = inbound_poller_mod._default_config()
+    assert defaults["enabled"] is False
+
+
+def test_status_reflects_env_disable(inbound_poller_mod, monkeypatch: pytest.MonkeyPatch):
+    mod = inbound_poller_mod
+    mod.configure(enabled=True, env="TEST")
+    monkeypatch.setenv("KOL_OPS_BRIDGE_DISABLE_GMAIL_INBOUND_POLLER", "1")
+    status = mod.get_status()
+    assert status["enabled"] is True
+    assert status["inbound_disabled"] is True
+    assert status["running"] is False

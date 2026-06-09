@@ -20,7 +20,6 @@ def worker_mod(monkeypatch: pytest.MonkeyPatch):
         sys.modules[pkg_name] = pkg
 
     for sub in (
-        "gmail_inbound_dispatch",
         "gmail_inbound_poller",
         "gmail_poller",
         "gmail_worker",

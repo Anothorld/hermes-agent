@@ -1,6 +1,7 @@
 """Gmail SENT reconciliation for operator-approved drafts.
 
-Inbound reply dispatching is handled by ``scripts/kol_reply_dispatcher.py``.
+Inbound reply dispatching is handled by the ``inbound_reply`` module
+(``gmail_inbound_poller`` / ``scripts/kol_reply_dispatcher.py`` CLI).
 This background task checks Gmail's SENT label and marks approved drafts as
 sent after an operator sends them in Gmail, including edit-learning capture
 via :mod:`gmail_reconcile` (same path as learning ``reconcile_sent`` jobs).

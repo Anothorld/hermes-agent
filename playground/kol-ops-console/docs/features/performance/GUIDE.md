@@ -121,9 +121,9 @@ Gmail 后台由 **单一 coordinator** `gmail_worker.py` 驱动（默认），�
 
 - 调度状态：`~/.hermes/kol-ops-bridge/gmail_worker.json`（最近 tick 时间）；入站配置：`inbound_poller.json`。
 - SENT 路径（定时 + `POST /gmail/reconcile-sent` + learning job）共用 `gmail_reconcile.lock`。
-- 入站逻辑经 `gmail_inbound_dispatch` 委托 `kol_reply_dispatcher.run_once`；Console `/reply-watcher/*` 为薄 API。
-- 观测：`GET /gmail/worker/status`（Bridge）。
-- 回退并行双 task：`KOL_OPS_GMAIL_WORKER_PARALLEL=1`（旧行为，两路独立 sleep）。
+- 入站逻辑在 [`inbound_reply/`](../../../plugins/kol-ops-bridge/inbound_reply/)（worker 默认 in-process `cal.*`）；CLI `scripts/kol_reply_dispatcher.py` 走 HTTP。
+- 观测：`GET /gmail/worker/status`；运维 one-shot：`POST /gmail/inbound-poller/run-once`。
+- 回退：`KOL_OPS_INBOUND_REPLY_LEGACY_SCRIPT=1`（旧 monolith）；`KOL_OPS_GMAIL_WORKER_PARALLEL=1`（并行 poller）。
 - 其它 env：`KOL_OPS_GMAIL_WORKER_WAKE_SEC`（默认 5）、`KOL_OPS_GMAIL_INBOUND_AUTO_START`（默认 **0**，需 Console 启停或显式设 1）。
 
 ### 4. 调优开关速查

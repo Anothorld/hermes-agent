@@ -15,6 +15,8 @@ should make.
 ## Shared Blocks (Phase 3)
 - Bridge runtime core:
   `references/shared/bridge-runtime-core.md`
+- Inbound poller / pre-run contract:
+  `references/shared/inbound-poller-runtime.md`
 - Router/dispatcher boundaries:
   `references/shared/router-dispatcher-boundaries.md`
 - Fact ownership (fragment mode):
@@ -27,16 +29,18 @@ should make.
 ## Runtime Contract
 - Frequency: every 10 minutes via Hermes `cronjob`. Profile:
   `outreach-operator`.
-- Cron pre-run: a minimal context collector (Phase B replacement for the
-  legacy `kol_reply_dispatcher.py` script) reports a `pending_replies`
-  array. If absent / empty, exit immediately. Each item must carry: matched
-  `identity_id`, `campaign_id`, `env`, the raw `latest_email`, the
+- Cron pre-run: the bridge **`inbound_reply`** module (worker in `serve.py`, or
+  standalone `scripts/kol_reply_dispatcher.py` for HTTP debugging only) collects
+  unread Gmail and launches gateway runs with a `pending_replies` array. If your
+  run input has no `pending_replies` / it is empty, exit immediately. Each item
+  must include `identity_id`, `campaign_id`, `env`, the raw `latest_email`, the
   `thread_history` (lean list of prior turns; see Step 0 below),
   deterministic `anomaly_signals` (thread/identity/risk soft-controls; see
-  Step 0b below), and the
-  dispatch-context snapshot (see Step 1). (Until that script lands
-  in a later phase, the agent may invoke this skill on-demand via chat with
-  one email at a time; do **not** auto-sweep Gmail from the LLM directly.)
+  Step 0b below), `chase_context`, and the dispatch-context snapshot (see Step 1).
+  Full poller contract:
+  `references/shared/inbound-poller-runtime.md`.
+  On-demand chat runs (one email at a time) are allowed; do **not** auto-sweep
+  Gmail from the LLM directly.
 - Follow shared bridge runtime core:
   `references/shared/bridge-runtime-core.md`.
 - Follow shared router/dispatcher boundaries:

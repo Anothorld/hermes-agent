@@ -80,7 +80,6 @@ def _load_pkg() -> ModuleType:
         "cal",
         "gmail_client",
         "gmail_poller",
-        "gmail_inbound_dispatch",
         "gmail_inbound_poller",
         "gmail_worker",
         "plugin_api",

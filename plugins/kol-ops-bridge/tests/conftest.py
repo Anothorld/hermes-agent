@@ -19,6 +19,10 @@ _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _PKG_NAME = "kol_ops_bridge_pkg"
 
 
+def pytest_configure(config):  # noqa: ARG001
+    _load_package()
+
+
 def _load_package() -> types.ModuleType:
     if _PKG_NAME in sys.modules:
         return sys.modules[_PKG_NAME]
@@ -53,7 +57,63 @@ def _load_package() -> types.ModuleType:
         sys.modules[f"{_PKG_NAME}.{sub}"] = mod
         spec.loader.exec_module(mod)
         setattr(pkg, sub, mod)
+    _load_inbound_reply_modules(pkg)
     return pkg
+
+
+def _load_inbound_reply_modules(pkg: types.ModuleType) -> None:
+    """Load inbound_reply package for poller tests."""
+    inbound_root = _PLUGIN_ROOT / "inbound_reply"
+    ordered = [
+        "schemas",
+        "gateway_client",
+        "deps",
+        "event_helpers",
+        "gating",
+        "matcher",
+        "payload",
+        "processor",
+        "state",
+        "orchestrator",
+    ]
+    for name in ordered:
+        key = f"{_PKG_NAME}.inbound_reply.{name}"
+        if key in sys.modules:
+            continue
+        spec = importlib.util.spec_from_file_location(key, inbound_root / f"{name}.py")
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[key] = mod
+        spec.loader.exec_module(mod)
+
+    init_key = f"{_PKG_NAME}.inbound_reply"
+    if init_key not in sys.modules:
+        spec = importlib.util.spec_from_file_location(init_key, inbound_root / "__init__.py")
+        assert spec is not None and spec.loader is not None
+        init_mod = importlib.util.module_from_spec(spec)
+        sys.modules[init_key] = init_mod
+        spec.loader.exec_module(init_mod)
+
+    ports_root = _PLUGIN_ROOT / "inbound_reply_ports"
+    bundle_key = f"{_PKG_NAME}.internal.dispatch_context_bundle"
+    if bundle_key not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            bundle_key, _PLUGIN_ROOT / "internal" / "dispatch_context_bundle.py",
+        )
+        assert spec is not None and spec.loader is not None
+        bundle_mod = importlib.util.module_from_spec(spec)
+        sys.modules[bundle_key] = bundle_mod
+        spec.loader.exec_module(bundle_mod)
+
+    for name in ("in_process", "http"):
+        key = f"{_PKG_NAME}.inbound_reply_ports.{name}"
+        if key in sys.modules:
+            continue
+        spec = importlib.util.spec_from_file_location(key, ports_root / f"{name}.py")
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[key] = mod
+        spec.loader.exec_module(mod)
 
 
 @pytest.fixture()

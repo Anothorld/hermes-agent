@@ -1756,64 +1756,14 @@ def get_dispatch_context(
     campaign_id: Annotated[str, Depends(_campaign_id_query_required_dep)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
-    """Bundle the read snapshots ``kol-reply-dispatcher`` needs in one call.
-
-    Returns ``{goals, lanes, relationship, reusable_facts, campaign_config,
-    campaign_facts, identity_facts, candidate}`` for a single
-    (identity, campaign) pair. Replaces 5 separate reads with 1.
-    ``campaign_config`` is ``None`` if the campaign row is missing
-    (caller must surface that as a routing error). ``campaign_facts``
-    is the latest per-campaign fact snapshot (``offer.*``, etc.) from
-    ``latest_facts_for(campaign_id=...)``.
-    """
+    """Bundle read snapshots ``kol-reply-dispatcher`` needs in one call."""
     if not cal.get_identity(identity_id):
         raise HTTPException(status_code=404, detail="identity not found")
-    active_goals = _active_goal_names(
+    from .internal.dispatch_context_bundle import build_dispatch_context_bundle
+
+    return build_dispatch_context_bundle(
         identity_id=identity_id, campaign_id=campaign_id, env=env,
     )
-    with cal._connect() as conn:  # type: ignore[attr-defined]
-        learning_hints = learning_store.build_learning_hints(
-            conn, env=env, active_goals=active_goals,
-        )
-    return {
-        "identity_id": identity_id,
-        "campaign_id": campaign_id,
-        "env": env,
-        "goals": cal.get_goal_state(
-            identity_id=identity_id, campaign_id=campaign_id, env=env,
-        ),
-        "lanes": cal.get_lanes_view(
-            identity_id=identity_id, campaign_id=campaign_id, env=env,
-        ),
-        "relationship": cal.get_relationship(identity_id),
-        # Same shape as GET /relationship/reusable-facts:
-        # ``{"identity_id":..., "facts":{...}}``.
-        "reusable_facts": {
-            "identity_id": identity_id,
-            "facts": cal.get_reusable_facts(identity_id),
-        },
-        "learning_hints": learning_hints,
-        "campaign_config": cal.get_campaign_config(campaign_id, env=env),
-        # Latest campaign-scoped facts (offer.* negotiation state, etc.).
-        "campaign_facts": cal.latest_facts_for(
-            identity_id=identity_id, campaign_id=campaign_id, env=env,
-        ),
-        # Per-campaign discovery evidence written by the discovery skill into
-        # ``campaign_candidates.payload_json`` (reason / niche_match /
-        # showcase_evidence / conversion_mechanism). ``None`` when the
-        # identity is not a candidate of this campaign.
-        "candidate": cal.get_candidate_for(
-            identity_id=identity_id, campaign_id=campaign_id, env=env,
-        ),
-        # All identity-level facts (campaign_id IS NULL), keyed as
-        # ``identity.<key>`` — surfaces the creator-brief facts
-        # (content_pillars, signature_hooks, voice_descriptors, hero_post_*,
-        # recommendation_reason) plus any other identity-scoped fact written
-        # via ``write-facts-multi``.
-        "identity_facts": cal.latest_facts_for(
-            identity_id=identity_id, campaign_id=None, env=env,
-        ),
-    }
 
 
 @router.get("/identities/{identity_id}/reply-dispatch-status")
@@ -2823,6 +2773,28 @@ def inbound_poller_restart(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, **status}
+
+
+@router.post("/gmail/inbound-poller/run-once")
+def inbound_poller_run_once(
+    body: InboundPollerStartBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """One-shot inbound poll (same as CLI without --watch)."""
+    _require_bridge_key(x_bridge_key)
+    from .inbound_reply import run_once
+    from .inbound_reply.deps import InboundDeps
+
+    try:
+        stats = run_once(
+            env=body.env,
+            lookback_days=body.lookback_days,
+            max_results=body.max_results,
+            deps=InboundDeps.in_process_default(),
+        )
+    except GmailUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, **stats}
 
 
 @router.post("/learning/backfill-edit-learning")

@@ -1,8 +1,4 @@
-"""Inbound Gmail reply polling — runs inside bridge ``serve.py`` (replaces Console subprocess).
-
-Delegates each tick to ``scripts/kol_reply_dispatcher.run_once`` so matching,
-dedup locks, and gateway dispatch stay identical to the CLI ``--watch`` mode.
-"""
+"""Inbound Gmail reply polling — runs inside bridge ``serve.py``."""
 
 from __future__ import annotations
 
@@ -13,8 +9,6 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
-
-from . import gmail_inbound_dispatch
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +44,6 @@ def _default_config() -> dict[str, Any]:
 
 
 def load_state() -> dict[str, Any]:
-    """Load persisted inbound-poller config + last-tick metadata."""
     if not _STATE_PATH.exists():
         return _default_config()
     try:
@@ -78,14 +71,21 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 def get_status() -> dict[str, Any]:
-    """Operator-facing status (Console ``/reply-watcher/status`` compatible)."""
     state = load_state()
-    running = bool(state.get("enabled"))
+    enabled = bool(state.get("enabled"))
+    inbound_disabled = os.environ.get("KOL_OPS_BRIDGE_DISABLE_GMAIL_INBOUND_POLLER") == "1"
+    running = enabled and not inbound_disabled
+    from .inbound_reply.deps import legacy_script_enabled
+
+    bridge_port = "legacy_script" if legacy_script_enabled() else "in_process"
     return {
+        "enabled": enabled,
+        "inbound_disabled": inbound_disabled,
         "running": running,
         "pid": None,
         "managed_by": "bridge",
-        "env": state.get("env") if running else state.get("env"),
+        "bridge_port": bridge_port,
+        "env": state.get("env"),
         "interval": state.get("interval"),
         "lookback_days": state.get("lookback_days"),
         "max_results": state.get("max_results"),
@@ -108,7 +108,6 @@ def configure(
     lookback_days: Optional[int] = None,
     max_results: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Update poller config; returns fresh status."""
     state = load_state()
     if enabled is True:
         state["enabled"] = True
@@ -133,7 +132,6 @@ def configure(
 
 
 def run_tick_sync() -> dict[str, int] | None:
-    """Run one inbound poll when enabled; returns stats or ``None`` if skipped."""
     state = load_state()
     if not state.get("enabled"):
         return None
@@ -141,14 +139,25 @@ def run_tick_sync() -> dict[str, int] | None:
     env = str(state.get("env") or "TEST").upper()
     lookback = int(state.get("lookback_days") or 3)
     max_results = int(state.get("max_results") or 50)
-    run_once, gmail_unavailable = gmail_inbound_dispatch.import_run_once()
+
+    from .inbound_reply import run_once
+    from .inbound_reply.deps import InboundDeps, import_legacy_run_once, legacy_script_enabled
 
     try:
-        stats = run_once(
-            env=env,
-            lookback_days=lookback,
-            max_results=max_results,
-        )
+        if legacy_script_enabled():
+            legacy_run, gmail_unavailable = import_legacy_run_once()
+            stats = legacy_run(
+                env=env,
+                lookback_days=lookback,
+                max_results=max_results,
+            )
+        else:
+            stats = run_once(
+                env=env,
+                lookback_days=lookback,
+                max_results=max_results,
+                deps=InboundDeps.in_process_default(),
+            )
         state = load_state()
         state["last_tick_at"] = _now()
         state["last_tick_stats"] = stats
@@ -156,14 +165,15 @@ def run_tick_sync() -> dict[str, int] | None:
         save_state(state)
         log.info("[gmail_inbound_poller] tick env=%s stats=%s", env, stats)
         return stats
-    except gmail_unavailable as exc:
-        state = load_state()
-        state["last_error"] = str(exc)[:500]
-        save_state(state)
-        log.warning("[gmail_inbound_poller] gmail unavailable: %s", exc)
-        return None
     except Exception as exc:  # noqa: BLE001
+        from .gmail_client import GmailUnavailable
+
         state = load_state()
+        if isinstance(exc, GmailUnavailable):
+            state["last_error"] = str(exc)[:500]
+            save_state(state)
+            log.warning("[gmail_inbound_poller] gmail unavailable: %s", exc)
+            return None
         state["last_error"] = f"{type(exc).__name__}: {exc}"[:500]
         save_state(state)
         log.exception("[gmail_inbound_poller] tick failed: %s", exc)
@@ -171,12 +181,10 @@ def run_tick_sync() -> dict[str, int] | None:
 
 
 async def run_tick_async() -> dict[str, int] | None:
-    """Thread-offloaded inbound tick for the unified ``gmail_worker``."""
     return await asyncio.to_thread(run_tick_sync)
 
 
 async def run_forever() -> None:
-    """Legacy standalone loop — prefer ``gmail_worker.run_forever``."""
     if os.environ.get("KOL_OPS_BRIDGE_DISABLE_GMAIL_INBOUND_POLLER") == "1":
         log.info("[gmail_inbound_poller] disabled via KOL_OPS_BRIDGE_DISABLE_GMAIL_INBOUND_POLLER")
         while True:

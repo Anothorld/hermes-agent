@@ -83,8 +83,12 @@ def get_status() -> dict[str, Any]:
     """Combined worker status for ops dashboards."""
     worker = _load_worker_state()
     inbound = gmail_inbound_poller.get_status()
+    from .inbound_reply import INBOUND_MODULE_VERSION
+
     return {
         "coordinator": "gmail_worker",
+        "inbound_module_version": INBOUND_MODULE_VERSION,
+        "bridge_port": inbound.get("bridge_port", "in_process"),
         "parallel_mode": _parallel_mode(),
         "sent_disabled": _sent_disabled(),
         "inbound_disabled": _inbound_disabled(),

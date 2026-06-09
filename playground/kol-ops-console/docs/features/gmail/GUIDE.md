@@ -36,9 +36,9 @@
 |------|------|------|
 | SENT 对账 | 操作员在 Gmail 点 Send 后标记已发 + edit-learning | `gmail_poller` tick / `POST /gmail/reconcile-sent` |
 | 入站回信 | 扫 INBOX → `kol_inbound_reply` → gateway dispatch | `gmail_inbound_poller` tick |
-| 运维快照 | 最近 tick、interval、入站启停 | `GET /gmail/worker/status` |
+| 运维快照 / one-shot | 最近 tick、手动跑一次 | `GET /gmail/worker/status`、`POST /gmail/inbound-poller/run-once` |
 
-Console `POST /reply-watcher/start|stop|restart` → Bridge `POST /gmail/inbound-poller/*`（无独立子进程）。SENT 手动同步：`POST /reply-watcher/reconcile-sent`。
+入站实现：[`plugins/kol-ops-bridge/inbound_reply/`](../../../plugins/kol-ops-bridge/inbound_reply/)（worker in-process；CLI HTTP）。
 
 ## 关联模块
 

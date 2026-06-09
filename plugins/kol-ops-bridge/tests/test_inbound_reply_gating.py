@@ -1,25 +1,37 @@
-"""Tests for reply dispatcher soft-gating controls."""
+"""Tests for inbound reply autoflow gating."""
 
 from __future__ import annotations
 
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
+import pytest
 
-def _load_dispatcher():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "kol_reply_dispatcher.py"
-    spec = importlib.util.spec_from_file_location("kol_reply_dispatcher", path)
-    assert spec is not None and spec.loader is not None
+
+@pytest.fixture()
+def gating_mod():
+    plugin_root = Path(__file__).resolve().parents[1]
+    pkg_name = "kol_ops_bridge_pkg"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [str(plugin_root)]
+        sys.modules[pkg_name] = pkg
+
+    spec = importlib.util.spec_from_file_location(
+        f"{pkg_name}.inbound_reply.gating",
+        plugin_root / "inbound_reply" / "gating.py",
+    )
+    assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
+    sys.modules[f"{pkg_name}.inbound_reply.gating"] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
-def test_delegated_budget_only_allows_autoflow():
-    mod = _load_dispatcher()
-    allow, controls = mod.resolve_autoflow_controls(
+def test_delegated_budget_only_allows_autoflow(gating_mod):
+    allow, controls = gating_mod.resolve_autoflow_controls(
         content_risk="c2",
         thread_integrity="strict",
         identity_integrity="delegated",
@@ -29,9 +41,8 @@ def test_delegated_budget_only_allows_autoflow():
     assert controls["gate_budget"] is False
 
 
-def test_delegated_budget_plus_payout_blocks():
-    mod = _load_dispatcher()
-    allow, controls = mod.resolve_autoflow_controls(
+def test_delegated_budget_plus_payout_blocks(gating_mod):
+    allow, controls = gating_mod.resolve_autoflow_controls(
         content_risk="c2",
         thread_integrity="strict",
         identity_integrity="delegated",
@@ -41,9 +52,8 @@ def test_delegated_budget_plus_payout_blocks():
     assert controls["gate_budget"] is True
 
 
-def test_unknown_budget_blocks():
-    mod = _load_dispatcher()
-    allow, _ = mod.resolve_autoflow_controls(
+def test_unknown_budget_blocks(gating_mod):
+    allow, _ = gating_mod.resolve_autoflow_controls(
         content_risk="c2",
         thread_integrity="strict",
         identity_integrity="unknown",
