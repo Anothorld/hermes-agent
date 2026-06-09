@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -12,10 +13,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
+from .perf_snapshot import perf
 from .db import _connect, init_db
 from .deps import shutdown_bridge, shutdown_gateway
 from .gateway_approval_watcher import watcher as approval_watcher
 from .gmail_store import migrate_legacy_global_token
+from .deps import get_bridge_singleton
+from .run_launch_queue import launch_queue, set_bridge_health_check
+from .run_state_reconciler import start_reconciler, stop_reconciler
 from .routers import (
     admin,
     approvals,
@@ -82,12 +87,81 @@ async def _lifespan(app: FastAPI):
             migrate_legacy_global_token(conn, int(owner["id"]))
     finally:
         conn.close()
-    await approval_watcher.start(get_settings())
+    settings = get_settings()
+
+    async def _bridge_health_ok() -> bool:
+        if not settings.launch_bridge_health_check:
+            return True
+        try:
+            await get_bridge_singleton().health()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    set_bridge_health_check(_bridge_health_ok)
+    await approval_watcher.start(settings)
+    await launch_queue.start()
+    await start_reconciler(settings)
     yield
+    await stop_reconciler()
+    await launch_queue.stop()
     await approval_watcher.stop()
     await events_router.hub.stop()
     await shutdown_bridge()
     await shutdown_gateway()
+
+
+_CAMPAIGN_ID_RE = re.compile(r"/campaigns/([^/]+)")
+_IDENTITY_ID_RE = re.compile(r"/identities/(\d+)")
+_RUN_ID_RE = re.compile(r"/runs/([^/]+)")
+
+
+def _slow_api_extra(path: str) -> dict[str, str]:
+    extra: dict[str, str] = {}
+    if m := _CAMPAIGN_ID_RE.search(path):
+        extra["campaign_id"] = m.group(1)
+    if m := _IDENTITY_ID_RE.search(path):
+        extra["identity_id"] = m.group(1)
+    if m := _RUN_ID_RE.search(path):
+        extra["run_id"] = m.group(1)
+    return extra
+
+
+def _record_slow_request(
+    *,
+    method: str,
+    path: str,
+    status: str | int,
+    duration_ms: float,
+) -> None:
+    extra = _slow_api_extra(path)
+    perf.record_slow_api(
+        method=method,
+        path=path,
+        status=status,
+        duration_ms=duration_ms,
+        extra=extra or None,
+    )
+    if extra:
+        log.info(
+            "slow_api method=%s path=%s status=%s duration_ms=%.1f "
+            "campaign_id=%s identity_id=%s run_id=%s",
+            method,
+            path,
+            status,
+            duration_ms,
+            extra.get("campaign_id", ""),
+            extra.get("identity_id", ""),
+            extra.get("run_id", ""),
+        )
+    else:
+        log.info(
+            "slow_api method=%s path=%s status=%s duration_ms=%.1f",
+            method,
+            path,
+            status,
+            duration_ms,
+        )
 
 
 def create_app() -> FastAPI:
@@ -121,21 +195,20 @@ def create_app() -> FastAPI:
         except Exception:
             elapsed = time.perf_counter() - started
             if elapsed >= s.slow_api_log_threshold_sec:
-                log.info(
-                    "slow_api method=%s path=%s status=EXCEPTION duration_ms=%.1f",
-                    request.method,
-                    path,
-                    elapsed * 1000.0,
+                _record_slow_request(
+                    method=request.method,
+                    path=path,
+                    status="EXCEPTION",
+                    duration_ms=elapsed * 1000.0,
                 )
             raise
         elapsed = time.perf_counter() - started
         if elapsed >= s.slow_api_log_threshold_sec:
-            log.info(
-                "slow_api method=%s path=%s status=%s duration_ms=%.1f",
-                request.method,
-                path,
-                response.status_code,
-                elapsed * 1000.0,
+            _record_slow_request(
+                method=request.method,
+                path=path,
+                status=response.status_code,
+                duration_ms=elapsed * 1000.0,
             )
         return response
 

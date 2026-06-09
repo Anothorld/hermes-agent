@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { API_BASE, getToken } from './api';
+import { useContext, useEffect, useRef } from 'react';
+import { LiveEventsContext } from './LiveEventsProvider';
 
 export type BridgeEventItem = {
   id: number;
@@ -49,56 +49,16 @@ export type WsEvent =
       items: GatewayApprovalItem[];
     };
 
+/** Subscribe to the singleton live-events websocket (via LiveEventsProvider). */
 export function useLiveEvents(onEvent: (e: WsEvent) => void): { connected: boolean } {
-  const [connected, setConnected] = useState(false);
+  const ctx = useContext(LiveEventsContext);
   const cbRef = useRef(onEvent);
   cbRef.current = onEvent;
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-    const url = API_BASE.replace(/^http/, 'ws') + `/ws?token=${encodeURIComponent(token)}`;
-    let ws: WebSocket | null = null;
-    let retry = 0;
-    let stop = false;
+    if (!ctx) return;
+    return ctx.subscribe((e) => cbRef.current(e));
+  }, [ctx]);
 
-    const connect = () => {
-      if (stop) return;
-      ws = new WebSocket(url);
-      ws.onopen = () => {
-        setConnected(true);
-        retry = 0;
-        // #region agent log
-        fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bba44f'},body:JSON.stringify({sessionId:'bba44f',location:'useLiveEvents.ts:onopen',message:'ws opened',data:{retry},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
-      };
-      ws.onmessage = (msg) => {
-        try {
-          const parsed = JSON.parse(msg.data) as WsEvent;
-          cbRef.current(parsed);
-        } catch {
-          /* ignore non-JSON */
-        }
-      };
-      ws.onclose = (ev) => {
-        setConnected(false);
-        // #region agent log
-        fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bba44f'},body:JSON.stringify({sessionId:'bba44f',location:'useLiveEvents.ts:onclose',message:'ws closed',data:{code:ev.code,reason:ev.reason,wasClean:ev.wasClean,stop,retry},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        retry += 1;
-        setTimeout(connect, Math.min(30_000, 1_000 * 2 ** retry));
-      };
-      ws.onerror = () => ws?.close();
-    };
-    connect();
-    return () => {
-      stop = true;
-      // #region agent log
-      fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bba44f'},body:JSON.stringify({sessionId:'bba44f',location:'useLiveEvents.ts:cleanup',message:'effect cleanup closing ws',data:{hadWs:!!ws},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
-      ws?.close();
-    };
-  }, []);
-
-  return { connected };
+  return { connected: ctx?.connected ?? false };
 }

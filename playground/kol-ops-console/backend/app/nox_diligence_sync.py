@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -167,7 +168,8 @@ async def attempt_gate_a_diligence(
         params = resolve_diligence_params(ident, facts_resp)
         if not diligence_eligible(params):
             return {"skipped": True, "reason": "no_nox_creator_or_url"}
-        out = _run_diligence_cli(
+        out = await asyncio.to_thread(
+            _run_diligence_cli,
             env="TEST",
             cfg_path="",
             params=params,
@@ -202,7 +204,8 @@ async def attempt_gate_a_diligence(
             cfg,
             allowed_gates=("shortlist_confirm",),
         )
-        out = _run_diligence_cli(
+        out = await asyncio.to_thread(
+            _run_diligence_cli,
             env=env_u,
             cfg_path=cfg_path,
             params=params,

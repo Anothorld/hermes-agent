@@ -12,10 +12,35 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 
 from ..bridge_client import BridgeClient, BridgeError
+from ..config import get_settings
 from ..deps import get_bridge, get_conn, require_role
 from ..kol_registry_export import build_registry_xlsx
+from ..perf_snapshot import perf
+from ..run_launch_queue import launch_queue
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/perf-snapshot")
+def perf_snapshot(
+    _: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """In-process counters for gateway queue, watcher, WS, and reconciler."""
+    settings = get_settings()
+    return {
+        "env": settings.env,
+        "perf": perf.as_dict(),
+        "launch_queue": launch_queue.snapshot(),
+        "flags": {
+            "gateway_launch_queue_enabled": settings.gateway_launch_queue_enabled,
+            "gateway_launch_max_inflight": settings.gateway_launch_max_inflight,
+            "run_reconciler_enabled": settings.run_reconciler_enabled,
+            "sync_run_states_on_get": settings.sync_run_states_on_get,
+            "approval_watch_mode": settings.approval_watch_mode,
+            "agent_stream_max_runs": settings.agent_stream_max_runs,
+            "nox_max_concurrent": settings.nox_max_concurrent,
+        },
+    }
 
 
 @router.post("/wipe-test")

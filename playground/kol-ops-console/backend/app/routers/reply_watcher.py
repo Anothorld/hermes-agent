@@ -1,4 +1,10 @@
-"""Manage the KOL Gmail reply watcher daemon."""
+"""Manage the KOL Gmail inbound reply watcher (bridge-integrated worker).
+
+Inbound INBOX polling runs inside ``kol-ops-bridge`` ``serve.py`` instead of a
+Console subprocess. This router is a thin operator API over bridge
+``/gmail/inbound-poller/*`` endpoints. SENT reconcile remains on
+``POST /reply-watcher/reconcile-sent`` → bridge ``/gmail/reconcile-sent``.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +12,12 @@ import datetime as _dt
 import json
 import os
 import signal
-import subprocess
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from ..config import get_settings
 from ..bridge_client import BridgeClient, BridgeError
 from ..deps import current_user, get_bridge, require_role
 
@@ -21,8 +25,8 @@ router = APIRouter(prefix="/reply-watcher", tags=["reply-watcher"])
 
 EnvName = Literal["TEST", "LIVE"]
 
-_STATE_DIR = Path.home() / ".hermes/kol-ops-console"
-_STATE_PATH = _STATE_DIR / "reply_watcher.json"
+_LEGACY_STATE_DIR = Path.home() / ".hermes/kol-ops-console"
+_LEGACY_STATE_PATH = _LEGACY_STATE_DIR / "reply_watcher.json"
 
 
 class WatcherStartBody(BaseModel):
@@ -38,37 +42,25 @@ class SentReconcileBody(BaseModel):
     max_results: int = Field(default=100, ge=1, le=500)
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[5]
-
-
-def _python_path() -> Path:
-    return _repo_root() / "venv/bin/python"
-
-
-def _script_path() -> Path:
-    return _repo_root() / "plugins/kol-ops-bridge/scripts/kol_reply_dispatcher.py"
-
-
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
-def _load_state() -> dict[str, Any] | None:
+def _load_legacy_state() -> dict[str, Any] | None:
     try:
-        if not _STATE_PATH.exists():
+        if not _LEGACY_STATE_PATH.exists():
             return None
-        data = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(_LEGACY_STATE_PATH.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def _save_state(state: dict[str, Any]) -> None:
-    _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = _STATE_PATH.with_suffix(".json.tmp")
+def _save_legacy_state(state: dict[str, Any]) -> None:
+    _LEGACY_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _LEGACY_STATE_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(_STATE_PATH)
+    tmp.replace(_LEGACY_STATE_PATH)
 
 
 def _pid_running(pid: int | None) -> bool:
@@ -80,147 +72,113 @@ def _pid_running(pid: int | None) -> bool:
         return False
     except PermissionError:
         return True
-    # `os.kill(pid, 0)` succeeds for zombies — the kernel still has the
-    # entry until the parent reaps it. Treat zombies as not running so
-    # stop/restart isn't tricked into trying to signal a dead process.
-    try:
-        out = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "state="],
-            capture_output=True, text=True, timeout=2,
-        )
-        if (out.stdout or "").strip().startswith("Z"):
-            return False
-    except (OSError, subprocess.SubprocessError):
-        pass
     return True
 
 
-def _status() -> dict[str, Any]:
-    state = _load_state() or {}
+def _stop_legacy_subprocess() -> dict[str, Any] | None:
+    """Stop pre-merge Console subprocess watcher if still running."""
+    state = _load_legacy_state() or {}
     pid = state.get("pid")
-    running = _pid_running(pid if isinstance(pid, int) else None)
-    return {
-        "running": running,
-        "pid": pid if running else None,
-        "env": state.get("env") if running else state.get("env"),
-        "interval": state.get("interval"),
-        "lookback_days": state.get("lookback_days"),
-        "max_results": state.get("max_results"),
-        "started_at": state.get("started_at") if running else None,
-        "stopped_at": state.get("stopped_at") if not running else None,
-        "log_path": state.get("log_path"),
-        "command": state.get("command"),
-        "state_path": str(_STATE_PATH),
-    }
-
-
-def _build_env() -> dict[str, str]:
-    settings = get_settings()
-    env = os.environ.copy()
-    env.setdefault("HERMES_HOME", str(Path.home() / ".hermes/profiles/kol-orchestrator"))
-    env["HERMES_KOL_OPS_BRIDGE_BASE"] = settings.bridge_base
-    if settings.bridge_key:
-        env["HERMES_KOL_OPS_BRIDGE_KEY"] = settings.bridge_key
-    env["HERMES_GATEWAY_BASE"] = settings.gateway_base
-    if settings.gateway_key:
-        env["HERMES_GATEWAY_KEY"] = settings.gateway_key
-    return env
-
-
-def _start(body: WatcherStartBody) -> dict[str, Any]:
-    current = _status()
-    if current["running"]:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"reply watcher already running in {current.get('env')} (pid={current.get('pid')}); use restart to switch mode",
-        )
-    python = _python_path()
-    script = _script_path()
-    if not python.exists():
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"python not found: {python}")
-    if not script.exists():
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"script not found: {script}")
-    _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = _STATE_DIR / f"reply_watcher_{body.env.lower()}.log"
-    command = [
-        str(python),
-        str(script),
-        "--env", body.env,
-        "--watch",
-        "--interval", str(body.interval),
-        "--lookback-days", str(body.lookback_days),
-        "--max-results", str(body.max_results),
-    ]
-    log_fh = log_path.open("ab")
+    if not isinstance(pid, int) or not _pid_running(pid):
+        return None
     try:
-        proc = subprocess.Popen(
-            command,
-            cwd=str(_repo_root()),
-            env=_build_env(),
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    finally:
-        log_fh.close()
-    state = {
-        "pid": proc.pid,
-        "env": body.env,
-        "interval": body.interval,
-        "lookback_days": body.lookback_days,
-        "max_results": body.max_results,
-        "started_at": _now(),
-        "stopped_at": None,
-        "log_path": str(log_path),
-        "command": command,
-    }
-    _save_state(state)
-    return _status()
-
-
-def _stop() -> dict[str, Any]:
-    state = _load_state() or {}
-    pid = state.get("pid")
-    if isinstance(pid, int) and _pid_running(pid):
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            # EPERM here typically means the pgid no longer has a living
-            # leader (zombie / orphaned). Nothing to signal; fall through
-            # and mark stopped so restart can spawn a fresh watcher.
-            pass
+        os.killpg(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
     state["stopped_at"] = _now()
-    _save_state(state)
-    return _status()
+    state["legacy_migrated_at"] = _now()
+    _save_legacy_state(state)
+    return {"legacy_pid_stopped": pid}
+
+
+def _shape_status(raw: dict[str, Any], *, legacy: dict[str, Any] | None = None) -> dict[str, Any]:
+    out = {
+        "running": bool(raw.get("running")),
+        "pid": raw.get("pid"),
+        "managed_by": raw.get("managed_by") or "bridge",
+        "env": raw.get("env"),
+        "interval": raw.get("interval"),
+        "lookback_days": raw.get("lookback_days"),
+        "max_results": raw.get("max_results"),
+        "started_at": raw.get("started_at"),
+        "stopped_at": raw.get("stopped_at"),
+        "log_path": raw.get("log_path"),
+        "command": raw.get("command"),
+        "state_path": raw.get("state_path"),
+        "last_tick_at": raw.get("last_tick_at"),
+        "last_tick_stats": raw.get("last_tick_stats"),
+        "last_error": raw.get("last_error"),
+    }
+    if legacy:
+        out["legacy_subprocess_stopped"] = legacy
+    return out
+
+
+async def _bridge_status(bridge: BridgeClient) -> dict[str, Any]:
+    try:
+        payload = await bridge.inbound_poller_status()
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "invalid bridge inbound poller status")
+    return payload
 
 
 @router.get("/status")
-def status_view(_: Annotated[dict, Depends(current_user)]) -> dict[str, Any]:
-    return _status()
+async def status_view(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+) -> dict[str, Any]:
+    payload = await _bridge_status(bridge)
+    return _shape_status(payload)
 
 
 @router.post("/start")
-def start(
+async def start(
     body: WatcherStartBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
     _: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict[str, Any]:
-    return _start(body)
+    legacy = _stop_legacy_subprocess()
+    try:
+        payload = await bridge.inbound_poller_start(body.model_dump())
+    except BridgeError as exc:
+        if exc.status == 409:
+            raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    status_payload = payload if isinstance(payload, dict) else {}
+    if status_payload.get("running"):
+        return _shape_status(status_payload, legacy=legacy)
+    raise HTTPException(status.HTTP_502_BAD_GATEWAY, "bridge failed to start inbound poller")
 
 
 @router.post("/stop")
-def stop(_: Annotated[dict, Depends(require_role("owner", "operator"))]) -> dict[str, Any]:
-    return _stop()
+async def stop(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    legacy = _stop_legacy_subprocess()
+    try:
+        payload = await bridge.inbound_poller_stop()
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    status_payload = payload if isinstance(payload, dict) else {}
+    return _shape_status(status_payload, legacy=legacy)
 
 
 @router.post("/restart")
-def restart(
+async def restart(
     body: WatcherStartBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
     _: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict[str, Any]:
-    _stop()
-    return _start(body)
+    legacy = _stop_legacy_subprocess()
+    try:
+        payload = await bridge.inbound_poller_restart(body.model_dump())
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    status_payload = payload if isinstance(payload, dict) else {}
+    return _shape_status(status_payload, legacy=legacy)
 
 
 @router.post("/reconcile-sent")

@@ -24,6 +24,11 @@ def get_bridge() -> BridgeClient:
     return _bridge_singleton
 
 
+def get_bridge_singleton() -> BridgeClient:
+    """Alias for background tasks (reconciler, queue worker)."""
+    return get_bridge()
+
+
 async def shutdown_bridge() -> None:
     global _bridge_singleton
     if _bridge_singleton is not None:
@@ -36,6 +41,11 @@ def get_gateway() -> GatewayClient:
     if _gateway_singleton is None:
         _gateway_singleton = GatewayClient()
     return _gateway_singleton
+
+
+def get_gateway_singleton() -> GatewayClient:
+    """Alias for background tasks (reconciler, queue worker)."""
+    return get_gateway()
 
 
 async def shutdown_gateway() -> None:

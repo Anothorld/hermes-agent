@@ -25,6 +25,8 @@ from typing import Any
 
 import pytest
 
+import pytest
+
 pytest.importorskip("fastapi")
 
 from fastapi import FastAPI  # noqa: E402
@@ -33,6 +35,18 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.deps import current_user, get_bridge, get_conn, get_gateway  # noqa: E402
 from app.routers import campaigns as campaigns_router  # noqa: E402
 from app.routers import products as products_router  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _sync_run_states_on_get(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests assert GET-triggered gate dispatch (legacy sync path)."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("KOC_RUN_RECONCILER_ENABLED", "false")
+    monkeypatch.setenv("KOC_SYNC_RUN_STATES_ON_GET", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +71,12 @@ class _StubBridge:
     async def get_identity(self, identity_id: int):
         return self.identity_map.get(identity_id, {})
 
+    async def batch_identity_briefs(self, identity_ids: list[int]):
+        return {
+            iid: self.identity_map.get(iid, {"identity_id": iid})
+            for iid in identity_ids
+        }
+
     async def upsert_campaign(self, campaign_id: str, body: dict):
         self.upsert_calls.append((campaign_id, body))
         return {"ok": True}
@@ -74,6 +94,12 @@ class _StubBridge:
         return {"event_id": len(self.events)}
 
     async def recent_events(self, env: str, limit: int = 200):
+        return []
+
+    async def get_lanes(self, campaign_id: str, *, env: str):
+        return {"items": []}
+
+    async def list_candidate_handles(self, campaign_id: str, *, env: str):
         return []
 
     async def open_escalation(self, body: dict):
@@ -95,7 +121,8 @@ class _StubGateway:
         return f"run-{self._next_id}"
 
     async def start_run(self, *, input: str, instructions: str | None = None,
-                        session_id: str | None = None, model: str | None = None):
+                        session_id: str | None = None, model: str | None = None,
+                        **kwargs: Any):
         new_id = self._mint_id()
         self.runs_started.append({
             "run_id": new_id,
@@ -106,6 +133,9 @@ class _StubGateway:
         self.states[new_id] = {"status": "running"}
         return {"run_id": new_id, "status": "queued"}
 
+    async def start_run_with_retry(self, **kwargs: Any) -> dict[str, Any]:
+        return await self.start_run(**kwargs)
+
     async def get_run(self, run_id: str):
         return self.states.get(run_id)
 
@@ -113,6 +143,12 @@ class _StubGateway:
         if run_id in self.states:
             self.states[run_id]["status"] = "cancelled"
         return {"status": "stopping"}
+
+    async def launch_via_queue(self, start_fn, **kwargs: Any):
+        return await start_fn()
+
+    def ensure_run_drained(self, run_id: str) -> None:
+        return None
 
 
 def _seed_conn() -> sqlite3.Connection:
@@ -316,7 +352,7 @@ def test_approve_shortlist_succeeds_when_gate_cleared() -> None:
 
     assert r.status_code == 200, r.text
     assert len(gateway.runs_started) == 1
-    assert len(bridge.approve_calls) == 1
+    assert len(bridge.route_calls) == 1
 
     # Approve overwrites ``run_id`` for display but MUST NOT touch
     # ``gate_run_id`` — it stays None.

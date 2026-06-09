@@ -2337,6 +2337,69 @@ def write_facts(
     return _safe("write_facts", _do)
 
 
+def write_identity_facts_batch(
+    *,
+    entries: list[tuple[int, Mapping[str, Any]]],
+    campaign_id: str,
+    namespace: str,
+    source: str,
+    env: str = "LIVE",
+) -> int:
+    """Write the same namespace facts for many identities with one recompute each."""
+    if namespace not in FACT_NAMESPACES:
+        raise FactNamespaceError(f"unknown namespace: {namespace!r}")
+    prefix = f"{namespace}."
+    for identity_id, facts in entries:
+        for k, v in facts.items():
+            if not k.startswith(prefix):
+                raise FactNamespaceError(
+                    f"fact_key {k!r} must start with {prefix!r}"
+                )
+            validator = _FACT_SHAPE_VALIDATORS.get(k)
+            if validator is not None:
+                validator(v)
+        _validate_discovery_provenance_bundle(namespace=namespace, facts=facts)
+        _validate_discovery_identity_match(
+            identity_id=identity_id, namespace=namespace, facts=facts, env=env,
+        )
+        _validate_approval_write_guards(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=env,
+            facts=facts,
+            source=source,
+        )
+
+    def _do() -> int:
+        with _connect() as conn:
+            now = _now()
+            n = 0
+            touched: set[int] = set()
+            for identity_id, facts in entries:
+                for k, v in facts.items():
+                    conn.execute(
+                        """INSERT INTO kol_facts
+                           (identity_id, campaign_id, fact_namespace, fact_key,
+                            fact_value, source, source_event_id, captured_at, env)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (identity_id, campaign_id, namespace, k,
+                         _j(v) if not isinstance(v, str) else v,
+                         source, None, now, env),
+                    )
+                    n += 1
+                touched.add(int(identity_id))
+            for identity_id in touched:
+                _recompute_goals_inner(
+                    conn,
+                    identity_id=identity_id,
+                    campaign_id=campaign_id,
+                    env=env,
+                )
+            return n
+
+    return _safe("write_identity_facts_batch", _do)
+
+
 def write_facts_multi(
     *,
     identity_id: int,
@@ -2350,8 +2413,8 @@ def write_facts_multi(
 
     ``namespaces`` is ``{namespace: {fact_key: value, ...}}``. All namespaces
     are validated up front (atomic-ish: any ``FactNamespaceError`` aborts the
-    call before any insert). Each non-empty namespace is forwarded to
-    ``write_facts`` (which triggers goal recompute once per call).
+    call before any insert).     All namespaces are inserted in one transaction with a single goal
+    recompute at the end.
 
     Returns ``{namespace: rows_inserted}``.
     """
@@ -2380,25 +2443,64 @@ def write_facts_multi(
             source=source,
         )
 
-    written: dict[str, int] = {}
-    for ns, facts in namespaces.items():
-        if not facts:
-            continue
-        n = write_facts(
-            identity_id=identity_id, campaign_id=campaign_id,
-            namespace=ns, facts=facts,
-            source=source, source_event_id=source_event_id, env=env,
-        )
-        written[ns] = int(n or 0)
-    return written
+    def _do() -> dict[str, int]:
+        with _connect() as conn:
+            now = _now()
+            written: dict[str, int] = {}
+            for ns, facts in namespaces.items():
+                if not facts:
+                    continue
+                n = 0
+                for k, v in facts.items():
+                    conn.execute(
+                        """INSERT INTO kol_facts
+                           (identity_id, campaign_id, fact_namespace, fact_key,
+                            fact_value, source, source_event_id, captured_at, env)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (identity_id, campaign_id, ns, k,
+                         _j(v) if not isinstance(v, str) else v,
+                         source, source_event_id, now, env),
+                    )
+                    n += 1
+                    mapped = _FACT_EVENT_TYPE_MAP.get(k)
+                    if (mapped and campaign_id and _truthy(v)):
+                        event_type, goal, lane = mapped
+                        conn.execute(
+                            """INSERT INTO kol_conversation_events
+                               (identity_id, campaign_id, event_type, goal, lane,
+                                actor, ts, payload_json, env)
+                               VALUES (?,?,?,?,?,?,?,?,?)""",
+                            (identity_id, campaign_id, event_type, goal, lane,
+                             source, now,
+                             _j({"fact_key": k, "fact_value": v}), env),
+                        )
+                written[ns] = n
+            if campaign_id:
+                _recompute_goals_inner(
+                    conn,
+                    identity_id=identity_id,
+                    campaign_id=campaign_id,
+                    env=env,
+                )
+            return written
+
+    result = _safe("write_facts_multi", _do)
+    return result if result is not None else {}
 
 
 def latest_facts_for(
-    *, identity_id: int, campaign_id: Optional[str], env: str = "LIVE"
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    env: str = "LIVE",
+    conn: Optional[sqlite3.Connection] = None,
 ) -> dict[str, Any]:
     """Return the latest value per fact_key for an (identity, campaign)
     pair, with identity-level facts (campaign_id IS NULL) merged underneath
     so thread-level overrides win.
+
+    When ``conn`` is supplied, queries reuse that connection (avoids extra
+    WAL opens during ``recompute_goals`` hot paths).
     """
 
     def _decode(v: Any) -> Any:
@@ -2409,23 +2511,30 @@ def latest_facts_for(
         except Exception:  # noqa: BLE001
             return v
 
-    with _connect() as conn:
-        ident_rows = conn.execute(
+    def _read(c: sqlite3.Connection) -> dict[str, Any]:
+        ident_rows = c.execute(
             """SELECT fact_key, fact_value FROM kol_facts_latest
                 WHERE identity_id=? AND campaign_id IS NULL AND env=?""",
             (identity_id, env),
         ).fetchall()
         camp_rows = []
         if campaign_id:
-            camp_rows = conn.execute(
+            camp_rows = c.execute(
                 """SELECT fact_key, fact_value FROM kol_facts_latest
                     WHERE identity_id=? AND campaign_id=? AND env=?""",
                 (identity_id, campaign_id, env),
             ).fetchall()
-    out: dict[str, Any] = {r["fact_key"]: _decode(r["fact_value"]) for r in ident_rows}
-    for r in camp_rows:
-        out[r["fact_key"]] = _decode(r["fact_value"])
-    return out
+        out: dict[str, Any] = {
+            r["fact_key"]: _decode(r["fact_value"]) for r in ident_rows
+        }
+        for r in camp_rows:
+            out[r["fact_key"]] = _decode(r["fact_value"])
+        return out
+
+    if conn is not None:
+        return _read(conn)
+    with _connect() as owned:
+        return _read(owned)
 
 
 def recompute_goals(*, identity_id: int, campaign_id: str, env: str = "LIVE") -> int:
@@ -2437,7 +2546,12 @@ def recompute_goals(*, identity_id: int, campaign_id: str, env: str = "LIVE") ->
 def _recompute_goals_inner(
     conn: sqlite3.Connection, *, identity_id: int, campaign_id: str, env: str
 ) -> int:
-    state = latest_facts_for(identity_id=identity_id, campaign_id=campaign_id, env=env)
+    state = latest_facts_for(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        conn=conn,
+    )
     cfg_row = conn.execute(
         "SELECT * FROM campaign_config WHERE campaign_id=?", (campaign_id,)
     ).fetchone()

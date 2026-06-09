@@ -90,16 +90,26 @@ async def dispatch_nox_contacts_batch(
         f"identity_ids: {','.join(str(i) for i in need)}",
         f"requested_by: {actor_email}",
     ])
+    session_id = f"kol-nox-contacts-batch:{env}:{campaign_id}"
     try:
-        run = await gateway.start_run(
-            input=brief,
-            instructions=_NOX_CONTACTS_BATCH_INSTRUCTIONS,
-            session_id=f"kol-nox-contacts-batch:{env}:{campaign_id}",
+
+        async def _start_batch() -> dict[str, Any]:
+            return await gateway.start_run(
+                input=brief,
+                instructions=_NOX_CONTACTS_BATCH_INSTRUCTIONS,
+                session_id=session_id,
+            )
+
+        run = await gateway.launch_via_queue(
+            _start_batch,
+            session_id=session_id,
+            dedup_key=dedup_key,
         )
     except GatewayError:
         return {"ok": False, "error": "gateway_start_failed"}
     run_id = run.get("run_id") if isinstance(run, dict) else None
     if isinstance(run_id, str) and run_id:
+        gateway.ensure_run_drained(run_id)
         register_run(
             conn,
             campaign_id=campaign_id,

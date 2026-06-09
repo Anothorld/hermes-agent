@@ -17,6 +17,7 @@ import { dialog } from '../components/dialogs/useDialog';
 import { toast, useEnvStore } from '../lib/store';
 import { errorSummary } from '../lib/errors';
 import { usePollingFallback } from '../hooks/usePollingFallback';
+import { isAsyncLearningJob, pollLearningJob } from '../lib/learningJobs';
 import {
   formatRunSummary,
   goalLabel,
@@ -265,7 +266,17 @@ export function LearningPage() {
         dry_run: dryRun,
         triggered_by: 'console:learning',
       });
-      toast.success(dryRun ? '预览完成' : '任务已提交', JSON.stringify(out.summary ?? out.ok));
+      let result = out;
+      if (isAsyncLearningJob(out)) {
+        toast.progress('后台执行中…', '学习任务在后台运行，请稍候', {
+          groupKey: 'learning-jobs',
+        });
+        result = await pollLearningJob(out.job_id);
+      }
+      toast.success(
+        dryRun ? '预览完成' : '任务已提交',
+        JSON.stringify(result.summary ?? result.ok ?? '完成'),
+      );
       await refresh();
     } catch (ex) {
       toast.error('执行失败', errorSummary(ex));
@@ -288,11 +299,14 @@ export function LearningPage() {
     setBusy('propose');
     toast.progress('生成中…', 'LLM 蒸馏约需 1–3 分钟，请稍候', { groupKey: 'learning-propose' });
     try {
-      const out = await api.post<Record<string, unknown>>('/learning/propose-edit-policy', {
+      let out = await api.post<Record<string, unknown>>('/learning/propose-edit-policy', {
         env,
         scope: 'company_style',
         limit: 200,
       });
+      if (isAsyncLearningJob(out)) {
+        out = await pollLearningJob(out.job_id);
+      }
       if (out.skipped) {
         toast.info('已跳过', String(out.reason ?? 'unknown'));
       } else if (out.pending) {

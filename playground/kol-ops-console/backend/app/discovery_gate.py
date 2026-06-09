@@ -34,10 +34,15 @@ from .campaign_locks import campaign_lock
 from .gateway_client import GatewayClient, GatewayError
 from .bridge_agent_contract_loader import (
     discovery_cli_rules,
-    gateway_contract_block,
+    gateway_contract_for_brief,
     terminal_safety_rules,
 )
-from .run_registry import get_inflight_run, register_run
+from .config import get_settings
+from .db import _connect
+from .launch_accept import launch_or_accept, queue_would_block
+from .launch_rollback import rollback_rediscover_failure
+from .run_launch_queue import new_pending_run_id
+from .run_registry import finalize_run_id, get_inflight_run, register_run
 
 
 logger = logging.getLogger(__name__)
@@ -61,7 +66,7 @@ REDISCOVERY_INSTRUCTIONS = (
     "asked for more candidates.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    f"{gateway_contract_block()}\n"
+    f"{gateway_contract_for_brief(compact=True)}\n"
     f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"{discovery_cli_rules()}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
@@ -379,25 +384,29 @@ def _recover_test_mode_to(
 async def _excluded_handles_from(
     bridge: BridgeClient, candidates: list[dict[str, Any]]
 ) -> list[str]:
-    """Project a list of candidate rows down to normalized exclusion handles.
-
-    Falls back to ``bridge.get_identity`` when ``primary_handle`` is missing
-    on the candidate row.
-    """
+    """Project candidate rows to normalized exclusion handles."""
+    ids = [
+        int(c["identity_id"])
+        for c in candidates
+        if isinstance(c, dict) and isinstance(c.get("identity_id"), int)
+    ]
+    brief_map = (
+        await bridge.batch_identity_briefs(ids) if ids else {}
+    )
     excluded: list[str] = []
     seen: set[str] = set()
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
-        handle = cand.get("primary_handle")
-        if not (isinstance(handle, str) and handle.strip()):
-            iid = cand.get("identity_id")
-            if isinstance(iid, int):
-                try:
-                    ident = await bridge.get_identity(iid)
-                except BridgeError:
-                    ident = {}
-                handle = ident.get("primary_handle") if isinstance(ident, dict) else None
+        iid = cand.get("identity_id")
+        ident = (
+            brief_map.get(int(iid)) if isinstance(iid, int) else None
+        ) or {}
+        handle = (
+            ident.get("primary_handle")
+            if isinstance(ident, dict)
+            else cand.get("primary_handle")
+        )
         if not (isinstance(handle, str) and handle.strip()):
             continue
         norm = handle.strip().lstrip("@").lower()
@@ -736,47 +745,157 @@ async def _trigger_rediscover_internal(
     )
 
     ensure_gateway_bridge_key()
-    out = await gateway.start_run(
-        input=brief_text,
-        instructions=rediscovery_instructions,
-        session_id=f"kol-campaign:{env}:{campaign_id}",
+    session_id = f"kol-campaign:{env}:{campaign_id}"
+
+    async def _start_rediscover() -> dict[str, Any]:
+        return await gateway.start_run(
+            input=brief_text,
+            instructions=rediscovery_instructions,
+            session_id=session_id,
+        )
+
+    baseline_now = _count_visible_candidates(candidates_snapshot)
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    use_async = (
+        not is_auto_retry
+        and get_settings().launch_http_202
+        and queue_would_block(session_id=session_id)
     )
+    pending_run_id: str | None = (
+        new_pending_run_id() if use_async else None
+    )
+    prev_row = conn.execute(
+        "SELECT run_id, status FROM product_campaigns "
+        "WHERE campaign_id=? AND env=?",
+        (campaign_id, env),
+    ).fetchone()
+    previous_run_id = (
+        str(prev_row["run_id"]) if prev_row and prev_row["run_id"] else None
+    )
+    previous_status = (
+        str(prev_row["status"]) if prev_row and prev_row["status"] else None
+    )
+    actor_user_id = actor["id"] if isinstance(actor, dict) and "id" in actor else None
+
+    async def _on_rediscover_error(_exc: Exception) -> None:
+        await rollback_rediscover_failure(
+            campaign_id=campaign_id,
+            env=env,
+            pending_run_id=pending_run_id,
+            previous_run_id=previous_run_id,
+            previous_status=previous_status,
+        )
+
+    def _persist_run_row(run_id: str | None, *, db: sqlite3.Connection) -> None:
+        if is_auto_retry:
+            db.execute(
+                "UPDATE product_campaigns SET run_id=?, status='running', "
+                "started_at=?, baseline_candidate_count=?, retry_count=?, "
+                "floor_unmet_reason=NULL, gate_run_id=? "
+                "WHERE campaign_id=? AND env=?",
+                (run_id, now, baseline_now, new_retry_count, run_id,
+                 campaign_id, env),
+            )
+        else:
+            target_floor = baseline_now + additional_count
+            db.execute(
+                "UPDATE product_campaigns SET run_id=?, status='running', "
+                "started_at=?, target_floor=?, baseline_candidate_count=?, "
+                "retry_count=0, floor_unmet_reason=NULL, gate_run_id=? "
+                "WHERE campaign_id=? AND env=?",
+                (run_id, now, target_floor, baseline_now, run_id,
+                 campaign_id, env),
+            )
+
+    async def _on_rediscover_success(run: dict[str, Any], _result: Any) -> None:
+        rid = run.get("run_id") if isinstance(run, dict) else None
+        bg = _connect(get_settings().db_path)
+        try:
+            if pending_run_id and isinstance(rid, str) and rid:
+                finalize_run_id(bg, pending_run_id=pending_run_id, actual_run_id=rid)
+            _persist_run_row(rid if isinstance(rid, str) else None, db=bg)
+            if isinstance(rid, str) and rid:
+                register_run(
+                    bg,
+                    campaign_id=campaign_id,
+                    env=env,
+                    run_id=rid,
+                    kind="outreach",
+                    session_id=session_id,
+                    dedup_key=dedup_key,
+                )
+            write_audit(
+                bg,
+                actor_user_id=actor_user_id,
+                action=(
+                    "campaign.auto_rediscover" if is_auto_retry
+                    else "campaign.rediscover"
+                ),
+                target=campaign_id,
+                payload={
+                    "env": env,
+                    "additional_count": additional_count,
+                    "excluded_handle_count": len(excluded_handles),
+                    "run_id": rid,
+                    "is_auto_retry": is_auto_retry,
+                    "retry_count": new_retry_count if is_auto_retry else 0,
+                    "async_accept": True,
+                },
+            )
+            bg.commit()
+        finally:
+            bg.close()
+
+    try:
+        accepted, out = await launch_or_accept(
+            gateway,
+            _start_rediscover,
+            session_id=session_id,
+            dedup_key=dedup_key,
+            on_success=_on_rediscover_success if use_async else None,
+            on_error=_on_rediscover_error if use_async else None,
+            job_meta={"campaign_id": campaign_id, "env": env},
+        )
+    except GatewayError:
+        raise
+
+    if accepted:
+        if out.get("deduped"):
+            return {
+                "ok": True,
+                "accepted": True,
+                "campaign_id": campaign_id,
+                "env": env,
+                "pending_run_id": pending_run_id,
+                "additional_count": additional_count,
+                "excluded_handle_count": len(excluded_handles),
+                **out,
+            }
+        if not pending_run_id:
+            pending_run_id = new_pending_run_id()
+        _persist_run_row(pending_run_id, db=conn)
+        register_run(
+            conn,
+            campaign_id=campaign_id,
+            env=env,
+            run_id=pending_run_id,
+            kind="outreach",
+            session_id=session_id,
+            dedup_key=dedup_key,
+        )
+        return {
+            "ok": True,
+            "accepted": True,
+            "campaign_id": campaign_id,
+            "env": env,
+            "pending_run_id": pending_run_id,
+            "additional_count": additional_count,
+            "excluded_handle_count": len(excluded_handles),
+            **out,
+        }
 
     new_run_id = out.get("run_id") if isinstance(out, dict) else None
-    now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
-
-    # Snapshot baseline + target_floor at run start so the post-terminal
-    # gate has authoritative values. Both use the VISIBLE-pool metric
-    # (includes ``selected_for_outreach``; excludes ``rejected``/``archived``)
-    # so that operator approvals made mid-run do NOT depress ``current`` and
-    # therefore do NOT trigger spurious auto-retries. Rejection during a run
-    # still counts against the floor, which is intentional.
-    #
-    # ``gate_run_id`` is set to the new run_id so that ``_sync_run_states``
-    # only dispatches the gate when this specific run terminates — not when
-    # an unrelated approve-driven outreach run finishes on the same row.
-    baseline_now = _count_visible_candidates(candidates_snapshot)
-
-    if is_auto_retry:
-        # Preserve target_floor; just refresh baseline + retry_count + run_id.
-        conn.execute(
-            "UPDATE product_campaigns SET run_id=?, status='running', "
-            "started_at=?, baseline_candidate_count=?, retry_count=?, "
-            "floor_unmet_reason=NULL, gate_run_id=? "
-            "WHERE campaign_id=? AND env=?",
-            (new_run_id, now, baseline_now, new_retry_count, new_run_id,
-             campaign_id, env),
-        )
-    else:
-        target_floor = baseline_now + additional_count
-        conn.execute(
-            "UPDATE product_campaigns SET run_id=?, status='running', "
-            "started_at=?, target_floor=?, baseline_candidate_count=?, "
-            "retry_count=0, floor_unmet_reason=NULL, gate_run_id=? "
-            "WHERE campaign_id=? AND env=?",
-            (new_run_id, now, target_floor, baseline_now, new_run_id,
-             campaign_id, env),
-        )
+    _persist_run_row(new_run_id if isinstance(new_run_id, str) else None, db=conn)
 
     if isinstance(new_run_id, str) and new_run_id:
         register_run(
@@ -789,7 +908,6 @@ async def _trigger_rediscover_internal(
             dedup_key=dedup_key,
         )
 
-    actor_user_id = actor["id"] if isinstance(actor, dict) and "id" in actor else None
     write_audit(
         conn,
         actor_user_id=actor_user_id,

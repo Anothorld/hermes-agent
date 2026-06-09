@@ -245,6 +245,7 @@ VIEWS: dict[str, str] = {
 INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS ix_facts_id_camp_ns       ON kol_facts (identity_id, campaign_id, fact_namespace)",
     "CREATE INDEX IF NOT EXISTS ix_facts_key              ON kol_facts (fact_key)",
+    "CREATE INDEX IF NOT EXISTS ix_facts_env_id_camp_key  ON kol_facts (env, identity_id, campaign_id, fact_key, id DESC)",
     "CREATE INDEX IF NOT EXISTS ix_events_id_ts           ON kol_conversation_events (identity_id, ts)",
     "CREATE INDEX IF NOT EXISTS ix_events_camp_ts         ON kol_conversation_events (campaign_id, ts)",
     "CREATE INDEX IF NOT EXISTS ix_goal_state_camp        ON kol_goal_state (campaign_id, status)",

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, getToken } from '../../api';
+import { useLiveEventsConnected } from '../../LiveEventsProvider';
 import { errorSummary } from '../../lib/errors';
 import { useAgentDockStore, useEnvStore } from '../../lib/store';
 import { SelectedSessionView } from './SelectedSessionView';
 import { SessionList } from './SessionList';
 import type { AgentSession, AgentSessionsResponse } from './types';
 
-const POLL_MS = 10_000;
+const POLL_MS = 15_000;
 
 export function AgentSessionDock() {
   const open = useAgentDockStore((s) => s.open);
@@ -15,10 +16,12 @@ export function AgentSessionDock() {
   const setOpen = useAgentDockStore((s) => s.setOpen);
   const selectSession = useAgentDockStore((s) => s.selectSession);
   const env = useEnvStore((s) => s.env);
+  const wsConnected = useLiveEventsConnected();
 
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [queueDepth, setQueueDepth] = useState(0);
   // Track the first load per env so the stale-selection effect doesn't
   // clobber the persisted selectedSessionId before the first response.
   const firstLoadDone = useRef(false);
@@ -40,16 +43,33 @@ export function AgentSessionDock() {
     }
   }, [env]);
 
+  const fetchQueueStatus = useCallback(async () => {
+    if (!getToken()) return;
+    try {
+      const r = await api.get<{
+        run_queue_depth?: number;
+        queue?: { queue_depth?: number };
+      }>(`/campaigns/run-launch-status`);
+      setQueueDepth(r.run_queue_depth ?? r.queue?.queue_depth ?? 0);
+    } catch {
+      /* best-effort */
+    }
+  }, []);
+
   useEffect(() => {
     // Reset the first-load flag whenever env flips so the stale-selection
     // effect waits for fresh data before clearing the persisted choice.
     firstLoadDone.current = false;
     if (!getToken()) return;
     fetchSessions();
-    if (!open) return;
-    const id = window.setInterval(fetchSessions, POLL_MS);
+    fetchQueueStatus();
+    if (!open || wsConnected) return;
+    const id = window.setInterval(() => {
+      fetchSessions();
+      fetchQueueStatus();
+    }, POLL_MS);
     return () => window.clearInterval(id);
-  }, [open, env, fetchSessions]);
+  }, [open, env, wsConnected, fetchSessions, fetchQueueStatus]);
 
   // Drop the persisted selection if the session disappears (env switch,
   // registry purge). Wait for the first fetch of the new env to settle
@@ -113,6 +133,14 @@ export function AgentSessionDock() {
             <span className="flex items-center gap-1 text-[11px] text-emerald-300">
               <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
               {openSessionCount} live
+            </span>
+          )}
+          {queueDepth > 0 && (
+            <span
+              className="text-[11px] text-amber-300"
+              title="Agent 启动请求正在排队，请稍候"
+            >
+              排队 {queueDepth}
             </span>
           )}
         </div>

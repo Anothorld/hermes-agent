@@ -128,22 +128,19 @@ def route_discovery_pool(
             env=env,
         )
 
-    # Step 4 — write outreach_path fact per identity.
-    for ident in routed_to_cold:
-        cal.write_facts(
-            identity_id=ident,
+    # Step 4 — batch-write outreach_path facts (one recompute per identity).
+    batch_entries: list[tuple[int, dict[str, Any]]] = [
+        (ident, {"identity.outreach_path": OUTREACH_PATH_COLD})
+        for ident in routed_to_cold
+    ] + [
+        (ident, {"identity.outreach_path": OUTREACH_PATH_REENGAGEMENT})
+        for ident in routed_to_reengagement
+    ]
+    if batch_entries:
+        cal.write_identity_facts_batch(
+            entries=batch_entries,
             campaign_id=campaign_id,
             namespace="identity",
-            facts={"identity.outreach_path": OUTREACH_PATH_COLD},
-            source="skill:discovery-to-outreach-router",
-            env=env,
-        )
-    for ident in routed_to_reengagement:
-        cal.write_facts(
-            identity_id=ident,
-            campaign_id=campaign_id,
-            namespace="identity",
-            facts={"identity.outreach_path": OUTREACH_PATH_REENGAGEMENT},
             source="skill:discovery-to-outreach-router",
             env=env,
         )

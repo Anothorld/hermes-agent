@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import re
 import sqlite3
@@ -9,9 +10,11 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 
 from ..audit import write_audit
+from ..db import _connect
 from ..bridge_client import BridgeClient, BridgeError
 from ..bridge_runtime import ensure_gateway_bridge_key
 from ..campaign_id_norm import CampaignIdNormaliserMixin, norm_campaign_id
@@ -24,9 +27,17 @@ from ..nox_diligence_sync import attempt_gate_a_diligence
 from ..nox_gate import materialize_campaign_config_file, require_nox_quota_enabled
 from ..nox_helpers import dedup_identity_ids_by_nox_creator
 from ..nox_quota import assert_nox_quota_available, raise_quota_exhausted
-from ..bridge_agent_contract_loader import gateway_contract_block, terminal_safety_rules
+from ..bridge_agent_contract_loader import (
+    gateway_contract_for_brief,
+    terminal_safety_rules,
+)
+from ..background_jobs import create_job, get_job, run_in_background
+from ..launch_accept import launch_or_accept
+from ..launch_rollback import rollback_discover_email_failure
+from ..run_launch_queue import new_pending_run_id
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
+    finalize_run_id,
     get_inflight_run,
     register_run,
 )
@@ -40,19 +51,36 @@ async def _start_detached_gateway_run(
     gateway: GatewayClient,
     *,
     action_label: str,
+    dedup_key: str | None = None,
+    on_success: Any = None,
+    job_meta: dict[str, Any] | None = None,
     **kwargs: Any,
-) -> dict[str, Any]:
-    """Start a run, retry on gateway concurrency, and drain SSE in background."""
+) -> tuple[bool, dict[str, Any]]:
+    """Start a run via launch queue; may return 202-shaped accept body."""
+    session_id = str(kwargs.get("session_id") or "")
+    kind = None
+    if session_id.startswith("kol-email-discover:"):
+        kind = "email_discover"
+    elif ":recovery-" in session_id:
+        kind = "recovery"
+
+    async def _start() -> dict[str, Any]:
+        return await gateway.start_run_with_retry(**kwargs)
+
     try:
-        run = await gateway.start_run_with_retry(**kwargs)
+        return await launch_or_accept(
+            gateway,
+            _start,
+            session_id=session_id or f"detached:{action_label}",
+            dedup_key=dedup_key,
+            kind=kind,
+            on_success=on_success,
+            job_meta=job_meta,
+        )
     except GatewayError as exc:
         raise http_exception_from_gateway_start(
             exc, action_label=action_label,
         ) from exc
-    run_id = run.get("run_id") if isinstance(run, dict) else None
-    if isinstance(run_id, str) and run_id:
-        gateway.schedule_drain_run_events(run_id)
-    return run
 
 
 def _env(env: str | None) -> str:
@@ -82,6 +110,17 @@ async def list_archived_kols(
         )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@router.get("/jobs/{job_id}")
+async def get_kol_job(
+    job_id: str,
+    _: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    row = get_job(job_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
+    return row
 
 
 @router.get("/{identity_id}")
@@ -419,7 +458,7 @@ _DISCOVER_EMAIL_INSTRUCTIONS = (
     "loop over any other identity in this campaign.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    f"{gateway_contract_block()}\n"
+    f"{gateway_contract_for_brief(compact=True)}\n"
     f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- CLI failures print JSON on **stdout**. Empty output + exit 2 → read\n"
@@ -633,6 +672,19 @@ async def discover_email(
                 cfg_path = ""
 
     ensure_gateway_bridge_key()
+    pending_run_id: str | None = None
+    if body.campaign_id:
+        pending_run_id = new_pending_run_id()
+        register_run(
+            conn,
+            campaign_id=body.campaign_id,
+            env=env,
+            run_id=pending_run_id,
+            kind="draft",
+            session_id=f"kol-email-discover:{env}:{identity_id}",
+            dedup_key=dedup_key,
+        )
+        conn.commit()
     handle = ident.get("primary_handle")
     brief = _compose_discover_email_brief(
         identity_id=identity_id,
@@ -643,28 +695,73 @@ async def discover_email(
         gate_b_attempted=gate_b_attempted,
         campaign_config_file=cfg_path,
     )
-    run = await _start_detached_gateway_run(
+    campaign_id_val = body.campaign_id
+    identity_id_val = identity_id
+    pending_ref = pending_run_id
+    user_id = user["id"]
+
+    async def _on_discover_error(_exc: Exception) -> None:
+        await rollback_discover_email_failure(pending_run_id=pending_ref)
+
+    async def _on_discover_success(run: dict[str, Any], _result: Any) -> None:
+        rid = run.get("run_id") if isinstance(run, dict) else None
+        if not (campaign_id_val and pending_ref and isinstance(rid, str) and rid):
+            return
+        bg = _connect(get_settings().db_path)
+        try:
+            finalize_run_id(bg, pending_run_id=pending_ref, actual_run_id=rid)
+            write_audit(
+                bg,
+                actor_user_id=user_id,
+                action="kol.email.discover",
+                target=str(identity_id_val),
+                payload={
+                    "env": env,
+                    "campaign_id": campaign_id_val,
+                    "run_id": rid,
+                    "async_accept": True,
+                },
+            )
+            bg.commit()
+        finally:
+            bg.close()
+
+    accepted, run = await _start_detached_gateway_run(
         gateway,
         action_label="搜索邮箱",
+        dedup_key=dedup_key,
         input=brief,
         instructions=_DISCOVER_EMAIL_INSTRUCTIONS,
-        # Per-identity namespace; not a campaign-wide resume.
         session_id=f"kol-email-discover:{env}:{identity_id}",
+        on_success=_on_discover_success,
+        on_error=_on_discover_error if pending_run_id else None,
+        job_meta={
+            "identity_id": identity_id,
+            "campaign_id": body.campaign_id,
+            "env": env,
+        },
     )
-    run_id = run.get("run_id") if isinstance(run, dict) else None
-    if isinstance(run_id, str) and run_id and body.campaign_id:
-        # Registering requires a campaign_id; for ad-hoc discovery
-        # without a campaign, skip registration (dedup falls back to
-        # the operator's local React state).
-        register_run(
-            conn,
-            campaign_id=body.campaign_id,
-            env=env,
-            run_id=run_id,
-            kind="draft",
-            session_id=f"kol-email-discover:{env}:{identity_id}",
-            dedup_key=dedup_key,
+    if accepted:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                **run,
+                "ok": True,
+                "identity_id": identity_id,
+                "pending_run_id": pending_run_id,
+                "started_at": _dt.datetime.now(
+                    _dt.timezone.utc,
+                ).isoformat(timespec="seconds"),
+            },
         )
+
+    run_id = run.get("run_id") if isinstance(run, dict) else None
+    if (
+        isinstance(run_id, str) and run_id
+        and body.campaign_id and pending_run_id
+    ):
+        finalize_run_id(conn, pending_run_id=pending_run_id, actual_run_id=run_id)
+        conn.commit()
     write_audit(
         conn,
         actor_user_id=user["id"],
@@ -672,12 +769,19 @@ async def discover_email(
         target=str(identity_id),
         payload={"env": env, "campaign_id": body.campaign_id, "run_id": run_id},
     )
-    return {
+    resp: dict[str, Any] = {
         "ok": True,
         "run_id": run_id,
         "identity_id": identity_id,
         "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
     }
+    if isinstance(run, dict):
+        if run.get("_queued"):
+            resp["queued"] = True
+            resp["waited_sec"] = run.get("_waited_sec")
+        if run.get("_queue_position"):
+            resp["queue_position"] = run.get("_queue_position")
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +893,98 @@ async def nox_diligence(
     }
 
 
+async def _execute_nox_diligence_batch(
+    *,
+    bridge: BridgeClient,
+    conn: sqlite3.Connection,
+    user: dict,
+    campaign_id: str,
+    env: str,
+    ids: list[int],
+    dropped_dupes: list[int],
+    sync: bool,
+) -> dict[str, Any]:
+    """Run Gate A diligence for each identity (parallel, bounded)."""
+    if env.upper() == "LIVE":
+        await require_nox_quota_enabled(bridge, campaign_id, env=env)
+        await assert_nox_quota_available(bridge, campaign_id, env=env)
+
+    brief_map = await bridge.batch_identity_briefs(ids)
+    sem = asyncio.Semaphore(get_settings().nox_max_concurrent)
+    processed: list[dict] = []
+    errors: list[dict] = []
+    quota_hit = False
+
+    async def _process_one(iid: int) -> None:
+        nonlocal quota_hit
+        async with sem:
+            ident = brief_map.get(iid) or {}
+            if not ident:
+                errors.append({"identity_id": iid, "error": "not_found"})
+                return
+            facts_resp = None
+            try:
+                facts_resp = await bridge.read_facts(
+                    iid, campaign_id=campaign_id, env=env,
+                )
+            except BridgeError:
+                facts_resp = None
+            result = await attempt_gate_a_diligence(
+                bridge,
+                identity_id=iid,
+                ident=ident,
+                campaign_id=campaign_id,
+                env=env,
+                actor_email=user["email"],
+                facts_resp=facts_resp,
+            )
+            if result.get("quota_exhausted"):
+                quota_hit = True
+                return
+            if result.get("skipped") or not result.get("ok"):
+                errors.append({
+                    "identity_id": iid,
+                    "reason": result.get("reason"),
+                    "detail": result.get("detail"),
+                })
+                return
+            processed.append({
+                "identity_id": iid,
+                "verdict": result.get("verdict"),
+                "cache_hit": result.get("cache_hit"),
+                "facts_written": result.get("facts_written"),
+            })
+
+    await asyncio.gather(*[_process_one(iid) for iid in ids])
+    if quota_hit:
+        raise_quota_exhausted(campaign_id=campaign_id, env=env)
+
+    payload = {
+        "identity_ids": ids,
+        "dropped_identity_ids": dropped_dupes,
+        "processed": processed,
+        "errors": errors,
+        "sync": sync,
+    }
+    write_audit(
+        conn,
+        actor_user_id=user["id"],
+        action="kol.nox.diligence_batch",
+        target=campaign_id,
+        payload=payload,
+    )
+    return {
+        "ok": True,
+        "sync": sync,
+        "identity_ids": ids,
+        "dropped_identity_ids": dropped_dupes,
+        "processed": processed,
+        "errors": errors,
+        "processed_count": len(processed),
+        "error_count": len(errors),
+    }
+
+
 @router.post("/nox-diligence-batch")
 async def nox_diligence_batch(
     body: NoxDiligenceBatchBody,
@@ -797,7 +993,7 @@ async def nox_diligence_batch(
     conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict:
-    """Gate A batch: serial synchronous diligence-pack per identity."""
+    """Gate A batch: parallel diligence-pack per identity."""
     env = body.env
     ids = list(dict.fromkeys(body.identity_ids))
     dropped_dupes: list[int] = []
@@ -817,76 +1013,61 @@ async def nox_diligence_batch(
                 "dropped_identity_ids": dropped_dupes,
             },
         )
-    if env.upper() == "LIVE":
-        await require_nox_quota_enabled(bridge, body.campaign_id, env=env)
-        await assert_nox_quota_available(bridge, body.campaign_id, env=env)
 
-    processed: list[dict] = []
-    errors: list[dict] = []
-    for iid in ids:
-        try:
-            ident = await bridge.get_identity(iid)
-        except BridgeError as exc:
-            errors.append({"identity_id": iid, "error": str(exc)})
-            continue
-        if not ident:
-            errors.append({"identity_id": iid, "error": "not_found"})
-            continue
-        facts_resp = None
-        try:
-            facts_resp = await bridge.read_facts(
-                iid, campaign_id=body.campaign_id, env=env,
-            )
-        except BridgeError:
-            facts_resp = None
-        result = await attempt_gate_a_diligence(
-            bridge,
-            identity_id=iid,
-            ident=ident,
-            campaign_id=body.campaign_id,
-            env=env,
-            actor_email=user["email"],
-            facts_resp=facts_resp,
-        )
-        if result.get("quota_exhausted"):
-            raise_quota_exhausted(campaign_id=body.campaign_id, env=env)
-        if result.get("skipped") or not result.get("ok"):
-            errors.append({
-                "identity_id": iid,
-                "reason": result.get("reason"),
-                "detail": result.get("detail"),
-            })
-            continue
-        processed.append({
-            "identity_id": iid,
-            "verdict": result.get("verdict"),
-            "cache_hit": result.get("cache_hit"),
-            "facts_written": result.get("facts_written"),
-        })
-
-    write_audit(
-        conn,
-        actor_user_id=user["id"],
-        action="kol.nox.diligence_batch",
-        target=body.campaign_id,
-        payload={
-            "identity_ids": ids,
-            "dropped_identity_ids": dropped_dupes,
-            "processed": processed,
-            "errors": errors,
-            "sync": True,
-        },
+    settings = get_settings()
+    use_async = (
+        settings.nox_batch_async
+        and len(ids) >= settings.nox_batch_async_min_ids
     )
-    return {
-        "ok": True,
-        "sync": True,
-        "identity_ids": ids,
-        "dropped_identity_ids": dropped_dupes,
-        "processed": processed,
-        "errors": errors,
-        "processed_count": len(processed),
-        "error_count": len(errors),
-    }
+    if use_async:
+        campaign_id = body.campaign_id
+        actor = dict(user)
+        job_id = create_job(
+            kind="nox-diligence-batch",
+            meta={
+                "campaign_id": campaign_id,
+                "env": env,
+                "identity_count": len(ids),
+            },
+        )
+
+        async def _runner() -> dict[str, Any]:
+            bg_conn = _connect(get_settings().db_path)
+            try:
+                return await _execute_nox_diligence_batch(
+                    bridge=bridge,
+                    conn=bg_conn,
+                    user=actor,
+                    campaign_id=campaign_id,
+                    env=env,
+                    ids=ids,
+                    dropped_dupes=dropped_dupes,
+                    sync=False,
+                )
+            finally:
+                bg_conn.close()
+
+        await run_in_background(job_id, _runner)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "job_id": job_id,
+                "status": "accepted",
+                "poll": f"/kols/jobs/{job_id}",
+                "identity_count": len(ids),
+            },
+        )
+
+    return await _execute_nox_diligence_batch(
+        bridge=bridge,
+        conn=conn,
+        user=user,
+        campaign_id=body.campaign_id,
+        env=env,
+        ids=ids,
+        dropped_dupes=dropped_dupes,
+        sync=True,
+    )
 
 
 @router.post("/{identity_id}/nox-contacts")
@@ -1017,13 +1198,18 @@ async def nox_monitor(
         f"campaign_id: {body.campaign_id or ''}",
         f"campaign_config_file: {cfg_path}",
     ])
-    run = await _start_detached_gateway_run(
+    accepted, run = await _start_detached_gateway_run(
         gateway,
         action_label="启用 Nox 监测",
         input=brief,
         instructions=_NOX_MONITOR_INSTRUCTIONS,
         session_id=f"kol-nox-monitor:{body.env}:{identity_id}",
     )
+    if accepted:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={**run, "ok": True, "identity_id": identity_id},
+        )
     run_id = run.get("run_id") if isinstance(run, dict) else None
     write_audit(
         conn,
@@ -1182,7 +1368,7 @@ _DISCOVER_SOCIAL_LINKS_INSTRUCTIONS = (
     "Do NOT loop over any other identity in this campaign.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    f"{gateway_contract_block()}\n"
+    f"{gateway_contract_for_brief(compact=True)}\n"
     f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- CLI failures print JSON on **stdout**. Empty output + exit 2 → read\n"
@@ -1306,13 +1492,18 @@ async def discover_social_links(
         campaign_id=body.campaign_id,
         actor_email=user["email"],
     )
-    run = await _start_detached_gateway_run(
+    accepted, run = await _start_detached_gateway_run(
         gateway,
         action_label="搜索社交链接",
         input=brief,
         instructions=_DISCOVER_SOCIAL_LINKS_INSTRUCTIONS,
         session_id=f"kol-social-link-discover:{env}:{identity_id}",
     )
+    if accepted:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={**run, "ok": True, "identity_id": identity_id},
+        )
     run_id = run.get("run_id") if isinstance(run, dict) else None
     if isinstance(run_id, str) and run_id and body.campaign_id:
         register_run(

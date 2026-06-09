@@ -33,6 +33,8 @@
 | POST | `/kols/{id}/discover-email` | Nox Gate B（需 `campaign_id` + LIVE + `nox_quota_enabled`）→ `kol-email-discovery`（Tier 1 本地 Chrome Google 搜索 + 结果页 `browser_*`；Tier 2 JS 页面；**禁止** `web_search`/`web_extract`、`veedcrawl_*`、`delegate_task`、`mcp_chrome_devtools_*`；guard 在 `kol-email-discover:*` 硬拦） |
 | POST | `/kols/{id}/discover-social-links` | `kol-social-link-discovery`（Tier 1 本地 Chrome Google + 结果页；Tier 2 JS 页面；**禁止** `web_search`/`web_extract`；browser no-hang 纪律） |
 | POST | `/kols/{id}/email`, `/kols/{id}/nox-contacts`, `/kols/{id}/nox/*` | 手动邮箱 / 仅 Nox Gate B / 尽调与监测 |
+| POST | `/kols/nox-diligence-batch` | Gate A 批量尽调；≥5 个 identity 时默认 **202 异步**（`KOC_NOX_BATCH_ASYNC`），轮询 `GET /kols/jobs/{job_id}` |
+| GET | `/kols/jobs/{job_id}` | 查询 Nox batch 等后台 job 状态 |
 
 ## 全网搜索邮箱（kol-email-discovery）
 
@@ -71,7 +73,7 @@ Tier 1 不再使用 `web_search` / `web_extract`。模型应：
 修复：
 - **tab-pool 插件**（`plugins/local-chrome-tab-pool/internal/tab_pool.py`）：`acquire()` 前调用 `reap_orphan_blank_tabs()`，只关闭**未被 pool 跟踪且 url 为 `about:blank`** 的 page target——真实页面与在用标签页不受影响。
 - **技能 + brief 纪律**：Tier 2 一页一次、单次尝试，导航/快照报错或超时即记入 `tried` 继续，绝不重试同一 URL；用尽 8 页预算即返回 miss；Chrome 无法启动则 miss `browser_unavailable`。**绝不让 run 挂死**。
-- **并发**：一次只跑一个 `kol-email-discovery`，不要为多个身份并行浏览器发现（会饱和 gateway 槽位与共享 Chrome）。
+- **并发**：一次只跑一个 `kol-email-discovery`，不要为多个身份并行浏览器发现（会饱和 gateway 槽位与共享 Chrome）。Console `run_launch_queue` 对 `kol-email-discover:*` 强制 **全局 max_inflight=1**。若队列繁忙，`POST /kols/{id}/discover-email` 返回 **202 accepted**（含 `job_id`、`poll`、`queue`），HTTP 不阻塞；详情页 toast「邮箱发现已排队」。Dock 显示「排队 N」。见 [performance](../performance/GUIDE.md)。
 - **CLI 错误**：bridge CLI 失败路径在 **stdout** 输出 JSON；空 terminal + exit 2 应读 stdout 的 `error`/`hint`，禁止转 `execute_code`。
 - **工具误选（701 / SEB8010）**：模型曾用 `delegate_task` 派子代理、子代理空参调用 `veedcrawl_*`（`bad_request`，未到 API）。`kol-bridge-agent-guard` 现对 `kol-email-discover:*` 拦截 `veedcrawl_*` 与 `delegate_task`；对 **`kol-campaign:*` 发现 run** 拦截 `delegate_task`（outreach/draft 除外）。Launch/rediscover brief 与 `instagram-kol-discovery` 技能同步写明：发现用 `browser_*`，批量靠 `/rediscover`。
 

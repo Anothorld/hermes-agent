@@ -788,16 +788,26 @@ async def resolve_escalation(
             actor_user_id=user.get("id"),
             require_draft=require_draft,
         )
+        session_id = f"kol-campaign:{env}:{campaign_id}"
         try:
-            run = await gateway.start_run(
-                input=brief,
-                instructions=_RESUME_INSTRUCTIONS,
-                session_id=f"kol-campaign:{env}:{campaign_id}",
+
+            async def _start_resume() -> dict[str, Any]:
+                return await gateway.start_run(
+                    input=brief,
+                    instructions=_RESUME_INSTRUCTIONS,
+                    session_id=session_id,
+                )
+
+            run = await gateway.launch_via_queue(
+                _start_resume,
+                session_id=session_id,
+                dedup_key=draft_dedup_key,
             )
         except GatewayError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
         if isinstance(run.get("run_id"), str):
             run_id = run["run_id"]
+            gateway.ensure_run_drained(run_id)
             conn.execute(
                 "UPDATE product_campaigns SET run_id=?, status='running' "
                 "WHERE campaign_id=? AND env=?",
@@ -904,18 +914,26 @@ async def preview_draft(
         actor_user_id=user.get("id"),
     )
     ensure_gateway_bridge_key()
+    session_id = f"kol-campaign-draft:{env}:{campaign_id}"
     try:
-        run = await gateway.start_run(
-            input=brief,
-            instructions=_DRAFT_PREVIEW_INSTRUCTIONS,
-            # Distinct session-id namespace so the preview run is not
-            # mistakenly treated as a resume by replay logic.
-            session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+
+        async def _start_preview() -> dict[str, Any]:
+            return await gateway.start_run(
+                input=brief,
+                instructions=_DRAFT_PREVIEW_INSTRUCTIONS,
+                session_id=session_id,
+            )
+
+        run = await gateway.launch_via_queue(
+            _start_preview,
+            session_id=session_id,
+            dedup_key=dedup_key,
         )
     except GatewayError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     run_id = run.get("run_id") if isinstance(run, dict) else None
     if isinstance(run_id, str) and run_id:
+        gateway.ensure_run_drained(run_id)
         register_run(
             conn,
             campaign_id=campaign_id,

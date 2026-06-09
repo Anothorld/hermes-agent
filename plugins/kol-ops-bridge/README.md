@@ -324,6 +324,8 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Learning LLM distill | `learning_llm.py` | *(via apply-edit-policy)* | Reuses Hermes `model.default` + `~/.hermes/.env` via `call_llm`; override with `KOL_LEARNING_LLM_*` |
 | Reject tag vocabulary | `reject_tags.py` | *(via reject body)* | `POST /approvals/.../reject` + `correction` |
 | Sent-body edit diff | `gmail_reconcile.py`, `reply_diff.py` | `reconcile_sent`, `backfill_edit_learning` | `POST /gmail/reconcile-sent`, `POST /learning/backfill-edit-learning` |
+| Gmail coordinator | `gmail_worker.py` | — | `GET /gmail/worker/status` |
+| Inbound reply polling | `gmail_inbound_poller.py`, `gmail_inbound_dispatch.py`, `scripts/kol_reply_dispatcher.py` | `kol_reply_dispatcher --watch` | `GET/POST /gmail/inbound-poller/*` |
 
 `write-facts-multi` with `source=email:<message_id>` auto-sanitizes namespaces
 when `signals` are supplied (see `classifier_facts.sanitize_classifier_namespaces`).

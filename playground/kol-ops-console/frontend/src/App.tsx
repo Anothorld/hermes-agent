@@ -23,6 +23,8 @@ import { DialogHost } from './components/dialogs/DialogHost';
 import { ToastHost } from './components/feedback/ToastHost';
 import { AgentSessionDock } from './components/agent-dock/AgentSessionDock';
 import { GatewayApprovalDock } from './components/gateway-approval/GatewayApprovalDock';
+import { GatewayApprovalProvider } from './GatewayApprovalProvider';
+import { LiveEventsProvider } from './LiveEventsProvider';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
@@ -39,6 +41,8 @@ export function App() {
           path="*"
           element={
             <RequireAuth>
+              <LiveEventsProvider>
+              <GatewayApprovalProvider>
               <EnvBanner />
               <GlobalNav />
               <BreadcrumbBar />
@@ -64,12 +68,14 @@ export function App() {
                   <Route path="/settings" element={<SettingsPage />} />
                 </Routes>
               </main>
+              <AgentSessionDock />
+              <GatewayApprovalDock />
+              </GatewayApprovalProvider>
+              </LiveEventsProvider>
             </RequireAuth>
           }
         />
       </Routes>
-      <AgentSessionDock />
-      <GatewayApprovalDock />
       <DialogHost />
       <ToastHost />
     </>

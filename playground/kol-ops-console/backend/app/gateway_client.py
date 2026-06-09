@@ -17,6 +17,7 @@ from typing import Any, Optional
 import httpx
 
 from .config import get_settings
+from .perf_snapshot import perf
 
 # Mirrors ``APIServerAdapter._MAX_CONCURRENT_RUNS`` in gateway api_server.
 GATEWAY_MAX_CONCURRENT_RUNS = 10
@@ -77,6 +78,7 @@ class GatewayClient:
             self._headers["Authorization"] = f"Bearer {s.gateway_key}"
         # Short timeout — this is a polling read against localhost.
         self._client = httpx.AsyncClient(timeout=5.0)
+        self._drain_tasks: dict[str, asyncio.Task] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -282,10 +284,55 @@ class GatewayClient:
             return
 
     def schedule_drain_run_events(self, run_id: str) -> None:
-        """Background drain — safe to call right after ``start_run`` returns."""
-        if not run_id:
+        """Background drain — idempotent per ``run_id``."""
+        self.ensure_run_drained(run_id)
+
+    def ensure_run_drained(self, run_id: str) -> None:
+        """Start at most one background SSE drain per run."""
+        if not run_id or run_id.startswith("pending:"):
             return
-        asyncio.create_task(self.drain_run_events(run_id))
+        existing = self._drain_tasks.get(run_id)
+        if existing is not None and not existing.done():
+            return
+
+        async def _runner() -> None:
+            try:
+                await self.drain_run_events(run_id)
+            finally:
+                self._drain_tasks.pop(run_id, None)
+                perf.gateway_drain_tasks = len(self._drain_tasks)
+
+        task = asyncio.create_task(_runner())
+        self._drain_tasks[run_id] = task
+        perf.gateway_drain_tasks = len(self._drain_tasks)
+
+    async def launch_via_queue(
+        self,
+        start_fn,
+        *,
+        session_id: str,
+        dedup_key: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Start a run through :mod:`run_launch_queue` when enabled."""
+        from .run_launch_queue import launch_queue
+
+        result = await launch_queue.launch(
+            start_fn,
+            session_id=session_id,
+            dedup_key=dedup_key,
+            kind=kind,
+        )
+        run = result.run
+        run_id = run.get("run_id") if isinstance(run, dict) else None
+        if isinstance(run_id, str) and run_id:
+            self.ensure_run_drained(run_id)
+        if result.queued:
+            run = dict(run)
+            run["_queued"] = True
+            run["_waited_sec"] = result.waited_sec
+            run["_queue_position"] = result.queue_position
+        return run
 
     async def stop_run(self, run_id: str) -> dict[str, Any]:
         """POST ``/v1/runs/{id}/stop`` — interrupt a running agent.

@@ -75,7 +75,16 @@ def _load_pkg() -> ModuleType:
     pkg = ModuleType(_PKG_NAME)
     pkg.__path__ = [str(_PLUGIN_ROOT)]  # type: ignore[attr-defined]
     sys.modules[_PKG_NAME] = pkg
-    for sub in ("schema", "cal", "gmail_client", "gmail_poller", "plugin_api"):
+    for sub in (
+        "schema",
+        "cal",
+        "gmail_client",
+        "gmail_poller",
+        "gmail_inbound_dispatch",
+        "gmail_inbound_poller",
+        "gmail_worker",
+        "plugin_api",
+    ):
         spec = importlib.util.spec_from_file_location(
             f"{_PKG_NAME}.{sub}", _PLUGIN_ROOT / f"{sub}.py"
         )
@@ -90,28 +99,48 @@ def create_app() -> FastAPI:
     _load_pkg()
     plugin_api = sys.modules[f"{_PKG_NAME}.plugin_api"]
     gmail_poller = sys.modules[f"{_PKG_NAME}.gmail_poller"]
+    gmail_inbound_poller = sys.modules[f"{_PKG_NAME}.gmail_inbound_poller"]
+    gmail_worker = sys.modules[f"{_PKG_NAME}.gmail_worker"]
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
-        # Gmail reply-poller runs as a single bg task; opt-out via env var.
-        if os.environ.get("KOL_OPS_BRIDGE_DISABLE_GMAIL_POLLER") == "1":
+        # Gmail: unified coordinator (default) or legacy parallel pollers.
+        tasks: list[asyncio.Task[None]] = []
+        if gmail_worker.parallel_mode_enabled():
             logging.getLogger(__name__).info(
-                "[serve] gmail poller disabled via env var"
+                "[serve] gmail parallel mode (KOL_OPS_GMAIL_WORKER_PARALLEL=1)"
             )
-            yield
-            return
-        task = asyncio.create_task(
-            gmail_poller.run_forever(),
-            name="kol-ops-bridge-gmail-poller",
-        )
+            if os.environ.get("KOL_OPS_BRIDGE_DISABLE_GMAIL_POLLER") != "1":
+                tasks.append(
+                    asyncio.create_task(
+                        gmail_poller.run_forever(),
+                        name="kol-ops-bridge-gmail-sent-poller",
+                    )
+                )
+            if os.environ.get("KOL_OPS_BRIDGE_DISABLE_GMAIL_INBOUND_POLLER") != "1":
+                tasks.append(
+                    asyncio.create_task(
+                        gmail_inbound_poller.run_forever(),
+                        name="kol-ops-bridge-gmail-inbound-poller",
+                    )
+                )
+        else:
+            tasks.append(
+                asyncio.create_task(
+                    gmail_worker.run_forever(),
+                    name="kol-ops-bridge-gmail-worker",
+                )
+            )
         try:
             yield
         finally:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
 
     app = FastAPI(title="kol-ops-bridge (standalone)", lifespan=_lifespan)
     app.include_router(plugin_api.router, prefix=_MOUNT)
@@ -198,7 +227,28 @@ def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
     _hydrate_env()
-    logging.basicConfig(level=args.log_level.upper())
+    from logging.handlers import RotatingFileHandler
+
+    log_dir = Path(
+        os.environ.get(
+            "KOL_OPS_BRIDGE_LOG_DIR",
+            str(Path.home() / ".hermes" / "kol-ops-bridge"),
+        )
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    bridge_log = log_dir / "bridge.log"
+    root = logging.getLogger()
+    root.setLevel(args.log_level.upper())
+    if not any(
+        isinstance(h, RotatingFileHandler)
+        and getattr(h, "baseFilename", "") == str(bridge_log)
+        for h in root.handlers
+    ):
+        fh = RotatingFileHandler(
+            bridge_log, maxBytes=10_000_000, backupCount=5, encoding="utf-8",
+        )
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        root.addHandler(fh)
     app = create_app()
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
     return 0

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { useLiveEventsConnected } from '../LiveEventsProvider';
 
 // setInterval wrapper that skips ticks while the operator is typing
 // inside an editor surface. Editors mark themselves with the
@@ -13,12 +14,16 @@ export function usePollingFallback(
   // Set to false to pause the loop entirely (e.g. while a modal is
   // open). Default true.
   enabled: boolean = true,
+  // When true, skip polling ticks while the global WS is connected.
+  pauseWhenWsConnected: boolean = true,
 ) {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const wsConnected = useLiveEventsConnected();
 
   useEffect(() => {
     if (!enabled) return;
+    if (pauseWhenWsConnected && wsConnected) return;
     const tick = () => {
       try {
         const ae = typeof document !== 'undefined' ? document.activeElement : null;
@@ -30,5 +35,5 @@ export function usePollingFallback(
     };
     const t = setInterval(tick, intervalMs);
     return () => clearInterval(t);
-  }, [enabled, intervalMs]);
+  }, [enabled, intervalMs, pauseWhenWsConnected, wsConnected]);
 }

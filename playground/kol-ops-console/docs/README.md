@@ -19,6 +19,7 @@
 | [features/gmail/GUIDE.md](features/gmail/GUIDE.md) | 操作员 Gmail OAuth、邮件历史 |
 | [features/nox/GUIDE.md](features/nox/GUIDE.md) | Nox 补充、尽调、配额 |
 | [features/live-events/GUIDE.md](features/live-events/GUIDE.md) | WebSocket 实时刷新 |
+| [features/performance/GUIDE.md](features/performance/GUIDE.md) | Agent 爆发期性能、压测、运维 runbook |
 
 **代码侧速查**
 

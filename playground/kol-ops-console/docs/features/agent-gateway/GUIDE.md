@@ -20,7 +20,7 @@
 
 | 层 | 文件 |
 |----|------|
-| FE | `agent-dock/`, `AgentTranscriptPanel.tsx`, `hooks/useGatewayApprovals.ts` |
+| FE | `agent-dock/`, `AgentTranscriptPanel.tsx`, `GatewayApprovalProvider.tsx`, `hooks/useGatewayApprovals.ts` |
 | BE | `gateway_client.py`, `run_registry.py`, `gateway_approval_watcher.py`, `routers/campaigns.py`（stream）, `routers/gateway_approvals.py` |
 | 配置 | `bridge_runtime.py`（bridge key 注入 gateway env） |
 
@@ -28,8 +28,26 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/campaigns/{id}/agent-stream` | SSE 日志 |
-| GET/POST | `/gateway-approvals` | 列表/resolve |
+| GET | `/campaigns/{id}/agent-stream` | SSE 日志（并行代理上限 `KOC_AGENT_STREAM_MAX_RUNS`，默认 10） |
+| GET | `/campaigns/run-launch-status` | 启动队列深度（Dock「排队 N」） |
+| GET | `/campaigns/launch-jobs/{job_id}` | 轮询 202 异步 launch（campaign / rediscover / discover-email）；FE 用 `lib/launchJobs.ts` |
+| GET | `/admin/perf-snapshot` | 运行时指标（owner/operator） |
+| GET/POST | `/gateway-approvals` | 列表/resolve（FE 经 `GatewayApprovalProvider` 全应用只拉一次 snapshot） |
+
+## Agent 爆发期：队列 + 排水
+
+Gateway 硬顶为 **10 并发 run**。Console 通过 `run_launch_queue` 将有效 inflight 压在
+`KOC_GATEWAY_LAUNCH_MAX_INFLIGHT`（默认 8）以下，并对 `kol-email-discover:*` **全局串行**
+（`max_inflight=1`）。
+
+每次 `start_run` 成功后，`gateway_client.ensure_run_drained(run_id)` 在后台消费
+终态 SSE，帮助 Gateway 尽快释放槽位（幂等，每 run 至多一条 drain 任务）。
+
+操作员在 **Agent Session Dock** 看到「排队 N」时表示有启动请求在等槽位，无需重复点击。
+详见 [performance](../performance/GUIDE.md)。
+
+Approval watcher 在 open runs >5 时自动切换 `poll_aggregate`，减少上游 SSE 长连数量
+（`KOC_APPROVAL_WATCH_MODE=auto`）。
 
 ## 关联模块
 

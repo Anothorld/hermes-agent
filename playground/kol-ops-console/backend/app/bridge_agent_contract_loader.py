@@ -32,6 +32,28 @@ def gateway_contract_block() -> str:
     return _contract_module().gateway_contract_block()
 
 
+def gateway_contract_snippet() -> str:
+    """Compact bridge rules for discovery briefs (saves ~1k tokens vs full block)."""
+    cli = _contract_module().CLI_INVOCATION
+    return (
+        "Bridge CAL (mandatory): "
+        f"{cli} <subcommand> --env LIVE|TEST. "
+        "Forbidden: execute_code, curl/urllib/requests to :8080, "
+        "direct cal.py/DB, reading plugins/kol-ops-bridge/ for API discovery. "
+        "Full contract: kol-bridge-agent-guard skill + bridge_agent_contract."
+    )
+
+
+def gateway_contract_for_brief(*, compact: bool | None = None) -> str:
+    """Pick compact vs full contract based on ``KOC_BRIEF_COMPACT_CONTRACT``."""
+    from .config import get_settings
+
+    use_compact = (
+        get_settings().brief_compact_contract if compact is None else compact
+    )
+    return gateway_contract_snippet() if use_compact else gateway_contract_block()
+
+
 def resume_cli_checklist(**kwargs: Any) -> str:
     return _contract_module().resume_cli_checklist(**kwargs)
 

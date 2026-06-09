@@ -19,6 +19,10 @@ import { useEnvStore, toast } from '../lib/store';
 import { errorSummary } from '../lib/errors';
 import { runStateLabel, isRunStateActive } from '../lib/runStateLabels';
 import { usePollingFallback } from '../hooks/usePollingFallback';
+import {
+  isAsyncLaunchJob,
+  resolveLaunchRunId,
+} from '../lib/launchJobs';
 import type { NoxStatsPayload } from '../components/NoxQuotaBanner';
 
 type ProductVariant = {
@@ -122,6 +126,7 @@ type CampaignsPayload = {
 type ReplyWatcherStatus = {
   running: boolean;
   pid: number | null;
+  managed_by?: 'bridge' | string | null;
   env: 'TEST' | 'LIVE' | null;
   interval: number | null;
   lookback_days: number | null;
@@ -131,6 +136,8 @@ type ReplyWatcherStatus = {
   log_path: string | null;
   command: string[] | null;
   state_path: string;
+  last_tick_at?: string | null;
+  last_error?: string | null;
 };
 
 type CloseCampaignResponse = {
@@ -1434,13 +1441,13 @@ function LaunchCampaignForm({
       if (!ok) return;
     }
     const requestStart = async (force: boolean) =>
-      api.post<{ run_id?: string }>(
+      api.post<Record<string, unknown>>(
         `/campaigns/${encodeURIComponent(campaignId)}/start${force ? '?force=true' : ''}`,
         buildLaunchBody(),
       );
     setBusy(true);
     try {
-      let r: { run_id?: string };
+      let r: Record<string, unknown>;
       try {
         r = await requestStart(false);
       } catch (ex) {
@@ -1462,7 +1469,17 @@ function LaunchCampaignForm({
           throw ex;
         }
       }
-      onLaunched(r.run_id ?? null, campaignId);
+      if (isAsyncLaunchJob(r)) {
+        toast.info(
+          '活动启动已排队',
+          'Gateway 繁忙，已加入启动队列。完成后会自动出现在 Agent 浮层。',
+        );
+      }
+      const runId = await resolveLaunchRunId(
+        r,
+        typeof r.pending_run_id === 'string' ? r.pending_run_id : null,
+      );
+      onLaunched(runId, campaignId);
     } catch (ex) {
       onError(normalizeLaunchError(ex));
     } finally {
@@ -1986,8 +2003,10 @@ export function ProductDetailPage() {
       setWatcherStatus(status);
       toast.success(
         status.running
-          ? `Reply watcher 已在 ${status.env} 运行 · pid ${status.pid}`
-          : 'Reply watcher 已停止',
+          ? status.managed_by === 'bridge'
+            ? `回信监听已在 ${status.env} 运行（Bridge 内置）`
+            : `Reply watcher 已在 ${status.env} 运行 · pid ${status.pid}`
+          : '回信监听已停止',
       );
     } catch (ex) {
       setErr(ex);
@@ -2050,17 +2069,34 @@ export function ProductDetailPage() {
   const rediscover = async (cid: string, env: string, additionalCount: number) => {
     setErr(null);
     try {
-      const r = await api.post<{
-        run_id?: string | null;
-        additional_count?: number;
-        excluded_handle_count?: number;
-      }>(`/campaigns/${encodeURIComponent(cid)}/rediscover`, {
-        env,
-        additional_count: additionalCount,
-      });
+      const r = await api.post<Record<string, unknown>>(
+        `/campaigns/${encodeURIComponent(cid)}/rediscover`,
+        {
+          env,
+          additional_count: additionalCount,
+        },
+      );
+      if (isAsyncLaunchJob(r)) {
+        toast.info(
+          '再发现已排队',
+          '发现 Agent 已加入队列，完成后会自动更新候选人池。',
+        );
+      }
+      const runId = await resolveLaunchRunId(
+        r,
+        typeof r.pending_run_id === 'string' ? r.pending_run_id : null,
+      );
+      const additional =
+        typeof r.additional_count === 'number'
+          ? r.additional_count
+          : additionalCount;
+      const excluded =
+        typeof r.excluded_handle_count === 'number'
+          ? r.excluded_handle_count
+          : 0;
       toast.success(
-        '已开始再发现',
-        `run ${r.run_id ?? '(none)'} · 目标 +${r.additional_count ?? additionalCount} · 排除 ${r.excluded_handle_count ?? 0} 个已知 handle`,
+        isAsyncLaunchJob(r) ? '再发现任务已接受' : '已开始再发现',
+        `run ${runId ?? '(排队中)'} · 目标 +${additional} · 排除 ${excluded} 个已知 handle`,
       );
       refreshCampaigns();
     } catch (ex) {

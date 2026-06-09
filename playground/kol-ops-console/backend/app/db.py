@@ -96,6 +96,8 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_kol_notes_identity ON kol_notes(kol_identity_id)",
     "CREATE INDEX IF NOT EXISTS idx_approvals_target ON approvals(target_kind, target_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_action_target_ts ON audit_log(action, target, ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_gmail_global_seen_at ON gmail_poller_global_seen(seen_at)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaigns_sku ON product_campaigns(sku, env)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_cid ON product_campaign_runs(campaign_id, env, started_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_product_campaign_runs_dedup ON product_campaign_runs(dedup_key, started_at DESC)",
@@ -187,6 +189,7 @@ def init_db() -> None:
             row["name"] for row in conn.execute("PRAGMA table_info(products)")
         }
         _migrate_gmail_tables(conn)
+        _prune_old_audit_log(conn)
         for col, ddl in (
             ("pitch_md", "TEXT"),
             ("selling_points", "TEXT"),
@@ -199,6 +202,14 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col} {ddl}")
     finally:
         conn.close()
+
+
+def _prune_old_audit_log(conn: sqlite3.Connection, *, days: int = 90) -> None:
+    """Drop audit rows older than ``days`` to keep console DB lean."""
+    conn.execute(
+        "DELETE FROM audit_log WHERE ts < datetime('now', ?)",
+        (f"-{days} day",),
+    )
 
 
 def _migrate_gmail_tables(conn: sqlite3.Connection) -> None:

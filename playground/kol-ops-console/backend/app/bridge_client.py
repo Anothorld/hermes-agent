@@ -527,6 +527,28 @@ class BridgeClient:
     async def reconcile_sent(self, body: dict[str, Any]) -> dict[str, Any]:
         return await self._req("POST", "/gmail/reconcile-sent", json=body)
 
+    async def inbound_poller_status(self) -> dict[str, Any]:
+        payload = await self._req("GET", "/gmail/inbound-poller/status")
+        return self._unwrap_inbound_poller(payload)
+
+    async def inbound_poller_start(self, body: dict[str, Any]) -> dict[str, Any]:
+        payload = await self._req("POST", "/gmail/inbound-poller/start", json=body)
+        return self._unwrap_inbound_poller(payload)
+
+    async def inbound_poller_stop(self) -> dict[str, Any]:
+        payload = await self._req("POST", "/gmail/inbound-poller/stop")
+        return self._unwrap_inbound_poller(payload)
+
+    async def inbound_poller_restart(self, body: dict[str, Any]) -> dict[str, Any]:
+        payload = await self._req("POST", "/gmail/inbound-poller/restart", json=body)
+        return self._unwrap_inbound_poller(payload)
+
+    @staticmethod
+    def _unwrap_inbound_poller(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict) and payload.get("ok"):
+            return {k: v for k, v in payload.items() if k != "ok"}
+        return payload if isinstance(payload, dict) else {}
+
     async def takeover_mailbox(
         self,
         identity_id: int,
@@ -597,6 +619,13 @@ class BridgeClient:
             params["since_id"] = since_id
         out = await self._req("GET", "/events/recent", params=params)
         return list(out.get("events") or [])
+
+    async def latest_event_id(self, env: str = "LIVE") -> int:
+        """High-water mark for incremental WS polling."""
+        events = await self.recent_events(env, limit=1)
+        if not events:
+            return 0
+        return int(events[0].get("id") or 0)
 
     async def write_event(self, body: dict[str, Any]) -> dict[str, Any]:
         return await self._req("POST", "/events", json=body)

@@ -84,7 +84,8 @@ kol-ops-console/
 │   └── src/
 │       ├── App.tsx          # 路由表
 │       ├── api.ts           # REST/SSE 类型与客户端
-│       ├── useLiveEvents.ts # WebSocket /ws
+│       ├── LiveEventsProvider.tsx # 单例 WebSocket /ws
+│       ├── useLiveEvents.ts
 │       ├── pages/           # 页面（见 pages/README.md）
 │       ├── components/      # 组件簇（见 components/README.md）
 │       ├── hooks/
@@ -112,6 +113,7 @@ kol-ops-console/
 | Gmail | 设置、KOL 邮件历史 | [gmail](docs/features/gmail/GUIDE.md) |
 | Nox | 产品页/活动 Nox 面板 | [nox](docs/features/nox/GUIDE.md) |
 | 实时事件 | 全局 WS 刷新 | [live-events](docs/features/live-events/GUIDE.md) |
+| 性能 / 压测 | 队列、指标、运维 | [performance](docs/features/performance/GUIDE.md) |
 
 ---
 

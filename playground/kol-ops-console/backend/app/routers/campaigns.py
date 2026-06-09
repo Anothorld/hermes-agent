@@ -21,10 +21,14 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..audit import write_audit
+from ..background_jobs import get_job
+from ..db import _connect
+from ..launch_accept import launch_or_accept, queue_would_block
+from ..launch_rollback import rollback_campaign_start_failure
 from ..bridge_client import BridgeClient, BridgeError
 from ..bridge_runtime import ensure_gateway_bridge_key
 from ..campaign_config_sync import (
@@ -60,6 +64,7 @@ from ..bridge_agent_contract_loader import (
     approval_cli_checklist,
     discovery_cli_rules,
     gateway_contract_block,
+    gateway_contract_for_brief,
     terminal_safety_rules,
 )
 from ..discovery_gate import (
@@ -70,8 +75,10 @@ from ..discovery_gate import (
 from ..gateway_client import GatewayClient, GatewayError, RUNNING_STATES, TERMINAL_STATES
 from ..gateway_http import http_exception_from_gateway_start
 from ..variant_candidates import human_spec_text, resolve_campaign_variants
+from ..run_launch_queue import new_pending_run_id
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
+    finalize_run_id,
     get_inflight_run,
     list_recent_runs,
     list_runs_for_campaign,
@@ -95,7 +102,7 @@ _LAUNCH_INSTRUCTIONS = (
     "You are launching a KOL outreach campaign via the web console.\n"
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
-    f"{gateway_contract_block()}\n"
+    f"{gateway_contract_for_brief(compact=True)}\n"
     f"{discovery_cli_rules()}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
@@ -869,17 +876,138 @@ async def start(
             f"campaign_config_file: {nox_cfg_path}\n"
         )
 
-    try:
-        out = await gateway.start_run(
+    session_id = f"kol-campaign:{body.env}:{campaign_id}"
+    dedup_key = f"campaign-start:{body.env}:{campaign_id}"
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    # Pre-assign pending id before scheduling background on_success (TOCTOU).
+    will_async = (
+        get_settings().launch_http_202
+        and queue_would_block(session_id=session_id)
+    )
+    pending_run_id: str | None = (
+        new_pending_run_id() if will_async else None
+    )
+    sku = product["sku"]
+    env_val = body.env
+    user_id = user["id"]
+    target_floor_val = target_floor
+    baseline_count_val = baseline_count
+    test_mode_to_val = body.test_mode_to
+    audit_payload = payload
+
+    async def _start_campaign() -> dict[str, Any]:
+        return await gateway.start_run(
             input=brief_text,
             instructions=_LAUNCH_INSTRUCTIONS,
-            session_id=f"kol-campaign:{body.env}:{campaign_id}",
+            session_id=session_id,
+        )
+
+    async def _on_launch_error(_exc: Exception) -> None:
+        await rollback_campaign_start_failure(
+            campaign_id=campaign_id,
+            env=env_val,
+            pending_run_id=pending_run_id,
+        )
+
+    async def _on_launch_success(run: dict[str, Any], _result: Any) -> None:
+        rid = run.get("run_id") if isinstance(run, dict) else None
+        bg = _connect(get_settings().db_path)
+        try:
+            if pending_run_id and isinstance(rid, str) and rid:
+                finalize_run_id(bg, pending_run_id=pending_run_id, actual_run_id=rid)
+            bg.execute(
+                """UPDATE product_campaigns SET run_id=?, gate_run_id=?, status='running'
+                   WHERE campaign_id=? AND env=?""",
+                (rid, rid, campaign_id, env_val),
+            )
+            if isinstance(rid, str) and rid:
+                register_run(
+                    bg,
+                    campaign_id=campaign_id,
+                    env=env_val,
+                    run_id=rid,
+                    kind="outreach",
+                    session_id=session_id,
+                    dedup_key=dedup_key,
+                )
+            write_audit(
+                bg,
+                actor_user_id=user_id,
+                action="campaign.start",
+                target=campaign_id,
+                payload={**audit_payload, "run_id": rid, "async_accept": True},
+            )
+            bg.commit()
+        finally:
+            bg.close()
+
+    try:
+        accepted, out = await launch_or_accept(
+            gateway,
+            _start_campaign,
+            session_id=session_id,
+            dedup_key=dedup_key,
+            on_success=_on_launch_success if will_async else None,
+            on_error=_on_launch_error if will_async else None,
+            job_meta={"campaign_id": campaign_id, "env": env_val},
         )
     except GatewayError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
+    if accepted:
+        if out.get("deduped"):
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content={
+                    **out,
+                    "campaign_id": campaign_id,
+                    "pending_run_id": pending_run_id,
+                },
+            )
+        if not pending_run_id:
+            pending_run_id = new_pending_run_id()
+        conn.execute(
+            """INSERT INTO product_campaigns
+                             (sku, campaign_id, env, run_id, test_mode_to, started_at,
+                              started_by_user_id, status, target_floor,
+                              baseline_candidate_count, retry_count, floor_unmet_reason,
+                              gate_run_id, diagnostics_history)
+                         VALUES (?,?,?,?,?,?,?, 'running', ?, ?, 0, NULL, ?, '[]')
+               ON CONFLICT(campaign_id, env) DO UPDATE SET
+                 run_id=excluded.run_id,
+                             test_mode_to=excluded.test_mode_to,
+                 started_at=excluded.started_at,
+                 started_by_user_id=excluded.started_by_user_id,
+                 status='running',
+                 target_floor=excluded.target_floor,
+                 baseline_candidate_count=excluded.baseline_candidate_count,
+                 retry_count=0,
+                 floor_unmet_reason=NULL,
+                 gate_run_id=excluded.gate_run_id,
+                 diagnostics_history='[]'""",
+            (sku, campaign_id, env_val, pending_run_id, test_mode_to_val, now,
+             user_id, target_floor_val, baseline_count_val, pending_run_id),
+        )
+        register_run(
+            conn,
+            campaign_id=campaign_id,
+            env=env_val,
+            run_id=pending_run_id,
+            kind="outreach",
+            session_id=session_id,
+            dedup_key=dedup_key,
+        )
+        conn.commit()
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                **out,
+                "campaign_id": campaign_id,
+                "pending_run_id": pending_run_id,
+            },
+        )
+
     run_id = out.get("run_id") if isinstance(out, dict) else None
-    now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
     # gate_run_id = run_id so the post-terminal gate watches THIS launch
     # run specifically; later approve-driven outreach runs (which overwrite
     # ``run_id``) won't accidentally trigger the discovery gate.
@@ -999,11 +1127,20 @@ async def nox_supplement(
         "Use creator-search --gate supplement_search once per platform (max 1 page).",
         "Pass keywords in JSON body when calling nox_kol_tool.py creator-search.",
     ])
+    session_id = f"kol-nox-supplement:{body.env}:{campaign_id}"
     try:
-        run = await gateway.start_run(
-            input=brief,
-            instructions=_NOX_SUPPLEMENT_INSTRUCTIONS,
-            session_id=f"kol-nox-supplement:{body.env}:{campaign_id}",
+
+        async def _start_supplement() -> dict[str, Any]:
+            return await gateway.start_run(
+                input=brief,
+                instructions=_NOX_SUPPLEMENT_INSTRUCTIONS,
+                session_id=session_id,
+            )
+
+        run = await gateway.launch_via_queue(
+            _start_supplement,
+            session_id=session_id,
+            dedup_key=f"nox-supplement:{body.env}:{campaign_id}",
         )
     except GatewayError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
@@ -1015,7 +1152,7 @@ async def nox_supplement(
             env=body.env,
             run_id=run_id,
             kind="draft",
-            session_id=f"kol-nox-supplement:{body.env}:{campaign_id}",
+            session_id=session_id,
             dedup_key=f"nox-supplement:{body.env}:{campaign_id}",
         )
     write_audit(
@@ -1171,6 +1308,12 @@ async def rediscover(
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
         except GatewayError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    if helper_out.get("accepted"):
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=helper_out,
+        )
 
     if not helper_out.get("ok"):
         skipped = helper_out.get("skipped")
@@ -1706,7 +1849,10 @@ async def _gateway_completed_snapshot(
         legacy_run_id=legacy_run_id,
         legacy_kind="outreach",
     )
-    runs = list_runs_for_campaign(conn, campaign_id=campaign_id, env=env, limit=20)
+    max_runs = get_settings().agent_stream_max_runs
+    runs = list_runs_for_campaign(
+        conn, campaign_id=campaign_id, env=env, limit=max_runs,
+    )
     if not runs:
         return None
     items: list[dict[str, Any]] = []
@@ -1773,11 +1919,13 @@ async def _reconcile_recent_session_runs(
 
     semaphore = asyncio.Semaphore(8)
 
+    from ..run_status_cache import run_status_cache
+
     async def _is_terminal(run_id: str) -> tuple[str, bool]:
         async with semaphore:
             info: dict[str, Any] | None
             try:
-                info = await gateway.get_run(run_id)
+                info = await run_status_cache.get_run(gateway, run_id)
             except GatewayError:
                 info = None
             # Gateway TTL-evicted run objects are terminal by contract.
@@ -1801,6 +1949,35 @@ async def _reconcile_recent_session_runs(
     if not changed:
         return rows
     return list_recent_runs(conn, env=env, limit=limit)
+
+
+@router.get("/launch-jobs/{job_id}")
+async def get_launch_job(
+    job_id: str,
+    _: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """Poll async gateway launch jobs (202 accept path)."""
+    row = get_job(job_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
+    return row
+
+
+@router.get("/run-launch-status")
+async def run_launch_status(
+    _: Annotated[dict, Depends(current_user)],
+) -> dict[str, Any]:
+    """Queue depth for operator dock (gateway launch scheduler)."""
+    from ..perf_snapshot import perf
+    from ..run_launch_queue import launch_queue
+
+    snap = perf.as_dict()
+    return {
+        "queue": launch_queue.snapshot(),
+        "launch": snap.get("launch", {}),
+        "run_queue_depth": snap.get("run_queue_depth", 0),
+        "run_queue_inflight": snap.get("run_queue_inflight", 0),
+    }
 
 
 @router.get("/agent-sessions")
@@ -1904,9 +2081,11 @@ async def agent_session_log(
     """
     if "/" in session_id or "\\" in session_id or ".." in session_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid session_id")
-    items = _parse_state_db_messages(session_id, limit)
+    items = await asyncio.to_thread(_parse_state_db_messages, session_id, limit)
     if items is None:
-        items = _parse_session_file(_session_file_by_sid(session_id), limit) or []
+        items = await asyncio.to_thread(
+            _parse_session_file, _session_file_by_sid(session_id), limit,
+        ) or []
     return {"session_id": session_id, "env": env, "items": items}
 
 
@@ -1958,6 +2137,47 @@ async def agent_log(
             "items": completed[-limit:],
         }
     return {"campaign_id": campaign_id, "env": env, "source": "session", "items": []}
+
+
+_GATEWAY_TERMINAL_FOR_STREAM = frozenset({"completed", "failed", "cancelled"})
+
+
+async def _list_runs_for_agent_stream(
+    conn: sqlite3.Connection,
+    gateway: GatewayClient,
+    *,
+    campaign_id: str,
+    env: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Prefer non-terminal gateway runs when picking SSE proxy targets."""
+    from ..perf_snapshot import perf
+    from ..run_status_cache import run_status_cache
+
+    runs = list_runs_for_campaign(
+        conn, campaign_id=campaign_id, env=env, limit=max(limit * 2, limit),
+    )
+    scored: list[tuple[int, str, dict[str, Any]]] = []
+    for row in runs:
+        if row.get("ended_at"):
+            scored.append((2, row["started_at"], row))
+            continue
+        rid = row.get("run_id")
+        if isinstance(rid, str) and rid.startswith("pending:"):
+            scored.append((0, row["started_at"], row))
+            continue
+        try:
+            info = await run_status_cache.get_run(gateway, str(rid))
+            st = str((info or {}).get("status") or "").lower()
+            prio = 1 if st in _GATEWAY_TERMINAL_FOR_STREAM else 0
+        except GatewayError:
+            prio = 0
+        scored.append((prio, row["started_at"], row))
+    scored.sort(key=lambda t: t[1], reverse=True)
+    scored.sort(key=lambda t: t[0])
+    picked = [r for _, _, r in scored[:limit]]
+    perf.open_gateway_sse_count = len(picked)
+    return picked
 
 
 # --------------------------------------------------------------- agent-stream
@@ -2222,8 +2442,9 @@ async def agent_stream(
         legacy_run_id=legacy_run_id,
         legacy_kind="outreach",
     )
-    initial_runs = list_runs_for_campaign(
-        conn, campaign_id=campaign_id, env=env, limit=20
+    max_runs = get_settings().agent_stream_max_runs
+    initial_runs = await _list_runs_for_agent_stream(
+        conn, gateway, campaign_id=campaign_id, env=env, limit=max_runs,
     )
     settings = get_settings()
 
@@ -2293,8 +2514,9 @@ async def agent_stream(
                 if now >= poll_at:
                     # New runs registered since stream start (e.g.,
                     # reply-dispatcher tick fired) — adopt them.
-                    fresh = list_runs_for_campaign(
-                        conn, campaign_id=campaign_id, env=env, limit=20
+                    fresh = await _list_runs_for_agent_stream(
+                        conn, gateway,
+                        campaign_id=campaign_id, env=env, limit=max_runs,
                     )
                     for r in fresh:
                         if r["run_id"] not in tasks:
@@ -2308,10 +2530,14 @@ async def agent_stream(
                                 "run_id": r["run_id"], "kind": r["kind"],
                                 "started_at": r["started_at"],
                             })
+                    from ..perf_snapshot import perf
+                    perf.open_gateway_sse_count = len(tasks)
                     poll_at = now + NEW_RUN_POLL_INTERVAL
         except asyncio.CancelledError:
             raise
         finally:
+            from ..perf_snapshot import perf
+            perf.open_gateway_sse_count = 0
             stop_event.set()
             for t in tasks.values():
                 t.cancel()
@@ -2762,14 +2988,19 @@ async def approve_shortlist(
         selected_rows: list[dict[str, Any]] = []
         try:
             candidates = await bridge.list_candidates(campaign_id, env=body.env)
+            cand_ids = [
+                int(row["identity_id"])
+                for row in candidates
+                if isinstance(row.get("identity_id"), int)
+            ]
+            brief_map = (
+                await bridge.batch_identity_briefs(cand_ids) if cand_ids else {}
+            )
             for row in candidates:
                 identity_id = row.get("identity_id")
                 if not isinstance(identity_id, int):
                     continue
-                try:
-                    ident = await bridge.get_identity(identity_id)
-                except BridgeError:
-                    ident = {}
+                ident = brief_map.get(identity_id) or {}
                 handle = str(
                     ident.get("primary_handle") or row.get("primary_handle") or ""
                 ).lstrip("@").lower()
@@ -2869,10 +3100,19 @@ async def approve_shortlist(
             test_mode_to=test_mode_to,
         )
         try:
-            run = await gateway.start_run_with_retry(
-                input=approval_brief,
-                instructions=_APPROVAL_INSTRUCTIONS,
-                session_id=f"kol-campaign-outreach:{body.env}:{campaign_id}",
+            session_id = f"kol-campaign-outreach:{body.env}:{campaign_id}"
+
+            async def _start_approve() -> dict[str, Any]:
+                return await gateway.start_run_with_retry(
+                    input=approval_brief,
+                    instructions=_APPROVAL_INSTRUCTIONS,
+                    session_id=session_id,
+                )
+
+            run = await gateway.launch_via_queue(
+                _start_approve,
+                session_id=session_id,
+                dedup_key=f"approve:{body.env}:{campaign_id}",
             )
         except GatewayError as exc:
             write_audit(
@@ -2895,6 +3135,8 @@ async def approve_shortlist(
                 },
             ) from exc
         new_run_id = run.get("run_id")
+        if isinstance(new_run_id, str) and new_run_id:
+            gateway.ensure_run_drained(new_run_id)
         # Approve overwrites ``run_id`` for status/display but MUST NOT
         # touch ``gate_run_id``; the discovery gate's pointer is owned
         # exclusively by ``_trigger_rediscover_internal`` /
@@ -3202,15 +3444,20 @@ async def redraft_outreach(
             actor_user_id=user.get("id"),
             test_mode_to=test_mode_to,
         )
+        session_id = f"kol-campaign-draft:{env}:{campaign_id}"
         try:
-            run = await gateway.start_run_with_retry(
-                input=brief,
-                instructions=_APPROVAL_INSTRUCTIONS,
-                # Share the draft session namespace with refine/preview
-                # so transcript replay treats this as a draft run, not a
-                # campaign-wide resume that would clutter the campaign
-                # transcript view.
-                session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+
+            async def _start_redraft() -> dict[str, Any]:
+                return await gateway.start_run_with_retry(
+                    input=brief,
+                    instructions=_APPROVAL_INSTRUCTIONS,
+                    session_id=session_id,
+                )
+
+            run = await gateway.launch_via_queue(
+                _start_redraft,
+                session_id=session_id,
+                dedup_key=dedup_key,
             )
         except GatewayError as exc:
             raise http_exception_from_gateway_start(
@@ -3224,7 +3471,7 @@ async def redraft_outreach(
                 env=env,
                 run_id=new_run_id,
                 kind="draft",
-                session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+                session_id=session_id,
                 dedup_key=dedup_key,
             )
         write_audit(
@@ -3564,11 +3811,20 @@ async def followup_draft(
                 else None
             ),
         )
+        session_id = f"kol-campaign-draft:{env}:{campaign_id}"
         try:
-            run = await gateway.start_run_with_retry(
-                input=brief,
-                instructions=_FOLLOWUP_DRAFT_INSTRUCTIONS,
-                session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+
+            async def _start_followup() -> dict[str, Any]:
+                return await gateway.start_run_with_retry(
+                    input=brief,
+                    instructions=_FOLLOWUP_DRAFT_INSTRUCTIONS,
+                    session_id=session_id,
+                )
+
+            run = await gateway.launch_via_queue(
+                _start_followup,
+                session_id=session_id,
+                dedup_key=dedup_key,
             )
         except GatewayError as exc:
             raise http_exception_from_gateway_start(
@@ -3582,7 +3838,7 @@ async def followup_draft(
                 env=env,
                 run_id=new_run_id,
                 kind="followup",
-                session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+                session_id=session_id,
                 dedup_key=dedup_key,
             )
         write_audit(

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
+import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Iterator, Optional
 
 from . import cal
 from . import mailbox_resolver
@@ -14,6 +18,25 @@ from .gmail_client import GmailClient, GmailUnavailable
 from .gmail_console import list_operator_gmail_clients
 
 log = logging.getLogger(__name__)
+
+_GMAIL_LOCK_PATH = Path(
+    os.environ.get(
+        "KOL_OPS_GMAIL_RECONCILE_LOCK",
+        str(Path.home() / ".hermes" / "kol-ops-bridge" / "gmail_reconcile.lock"),
+    )
+)
+
+
+@contextmanager
+def _gmail_reconcile_lock() -> Iterator[None]:
+    """Cross-process lock so poller + reply_watcher do not overlap SENT scans."""
+    _GMAIL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _GMAIL_LOCK_PATH.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def _draft_owned_by_mailbox(
@@ -258,6 +281,24 @@ def run_reconcile_sent(
     Returns a summary dict (also suitable for learning job audit output).
     Raises :class:`GmailUnavailable` when Gmail is not configured.
     """
+    with _gmail_reconcile_lock():
+        return _run_reconcile_sent_unlocked(
+            env=env,
+            lookback_days=lookback_days,
+            max_results=max_results,
+            client=client,
+            mailbox_user_id=mailbox_user_id,
+        )
+
+
+def _run_reconcile_sent_unlocked(
+    *,
+    env: str,
+    lookback_days: int = 7,
+    max_results: int = 100,
+    client: Optional[GmailClient] = None,
+    mailbox_user_id: Optional[int] = None,
+) -> dict[str, Any]:
     gmail = client or GmailClient()
     if not gmail.is_available():
         raise GmailUnavailable("gmail token or google_api.py unavailable")
@@ -303,6 +344,20 @@ def run_reconcile_all_mailboxes(
     max_results: int = 100,
 ) -> dict[str, Any]:
     """Run sent reconciliation once per connected operator mailbox."""
+    with _gmail_reconcile_lock():
+        return _run_reconcile_all_mailboxes_unlocked(
+            env=env,
+            lookback_days=lookback_days,
+            max_results=max_results,
+        )
+
+
+def _run_reconcile_all_mailboxes_unlocked(
+    *,
+    env: str,
+    lookback_days: int = 7,
+    max_results: int = 100,
+) -> dict[str, Any]:
     mailboxes = list_operator_gmail_clients()
     if not mailboxes:
         raise GmailUnavailable("no operator Gmail connections available")

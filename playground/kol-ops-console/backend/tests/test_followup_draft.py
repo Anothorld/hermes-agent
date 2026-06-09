@@ -137,6 +137,7 @@ async def test_followup_draft_allows_after_initial_outreach_approved_and_sent(mo
     }
     gateway = AsyncMock()
     gateway.start_run_with_retry = AsyncMock(return_value={"run_id": "run-followup-1"})
+    gateway.launch_via_queue = AsyncMock(return_value={"run_id": "run-followup-1"})
     conn = MagicMock()
     user = {"id": 1, "email": "op@brand.com"}
 
@@ -168,4 +169,4 @@ async def test_followup_draft_allows_after_initial_outreach_approved_and_sent(mo
         gateway,
     )
     assert out["run_id"] == "run-followup-1"
-    gateway.start_run_with_retry.assert_awaited_once()
+    gateway.launch_via_queue.assert_awaited_once()

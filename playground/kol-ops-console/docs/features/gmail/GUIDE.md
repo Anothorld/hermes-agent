@@ -28,10 +28,23 @@
 | GET | `/internal/gmail-token-path` | Bridge 专用（`X-Internal-Key`） |
 | POST | `/kols/{id}/takeover-mailbox` | 接管绑定 |
 
+## Gmail 后台 worker（Bridge）
+
+`gmail_worker` 为默认 coordinator：按各自 interval 到期后 **串行** 跑入站 → SENT（见 [performance](../performance/GUIDE.md) env 表）。
+
+| 路径 | 职责 | 入口 |
+|------|------|------|
+| SENT 对账 | 操作员在 Gmail 点 Send 后标记已发 + edit-learning | `gmail_poller` tick / `POST /gmail/reconcile-sent` |
+| 入站回信 | 扫 INBOX → `kol_inbound_reply` → gateway dispatch | `gmail_inbound_poller` tick |
+| 运维快照 | 最近 tick、interval、入站启停 | `GET /gmail/worker/status` |
+
+Console `POST /reply-watcher/start|stop|restart` → Bridge `POST /gmail/inbound-poller/*`（无独立子进程）。SENT 手动同步：`POST /reply-watcher/reconcile-sent`。
+
 ## 关联模块
 
 - [approvals](../approvals/GUIDE.md) — 发信触发
-- [campaigns](../campaigns/GUIDE.md) — `reply_watcher` 对 SENT 线程对账
+- [campaigns](../campaigns/GUIDE.md) — 产品页回信监听 UI
+- [performance](../performance/GUIDE.md) — env 开关与锁说明
 - 文档：`agent_prj/docs/kol-operator-gmail-onboarding.md`
 
 ## 安全

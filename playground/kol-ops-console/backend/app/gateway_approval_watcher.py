@@ -39,6 +39,7 @@ import datetime as _dt
 import json
 import logging
 import sqlite3
+import threading
 from contextlib import suppress
 from typing import Any, AsyncIterator, Optional
 
@@ -46,6 +47,8 @@ import httpx
 
 from .config import Settings, get_settings
 from .db import _connect
+from .perf_snapshot import perf
+from .run_status_cache import run_status_cache
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +82,7 @@ class GatewayApprovalWatcher:
         self._pending: dict[str, dict[str, Any]] = {}
         self._subs: dict[str, asyncio.Task] = {}
         self._subscribers: set[asyncio.Queue] = set()
-        self._lock = asyncio.Lock()
+        self._state_lock = threading.Lock()
         self._seq: int = 0
         self._scan_task: Optional[asyncio.Task] = None
         self._settings: Optional[Settings] = None
@@ -125,7 +128,8 @@ class GatewayApprovalWatcher:
         Callers use ``seq`` to ignore older events that arrived between
         their fetch and websocket subscribe.
         """
-        return list(self._pending.values()), self._seq
+        with self._state_lock:
+            return list(self._pending.values()), self._seq
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -162,18 +166,45 @@ class GatewayApprovalWatcher:
                 self._subs.pop(run_id, None)
 
         rows = await asyncio.to_thread(_read_active_runs, self._settings.db_path)
-        seen_run_ids: set[str] = set()
-        for row in rows:
-            run_id = row["run_id"]
-            seen_run_ids.add(run_id)
-            if run_id in self._subs and not self._subs[run_id].done():
-                continue
-            # done() task — reap and replace below.
-            self._subs.pop(run_id, None)
-            self._subs[run_id] = asyncio.create_task(
-                self._watch(run_id=run_id, kind=row["kind"], campaign_id=row["campaign_id"])
-            )
+        use_sse = self._use_sse_per_run(len(rows))
+        perf.approval_watcher_mode = (
+            "sse_per_run" if use_sse else "poll_aggregate"
+        )
+        if use_sse:
+            for row in rows:
+                run_id = row["run_id"]
+                if run_id in self._subs and not self._subs[run_id].done():
+                    continue
+                self._subs.pop(run_id, None)
+                self._subs[run_id] = asyncio.create_task(
+                    self._watch(
+                        run_id=run_id,
+                        kind=row["kind"],
+                        campaign_id=row["campaign_id"],
+                    )
+                )
+        else:
+            for run_id, task in list(self._subs.items()):
+                if not task.done():
+                    task.cancel()
+            self._subs.clear()
+        perf.approval_watcher_sse_subs = len(self._subs)
         await self._poll_waiting_approvals(rows)
+
+    def _use_sse_per_run(self, open_count: int) -> bool:
+        assert self._settings is not None
+        mode = str(
+            getattr(self._settings, "approval_watch_mode", None) or "auto"
+        ).lower()
+        if mode == "poll_aggregate":
+            return False
+        if mode == "sse_per_run":
+            return True
+        threshold = max(
+            1,
+            int(getattr(self._settings, "approval_watch_poll_threshold", 5)),
+        )
+        return open_count <= threshold
 
     async def _poll_waiting_approvals(self, rows: list[dict[str, Any]]) -> None:
         """Fallback: surface approvals when gateway status says blocked.
@@ -183,28 +214,26 @@ class GatewayApprovalWatcher:
         task had not yet subscribed. Polling ``GET /v1/runs/{id}`` catches
         ``waiting_for_approval`` and replays the event history once.
         """
-        assert self._settings is not None and self._client is not None
+        assert self._settings is not None
 
-        base = self._settings.gateway_base.rstrip("/")
-        headers: dict[str, str] = {"Accept": "application/json"}
-        if self._settings.gateway_key:
-            headers["Authorization"] = f"Bearer {self._settings.gateway_key}"
+        from .deps import get_gateway_singleton
+
+        gateway = get_gateway_singleton()
 
         async def _probe(row: dict[str, Any]) -> None:
             run_id = str(row.get("run_id") or "")
-            if not run_id or run_id in self._pending:
+            if not run_id or run_id.startswith("pending:"):
+                return
+            with self._state_lock:
+                already_pending = run_id in self._pending
+            if already_pending:
                 return
             try:
-                r = await self._client.get(  # type: ignore[union-attr]
-                    f"{base}/v1/runs/{run_id}",
-                    headers=headers,
-                    timeout=5.0,
-                )
-            except httpx.HTTPError:
+                info = await run_status_cache.get_run(gateway, run_id)
+            except Exception:  # noqa: BLE001
                 return
-            if r.status_code >= 400:
+            if info is None:
                 return
-            info = r.json()
             state = str(info.get("status") or "").lower()
             if state != "waiting_for_approval":
                 return
@@ -422,19 +451,23 @@ class GatewayApprovalWatcher:
             "source": "gateway",
             "captured_at": payload.get("timestamp") or _utcnow_iso(),
         }
-        self._pending[run_id] = entry
-        self._seq += 1
+        with self._state_lock:
+            self._pending[run_id] = entry
+            self._seq += 1
+            seq = self._seq
         self._broadcast({
             "event": "gateway_approval.request",
-            "seq": self._seq,
+            "seq": seq,
             **entry,
         })
 
     def _close(self, run_id: str, *, reason: str, choice: Optional[str] = None) -> None:
-        if run_id not in self._pending:
-            return
-        del self._pending[run_id]
-        self._seq += 1
+        with self._state_lock:
+            if run_id not in self._pending:
+                return
+            del self._pending[run_id]
+            self._seq += 1
+            seq = self._seq
         event_name = (
             "gateway_approval.responded" if choice is not None
             else "gateway_approval.cleared"
@@ -443,7 +476,7 @@ class GatewayApprovalWatcher:
             "event": event_name,
             "run_id": run_id,
             "reason": reason,
-            "seq": self._seq,
+            "seq": seq,
         }
         if choice is not None:
             ev["choice"] = choice
@@ -479,6 +512,7 @@ def _read_active_runs(db_path: Any) -> list[dict[str, Any]]:
                 WHERE ended_at IS NULL
                   AND started_at >= ?
                   AND run_id IS NOT NULL
+                  AND run_id NOT LIKE 'pending:%'
                 ORDER BY started_at DESC
                 LIMIT 200""",
             (cutoff,),

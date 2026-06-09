@@ -69,6 +69,16 @@ tried or skipped.
 `web_extract`, terminal curl/urllib/requests HTTP scraping, `execute_code`
 with browser/hermes_tools imports. This skill is not `instagram-kol-discovery`.
 
+### Concurrency discipline (Console-enforced)
+
+- **Never** run parallel browser email-discovery for multiple identities.
+  Console `run_launch_queue` enforces **global `max_inflight=1`** for
+  `session_id` prefix `kol-email-discover:` — additional POSTs wait in queue.
+- If the operator sees **「排队 N」** in Agent Session Dock, earlier discover
+  runs are still consuming the single browser slot; do not retry from chat.
+- One discover run = one identity until terminal (`found` / `miss` / `failed`).
+  Batch orchestrators must serialize, not fan-out.
+
 ## Inputs
 1. `identity_id` (mandatory).
 2. `env` (`TEST` or `LIVE`, mandatory).

@@ -1977,11 +1977,41 @@ function EmailPanel({
     try {
       const r = await api.post<{
         run_id?: string | null;
+        pending_run_id?: string | null;
         started_at?: string;
+        status?: string;
+        job_id?: string;
+        poll?: string;
+        queue?: { email_discover_queued?: number };
         gate_b?: boolean;
         skipped_browser_discover?: boolean;
         email?: string;
       }>(`/kols/${identityId}/discover-email`, { env, campaign_id: campaignId });
+      if (r.status === 'accepted' || r.job_id) {
+        const depth = r.queue?.email_discover_queued ?? 0;
+        toast.info(
+          '邮箱发现已排队',
+          depth > 0
+            ? `当前排在第 ${depth + 1} 位，完成后会自动开始。可在 Agent 浮层查看进度。`
+            : '已加入发现队列，完成后会自动开始。可在 Agent 浮层查看进度。',
+        );
+        const startedAt = Date.now();
+        const cooldownUntil = startedAt + DISCOVER_INFLIGHT_DISPLAY_MS;
+        const placeholderRun = r.pending_run_id ?? r.run_id ?? null;
+        writeDiscoverCooldown(identityId, env, {
+          runId: placeholderRun,
+          startedAt,
+          cooldownUntil,
+        });
+        setPhase({
+          kind: 'discover_running',
+          runId: placeholderRun,
+          startedAt,
+          cooldownUntil,
+        });
+        onChanged();
+        return;
+      }
       if (r.skipped_browser_discover && r.email) {
         toast.success('Nox Gate B 已写入邮箱', r.email);
         setPhase({ kind: 'idle' });

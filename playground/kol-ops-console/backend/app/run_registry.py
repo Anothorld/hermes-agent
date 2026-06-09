@@ -28,6 +28,23 @@ RunKind = Literal["outreach", "reply", "draft", "resume", "refine"]
 INFLIGHT_TTL_SECONDS = 300
 
 
+def finalize_run_id(
+    conn: sqlite3.Connection,
+    *,
+    pending_run_id: str,
+    actual_run_id: str,
+) -> None:
+    """Replace a TOCTOU placeholder row with the real gateway run_id."""
+    if not pending_run_id or not actual_run_id:
+        return
+    if pending_run_id == actual_run_id:
+        return
+    conn.execute(
+        "UPDATE product_campaign_runs SET run_id=? WHERE run_id=?",
+        (actual_run_id, pending_run_id),
+    )
+
+
 def register_run(
     conn: sqlite3.Connection,
     *,
@@ -95,12 +112,12 @@ def get_inflight_run(
 def list_runs_for_campaign(
     conn: sqlite3.Connection, *, campaign_id: str, env: str, limit: int = 20
 ) -> list[dict]:
-    """Most recent runs first. Returns rows shaped for the FE registry."""
+    """Open runs first, then most recent. Shaped for the FE registry."""
     rows = conn.execute(
         """SELECT run_id, kind, session_id, started_at, ended_at
              FROM product_campaign_runs
             WHERE campaign_id=? AND env=?
-            ORDER BY started_at DESC
+            ORDER BY (ended_at IS NULL) DESC, started_at DESC
             LIMIT ?""",
         (campaign_id, env, limit),
     ).fetchall()

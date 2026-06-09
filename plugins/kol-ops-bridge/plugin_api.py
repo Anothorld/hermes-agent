@@ -53,6 +53,8 @@ from . import learning_promote
 from . import learning_store
 from . import reply_diff
 from . import reject_tags
+from . import gmail_inbound_poller
+from . import gmail_worker
 from .gmail_reconcile import (
     backfill_edit_learning_all_mailboxes,
     run_reconcile_all_mailboxes,
@@ -395,6 +397,13 @@ class ReconcileSentBody(BaseModel):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
     lookback_days: int = Field(default=7, ge=1, le=90)
     max_results: int = Field(default=100, ge=1, le=500)
+
+
+class InboundPollerStartBody(BaseModel):
+    env: str = Field(default="TEST", pattern="^(TEST|LIVE)$")
+    interval: int = Field(default=60, ge=15, le=3600)
+    lookback_days: int = Field(default=3, ge=1, le=30)
+    max_results: int = Field(default=50, ge=1, le=500)
 
 
 class BackfillEditLearningBody(BaseModel):
@@ -2745,6 +2754,75 @@ def reconcile_sent(
     except GmailUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"ok": True, **result}
+
+
+@router.get("/gmail/worker/status")
+def gmail_worker_status() -> dict[str, Any]:
+    """Unified Gmail coordinator + inbound poller snapshot."""
+    return {"ok": True, **gmail_worker.get_status()}
+
+
+@router.get("/gmail/inbound-poller/status")
+def inbound_poller_status() -> dict[str, Any]:
+    """Inbound reply watcher state (runs inside bridge, not a Console subprocess)."""
+    return {"ok": True, **gmail_inbound_poller.get_status()}
+
+
+@router.post("/gmail/inbound-poller/start")
+def inbound_poller_start(
+    body: InboundPollerStartBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    current = gmail_inbound_poller.get_status()
+    if current.get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"inbound poller already running in {current.get('env')}; "
+                "use restart to switch mode"
+            ),
+        )
+    try:
+        status = gmail_inbound_poller.configure(
+            enabled=True,
+            env=body.env,
+            interval=body.interval,
+            lookback_days=body.lookback_days,
+            max_results=body.max_results,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **status}
+
+
+@router.post("/gmail/inbound-poller/stop")
+def inbound_poller_stop(
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    status = gmail_inbound_poller.configure(enabled=False)
+    return {"ok": True, **status}
+
+
+@router.post("/gmail/inbound-poller/restart")
+def inbound_poller_restart(
+    body: InboundPollerStartBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    gmail_inbound_poller.configure(enabled=False)
+    try:
+        status = gmail_inbound_poller.configure(
+            enabled=True,
+            env=body.env,
+            interval=body.interval,
+            lookback_days=body.lookback_days,
+            max_results=body.max_results,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **status}
 
 
 @router.post("/learning/backfill-edit-learning")

@@ -92,7 +92,29 @@ class Settings(BaseSettings):
         "/kols",
         "/products",
         "/gateway-approvals",
+        "/learning",
     )
+
+    # --- Performance / concurrency ---
+    gateway_launch_queue_enabled: bool = True
+    gateway_launch_max_inflight: int = 8
+    recovery_launch_serial: bool = True
+    run_reconciler_enabled: bool = True
+    run_reconciler_interval_sec: float = 20.0
+    sync_run_states_on_get: bool = False
+    run_status_cache_ttl_sec: float = 10.0
+    run_status_cache_active_ttl_sec: float = 3.0
+    approval_watch_mode: str = "auto"  # auto | sse_per_run | poll_aggregate
+    approval_watch_poll_threshold: int = 5
+    agent_stream_max_runs: int = 10
+    nox_max_concurrent: int = 2
+    learning_async_jobs: bool = True
+    bridge_gmail_poller_in_executor: bool = True
+    brief_compact_contract: bool = True
+    nox_batch_async: bool = True
+    nox_batch_async_min_ids: int = 5
+    launch_http_202: bool = True
+    launch_bridge_health_check: bool = True
 
 
 @lru_cache(maxsize=1)

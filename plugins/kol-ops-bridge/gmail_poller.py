@@ -59,59 +59,87 @@ def _max_results() -> int:
     return max(50, int(os.environ.get("KOL_OPS_SENT_RECONCILE_MAX_RESULTS", "200")))
 
 
-async def run_forever() -> None:
-    interval = max(30, int(os.environ.get("KOL_OPS_SENT_RECONCILE_INTERVAL_SEC", "300")))
+def sent_interval_sec() -> int:
+    return max(30, int(os.environ.get("KOL_OPS_SENT_RECONCILE_INTERVAL_SEC", "300")))
+
+
+def sent_reconcile_envs() -> tuple[str, ...]:
     envs = tuple(
         e.strip().upper()
         for e in os.environ.get("KOL_OPS_SENT_RECONCILE_ENVS", "TEST,LIVE").split(",")
         if e.strip().upper() in {"TEST", "LIVE"}
-    ) or ("LIVE",)
-    client = GmailClient()
-    log.info("[gmail_poller] sent reconcile enabled interval=%ss envs=%s", interval, envs)
-    while True:
-        t0 = time.perf_counter()
+    )
+    return envs or ("LIVE",)
+
+
+_SENT_CLIENT: GmailClient | None = None
+
+
+def _sent_client() -> GmailClient:
+    global _SENT_CLIENT
+    if _SENT_CLIENT is None:
+        _SENT_CLIENT = GmailClient()
+    return _SENT_CLIENT
+
+
+def run_sent_tick_sync(*, client: Optional[GmailClient] = None) -> int:
+    """Run one SENT reconcile pass across configured envs."""
+    envs = sent_reconcile_envs()
+    gmail = client or _sent_client()
+    t0 = time.perf_counter()
+    _dbg_log(
+        location="gmail_poller.py:run_sent_tick_sync",
+        message="reconcile_start",
+        data={"envs": list(envs)},
+        hypothesis_id="H1",
+    )
+    try:
+        count = reconcile_sent_drafts_once(gmail, envs=envs)
+    except GmailUnavailable as exc:
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
         _dbg_log(
-            location="gmail_poller.py:run_forever",
-            message="reconcile_start",
-            data={"interval_sec": interval, "envs": list(envs)},
+            location="gmail_poller.py:run_sent_tick_sync",
+            message="reconcile_gmail_unavailable",
+            data={"elapsed_ms": elapsed_ms, "error": str(exc)[:200]},
             hypothesis_id="H1",
         )
-        try:
-            count = reconcile_sent_drafts_once(client, envs=envs)
-            elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
-            _dbg_log(
-                location="gmail_poller.py:run_forever",
-                message="reconcile_end",
-                data={
-                    "elapsed_ms": elapsed_ms,
-                    "reconciled_count": count,
-                    "envs": list(envs),
-                },
-                hypothesis_id="H1",
-            )
-            if count:
-                log.info("[gmail_poller] reconciled %s sent draft(s)", count)
-        except GmailUnavailable as exc:
-            elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
-            _dbg_log(
-                location="gmail_poller.py:run_forever",
-                message="reconcile_gmail_unavailable",
-                data={"elapsed_ms": elapsed_ms, "error": str(exc)[:200]},
-                hypothesis_id="H1",
-            )
-            log.warning("[gmail_poller] gmail unavailable: %s", exc)
-        except Exception as exc:  # noqa: BLE001
-            elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
-            _dbg_log(
-                location="gmail_poller.py:run_forever",
-                message="reconcile_failed",
-                data={
-                    "elapsed_ms": elapsed_ms,
-                    "error": type(exc).__name__,
-                },
-                hypothesis_id="H1",
-            )
-            log.exception("[gmail_poller] sent reconcile failed: %s", exc)
+        log.warning("[gmail_poller] gmail unavailable: %s", exc)
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        _dbg_log(
+            location="gmail_poller.py:run_sent_tick_sync",
+            message="reconcile_failed",
+            data={"elapsed_ms": elapsed_ms, "error": type(exc).__name__},
+            hypothesis_id="H1",
+        )
+        log.exception("[gmail_poller] sent reconcile failed: %s", exc)
+        return 0
+
+    elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+    _dbg_log(
+        location="gmail_poller.py:run_sent_tick_sync",
+        message="reconcile_end",
+        data={"elapsed_ms": elapsed_ms, "reconciled_count": count, "envs": list(envs)},
+        hypothesis_id="H1",
+    )
+    if count:
+        log.info("[gmail_poller] reconciled %s sent draft(s)", count)
+    return count
+
+
+async def run_sent_tick_async() -> int:
+    """Thread-offloaded SENT tick for the unified ``gmail_worker``."""
+    return await asyncio.to_thread(run_sent_tick_sync)
+
+
+async def run_forever() -> None:
+    """Legacy standalone loop — prefer ``gmail_worker.run_forever``."""
+    interval = sent_interval_sec()
+    envs = sent_reconcile_envs()
+    log.info("[gmail_poller] standalone sent reconcile interval=%ss envs=%s", interval, envs)
+    while True:
+        await run_sent_tick_async()
         await asyncio.sleep(interval)
 
 

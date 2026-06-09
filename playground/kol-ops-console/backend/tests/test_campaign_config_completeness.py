@@ -84,6 +84,7 @@ def _make_client(behaviors: list[Any]) -> BridgeClient:
     client._client = _FakeHttpxClient(behaviors)
     client._base = "http://test"
     client._headers = {}
+    client._default_timeout = 60.0
     return client
 
 
@@ -154,7 +155,9 @@ class _StubBridge:
         self.upsert_calls.append((campaign_id, body))
         return {"ok": True}
 
-    async def get_campaign(self, campaign_id: str) -> dict[str, Any]:
+    async def get_campaign(
+        self, campaign_id: str, env: str = "LIVE", **kwargs: Any,
+    ) -> dict[str, Any]:
         if self.get_campaign_returns is None:
             raise BridgeError(404, "campaign not found")
         return dict(self.get_campaign_returns)
@@ -170,6 +173,17 @@ class _StubBridge:
                          env: str = "LIVE") -> dict[str, Any]:
         return {"facts": self.facts_by_identity.get(identity_id, {})}
 
+    async def get_lanes(self, campaign_id: str, *, env: str) -> dict[str, Any]:
+        return {"items": []}
+
+    async def list_candidate_handles(
+        self, campaign_id: str, *, env: str,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def recent_events(self, env: str, limit: int = 200) -> list[dict[str, Any]]:
+        return []
+
 
 class _StubGateway:
     def __init__(self) -> None:
@@ -178,14 +192,34 @@ class _StubGateway:
 
     async def start_run(self, *, input: str, instructions: str | None = None,
                         session_id: str | None = None,
-                        model: str | None = None) -> dict[str, Any]:
+                        model: str | None = None, **kwargs: Any) -> dict[str, Any]:
         self._next += 1
         run_id = f"run-{self._next}"
         self.runs_started.append({"run_id": run_id, "session_id": session_id})
         return {"run_id": run_id, "status": "queued"}
 
+    async def start_run_with_retry(self, **kwargs: Any) -> dict[str, Any]:
+        return await self.start_run(**kwargs)
+
     async def get_run(self, run_id: str) -> dict[str, Any]:
         return {"status": "running"}
+
+    async def launch_via_queue(self, start_fn, **kwargs: Any) -> dict[str, Any]:
+        return await start_fn()
+
+    def ensure_run_drained(self, run_id: str) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _sync_gateway_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route tests expect synchronous ``start_run`` (no 202 accept)."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("KOC_LAUNCH_HTTP_202", "false")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _now() -> str:

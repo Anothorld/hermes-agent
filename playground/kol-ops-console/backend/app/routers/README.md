@@ -14,7 +14,9 @@
 | `escalations.py` | [escalations](../../../docs/features/escalations/GUIDE.md) |
 | `policies.py` | [policies](../../../docs/features/policies/GUIDE.md) |
 | `gateway_approvals.py` | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |
-| `admin.py` | [gate-metrics](../../../docs/features/gate-metrics/GUIDE.md), [auth-settings](../../../docs/features/auth-settings/GUIDE.md) |
+| `admin.py` | [gate-metrics](../../../docs/features/gate-metrics/GUIDE.md), [auth-settings](../../../docs/features/auth-settings/GUIDE.md), [performance](../../../docs/features/performance/GUIDE.md)（`GET /admin/perf-snapshot`） |
+| `products.py` | 含 `POST /products/reconcile-runs`（手动 run 对齐） |
+| `campaigns.py` | 含 `GET /campaigns/run-launch-status`（启动队列） |
 | `events.py` | [live-events](../../../docs/features/live-events/GUIDE.md) |
 
 挂载入口：`../main.py`（`include_router`）。

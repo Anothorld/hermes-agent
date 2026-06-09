@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Mapping, Optional
+
+_STATS_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_STATS_CACHE_TTL_SEC = 45.0
 
 from fastapi import HTTPException, status
 
@@ -27,8 +31,16 @@ async def fetch_campaign_nox_stats(
     campaign_id: str,
     *,
     env: str,
+    bypass_cache: bool = False,
 ) -> dict[str, Any]:
     """Run ``cache-stats`` for a campaign (timezone from CAL config)."""
+    cache_key = (campaign_id, env.upper())
+    now = time.monotonic()
+    if not bypass_cache:
+        hit = _STATS_CACHE.get(cache_key)
+        if hit is not None and now < hit[0]:
+            return dict(hit[1])
+
     supplement_max = 30
     cfg: dict[str, Any] = {}
     tz = "Asia/Shanghai"
@@ -56,6 +68,7 @@ async def fetch_campaign_nox_stats(
     stats["quota_exhausted"] = quota_exhausted_from_stats(stats)
     stats["supplement_max_calls"] = supplement_max
     stats["nox_quota_enabled"] = _nox_quota_is_enabled(cfg)
+    _STATS_CACHE[cache_key] = (now + _STATS_CACHE_TTL_SEC, dict(stats))
     return stats
 
 

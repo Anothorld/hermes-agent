@@ -12,7 +12,7 @@
 
 | 层 | 文件 |
 |----|------|
-| FE | `useLiveEvents.ts`, `hooks/useDataChannel.ts`, `hooks/usePollingFallback.ts` |
+| FE | `LiveEventsProvider.tsx`（单例 WS）, `useLiveEvents.ts`, `hooks/useDataChannel.ts`, `hooks/usePollingFallback.ts`（WS 连通时默认暂停轮询） |
 | BE | `routers/events.py`（`WebSocket /ws`、hub） |
 | 相关 | `gateway_approval_watcher.py` → hub |
 

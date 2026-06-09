@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..bridge_client import BridgeClient, BridgeError
+from ..config import get_settings
 from ..deps import current_user, get_bridge, require_role
+from ..learning_job_store import create_job, get_job, run_in_background
 
 router = APIRouter(prefix="/learning", tags=["learning"])
 
@@ -87,6 +91,17 @@ class RunLearningJobsBody(BaseModel):
     dry_run: bool = True
 
 
+@router.get("/jobs/{job_id}")
+async def get_learning_job(
+    job_id: str,
+    _: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    row = get_job(job_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
+    return row
+
+
 @router.post("/run-jobs")
 async def run_learning_jobs(
     body: RunLearningJobsBody,
@@ -97,6 +112,30 @@ async def run_learning_jobs(
         **body.model_dump(),
         "triggered_by": f"console:{user.get('email', 'unknown')}",
     }
+    settings = get_settings()
+    if settings.learning_async_jobs:
+
+        async def _bridge_call() -> dict[str, Any]:
+            return await bridge._req(
+                "POST",
+                "/learning/run-scheduled-jobs",
+                json=payload,
+                timeout_sec=_learning_bridge_timeout(bridge),
+            )
+
+        job_id = create_job(
+            kind="run-scheduled-jobs",
+            meta={"suite": body.suite, "env": body.env},
+        )
+        await run_in_background(job_id, _bridge_call)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "job_id": job_id,
+                "status": "accepted",
+                "poll": f"/learning/jobs/{job_id}",
+            },
+        )
     try:
         return await bridge._req(
             "POST",
@@ -127,15 +166,40 @@ async def backfill_edit_learning(
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict[str, Any]:
+    payload = {
+        "env": body.env,
+        "dry_run": body.dry_run,
+        "limit": body.limit,
+    }
+    settings = get_settings()
+    if settings.learning_async_jobs:
+
+        async def _bridge_call() -> dict[str, Any]:
+            return await bridge._req(
+                "POST",
+                "/learning/backfill-edit-learning",
+                json=payload,
+                timeout_sec=_learning_bridge_timeout(bridge),
+            )
+
+        job_id = create_job(
+            kind="backfill-edit-learning",
+            meta={"env": body.env, "dry_run": body.dry_run},
+        )
+        await run_in_background(job_id, _bridge_call)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "job_id": job_id,
+                "status": "accepted",
+                "poll": f"/learning/jobs/{job_id}",
+            },
+        )
     try:
         return await bridge._req(
             "POST",
             "/learning/backfill-edit-learning",
-            json={
-                "env": body.env,
-                "dry_run": body.dry_run,
-                "limit": body.limit,
-            },
+            json=payload,
         )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
@@ -155,6 +219,30 @@ async def propose_edit_policy(
     }
     if body.owner_user_id is not None:
         payload["owner_user_id"] = body.owner_user_id
+    settings = get_settings()
+    if settings.learning_async_jobs:
+
+        async def _bridge_call() -> dict[str, Any]:
+            return await bridge._req(
+                "POST",
+                "/learning/apply-edit-policy",
+                json=payload,
+                timeout_sec=_learning_bridge_timeout(bridge),
+            )
+
+        job_id = create_job(
+            kind="apply-edit-policy",
+            meta={"scope": body.scope, "env": body.env},
+        )
+        await run_in_background(job_id, _bridge_call)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "job_id": job_id,
+                "status": "accepted",
+                "poll": f"/learning/jobs/{job_id}",
+            },
+        )
     try:
         return await bridge._req(
             "POST",

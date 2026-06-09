@@ -1,16 +1,11 @@
 """Real-time event multiplex: polls bridge ``/events/recent`` and fans out
-to connected WebSocket clients.
-
-The first version uses a small in-process poll loop (every 5s) rather than
-hooking into Hermes' internal event bus. Trade-off: 5s freshness lag vs.
-zero coupling. The poll watermark is ``latest_event_id``."""
+to connected WebSocket clients."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import time
 from contextlib import suppress
 from typing import Annotated
 
@@ -21,15 +16,11 @@ from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
 from ..deps import current_user, get_bridge
 from ..gateway_approval_watcher import watcher as approval_watcher
+from ..perf_snapshot import perf
 from ..security import decode_token
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["events"])
-
-
-# ---------------------------------------------------------------------------
-# Read passthroughs (recent events + open escalations)
-# ---------------------------------------------------------------------------
 
 
 @router.get("/events/recent")
@@ -94,10 +85,12 @@ class _Hub:
     async def add(self, ws: WebSocket) -> None:
         async with self._lock:
             self._clients.add(ws)
+            perf.ws_clients = len(self._clients)
 
     async def drop(self, ws: WebSocket) -> None:
         async with self._lock:
             self._clients.discard(ws)
+            perf.ws_clients = len(self._clients)
 
     async def broadcast(self, payload: dict) -> None:
         text = json.dumps(payload, ensure_ascii=False)
@@ -110,6 +103,7 @@ class _Hub:
                     dead.append(ws)
             for ws in dead:
                 self._clients.discard(ws)
+            perf.ws_clients = len(self._clients)
 
     async def start_poller(self, bridge: BridgeClient) -> None:
         if self._task is None:
@@ -137,24 +131,20 @@ class _Hub:
         while True:
             try:
                 await asyncio.sleep(5.0)
-                events = await bridge.recent_events(env, limit=200)
-                fresh = [e for e in events if int(e.get("id", 0)) > self._last_id]
-                if not fresh:
+                events = await bridge.recent_events(
+                    env, limit=200, since_id=self._last_id or None,
+                )
+                if not events:
                     continue
-                fresh.sort(key=lambda e: int(e["id"]))
-                self._last_id = int(fresh[-1]["id"])
-                await self.broadcast({"type": "events", "items": fresh})
+                events.sort(key=lambda e: int(e.get("id", 0)))
+                self._last_id = int(events[-1].get("id", self._last_id))
+                await self.broadcast({"type": "events", "items": events})
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.warning("event poll error: %s", exc)
 
     async def _approval_relay_loop(self) -> None:
-        """Fan watcher events out to websocket clients.
-
-        Frame type is ``"gateway_approvals"`` so the frontend hook can
-        discriminate against the existing ``"events"`` (bridge) feed.
-        """
         q = approval_watcher.subscribe()
         try:
             while True:
@@ -168,33 +158,6 @@ class _Hub:
 
 hub = _Hub()
 
-# #region agent log
-_DEBUG_LOG = "/Users/arnold/agent_prj/.cursor/debug-bba44f.log"
-
-
-def _agent_dbg(*, location: str, message: str, data: dict, hypothesis_id: str) -> None:
-    try:
-        with open(_DEBUG_LOG, "a", encoding="utf-8") as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "sessionId": "bba44f",
-                        "timestamp": int(time.time() * 1000),
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "hypothesisId": hypothesis_id,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-
-
-# #endregion
-
 
 @router.websocket("/ws")
 async def ws_endpoint(
@@ -204,57 +167,20 @@ async def ws_endpoint(
 ) -> None:
     """Single channel for live updates. Auth: ?token=<jwt>."""
     if not token:
-        # #region agent log
-        _agent_dbg(
-            location="events.py:ws_endpoint",
-            message="ws rejected no token",
-            data={},
-            hypothesis_id="E",
-        )
-        # #endregion
         await ws.close(code=4401)
         return
     try:
         decode_token(token)
     except Exception:  # noqa: BLE001
-        # #region agent log
-        _agent_dbg(
-            location="events.py:ws_endpoint",
-            message="ws rejected bad token",
-            data={},
-            hypothesis_id="E",
-        )
-        # #endregion
         await ws.close(code=4401)
         return
     await ws.accept()
     await hub.add(ws)
-    # #region agent log
-    _agent_dbg(
-        location="events.py:ws_endpoint",
-        message="ws accepted",
-        data={"client_count": len(hub._clients)},
-        hypothesis_id="A",
-    )
-    # #endregion
     await hub.start_poller(bridge)
-    disconnect_code: int | None = None
     try:
         while True:
-            # Discard inbound; this is a server-push channel.
             await ws.receive_text()
-    except WebSocketDisconnect as exc:
-        disconnect_code = exc.code
+    except WebSocketDisconnect:
+        pass
     finally:
         await hub.drop(ws)
-        # #region agent log
-        _agent_dbg(
-            location="events.py:ws_endpoint",
-            message="ws disconnected",
-            data={
-                "disconnect_code": disconnect_code,
-                "client_count": len(hub._clients),
-            },
-            hypothesis_id="A",
-        )
-        # #endregion
