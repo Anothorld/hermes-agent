@@ -125,6 +125,8 @@ type CampaignsPayload = {
 
 type ReplyWatcherStatus = {
   running: boolean;
+  enabled?: boolean | null;
+  inbound_disabled?: boolean | null;
   pid: number | null;
   managed_by?: 'bridge' | string | null;
   env: 'TEST' | 'LIVE' | null;
@@ -137,6 +139,15 @@ type ReplyWatcherStatus = {
   command: string[] | null;
   state_path: string;
   last_tick_at?: string | null;
+  last_tick_stats?: {
+    matched?: number;
+    skipped?: number;
+    retry?: number;
+    deferred?: number;
+    errors?: number;
+    scanned?: number;
+    mailboxes?: number;
+  } | null;
   last_error?: string | null;
 };
 
@@ -229,23 +240,52 @@ function ReplyWatcherPanel({
   onRefresh: () => void;
 }) {
   const running = status?.running ?? false;
-  const pillCls = running ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600';
+  const enabled = status?.enabled ?? running;
+  const envDisabled = Boolean(status?.inbound_disabled);
+  const stats = status?.last_tick_stats;
+  const pillCls = running
+    ? 'bg-emerald-100 text-emerald-800'
+    : enabled && envDisabled
+      ? 'bg-amber-100 text-amber-800'
+      : 'bg-slate-100 text-slate-600';
+  const pillLabel = running
+    ? `运行中 · ${status?.env}`
+    : enabled && envDisabled
+      ? '已启用但被环境变量暂停'
+      : '已停止';
   return (
     <div className="rounded border border-slate-200 bg-white p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-sm font-medium">Reply watcher</h3>
-            <span className={`rounded px-2 py-0.5 text-xs ${pillCls}`}>
-              {running ? `running · ${status?.env}` : 'stopped'}
-            </span>
+            <h3 className="text-sm font-medium">回信监听</h3>
+            <span className={`rounded px-2 py-0.5 text-xs ${pillCls}`}>{pillLabel}</span>
             {status?.pid && <span className="text-xs text-slate-500">pid {status.pid}</span>}
           </div>
           <div className="text-xs text-slate-500">
-            Gmail replies → CAL inbound event → reply router → draft approval or escalation.
+            扫描 Gmail 收件箱 → 写入 CAL 入站事件 → 触发回信路由 → 生成草稿或升级人工。
           </div>
+          {enabled && envDisabled && (
+            <div className="text-xs text-amber-700">
+              Bridge 已配置启用，但 `KOL_OPS_BRIDGE_DISABLE_GMAIL_INBOUND_POLLER=1` 阻止实际轮询。
+            </div>
+          )}
+          {stats && (
+            <div className="text-xs text-slate-500">
+              最近一轮：匹配 {stats.matched ?? 0} · 跳过 {stats.skipped ?? 0}
+              · 待重试 {stats.retry ?? 0}
+              {(stats.deferred ?? 0) > 0 ? ` · 退避中 ${stats.deferred}` : ''}
+              {(stats.errors ?? 0) > 0 ? ` · 异常 ${stats.errors}` : ''}
+            </div>
+          )}
+          {status?.last_tick_at && (
+            <div className="text-xs text-slate-400">上次扫描：{status.last_tick_at}</div>
+          )}
+          {status?.last_error && (
+            <div className="text-xs text-rose-600">最近错误：{status.last_error}</div>
+          )}
           {status?.log_path && (
-            <div className="break-all text-xs text-slate-400">log: {status.log_path}</div>
+            <div className="break-all text-xs text-slate-400">日志：{status.log_path}</div>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs">

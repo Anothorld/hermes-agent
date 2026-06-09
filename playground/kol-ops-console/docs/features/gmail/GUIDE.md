@@ -40,6 +40,12 @@
 
 入站实现：[`plugins/kol-ops-bridge/inbound_reply/`](../../../plugins/kol-ops-bridge/inbound_reply/)（worker in-process；CLI HTTP）。
 
+Console 产品页 **回信监听** 卡片展示：`running` / `enabled` / `inbound_disabled`、最近一轮
+`last_tick_stats`（matched / retry / deferred / errors）及 `last_error`。
+
+Gateway 重试退避 env：`KOL_OPS_INBOUND_GATEWAY_RETRY_BASE_SEC`（默认 60）、
+`KOL_OPS_INBOUND_GATEWAY_RETRY_MAX_SEC`（默认 3600）。
+
 ## 关联模块
 
 - [approvals](../approvals/GUIDE.md) — 发信触发

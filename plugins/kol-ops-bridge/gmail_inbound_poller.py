@@ -197,5 +197,6 @@ async def run_forever() -> None:
             await asyncio.sleep(5.0)
             continue
         await run_tick_async()
+        state = load_state()
         interval = max(15, int(state.get("interval") or 60))
         await asyncio.sleep(interval)

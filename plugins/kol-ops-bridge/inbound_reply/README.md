@@ -29,9 +29,17 @@ Both call `inbound_reply.orchestrator.run_once()` with different `InboundDeps`.
 | `skipped` | yes | skip |
 | `retry` | no | re-process; `should_retry_gateway_only` skips duplicate event write |
 | orchestrator crash mid-message | prior successes saved incrementally | failed message retried |
+| global seen + gateway recovery | probe `reply_dispatch_status` | re-run when `should_retry_gateway_only` |
+| gateway retry storm | exponential backoff in `poller_state.json` | `deferred` stat until `retry_backoff_*` expires |
 
 Gateway failures return `retry` (not `dispatched`) so `should_retry_gateway_only`
 can recover without duplicate `kol_inbound_reply` rows.
+
+Globally-seen messages are still probed for gateway recovery (historical dirty
+rows from pre-fix deployments).
+
+Retry backoff: `KOL_OPS_INBOUND_GATEWAY_RETRY_BASE_SEC` (default 60),
+`KOL_OPS_INBOUND_GATEWAY_RETRY_MAX_SEC` (default 3600), exponential per message.
 
 Bridge/matcher infra errors return `retry`. True non-matches return `skipped`.
 
@@ -49,6 +57,8 @@ Bridge/matcher infra errors return `retry`. True non-matches return `skipped`.
 | `KOL_OPS_INBOUND_REPLY_LEGACY_SCRIPT` | unset | `1` → rollback to `kol_reply_dispatcher_legacy.py` |
 | `HERMES_GATEWAY_BASE` | `http://127.0.0.1:8642` | Gateway for agent dispatch |
 | `HERMES_GATEWAY_KEY` | unset | Gateway auth (optional) |
+| `KOL_OPS_INBOUND_GATEWAY_RETRY_BASE_SEC` | `60` | Initial gateway retry backoff |
+| `KOL_OPS_INBOUND_GATEWAY_RETRY_MAX_SEC` | `3600` | Max gateway retry backoff |
 | `KOL_OPS_INBOUND_DEBUG_LOG` | unset | Legacy script debug JSONL path (optional) |
 
 ## Rollback

@@ -73,6 +73,7 @@ def _load_inbound_reply_modules(pkg: types.ModuleType) -> None:
         "matcher",
         "payload",
         "processor",
+        "recovery",
         "state",
         "orchestrator",
     ]

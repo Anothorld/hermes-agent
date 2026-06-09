@@ -37,6 +37,9 @@ One-shot bridge API: `POST /gmail/inbound-poller/run-once`.
 - Gateway or bridge infra failures → poller returns `retry` (message **not** marked
   seen). Next tick uses `should_retry_gateway_only` to re-dispatch without
   duplicating `kol_inbound_reply` events.
+- Globally-seen messages are still probed; recovery runs when
+  `should_retry_gateway_only` is set (fixes pre-fix dirty rows).
+- Gateway retry uses exponential backoff (`deferred` in tick stats) to avoid storms.
 - Thread history fetch failures degrade to `thread_history=[]` and still dispatch.
 - `GET /gmail/worker/status` exposes `inbound_disabled` when
   `KOL_OPS_BRIDGE_DISABLE_GMAIL_INBOUND_POLLER=1`.

@@ -31,6 +31,7 @@ class InboundTickStats:
     scanned: int
     mailboxes: int
     errors: int = 0
+    deferred: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -40,4 +41,5 @@ class InboundTickStats:
             "scanned": self.scanned,
             "mailboxes": self.mailboxes,
             "errors": self.errors,
+            "deferred": self.deferred,
         }

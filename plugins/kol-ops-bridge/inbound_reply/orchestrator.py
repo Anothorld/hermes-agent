@@ -10,11 +10,15 @@ from ..gmail_client import GmailUnavailable
 from ..gmail_console import list_operator_gmail_clients
 from .deps import InboundDeps
 from .processor import process_message
+from .recovery import needs_reprocess_after_global_seen
 from .schemas import InboundTickStats, ProcessStatus
 from .state import (
+    clear_retry_backoff,
     global_message_seen,
     load_state,
     record_global_message_seen,
+    record_retry_backoff,
+    retry_not_before,
     save_state,
     state_lock,
     trim_seen,
@@ -36,6 +40,7 @@ def _record_message_outcome(
     """Persist seen markers immediately so a later failure cannot lose progress."""
     if status not in ("dispatched", "skipped"):
         return
+    clear_retry_backoff(state, env=env, message_id=message_id)
     seen.add(message_id)
     record_global_message_seen(
         env=env,
@@ -67,6 +72,7 @@ def run_once(
         retry = 0
         errors = 0
         scanned = 0
+        deferred = 0
         query = f"in:inbox newer_than:{int(lookback_days)}d -from:me"
         for mb in mailboxes:
             seen_key = f"seen_{env}_{mb.user_id}"
@@ -76,14 +82,23 @@ def run_once(
             for stub in messages:
                 if stub.message_id in seen:
                     continue
-                if global_message_seen(env=env, message_id=stub.message_id):
-                    seen.add(stub.message_id)
+                if retry_not_before(state, env=env, message_id=stub.message_id) > time.time():
+                    deferred += 1
                     continue
+                globally_seen = global_message_seen(env=env, message_id=stub.message_id)
+                if globally_seen:
+                    seen.add(stub.message_id)
                 try:
                     full = mb.client.get_message(stub.message_id)
                 except GmailUnavailable as exc:
                     log.warning("gmail get %s failed: %s", stub.message_id, exc)
                     retry += 1
+                    continue
+                if globally_seen and not needs_reprocess_after_global_seen(
+                    full,
+                    env=env,
+                    bridge=resolved.bridge,
+                ):
                     continue
                 try:
                     status = process_message(
@@ -102,6 +117,14 @@ def run_once(
                     )
                     errors += 1
                     retry += 1
+                    record_retry_backoff(state, env=env, message_id=full.message_id)
+                    continue
+
+                if status == "retry":
+                    record_retry_backoff(state, env=env, message_id=full.message_id)
+                    state[f"last_run_{env}"] = int(time.time())
+                    save_state(state)
+                    retry += 1
                     continue
 
                 _record_message_outcome(
@@ -117,8 +140,6 @@ def run_once(
                     matched += 1
                 elif status == "skipped":
                     skipped += 1
-                else:
-                    retry += 1
             state[seen_key] = trim_seen(seen)
         state[f"last_run_{env}"] = int(time.time())
         save_state(state)
@@ -129,5 +150,6 @@ def run_once(
             scanned=scanned,
             mailboxes=len(mailboxes),
             errors=errors,
+            deferred=deferred,
         )
         return stats.as_dict()

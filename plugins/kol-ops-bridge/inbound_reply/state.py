@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -18,6 +19,8 @@ log = logging.getLogger(__name__)
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 _STATE_PATH = _HERMES_HOME / "kol-ops-bridge" / "poller_state.json"
 _LOCK_PATH = _STATE_PATH.with_suffix(".lock")
+
+
 def _default_console_db_path() -> Path:
     explicit = os.environ.get("KOC_DB_PATH")
     if explicit:
@@ -27,6 +30,54 @@ def _default_console_db_path() -> Path:
 
 _CONSOLE_DB_PATH = _default_console_db_path()
 _SEEN_CAP = 2000
+
+
+def retry_backoff_bucket_key(env: str) -> str:
+    return f"retry_backoff_{env}"
+
+
+def retry_failures_key(env: str) -> str:
+    return f"retry_failures_{env}"
+
+
+def gateway_retry_base_sec() -> int:
+    return max(15, int(os.environ.get("KOL_OPS_INBOUND_GATEWAY_RETRY_BASE_SEC", "60")))
+
+
+def gateway_retry_max_sec() -> int:
+    return max(gateway_retry_base_sec(), int(os.environ.get("KOL_OPS_INBOUND_GATEWAY_RETRY_MAX_SEC", "3600")))
+
+
+def retry_not_before(state: dict[str, Any], *, env: str, message_id: str) -> float:
+    bucket = state.get(retry_backoff_bucket_key(env), {})
+    if not isinstance(bucket, dict):
+        return 0.0
+    try:
+        return float(bucket.get(message_id) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def record_retry_backoff(state: dict[str, Any], *, env: str, message_id: str) -> None:
+    failures_bucket = state.setdefault(retry_failures_key(env), {})
+    if not isinstance(failures_bucket, dict):
+        failures_bucket = {}
+        state[retry_failures_key(env)] = failures_bucket
+    failures = int(failures_bucket.get(message_id, 0)) + 1
+    failures_bucket[message_id] = failures
+    delay = min(gateway_retry_max_sec(), gateway_retry_base_sec() * (2 ** min(failures - 1, 6)))
+    backoff_bucket = state.setdefault(retry_backoff_bucket_key(env), {})
+    if not isinstance(backoff_bucket, dict):
+        backoff_bucket = {}
+        state[retry_backoff_bucket_key(env)] = backoff_bucket
+    backoff_bucket[message_id] = time.time() + delay
+
+
+def clear_retry_backoff(state: dict[str, Any], *, env: str, message_id: str) -> None:
+    for key in (retry_backoff_bucket_key(env), retry_failures_key(env)):
+        bucket = state.get(key)
+        if isinstance(bucket, dict):
+            bucket.pop(message_id, None)
 
 
 def state_path() -> Path:

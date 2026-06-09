@@ -83,9 +83,12 @@ class InProcessBridgeAdapter:
     ) -> dict[str, Any]:
         if not cal.get_identity(identity_id):
             return {"error": "identity not found"}
-        return build_dispatch_context_bundle(
-            identity_id=identity_id, campaign_id=campaign_id, env=env,
-        )
+        try:
+            return build_dispatch_context_bundle(
+                identity_id=identity_id, campaign_id=campaign_id, env=env,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise BridgeRequestError(f"dispatch_context failed: {exc}") from exc
 
     def reply_chase_hint(
         self,
@@ -96,10 +99,13 @@ class InProcessBridgeAdapter:
         thread_id: str | None,
         env: str,
     ) -> dict[str, Any]:
-        return cal.reply_chase_hint(
-            identity_id=identity_id,
-            campaign_id=campaign_id,
-            message_id=message_id,
-            thread_id=thread_id,
-            env=env,
-        )
+        try:
+            return cal.reply_chase_hint(
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                message_id=message_id,
+                thread_id=thread_id,
+                env=env,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise BridgeRequestError(f"reply_chase_hint failed: {exc}") from exc

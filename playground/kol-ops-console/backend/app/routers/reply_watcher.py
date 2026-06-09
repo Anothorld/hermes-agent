@@ -92,8 +92,13 @@ def _stop_legacy_subprocess() -> dict[str, Any] | None:
 
 
 def _shape_status(raw: dict[str, Any], *, legacy: dict[str, Any] | None = None) -> dict[str, Any]:
+    last_stats = raw.get("last_tick_stats")
+    if not isinstance(last_stats, dict):
+        last_stats = None
     out = {
         "running": bool(raw.get("running")),
+        "enabled": raw.get("enabled"),
+        "inbound_disabled": raw.get("inbound_disabled"),
         "pid": raw.get("pid"),
         "managed_by": raw.get("managed_by") or "bridge",
         "env": raw.get("env"),
@@ -106,7 +111,7 @@ def _shape_status(raw: dict[str, Any], *, legacy: dict[str, Any] | None = None) 
         "command": raw.get("command"),
         "state_path": raw.get("state_path"),
         "last_tick_at": raw.get("last_tick_at"),
-        "last_tick_stats": raw.get("last_tick_stats"),
+        "last_tick_stats": last_stats,
         "last_error": raw.get("last_error"),
     }
     if legacy:

@@ -260,6 +260,85 @@ def _save_state(state: dict[str, Any]) -> None:
     tmp.replace(_STATE_PATH)
 
 
+def _retry_backoff_bucket_key(env: str) -> str:
+    return f"retry_backoff_{env}"
+
+
+def _retry_failures_key(env: str) -> str:
+    return f"retry_failures_{env}"
+
+
+def _gateway_retry_base_sec() -> int:
+    return max(15, int(os.environ.get("KOL_OPS_INBOUND_GATEWAY_RETRY_BASE_SEC", "60")))
+
+
+def _gateway_retry_max_sec() -> int:
+    return max(_gateway_retry_base_sec(), int(os.environ.get("KOL_OPS_INBOUND_GATEWAY_RETRY_MAX_SEC", "3600")))
+
+
+def _retry_not_before(state: dict[str, Any], *, env: str, message_id: str) -> float:
+    bucket = state.get(_retry_backoff_bucket_key(env), {})
+    if not isinstance(bucket, dict):
+        return 0.0
+    try:
+        return float(bucket.get(message_id) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _record_retry_backoff(state: dict[str, Any], *, env: str, message_id: str) -> None:
+    failures_bucket = state.setdefault(_retry_failures_key(env), {})
+    if not isinstance(failures_bucket, dict):
+        failures_bucket = {}
+        state[_retry_failures_key(env)] = failures_bucket
+    failures = int(failures_bucket.get(message_id, 0)) + 1
+    failures_bucket[message_id] = failures
+    delay = min(
+        _gateway_retry_max_sec(),
+        _gateway_retry_base_sec() * (2 ** min(failures - 1, 6)),
+    )
+    backoff_bucket = state.setdefault(_retry_backoff_bucket_key(env), {})
+    if not isinstance(backoff_bucket, dict):
+        backoff_bucket = {}
+        state[_retry_backoff_bucket_key(env)] = backoff_bucket
+    backoff_bucket[message_id] = time.time() + delay
+
+
+def _clear_retry_backoff(state: dict[str, Any], *, env: str, message_id: str) -> None:
+    for key in (_retry_backoff_bucket_key(env), _retry_failures_key(env)):
+        bucket = state.get(key)
+        if isinstance(bucket, dict):
+            bucket.pop(message_id, None)
+
+
+def _needs_reprocess_after_global_seen(msg: GmailMessage, *, env: str) -> bool:
+    try:
+        matched = _match_identity(msg, env=env)
+    except _MatchBridgeError:
+        return True
+    if not matched or not matched.campaign_id:
+        return False
+    try:
+        dispatch_status = _BRIDGE.request(
+            "GET",
+            f"/identities/{matched.identity_id}/reply-dispatch-status",
+            params={
+                "campaign_id": matched.campaign_id,
+                "message_id": msg.message_id,
+                "env": env,
+            },
+        )
+    except SystemExit:
+        return True
+    if not isinstance(dispatch_status, dict):
+        return False
+    if dispatch_status.get("should_retry_gateway_only"):
+        return True
+    if dispatch_status.get("should_skip_poller"):
+        return False
+    return False
+
+
 # -------------------------------------------------------------------- HTTP
 def _http_json(
     method: str,
@@ -1234,6 +1313,7 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
         skipped = 0
         retry = 0
         errors = 0
+        deferred = 0
         scanned = 0
         query = f"in:inbox newer_than:{int(lookback_days)}d -from:me"
         for mb in mailboxes:
@@ -1244,14 +1324,19 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
             for stub in messages:
                 if stub.message_id in seen:
                     continue
-                if _global_message_seen(env=env, message_id=stub.message_id):
-                    seen.add(stub.message_id)
+                if _retry_not_before(state, env=env, message_id=stub.message_id) > time.time():
+                    deferred += 1
                     continue
+                globally_seen = _global_message_seen(env=env, message_id=stub.message_id)
+                if globally_seen:
+                    seen.add(stub.message_id)
                 try:
                     full = mb.client.get_message(stub.message_id)
                 except GmailUnavailable as exc:
                     log.warning("gmail get %s failed: %s", stub.message_id, exc)
                     retry += 1
+                    continue
+                if globally_seen and not _needs_reprocess_after_global_seen(full, env=env):
                     continue
                 try:
                     status = _process_message(
@@ -1269,8 +1354,16 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
                     )
                     errors += 1
                     retry += 1
+                    _record_retry_backoff(state, env=env, message_id=full.message_id)
+                    continue
+                if status == "retry":
+                    _record_retry_backoff(state, env=env, message_id=full.message_id)
+                    state[f"last_run_{env}"] = int(time.time())
+                    _save_state(state)
+                    retry += 1
                     continue
                 if status in ("dispatched", "skipped"):
+                    _clear_retry_backoff(state, env=env, message_id=full.message_id)
                     seen.add(full.message_id)
                     _record_global_message_seen(
                         env=env,
@@ -1284,8 +1377,6 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
                     matched += 1
                 elif status == "skipped":
                     skipped += 1
-                else:
-                    retry += 1
             state[seen_key] = sorted(seen)[-2000:]
         state[f"last_run_{env}"] = int(time.time())
         _save_state(state)
@@ -1294,6 +1385,7 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
             "skipped": skipped,
             "retry": retry,
             "errors": errors,
+            "deferred": deferred,
             "scanned": scanned,
             "mailboxes": len(mailboxes),
         }
