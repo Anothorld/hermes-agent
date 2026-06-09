@@ -221,6 +221,9 @@ When `recommended_action == "defer_escalation"` (open escalation
   `open_escalation_awaiting_answer` if you try without `linked_escalation_id`.
 - Confirm the escalation is already open (Step 3.5 or an existing row); do
   not open a duplicate.
+- The Bridge **automatically** appends this inbound to the open escalation's
+  `resume_context.pending_inbounds` and `question_to_operator` when the
+  poller writes `kol_inbound_reply` via `POST /events` — no CLI step needed.
 - Skip Steps 4–5 drafting; jump to Step 6 and mark the inbound handled.
 
 When `recommended_action == "regenerate"` **and** `allow_autoflow` is still

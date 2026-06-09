@@ -3,6 +3,7 @@ import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, EscalationRow } from '../api';
 import { parseConflictBody, startedAtMs, useInflightLock } from '../useInflightLock';
 import InboundEmailStack, { type PendingInbound } from '../components/InboundEmailStack';
+import EscalationSuggestedQuestion from '../components/EscalationSuggestedQuestion';
 import type { InboundEmail } from '../components/InboundEmailCard';
 import { FactInput } from '../components/inputs/FactInput';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
@@ -253,9 +254,15 @@ function EscalationList() {
                       {r.pending_inbound_count} 封待处理回信
                     </span>
                   )}
+                  {(r.pending_inbound_count ?? 0) <= 1 &&
+                    (r.suggested_question?.includes('【KOL 追信') ?? false) && (
+                      <span className="mt-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-900">
+                        有 KOL 追信
+                      </span>
+                    )}
                   {r.suggested_question && (
-                    <div className="mt-1 line-clamp-2 text-xs text-slate-500" title={r.suggested_question}>
-                      {r.suggested_question}
+                    <div className="mt-1 text-xs">
+                      <EscalationSuggestedQuestion text={r.suggested_question} compact />
                     </div>
                   )}
                 </td>
@@ -678,9 +685,7 @@ function EscalationDetail({ id }: { id: number }) {
             <div className="text-xs font-semibold uppercase tracking-wide text-sky-700">
               请求操作员答复
             </div>
-            <div className="mt-1 whitespace-pre-wrap text-sm leading-relaxed">
-              {row.suggested_question}
-            </div>
+            <EscalationSuggestedQuestion text={row.suggested_question} />
           </div>
         )}
         {extractMissingFields(row).length > 0 && (

@@ -647,6 +647,12 @@ async def escalation_inbound_context(
     campaign_id = escalation.get("campaign_id")
     if not isinstance(identity_id, int):
         return {"escalation_id": escalation_id, "inbound": None}
+    if str(escalation.get("state") or "") == "awaiting_answer":
+        try:
+            await bridge.sync_escalation_pending_inbounds(escalation_id)
+            escalation = await _find_escalation(bridge, escalation_id, env) or escalation
+        except BridgeError:
+            pass
     try:
         events = await bridge.get_timeline(
             identity_id,

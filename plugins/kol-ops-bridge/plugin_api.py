@@ -2939,6 +2939,16 @@ def resolve_escalation(
     return {"ok": True}
 
 
+@router.post("/escalations/{escalation_id}/sync-pending-inbounds")
+def sync_escalation_pending_inbounds(
+    escalation_id: int,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Backfill ``resume_context.pending_inbounds`` from CAL inbound events."""
+    _require_bridge_key(x_bridge_key)
+    return cal.sync_escalation_pending_inbounds(escalation_id)
+
+
 # ---------------------------------------------------------------------------
 # Deterministic logic helpers (toolized skill steps)
 #

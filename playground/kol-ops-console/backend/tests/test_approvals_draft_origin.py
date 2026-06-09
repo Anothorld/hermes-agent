@@ -33,6 +33,17 @@ def test_draft_origin_chase_supersede():
     assert origin == "chase_supersede"
 
 
+def test_draft_origin_chase_supersede_dict():
+    origin, _ = approvals_mod._derive_draft_origin(
+        "approval.reply_draft",
+        {
+            "chase_supersede": {"prior_source_message_id": "MSG1"},
+            "child_skill": "kol-reply-synthesizer",
+        },
+    )
+    assert origin == "chase_supersede"
+
+
 def test_draft_origin_proactive_followup():
     origin, label = approvals_mod._derive_draft_origin(
         "approval.reply_draft",

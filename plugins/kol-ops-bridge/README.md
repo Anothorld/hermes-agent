@@ -71,6 +71,20 @@ Skills (`kol-escalation-resumer`, `kol-reply-dispatcher`) repeat the same contra
 - **Lint:** `kol_bridge_tool.py lint-agent-code --snippet-file … --strict`
 - **Doc:** `agent_prj/docs/kol-bridge-agent-tooling.md`
 
+### Escalation pending inbounds (`awaiting_answer`)
+
+When a `kol_inbound_reply` event is written (`POST /events` or poller), Bridge
+appends the message to **one** inbound-tagged open escalation on that
+identity+campaign (`escalation_inbounds.select_escalation_ids_for_followup`:
+same Gmail `thread_id` preferred, else newest inbound-tagged row). Follow-ups
+also append a `【KOL 追信 · <msg_id>】` block to `question_to_operator`.
+
+- `open_escalation` seeds `pending_inbounds` from `source_message_id` when present.
+- Legacy rows: `POST /escalations/{id}/sync-pending-inbounds` backfills from
+  timeline events (Console calls this on inbound-context load).
+- While escalation is open, `persist-reply-draft` without `linked_escalation_id`
+  returns **409**; dispatcher should see `defer_escalation` in chase hint.
+
 `get-escalation` example (no `--campaign-id`):
 
 ```bash

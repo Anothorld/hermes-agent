@@ -20,12 +20,14 @@
 - `reply_chase_hint` → **`defer_escalation`**（不生成追信占位稿）
 - `persist-reply-draft` **无** `linked_escalation_id` → **409**（同轮 Step 3.5/3.1 也拦得住）
 - 预览/resume 稿须带 `linked_escalation_id`；有待审 linked 稿时 chase supersede → **409**
-- **追信合并**：每封 `kol_inbound_reply` 写入时，Bridge 自动追加到该 campaign 所有 `awaiting_answer` 升级的 `resume_context.pending_inbounds`（开升级时种子 `MSG1` 为 `trigger`）
+- **追信合并**：每封 `kol_inbound_reply` 写入时，Bridge 自动追加到 **一条** 入站类 `awaiting_answer` 升级的 `resume_context.pending_inbounds`（同 Gmail `thread_id` 优先，否则最新 inbound-tagged 行；开升级时种子 `MSG1` 为 `trigger`，无种子时首封入站也标 `trigger`）
 - **问题摘要更新**：同一时刻把最新追信摘要追加到 `question_to_operator` / 列表与详情里的 `suggested_question`（`【KOL 追信 · <msg_id>】` 块，按 message_id 去重）
 
 ### 升级页「待处理回信」折叠区
 
-- API：`GET /escalations/{id}/inbound-context` 返回 `pending_inbounds[]`（`触发升级` + `追信（待处理）` 标签）
+- API：`GET /escalations/{id}/inbound-context` 打开时自动调用 Bridge `POST /escalations/{id}/sync-pending-inbounds` 回填旧单；返回 `pending_inbounds[]`（`触发升级` + `追信（待处理）` 标签）
+- 追信只挂到 **一条** 入站类升级（同 thread 优先，否则最新 inbound-tagged 行）；内部类升级（discovery 等）不会被误追加
+- `suggested_question` 中 `【KOL 追信】` 块在列表/详情以 **琥珀色** 高亮
 - 操作员在答复时应覆盖 **全部** pending 来信；resume 稿以 `latest_pending_inbound_message_id` 为 Gmail 回复锚点
 
 ## 操作员清单（入站升级）
@@ -43,11 +45,12 @@
 | 层 | 文件 |
 |----|------|
 | FE 列表/详情 | `EscalationConsolePage.tsx` |
+| FE 折叠回信 / 问题高亮 | `InboundEmailStack.tsx`, `EscalationSuggestedQuestion.tsx` |
 | FE 待审批标签 | `ApprovalsPage.tsx`（`draft_origin` badge） |
 | BE 升级 | `routers/escalations.py` — `_escalation_needs_reply_draft`, `draft_expected` |
 | BE 待审批 | `routers/approvals.py` — `_derive_draft_origin` |
 | Bridge chase | `plugins/kol-ops-bridge/reply_chase.py`, `cal.py` |
-| Bridge 开升级 | `plugin_api.py` `open_escalation`（补全 `source_message_id`） |
+| Bridge 开升级 / 追信 | `plugin_api.py` `open_escalation`；`escalation_inbounds.py`；`cal.py` `append_pending_inbound_on_inbound_event` |
 | Agent | `kol-reply-dispatcher` Step 3.1/3.5, `kol-escalation-resumer` |
 
 ## 主要 API
@@ -58,6 +61,8 @@
 | GET | `/escalations/{id}` | 详情 + 关联入站 |
 | PATCH | `/escalations/{id}` | resume / terminate；返回 `draft_expected` + `draft_followup`（`expected` / `already_pending` / `in_flight` / `none`） |
 | POST | `/escalations/{id}/preview-draft` | 试写草稿（不 resolve） |
+| GET | `/escalations/{id}/inbound-context` | 入站上下文 + `pending_inbounds[]`（旧单自动 sync） |
+| POST | Bridge `/escalations/{id}/sync-pending-inbounds` | 从 timeline 回填 `pending_inbounds`（Console inbound-context 自动调用） |
 
 ## #109 类 incident 复盘要点
 

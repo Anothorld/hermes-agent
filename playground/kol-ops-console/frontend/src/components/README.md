@@ -23,6 +23,7 @@
 | `LaneFilterBar`, `GoalProgressBar`, `FactsEditor`, `KolProfileDashboard`, `KolSocialQuickLinks`, `KolProfilePreviewLink`, `NoxDiligencePanel`, `NoxInsightsSections`, `NoxDistributionChart`, `KolRegistryTable`, `NoxAudienceHoverPanel`, `AudienceProfileHoverButton` | [kols](../../../docs/features/kols/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md), [gate-metrics](../../../docs/features/gate-metrics/GUIDE.md) |
 | `EditCampaignConfigPanel`, `NoxCampaignOpsPanel`, `ContractReadinessPanel` | [campaigns](../../../docs/features/campaigns/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md) |
 | `CommunicationHistoryPanel` | [gmail](../../../docs/features/gmail/GUIDE.md) |
+| `InboundEmailCard`, `InboundEmailStack`, `EscalationSuggestedQuestion` | [escalations](../../../docs/features/escalations/GUIDE.md) |
 | `AgentTranscriptPanel` | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |
 | `factKeyLabel.ts` | [kols](../../../docs/features/kols/GUIDE.md) |
 

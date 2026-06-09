@@ -216,7 +216,8 @@ def _derive_draft_origin(
     child = value.get("child_skill")
     if value.get("kind") == "proactive_followup" or child == "kol-proactive-followup":
         return "proactive_followup", _DRAFT_ORIGIN_LABELS["proactive_followup"]
-    if value.get("chase_supersede"):
+    chase = value.get("chase_supersede")
+    if chase is True or (isinstance(chase, dict) and chase):
         return "chase_supersede", _DRAFT_ORIGIN_LABELS["chase_supersede"]
     if child or value.get("primary_goal"):
         return "inbound_auto", _DRAFT_ORIGIN_LABELS["inbound_auto"]

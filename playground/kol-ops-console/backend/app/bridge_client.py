@@ -565,6 +565,13 @@ class BridgeClient:
             "PATCH", f"/escalations/{escalation_id}", json=body
         )
 
+    async def sync_escalation_pending_inbounds(
+        self, escalation_id: int,
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", f"/escalations/{escalation_id}/sync-pending-inbounds",
+        )
+
     # --------------------------------------------------------------- Events
     async def recent_events(
         self,

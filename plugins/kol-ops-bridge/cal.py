@@ -33,7 +33,7 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Callable, Final, Iterable, Iterator, Mapping, Optional
+from typing import Any, Callable, Final, Iterable, Iterator, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -3299,17 +3299,36 @@ def append_pending_inbound_on_inbound_event(
             ).fetchall()
             if not rows:
                 return 0
+            target_ids = set(
+                escalation_inbounds.select_escalation_ids_for_followup(
+                    rows,
+                    anchor,
+                    parse_ctx=lambda raw: _jl(raw, {}) or {},
+                )
+            )
+            if not target_ids:
+                return 0
             now = _now()
             updated = 0
             for row in rows:
+                if int(row["id"]) not in target_ids:
+                    continue
                 ctx = _jl(row["resume_context_json"], {}) or {}
                 merged = escalation_inbounds.append_pending_inbound(ctx, anchor)
                 if merged == ctx:
                     continue
-                new_question = escalation_inbounds.append_followup_to_suggested_question(
-                    row["question_to_operator"],
-                    anchor,
+                new_question = row["question_to_operator"]
+                pending_after = merged.get("pending_inbounds") or []
+                last_role = (
+                    pending_after[-1].get("role")
+                    if pending_after and isinstance(pending_after[-1], dict)
+                    else None
                 )
+                if last_role == "followup":
+                    new_question = escalation_inbounds.append_followup_to_suggested_question(
+                        row["question_to_operator"],
+                        anchor,
+                    )
                 conn.execute(
                     """UPDATE kol_escalations
                           SET resume_context_json=?, question_to_operator=?,
@@ -3321,6 +3340,133 @@ def append_pending_inbound_on_inbound_event(
             return updated
 
     return int(_safe("append_pending_inbound_on_inbound_event", _do) or 0)
+
+
+def sync_escalation_pending_inbounds(
+    escalation_id: int,
+    *,
+    inbound_events: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Backfill ``pending_inbounds`` for legacy inbound-tagged escalations."""
+    from . import escalation_inbounds
+
+    def _do() -> dict[str, Any]:
+        with _connect() as conn:
+            row = conn.execute(
+                """SELECT id, identity_id, campaign_id, env, state,
+                          created_at, resume_context_json, question_to_operator
+                     FROM kol_escalations WHERE id=?""",
+                (escalation_id,),
+            ).fetchone()
+        if not row:
+            return {"synced": False, "reason": "not_found"}
+        if row["state"] != "awaiting_answer":
+            return {"synced": False, "reason": "not_awaiting"}
+        ctx = _jl(row["resume_context_json"], {}) or {}
+        question_to_operator = row["question_to_operator"]
+        if not escalation_inbounds.is_inbound_tagged_resume_context(ctx):
+            return {"synced": False, "reason": "not_inbound_tagged"}
+        identity_id = int(row["identity_id"] or 0)
+        campaign_id = row["campaign_id"]
+        env = row["env"] or "LIVE"
+        if not identity_id or not campaign_id:
+            return {"synced": False, "reason": "missing_scope"}
+        events = (
+            list(inbound_events)
+            if inbound_events is not None
+            else list_events(
+                env=env,
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                limit=200,
+            )
+        )
+        if not escalation_inbounds.needs_pending_inbound_sync(
+            ctx,
+            events,
+            escalation_created_at=row["created_at"] or "",
+        ):
+            return {"synced": False, "reason": "already_populated"}
+        inbounds = [
+            ev for ev in events
+            if isinstance(ev, dict) and ev.get("event_type") == "kol_inbound_reply"
+        ]
+        if not inbounds:
+            return {"synced": False, "reason": "no_inbound_events"}
+        created = row["created_at"] or ""
+        trigger_ev = None
+        for ev in inbounds:
+            ts = ev.get("ts") or ""
+            if ts and created and ts <= created:
+                trigger_ev = ev
+                break
+        if trigger_ev is None:
+            trigger_ev = inbounds[0]
+        new_ctx = dict(ctx)
+        new_ctx = escalation_inbounds.seed_trigger_inbound(new_ctx)
+        trig_payload = (
+            trigger_ev.get("payload")
+            if isinstance(trigger_ev.get("payload"), dict)
+            else {}
+        )
+        trig_anchor = escalation_inbounds.inbound_anchor_from_payload(
+            trig_payload,
+            event_id=trigger_ev.get("id"),
+            ts=trigger_ev.get("ts"),
+            role="trigger",
+        )
+        if trig_anchor:
+            new_ctx = escalation_inbounds.append_pending_inbound(new_ctx, {
+                **trig_anchor,
+                "role": "trigger",
+            })
+        for ev in inbounds:
+            if ev is trigger_ev:
+                continue
+            ts = ev.get("ts") or ""
+            if created and ts and ts <= created:
+                continue
+            payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+            follow = escalation_inbounds.inbound_anchor_from_payload(
+                payload,
+                event_id=ev.get("id"),
+                ts=ev.get("ts"),
+                role="followup",
+            )
+            if follow:
+                new_ctx = escalation_inbounds.append_pending_inbound(new_ctx, follow)
+        if new_ctx == ctx:
+            return {"synced": False, "reason": "unchanged"}
+        old_ids = {
+            str(x.get("message_id") or "")
+            for x in (ctx.get("pending_inbounds") or [])
+            if isinstance(x, dict)
+        }
+        new_question = question_to_operator
+        for anchor in new_ctx.get("pending_inbounds") or []:
+            if not isinstance(anchor, dict):
+                continue
+            if anchor.get("role") != "followup":
+                continue
+            mid = str(anchor.get("message_id") or "")
+            if mid and mid not in old_ids:
+                new_question = escalation_inbounds.append_followup_to_suggested_question(
+                    new_question,
+                    anchor,
+                )
+        with _connect() as conn:
+            conn.execute(
+                """UPDATE kol_escalations
+                      SET resume_context_json=?, question_to_operator=?,
+                          updated_at=?
+                    WHERE id=?""",
+                (_j(new_ctx), new_question, _now(), escalation_id),
+            )
+        count = len(new_ctx.get("pending_inbounds") or [])
+        return {"synced": True, "pending_inbound_count": count}
+
+    out = _safe("sync_escalation_pending_inbounds", _do)
+    return out if isinstance(out, dict) else {"synced": False, "reason": "error"}
 
 
 def get_escalation_campaign_id(escalation_id: int) -> Optional[str]:
