@@ -854,7 +854,11 @@ async def _trigger_rediscover_internal(
             dedup_key=dedup_key,
             on_success=_on_rediscover_success if use_async else None,
             on_error=_on_rediscover_error if use_async else None,
-            job_meta={"campaign_id": campaign_id, "env": env},
+            job_meta={
+                "campaign_id": campaign_id,
+                "env": env,
+                "pending_run_id": pending_run_id,
+            },
         )
     except GatewayError:
         raise
@@ -866,7 +870,7 @@ async def _trigger_rediscover_internal(
                 "accepted": True,
                 "campaign_id": campaign_id,
                 "env": env,
-                "pending_run_id": pending_run_id,
+                "pending_run_id": out.get("pending_run_id") or pending_run_id,
                 "additional_count": additional_count,
                 "excluded_handle_count": len(excluded_handles),
                 **out,

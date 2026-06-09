@@ -38,8 +38,9 @@ def _accepted_body(
     job_id: str,
     session_id: str,
     deduped: bool = False,
+    pending_run_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    body: dict[str, Any] = {
         "job_id": job_id,
         "status": "accepted",
         "poll": f"/campaigns/launch-jobs/{job_id}",
@@ -47,6 +48,9 @@ def _accepted_body(
         "queue": launch_queue.snapshot(),
         "deduped": deduped,
     }
+    if pending_run_id:
+        body["pending_run_id"] = pending_run_id
+    return body
 
 
 async def launch_or_accept(
@@ -90,10 +94,20 @@ async def launch_or_accept(
             meta_match={"dedup_key": dedup_key},
         )
         if existing:
+            from .background_jobs import get_job
+
+            prior = get_job(existing) or {}
+            prior_meta = prior.get("meta") if isinstance(prior.get("meta"), dict) else {}
+            prior_pending = prior_meta.get("pending_run_id")
             return True, _accepted_body(
                 job_id=existing,
                 session_id=session_id,
                 deduped=True,
+                pending_run_id=(
+                    str(prior_pending)
+                    if isinstance(prior_pending, str) and prior_pending
+                    else None
+                ),
             )
 
     job_id = create_job(kind=_LAUNCH_JOB_KIND, meta=meta)

@@ -36,7 +36,7 @@ def _now() -> str:
 
 def _default_config() -> dict[str, Any]:
     return {
-        "enabled": os.environ.get("KOL_OPS_GMAIL_INBOUND_AUTO_START", "1") == "1",
+        "enabled": os.environ.get("KOL_OPS_GMAIL_INBOUND_AUTO_START", "0") == "1",
         "env": os.environ.get("KOL_OPS_GMAIL_INBOUND_ENV", "TEST").strip().upper(),
         "interval": max(15, int(os.environ.get("KOL_OPS_GMAIL_INBOUND_INTERVAL_SEC", "60"))),
         "lookback_days": max(1, int(os.environ.get("KOL_OPS_GMAIL_INBOUND_LOOKBACK_DAYS", "3"))),

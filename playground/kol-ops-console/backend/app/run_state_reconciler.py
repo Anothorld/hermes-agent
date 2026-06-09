@@ -71,9 +71,14 @@ async def reconcile_run_states(
             r["target_floor"] if "target_floor" in row_keys else None
         )
 
-        if r["status"] == "running" and r["run_id"]:
+        run_id = r["run_id"]
+        if (
+            r["status"] == "running"
+            and run_id
+            and not str(run_id).startswith("pending:")
+        ):
             try:
-                info = await run_status_cache.get_run(gateway, r["run_id"])
+                info = await run_status_cache.get_run(gateway, str(run_id))
             except GatewayError:
                 info = None
             if info is None:
@@ -100,9 +105,14 @@ async def reconcile_run_states(
                     dirty = True
 
         gate_state_str: str | None = None
-        if gate_run_id and bridge is not None and target_floor is not None:
+        if (
+            gate_run_id
+            and not str(gate_run_id).startswith("pending:")
+            and bridge is not None
+            and target_floor is not None
+        ):
             try:
-                gate_info = await run_status_cache.get_run(gateway, gate_run_id)
+                gate_info = await run_status_cache.get_run(gateway, str(gate_run_id))
             except GatewayError:
                 gate_info = None
             if gate_info is None:
@@ -152,8 +162,10 @@ async def reconcile_run_states(
         )
         for open_run in open_runs:
             run_id_to_poll = open_run["run_id"]
+            if not run_id_to_poll or str(run_id_to_poll).startswith("pending:"):
+                continue
             try:
-                rinfo = await run_status_cache.get_run(gateway, run_id_to_poll)
+                rinfo = await run_status_cache.get_run(gateway, str(run_id_to_poll))
             except GatewayError:
                 continue
             if rinfo is None:

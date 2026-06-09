@@ -949,7 +949,11 @@ async def start(
             dedup_key=dedup_key,
             on_success=_on_launch_success if will_async else None,
             on_error=_on_launch_error if will_async else None,
-            job_meta={"campaign_id": campaign_id, "env": env_val},
+            job_meta={
+                "campaign_id": campaign_id,
+                "env": env_val,
+                "pending_run_id": pending_run_id,
+            },
         )
     except GatewayError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
@@ -961,7 +965,7 @@ async def start(
                 content={
                     **out,
                     "campaign_id": campaign_id,
-                    "pending_run_id": pending_run_id,
+                    "pending_run_id": out.get("pending_run_id") or pending_run_id,
                 },
             )
         if not pending_run_id:

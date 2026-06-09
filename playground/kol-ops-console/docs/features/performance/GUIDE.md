@@ -124,7 +124,7 @@ Gmail 后台由 **单一 coordinator** `gmail_worker.py` 驱动（默认），�
 - 入站逻辑经 `gmail_inbound_dispatch` 委托 `kol_reply_dispatcher.run_once`；Console `/reply-watcher/*` 为薄 API。
 - 观测：`GET /gmail/worker/status`（Bridge）。
 - 回退并行双 task：`KOL_OPS_GMAIL_WORKER_PARALLEL=1`（旧行为，两路独立 sleep）。
-- 其它 env：`KOL_OPS_GMAIL_WORKER_WAKE_SEC`（默认 5）、`KOL_OPS_GMAIL_INBOUND_AUTO_START=1`。
+- 其它 env：`KOL_OPS_GMAIL_WORKER_WAKE_SEC`（默认 5）、`KOL_OPS_GMAIL_INBOUND_AUTO_START`（默认 **0**，需 Console 启停或显式设 1）。
 
 ### 4. 调优开关速查
 
