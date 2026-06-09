@@ -131,6 +131,28 @@ class BridgeClient:
             },
         )
 
+    async def batch_internal_touch_count(
+        self,
+        *,
+        env: str = "LIVE",
+        identity_ids: list[int] | None = None,
+        handles: list[str] | None = None,
+    ) -> dict[str, Any]:
+        ids = identity_ids or []
+        hs = handles or []
+        if not ids and not hs:
+            return {"env": env, "items": {}}
+        params: dict[str, str] = {"env": env}
+        if ids:
+            params["identity_ids"] = ",".join(str(i) for i in ids)
+        if hs:
+            params["handles"] = ",".join(hs)
+        return await self._req(
+            "GET",
+            "/identities/internal-touch-count",
+            params=params,
+        )
+
     async def get_relationship(self, identity_id: int) -> dict[str, Any]:
         return await self._req("GET", f"/identities/{identity_id}/relationship")
 

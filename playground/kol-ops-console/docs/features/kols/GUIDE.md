@@ -26,7 +26,8 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/kols`, `/kols/{id}` | 列表/详情（含跨活动 `prior_outreach_touch`：曾触达 / 近期已触达 + 多久前） |
-| GET | Bridge `/identities/outreach-touch` | 短名单批量触达标签（Console 内部） |
+| GET | Bridge `/identities/outreach-touch` | 短名单批量邮件触达标签（Console 内部） |
+| GET | Bridge `/identities/internal-touch-count` | 短名单批量「内部曾触达次数」（曾触达列表.xlsx，同指标页红人列表） |
 | GET/PATCH | `/facts`, `/facts/multi` | CAL 事实 |
 | GET | `/identities/{id}/goals` | 目标/泳道进度 |
 | GET | `/kols/{id}/communication-history` | 绑定邮箱线程 |

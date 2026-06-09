@@ -202,6 +202,25 @@ def test_registry_touch_count_from_workbook_index(bridge_pkg, cal_db, monkeypatc
     assert out["items"][0]["internal_touch_count"] == 3
 
 
+def test_batch_internal_touch_count_matches_registry_logic(bridge_pkg, cal_db, monkeypatch):
+    cal = cal_db
+    pta = bridge_pkg.prior_touch_allowlist
+    monkeypatch.setattr(
+        pta,
+        "get_internal_touch_count",
+        lambda *, handle=None, email=None, **_:
+            2 if str(handle or "").lstrip("@") == "batch_touch_kol" else 0,
+    )
+    iid = cal.upsert_identity(
+        primary_handle="@batch_touch_kol",
+        primary_email="batch@example.com",
+        env="LIVE",
+    )
+    out = cal.batch_internal_touch_count([iid], env="LIVE", handles=["orphan_handle"])
+    assert out[str(iid)] == 2
+    assert out["h:orphan_handle"] == 0
+
+
 def test_registry_pipeline_flags_initial_draft_and_reply(bridge_pkg, cal_db):
     cal = cal_db
     cid = "PIPE-CAMP-1"

@@ -204,6 +204,10 @@ Cross-campaign **confirmed outreach sends** (`outreach.sent` events and
    enriches shortlist rows and KOL detail with `prior_outreach_touch`
    (`last_touch_at`, `within_cooldown`, optional `last_touch_campaign_id`).
 
+4. **Internal touch count (workbook)** — `GET /identities/internal-touch-count?identity_ids=1,2&handles=foo`
+   returns `items` keyed by identity id or `h:{handle}` with row-match counts
+   from ``曾触达列表.xlsx`` (same logic as gate-metrics「内部曾触达次数」).
+
 ### Shortlist campaign transfer (Phase 1a)
 
 Move a KOL between campaign discovery pools **before** shortlist approval (no

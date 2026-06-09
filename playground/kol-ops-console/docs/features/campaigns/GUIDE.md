@@ -29,7 +29,7 @@
 | GET | `/campaigns/{id}/lanes` | 看板泳道数据（Bridge 批量读 CAL，**仅 shortlist 已批准**的 KOL；Console 约 8s 缓存） |
 | GET/PATCH | `/campaigns/{id}/config` | 活动配置 |
 | GET/POST | `/campaigns/{id}/candidates/*` | 发现池（GET 使用 handle JOIN，含 `total_collabs`） |
-| GET | `/campaigns/{id}/shortlist` | 短名单（`social_links`、`link_previews` 按 URL、`preview_facts`、Nox、`prior_outreach_touch`）；默认 **快速路径**（单次 `batch_facts_subset` + 缓存 OG）；`?prefetch_og=1` 为慢路径（逐人 `read_facts` +  live OG，供 Refresh） |
+| GET | `/campaigns/{id}/shortlist` | 短名单（`social_links`、`link_previews` 按 URL、`preview_facts`、Nox、`prior_outreach_touch`、**`internal_touch_count`**（曾触达列表.xlsx，同指标页「内部曾触达次数」））；默认 **快速路径**（单次 `batch_facts_subset` + 缓存 OG）；`?prefetch_og=1` 为慢路径（逐人 `read_facts` +  live OG，供 Refresh） |
 | GET | `/campaigns/{id}/agent-stream` | SSE  transcript |
 | POST | `/reply-watcher/*` | 入站回信监听（Bridge 内置 worker；`reconcile-sent` 为 SENT 对账）。产品页卡片展示 `running` / `enabled` / `inbound_disabled` 与 `last_tick_stats`（含 retry、deferred、errors） |
 

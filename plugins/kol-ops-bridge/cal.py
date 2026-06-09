@@ -1333,6 +1333,66 @@ def batch_global_outreach_touch(
     return _safe("batch_global_outreach_touch", _do) or {}
 
 
+def batch_internal_touch_count(
+    identity_ids: Iterable[int],
+    *,
+    env: str = "LIVE",
+    handles: Iterable[str] | None = None,
+) -> dict[str, int]:
+    """Workbook row matches per identity/handle (metrics registry logic).
+
+    Uses ``prior_touch_allowlist.get_internal_touch_count`` — same source as
+    the gate-metrics「内部曾触达次数」column.
+    """
+    try:
+        from . import prior_touch_allowlist as _pta
+    except ImportError:
+        import prior_touch_allowlist as _pta  # type: ignore[no-redef]
+
+    def _do() -> dict[str, int]:
+        out: dict[str, int] = {}
+        ids = list(dict.fromkeys(int(i) for i in identity_ids))
+        env_norm = env.upper()
+        if ids:
+            id_ph = ",".join("?" * len(ids))
+            with _connect() as conn:
+                rows = conn.execute(
+                    f"""SELECT i.id, i.primary_handle, i.primary_email
+                          FROM kol_identity i
+                         WHERE i.env=? AND i.id IN ({id_ph})""",
+                    (env_norm, *ids),
+                ).fetchall()
+                facts_by_id = _batch_registry_facts(
+                    conn,
+                    ids,
+                    env=env_norm,
+                    fact_keys=("identity.primary_email_from_legacy",),
+                )
+            for row in rows:
+                iid = int(row["id"])
+                facts = facts_by_id.get(iid, {})
+                email = _resolve_registry_email(row["primary_email"], facts)
+                out[str(iid)] = _pta.get_internal_touch_count(
+                    handle=row["primary_handle"],
+                    email=email,
+                )
+        seen_handles: set[str] = set()
+        for raw in handles or ():
+            if not isinstance(raw, str):
+                continue
+            handle = raw.strip().lstrip("@")
+            if not handle:
+                continue
+            key = handle.lower()
+            if key in seen_handles:
+                continue
+            seen_handles.add(key)
+            out[f"h:{handle}"] = _pta.get_internal_touch_count(handle=handle)
+        return out
+
+    return _safe("batch_internal_touch_count", _do) or {}
+
+
 def list_outreach_cooldown_handles(
     *,
     env: str = "LIVE",

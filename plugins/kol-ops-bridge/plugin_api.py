@@ -644,6 +644,38 @@ def batch_outreach_touch(
     }
 
 
+@router.get("/identities/internal-touch-count")
+def batch_internal_touch_count(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    identity_ids: Optional[str] = Query(
+        default=None,
+        description="Comma-separated identity_id values",
+    ),
+    handles: Optional[str] = Query(
+        default=None,
+        description="Comma-separated handles (for rows without identity_id)",
+    ),
+) -> dict[str, Any]:
+    """曾触达列表.xlsx row matches (gate-metrics「内部曾触达次数」)."""
+    ids: list[int] = []
+    if identity_ids:
+        for part in identity_ids.split(","):
+            part = part.strip()
+            if part.isdigit():
+                ids.append(int(part))
+    handle_list: list[str] = []
+    if handles:
+        handle_list = [p.strip() for p in handles.split(",") if p.strip()]
+    if not ids and not handle_list:
+        return {"env": env, "items": {}}
+    items = cal.batch_internal_touch_count(
+        ids,
+        env=env,
+        handles=handle_list or None,
+    )
+    return {"env": env, "items": items}
+
+
 @router.get("/outreach-touch/cooldown-handles")
 def list_outreach_cooldown_handles(
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),

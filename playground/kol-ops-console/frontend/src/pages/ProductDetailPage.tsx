@@ -9,6 +9,7 @@ import {
   PriorOutreachTouchBadge,
   type PriorOutreachTouch,
 } from '../components/PriorOutreachTouchBadge';
+import { InternalTouchCountBadge } from '../components/InternalTouchCountBadge';
 import { KolSocialQuickLinks } from '../components/KolSocialQuickLinks';
 import type { LinkPreviewPayload } from '../lib/kolProfileSnapshot';
 import { resolvePriorOutreachTouch } from '../lib/priorOutreachTouch';
@@ -376,6 +377,7 @@ type ShortlistCandidate = {
   nox_cache_month?: string | null;
   nox_creator_id?: string | null;
   prior_outreach_touch?: PriorOutreachTouch | null;
+  internal_touch_count?: number | null;
 };
 
 type ShortlistPayload = {
@@ -706,6 +708,7 @@ function ShortlistReviewPanel({
                   <PriorOutreachTouchBadge
                     touch={resolvePriorOutreachTouch(c.prior_outreach_touch)}
                   />
+                  <InternalTouchCountBadge count={c.internal_touch_count} />
                   {c.nox_diligence_verdict && (
                     <span
                       className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-800"
@@ -789,6 +792,7 @@ function ShortlistReviewPanel({
                     <PriorOutreachTouchBadge
                       touch={resolvePriorOutreachTouch(c.prior_outreach_touch)}
                     />
+                    <InternalTouchCountBadge count={c.internal_touch_count} />
                     {c.selected_at && (
                       <span className="text-[10px] text-slate-400">
                         selected <TimeAgo iso={c.selected_at} prefix="@" className="ml-1" />

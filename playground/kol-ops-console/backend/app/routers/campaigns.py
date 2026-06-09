@@ -2598,6 +2598,35 @@ async def _enrich_shortlist_rows(
         if isinstance(c.get("identity_id"), int)
     ]
     if not profile_ids:
+        handle_only = [
+            str(c["handle"]).lstrip("@")
+            for c in candidates
+            if isinstance(c.get("handle"), str) and str(c["handle"]).strip()
+        ]
+        if handle_only:
+            try:
+                internal_touch_result = await bridge.batch_internal_touch_count(
+                    env=env,
+                    handles=handle_only,
+                )
+            except Exception:
+                internal_touch_result = {}
+            internal_touch_items: dict[str, Any] = {}
+            if isinstance(internal_touch_result, dict):
+                raw_internal = internal_touch_result.get("items")
+                if isinstance(raw_internal, dict):
+                    internal_touch_items = raw_internal
+            for c in candidates:
+                if not isinstance(c.get("handle"), str):
+                    continue
+                handle_key = f"h:{str(c['handle']).lstrip('@')}"
+                raw_count = internal_touch_items.get(handle_key)
+                if isinstance(raw_count, int):
+                    c["internal_touch_count"] = raw_count
+                elif isinstance(raw_count, str) and raw_count.isdigit():
+                    c["internal_touch_count"] = int(raw_count)
+                else:
+                    c["internal_touch_count"] = 0
         await enrich_shortlist_profile_og(
             bridge,
             candidates,
@@ -2607,7 +2636,7 @@ async def _enrich_shortlist_rows(
         )
         return
 
-    facts_result, touch_result = await asyncio.gather(
+    facts_result, touch_result, internal_touch_result = await asyncio.gather(
         bridge.batch_facts_subset(
             campaign_id=campaign_id,
             identity_ids=profile_ids,
@@ -2615,6 +2644,17 @@ async def _enrich_shortlist_rows(
             fact_keys=_SHORTLIST_BATCH_FACT_KEYS,
         ),
         bridge.batch_outreach_touch(profile_ids, env=env),
+        bridge.batch_internal_touch_count(
+            env=env,
+            identity_ids=profile_ids,
+            handles=[
+                str(c["handle"]).lstrip("@")
+                for c in candidates
+                if not isinstance(c.get("identity_id"), int)
+                and isinstance(c.get("handle"), str)
+                and str(c["handle"]).strip()
+            ],
+        ),
         return_exceptions=True,
     )
     facts_by_id: dict[int, dict[str, Any]] = (
@@ -2625,9 +2665,31 @@ async def _enrich_shortlist_rows(
         raw_touch = touch_result.get("items")
         if isinstance(raw_touch, dict):
             touch_items = raw_touch
+    internal_touch_items: dict[str, Any] = {}
+    if isinstance(internal_touch_result, dict):
+        raw_internal = internal_touch_result.get("items")
+        if isinstance(raw_internal, dict):
+            internal_touch_items = raw_internal
 
     for c in candidates:
         iid = c.get("identity_id")
+        if isinstance(iid, int):
+            raw_count = internal_touch_items.get(str(iid))
+            if isinstance(raw_count, int):
+                c["internal_touch_count"] = raw_count
+            elif isinstance(raw_count, str) and raw_count.isdigit():
+                c["internal_touch_count"] = int(raw_count)
+            else:
+                c["internal_touch_count"] = 0
+        elif isinstance(c.get("handle"), str):
+            handle_key = f"h:{str(c['handle']).lstrip('@')}"
+            raw_count = internal_touch_items.get(handle_key)
+            if isinstance(raw_count, int):
+                c["internal_touch_count"] = raw_count
+            elif isinstance(raw_count, str) and raw_count.isdigit():
+                c["internal_touch_count"] = int(raw_count)
+            else:
+                c["internal_touch_count"] = 0
         if not isinstance(iid, int):
             continue
         facts = facts_by_id.get(iid) or {}
