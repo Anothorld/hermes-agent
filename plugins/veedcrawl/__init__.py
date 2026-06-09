@@ -22,6 +22,7 @@ from plugins.veedcrawl.tools import (
     VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA,
     VEEDCRAWL_SEARCH_SCHEMA,
     VEEDCRAWL_TRANSCRIPT_SCHEMA,
+    as_function_schema,
     _check_veedcrawl_available,
     _handle_account,
     _handle_extract,
@@ -62,11 +63,11 @@ def _load_hooks():
 
 def register(ctx) -> None:
     """Register all Veedcrawl tools. Called once by the plugin loader."""
-    for name, schema, handler, emoji in _TOOLS:
+    for name, parameters, handler, emoji in _TOOLS:
         ctx.register_tool(
             name=name,
             toolset="veedcrawl",
-            schema=schema,
+            schema=as_function_schema(name, parameters),
             handler=handler,
             check_fn=_check_veedcrawl_available,
             emoji=emoji,

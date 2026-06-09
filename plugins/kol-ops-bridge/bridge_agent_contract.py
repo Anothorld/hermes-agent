@@ -278,6 +278,10 @@ def resume_cli_checklist(
         f"{CLI_INVOCATION} write-event --env {env} --json @/tmp/resume_event.json",
         "(Write /tmp/resume_event.json with identity_id, campaign_id, "
         'event_type escalation_resume_processed, actor skill:kol-escalation-resumer.)',
+        "When require_draft: persist via persist-reply-draft with "
+        "linked_escalation_id; address resume_context.pending_inbounds "
+        "(use latest_pending_inbound_message_id as source_message_id "
+        "when set); use operator_answer facts — no stall prose.",
         "Return kol-escalation-resumer JSON envelope (body null unless brief requires draft).",
     ])
 

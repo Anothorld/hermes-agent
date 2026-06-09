@@ -115,7 +115,7 @@ class CALClient:
         self,
         base: Optional[str] = None,
         bridge_key: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: float = 120.0,
     ) -> None:
         self.base = (base or DEFAULT_BASE).rstrip("/")
         self.bridge_key = load_bridge_key(bridge_key)

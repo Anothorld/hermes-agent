@@ -969,7 +969,20 @@ def post_event(
     )
     if event_id is None:
         raise HTTPException(status_code=500, detail="write_event failed")
-    return {"event_id": event_id}
+    appended = 0
+    if (
+        body.event_type == "kol_inbound_reply"
+        and body.campaign_id
+        and isinstance(body.payload, dict)
+    ):
+        appended = cal.append_pending_inbound_on_inbound_event(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+            payload=body.payload,
+            event_id=event_id,
+        )
+    return {"event_id": event_id, "escalation_inbounds_appended": appended}
 
 
 @router.post("/identities/{identity_id}/archive")
@@ -2816,6 +2829,39 @@ def get_escalation(escalation_id: int) -> dict[str, Any]:
     return row
 
 
+def _latest_inbound_message_from_events(
+    *,
+    identity_id: int,
+    campaign_id: str | None,
+    env: str,
+) -> tuple[str | None, str | None]:
+    """Return (message_id, thread_id) from the newest kol_inbound_reply event."""
+    try:
+        events = cal.list_events(
+            env=env,
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            limit=200,
+        )
+    except Exception:  # noqa: BLE001 — enrichment must not block open_escalation
+        return None, None
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("event_type") != "kol_inbound_reply":
+            continue
+        payload = ev.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        msg = payload.get("message_id")
+        thread = payload.get("thread_id")
+        message_id = msg.strip() if isinstance(msg, str) and msg.strip() else None
+        thread_id = thread.strip() if isinstance(thread, str) and thread.strip() else None
+        if message_id:
+            return message_id, thread_id
+    return None, None
+
+
 @router.post("/escalations")
 def open_escalation(
     body: EscalationOpenBody,
@@ -2823,6 +2869,28 @@ def open_escalation(
 ) -> dict[str, Any]:
     _require_bridge_key(x_bridge_key)
     payload = body.model_dump(exclude_none=True)
+    # Enrich inbound-triggered escalations when the agent omitted anchors.
+    ctx = payload.get("resume_context") or {}
+    if isinstance(ctx, dict):
+        identity_id = int(payload.get("identity_id") or 0)
+        campaign_id = payload.get("campaign_id")
+        env = str(payload.get("env") or "LIVE")
+        if (
+            identity_id
+            and campaign_id
+            and ctx.get("source") in ("classifier", "dispatcher")
+            and not ctx.get("source_message_id")
+        ):
+            msg_id, thread_id = _latest_inbound_message_from_events(
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                env=env,
+            )
+            if msg_id:
+                ctx["source_message_id"] = msg_id
+            if thread_id and not ctx.get("thread_id"):
+                ctx["thread_id"] = thread_id
+            payload["resume_context"] = ctx
     # Enrich resume_context with the authoritative Gmail thread_id when
     # only a source_message_id is supplied. This prevents downstream
     # drafting skills from mis-using the message_id as a thread_id (past
@@ -3025,13 +3093,45 @@ def persist_reply_draft(
         if prior_src and prior_src != body.source_message_id:
             superseded_prior_source = prior_src
 
-    child_envelope = dict(body.child_envelope or {})
-    latest_email = dict(body.latest_email or {})
-    if reply_draft.is_proactive_followup_draft({
+    is_proactive = reply_draft.is_proactive_followup_draft({
         "primary_goal": body.primary_goal,
         "child_skill": body.child_skill,
-        "draft": child_envelope,
-    }):
+        "draft": body.child_envelope or {},
+    })
+    if body.linked_escalation_id is None and not is_proactive:
+        if cal.has_awaiting_escalation(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "open_escalation_awaiting_answer: cannot persist a reply "
+                    "draft without linked_escalation_id while an escalation "
+                    "is awaiting operator answer. Finish the escalation "
+                    "resume path or pass linked_escalation_id for preview/"
+                    "resume drafts."
+                ),
+            )
+        if (
+            superseded_prior_source
+            and isinstance(prior_fact, dict)
+            and prior_fact.get("decision") == "pending"
+            and prior_fact.get("linked_escalation_id") is not None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "linked_escalation_draft_pending: cannot chase-supersede "
+                    "a pending draft linked to an escalation. Wait for the "
+                    "operator to approve/reject the escalation-resume draft."
+                ),
+            )
+
+    child_envelope = dict(body.child_envelope or {})
+    latest_email = dict(body.latest_email or {})
+    if is_proactive:
         try:
             facts = cal.latest_facts_for(
                 identity_id=body.identity_id,

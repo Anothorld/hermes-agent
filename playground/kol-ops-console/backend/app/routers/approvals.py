@@ -196,15 +196,45 @@ def _compose_refine_brief(
     ])
 
 
+_DRAFT_ORIGIN_LABELS: dict[str, str] = {
+    "inbound_auto": "KOL回信自动",
+    "chase_supersede": "追信占位(已废弃)",
+    "proactive_followup": "操作员追信",
+    "escalation_resume": "升级恢复稿",
+}
+
+
+def _derive_draft_origin(
+    fact_key: str,
+    value: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Classify reply-draft provenance for operator badges."""
+    if fact_key != "approval.reply_draft" or not isinstance(value, dict):
+        return None, None
+    if value.get("linked_escalation_id") or value.get("escalation_id"):
+        return "escalation_resume", _DRAFT_ORIGIN_LABELS["escalation_resume"]
+    child = value.get("child_skill")
+    if value.get("kind") == "proactive_followup" or child == "kol-proactive-followup":
+        return "proactive_followup", _DRAFT_ORIGIN_LABELS["proactive_followup"]
+    if value.get("chase_supersede"):
+        return "chase_supersede", _DRAFT_ORIGIN_LABELS["chase_supersede"]
+    if child or value.get("primary_goal"):
+        return "inbound_auto", _DRAFT_ORIGIN_LABELS["inbound_auto"]
+    return "inbound_auto", _DRAFT_ORIGIN_LABELS["inbound_auto"]
+
+
 def _to_row(raw: dict[str, Any], handle_map: dict[int, str | None]) -> dict[str, Any]:
     """Normalize one bridge approval row into the frontend ``ApprovalRow``."""
     fact_key = raw.get("fact_key") or raw.get("fact_path") or ""
     namespace = fact_key.split(".", 1)[0] if fact_key else ""
     value = raw.get("value")
+    draft_origin: str | None = None
+    draft_origin_label: str | None = None
     if isinstance(value, dict):
         context: dict[str, Any] | None = value
         opened_by = value.get("opened_by") or value.get("source")
         linked_escalation_id = value.get("linked_escalation_id") or value.get("escalation_id")
+        draft_origin, draft_origin_label = _derive_draft_origin(fact_key, value)
     elif value is None:
         context = None
         opened_by = None
@@ -231,6 +261,8 @@ def _to_row(raw: dict[str, Any], handle_map: dict[int, str | None]) -> dict[str,
         "env": raw.get("env"),
         "linked_escalation_id": linked_escalation_id,
         "handle": handle if isinstance(handle, str) else None,
+        "draft_origin": draft_origin,
+        "draft_origin_label": draft_origin_label,
     }
 
 

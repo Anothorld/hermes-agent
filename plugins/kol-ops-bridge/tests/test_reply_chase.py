@@ -96,6 +96,22 @@ def test_regenerate_on_approved_unsent_chase(bridge_pkg):
     assert out["prior_approved_unsent"] is True
 
 
+def test_apply_open_escalation_defer(bridge_pkg):
+    rc = bridge_pkg.reply_chase
+    evaluation = {
+        "recommended_action": "regenerate",
+        "prior_pending_draft": True,
+        "prior_source_message_id": "MSG1",
+    }
+    out = rc.apply_open_escalation_defer(evaluation)
+    assert out["recommended_action"] == "defer_escalation"
+    assert out["defer_reason"] == "open_escalation_awaiting_answer"
+    assert out["deferred_chase_action"] == "regenerate"
+
+    noop = rc.apply_open_escalation_defer({"recommended_action": "proceed_normal"})
+    assert noop["recommended_action"] == "proceed_normal"
+
+
 def test_escalate_thread_fork(bridge_pkg):
     rc = bridge_pkg.reply_chase
     fact = {

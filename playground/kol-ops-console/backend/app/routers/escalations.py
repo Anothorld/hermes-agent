@@ -80,12 +80,11 @@ _DRAFT_PREVIEW_INSTRUCTIONS = (
     "  brief `requested_by_user_id` when present) + `kol-creator-brief-loader`, "
     "  then `humanizer`. Follow that skill's body format contract (HTML for "
     "  outreach-style drafts; reply-thread drafts per skill).\n"
-    "- Write the resulting draft as a single ``approval.reply_draft`` "
-    "  fact via ``kol_bridge_tool.py write-facts --namespace approval "
-    "  --json @/tmp/draft.json``. The JSON body MUST set "
-    "  ``campaign_id`` to the campaign_id from the brief above and "
-    "  include ``linked_escalation_id`` in the fact value so the "
-    "  console can correlate this preview with the escalation.\n"
+    "- Persist the draft via ``kol_bridge_tool.py persist-reply-draft``. "
+    "The JSON body MUST set ``campaign_id``, ``source_message_id`` "
+    "from resume_context, and ``linked_escalation_id`` in the fact "
+    "value so the console can correlate this preview with the "
+    "escalation.\n"
     "- Preserve dollar amounts exactly. Never place JSON containing `$` "
     "  amounts in an unquoted heredoc or inline double-quoted shell "
     "  string; bash expands `$3000` to `000` and `$800` to `00`. Use "
@@ -194,6 +193,12 @@ def _normalize_escalation_row(raw: dict[str, Any]) -> dict[str, Any]:
     ctx = out.get("resume_context") or {}
     if isinstance(ctx, dict):
         out.setdefault("rule_id", ctx.get("matched_rule_id") or ctx.get("rule_id"))
+        pending = ctx.get("pending_inbounds")
+        if isinstance(pending, list):
+            out["pending_inbound_count"] = len(pending)
+            latest = ctx.get("latest_pending_inbound_message_id")
+            if isinstance(latest, str) and latest.strip():
+                out["latest_pending_inbound_message_id"] = latest.strip()
     if not out.get("suggested_question"):
         out["suggested_question"] = out.get("question_to_operator")
     if not out.get("suggested_question") and isinstance(ctx, dict):
@@ -272,33 +277,33 @@ def _compose_resume_brief(
     ]
     if require_draft:
         next_step_lines.append(
-            "Because this escalation was opened by the reply dispatcher "
-            "for an inbound KOL message and no preview draft exists yet, "
-            "you MUST also produce a reply draft for the operator to "
-            "review. BEFORE invoking any drafting skill, re-check that "
-            "no pending approval.reply_draft fact already linked to "
-            "this escalation exists: run `kol_bridge_tool.py "
-            "list-approvals --status pending --env <env>` and look for "
-            "a row where `value.linked_escalation_id` equals the "
-            "escalation_id above. If one is already present (a parallel "
-            "preview-draft run beat us to it), DO NOT draft again — "
-            "skip the drafting step entirely and just summarize that "
-            "the existing draft will be reviewed on the Approvals "
-            "page. Otherwise, invoke the appropriate drafting skill "
-            "for the active goal (kol-deliverables-clarifier for "
-            "deliverables_scope, kol-compensation-negotiator for "
-            "compensation_negotiation, kol-contract-coordinator for "
-            "contract_signing, etc.). Before drafting: "
+            "This escalation was opened for an inbound KOL message and "
+            "no linked preview draft exists yet — you MUST produce a "
+            "formal reply draft reflecting the operator_answer and "
+            "operator_facts above AND every entry in "
+            "resume_context.pending_inbounds (trigger + follow-ups); "
+            "use latest_pending_inbound_message_id as the Gmail reply "
+            "anchor when present. Do not ignore follow-up questions "
+            "that arrived while the escalation was open (not a stall "
+            "note like \"we're reviewing\" or \"will get back shortly\"). "
+            "BEFORE "
+            "drafting, re-check `kol_bridge_tool.py list-approvals "
+            "--status pending --env <env>` for a row where "
+            "`value.linked_escalation_id` equals the escalation_id "
+            "above; if present, skip drafting. Supersede any stale "
+            "pending draft that only has chase_supersede and no "
+            "linked_escalation_id. Invoke the drafting skill for the "
+            "active goal (kol-compensation-negotiator for "
+            "compensation_negotiation, etc.). Before drafting: "
             "`kol-email-style-loader` (pass `--owner-user-id` from brief "
-            "`requested_by_user_id` when present) + `kol-creator-brief-loader`, "
-            "then `humanizer`. Write exactly one "
-            "approval.reply_draft fact via `kol_bridge_tool.py "
-            "write-facts --namespace approval --json @/tmp/draft.json`. "
-            "The JSON body MUST set campaign_id to the campaign_id "
-            "above and the fact value MUST include linked_escalation_id "
-            "pointing at the escalation_id above. Do not call "
-            "resolve-escalation; the escalation has already been "
-            "resolved by the console."
+            "`requested_by_user_id` when present) + "
+            "`kol-creator-brief-loader`, then `humanizer`. Persist via "
+            "`kol_bridge_tool.py persist-reply-draft` with "
+            "source_message_id = resume_context.latest_pending_inbound_message_id "
+            "when set, else resume_context.source_message_id, and fact value "
+            "including linked_escalation_id=<escalation_id>. Do not "
+            "call resolve-escalation; the console already resolved "
+            "this row."
         )
     return "\n".join([
         "# escalation_resume",
@@ -334,18 +339,103 @@ def _compose_resume_brief(
     ])
 
 
-def _escalation_needs_reply_draft(escalation: dict[str, Any]) -> bool:
-    """True iff this escalation was opened because an inbound KOL reply
-    is waiting for us — i.e. the reply dispatcher created it. For those
-    cases, the campaign cannot make progress without us sending a reply.
-
-    Internal escalations (e.g. compensation_cap_breach raised by a skill
-    while drafting outbound) don't need a fresh reply on resume.
-    """
+def _escalation_inbound_message_id(
+    escalation: dict[str, Any],
+    *,
+    inferred_inbound_message_id: str | None = None,
+) -> str | None:
+    """Best inbound anchor for reply drafting on resume."""
     ctx = escalation.get("resume_context") or {}
-    if not isinstance(ctx, dict):
+    if isinstance(ctx, dict):
+        raw = ctx.get("source_message_id")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    if isinstance(inferred_inbound_message_id, str) and inferred_inbound_message_id.strip():
+        return inferred_inbound_message_id.strip()
+    return None
+
+
+def _is_inbound_escalation_source(ctx: dict[str, Any]) -> bool:
+    """True when resume_context tags an inbound-reply escalation."""
+    source = ctx.get("source")
+    if source in ("classifier", "dispatcher"):
+        return True
+    # Legacy rows: explicit inbound anchor without a source tag.
+    if source is None and ctx.get("source_message_id"):
+        return True
+    return False
+
+
+def _escalation_needs_reply_draft(
+    escalation: dict[str, Any],
+    *,
+    inferred_inbound_message_id: str | None = None,
+) -> bool:
+    """True when an inbound KOL reply is waiting for a post-resume draft.
+
+    Covers classifier- and dispatcher-tagged escalations plus legacy rows
+    that carry ``source_message_id``. Internal-only escalations (other
+    ``source`` values, or ``source`` missing without an explicit anchor)
+    are excluded even when the timeline has unrelated inbound history.
+    """
+    if not escalation.get("campaign_id") or not escalation.get("identity_id"):
         return False
-    return ctx.get("source") == "dispatcher" and bool(ctx.get("source_message_id"))
+    ctx = escalation.get("resume_context") or {}
+    if not isinstance(ctx, dict) or not _is_inbound_escalation_source(ctx):
+        return False
+    msg_id = _escalation_inbound_message_id(
+        escalation,
+        inferred_inbound_message_id=inferred_inbound_message_id,
+    )
+    return bool(msg_id)
+
+
+def _resume_draft_followup(
+    *,
+    needs_draft: bool,
+    require_draft: bool,
+    already_has_draft: bool,
+    draft_in_flight: bool,
+) -> tuple[bool, str]:
+    """Map resume draft state to ``draft_expected`` + ``draft_followup``."""
+    if not needs_draft:
+        return False, "none"
+    if already_has_draft:
+        return False, "already_pending"
+    if draft_in_flight:
+        return False, "in_flight"
+    if require_draft:
+        return True, "expected"
+    return False, "none"
+
+
+async def _infer_inbound_message_id_for_escalation(
+    bridge: BridgeClient,
+    escalation: dict[str, Any],
+    env: str,
+) -> str | None:
+    """Timeline fallback when resume_context omitted source_message_id."""
+    identity_id = escalation.get("identity_id")
+    campaign_id = escalation.get("campaign_id")
+    if not isinstance(identity_id, int) or not isinstance(campaign_id, str):
+        return None
+    try:
+        events = await bridge.get_timeline(
+            identity_id,
+            env=env,
+            campaign_id=campaign_id,
+            limit=200,
+        )
+    except BridgeError:
+        return None
+    inbound = _pick_inbound_for_escalation(
+        events=events,
+        escalation_created_at=escalation.get("created_at"),
+    )
+    if not inbound:
+        return None
+    msg = inbound.get("message_id")
+    return msg if isinstance(msg, str) and msg.strip() else None
 
 
 async def _has_pending_reply_draft(
@@ -354,6 +444,10 @@ async def _has_pending_reply_draft(
     """Check whether a pending ``approval.reply_draft`` already exists
     that is linked to this escalation (typically written by a prior
     ``preview-draft`` run). Used so resolve doesn't write a duplicate.
+
+    Pending rows that only carry ``chase_supersede`` (no
+    ``linked_escalation_id``) intentionally do **not** block resume
+    drafting — those are stale chase placeholders to supersede.
     """
     try:
         rows = await bridge.list_approvals(status="pending", env=env)
@@ -445,6 +539,91 @@ def _shape_inbound(ev: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _inbound_index(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for ev in events:
+        if not isinstance(ev, dict) or ev.get("event_type") != "kol_inbound_reply":
+            continue
+        shaped = _shape_inbound(ev)
+        mid = shaped.get("message_id")
+        if isinstance(mid, str) and mid.strip():
+            out[mid.strip()] = shaped
+    return out
+
+
+def _shape_inbound_from_anchor(anchor: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": anchor.get("event_id"),
+        "ts": anchor.get("ts"),
+        "from_addr": anchor.get("from_addr"),
+        "subject": anchor.get("subject"),
+        "body": None,
+        "snippet": anchor.get("snippet"),
+        "date": None,
+        "message_id": anchor.get("message_id"),
+        "thread_id": anchor.get("thread_id"),
+    }
+
+
+def _role_label(role: str, followup_index: int) -> str:
+    if role == "trigger":
+        return "触发升级"
+    if followup_index <= 1:
+        return "追信（待处理）"
+    return f"追信 #{followup_index}（待处理）"
+
+
+def _collect_pending_inbounds(
+    escalation: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge ``resume_context.pending_inbounds`` with timeline bodies."""
+    ctx = escalation.get("resume_context") or {}
+    anchors = ctx.get("pending_inbounds") if isinstance(ctx, dict) else None
+    by_msg = _inbound_index(events)
+    if isinstance(anchors, list) and anchors:
+        rows: list[dict[str, Any]] = []
+        followup_n = 0
+        for anchor in anchors:
+            if not isinstance(anchor, dict):
+                continue
+            mid = anchor.get("message_id")
+            if not isinstance(mid, str) or not mid.strip():
+                continue
+            shaped = by_msg.get(mid.strip()) or _shape_inbound_from_anchor(anchor)
+            role = str(anchor.get("role") or "followup")
+            if role == "followup":
+                followup_n += 1
+            rows.append({
+                **shaped,
+                "role": role,
+                "label": _role_label(role, followup_n),
+            })
+        return rows
+    trigger = _pick_inbound_for_escalation(
+        events=events,
+        escalation_created_at=escalation.get("created_at"),
+    )
+    if not trigger:
+        return []
+    created = escalation.get("created_at")
+    extras: list[dict[str, Any]] = []
+    for ev in events:
+        if not isinstance(ev, dict) or ev.get("event_type") != "kol_inbound_reply":
+            continue
+        if created and (ev.get("ts") or "") <= created:
+            continue
+        shaped = _shape_inbound(ev)
+        if shaped.get("message_id") == trigger.get("message_id"):
+            continue
+        extras.append({**shaped, "role": "followup", "label": "追信（待处理）"})
+    extras.reverse()
+    return [
+        {**trigger, "role": "trigger", "label": "触发升级"},
+        *extras,
+    ]
+
+
 @router.get("/{escalation_id}/inbound-context")
 async def escalation_inbound_context(
     escalation_id: int,
@@ -477,9 +656,16 @@ async def escalation_inbound_context(
         )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    inbound = _pick_inbound_for_escalation(
+    pending_inbounds = _collect_pending_inbounds(escalation, events)
+    inbound = pending_inbounds[0] if pending_inbounds else _pick_inbound_for_escalation(
         events=events,
         escalation_created_at=escalation.get("created_at"),
+    )
+    ctx = escalation.get("resume_context") or {}
+    latest_mid = (
+        ctx.get("latest_pending_inbound_message_id")
+        if isinstance(ctx, dict)
+        else None
     )
     return {
         "escalation_id": escalation_id,
@@ -487,6 +673,9 @@ async def escalation_inbound_context(
         "campaign_id": campaign_id,
         "env": e,
         "inbound": inbound,
+        "pending_inbounds": pending_inbounds,
+        "pending_inbound_count": len(pending_inbounds),
+        "latest_pending_inbound_message_id": latest_mid,
     }
 
 
@@ -536,12 +725,24 @@ async def resolve_escalation(
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     run_id: str | None = None
+    draft_expected = False
+    draft_followup = "none"
     if body.decision == "resume" and escalation and escalation.get("campaign_id"):
         env = str(escalation.get("env") or body.env or _env(None)).upper()
         campaign_id = str(escalation["campaign_id"])
         require_draft = False
         draft_dedup_key: str | None = None
-        if _escalation_needs_reply_draft(escalation):
+        needs_draft = False
+        already_has_draft = False
+        draft_in_flight = False
+        inferred_inbound = await _infer_inbound_message_id_for_escalation(
+            bridge, escalation, env,
+        )
+        needs_draft = _escalation_needs_reply_draft(
+            escalation,
+            inferred_inbound_message_id=inferred_inbound,
+        )
+        if needs_draft:
             # The has-pending check + the agent re-running this check
             # inside the resume brief together close the race where a
             # preview-draft was triggered in parallel: the console
@@ -566,6 +767,13 @@ async def resolve_escalation(
                     # will surface on the Approvals page on its own.
                     require_draft = False
                     draft_dedup_key = None
+                    draft_in_flight = True
+            draft_expected, draft_followup = _resume_draft_followup(
+                needs_draft=needs_draft,
+                require_draft=require_draft,
+                already_has_draft=already_has_draft,
+                draft_in_flight=draft_in_flight,
+            )
         brief = _compose_resume_brief(
             escalation=escalation,
             operator_answer=body.operator_answer,
@@ -607,7 +815,12 @@ async def resolve_escalation(
             "reason_tags": body.reason_tags,
         },
     )
-    return {**out, "run_id": run_id}
+    return {
+        **out,
+        "run_id": run_id,
+        "draft_expected": draft_expected,
+        "draft_followup": draft_followup,
+    }
 
 
 @router.post("/{escalation_id}/preview-draft")

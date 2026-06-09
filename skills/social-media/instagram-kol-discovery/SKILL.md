@@ -235,6 +235,11 @@ is already ingested so CAL gets `identity.veedcrawl_*` index facts.
 
 When veedcrawl is unavailable, continue with **pure browser** — do not abort.
 
+**Invoke veedcrawl as native function tools — never via `terminal`.**
+The tool schemas expose required JSON fields (`q`, `username`, `url`, …).
+Do not pipe JSON through `echo`/`python`/`curl`; call `veedcrawl_*` directly
+with an `arguments` object.
+
 **Canonical tool calls (copy args exactly — never invoke with `{}`).**
 Empty-arg calls are blocked by the plugin hook and waste iterations.
 
@@ -689,10 +694,12 @@ action as visible to IG's risk system.
 - Do not use Veedcrawl search/profile as the only discovery path — browser surfaces are mandatory.
 - Do not call `mcp_veedcrawl_*` or bypass plugin tools for discovery.
 - Do not ignore `persisted: false` on veedcrawl tool results — fall back to browser.
+- Do not invoke `veedcrawl_*` via `terminal`, `execute_code`, or shell JSON
+  pipes — they are Hermes function tools; the schema lists required args.
 - Do not call any `veedcrawl_*` tool with an empty object `{}` or missing
   required fields — the hook blocks it. Always pass the canonical JSON from
   **Veedcrawl supplement → Canonical tool calls** (at minimum: `q` for search,
-  `username` or `url` for profile, `url` for metadata, `url`+`prompt` for extract).
+  `username` for IG profile, `url` for metadata, `url`+`prompt` for extract).
 - Do not call `veedcrawl_extract` without both `url` + `prompt` (on-demand showcase gap or explicit operator request).
 - Do not use `veedcrawl_profile` for Instagram when `veedcrawl_instagram_profile` is available — use `{"username": "<handle>"}`.
 - **Local Chrome — never** issue a `follow / like / comment / save / DM / share` action, even when a snapshot lists it as the easiest-looking element. The skill is read-only on the main account.

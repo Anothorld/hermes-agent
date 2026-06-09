@@ -45,6 +45,11 @@ gate prevents dispatch — `hermes tools` will list them as unavailable.
 
 ## Guardrails
 
+**OpenAI function schema shape** (`as_function_schema` in `tools.py`): each tool
+registers `{name, description, parameters}` — not a bare parameters object.
+Bare objects were sanitized to empty `properties: {}`, which made models think
+veedcrawl tools had no parameters (and try `terminal` JSON workarounds).
+
 **Pre-dispatch argument validation** (`hooks.py` + `_internal/arg_validate.py`):
 incomplete tool calls (empty `{}`, missing `username`/`q`/`url`, etc.) are
 blocked in `pre_tool_call` before handlers run. The model receives an example

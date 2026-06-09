@@ -18,6 +18,7 @@ import { useEnvStore, toast } from '../lib/store';
 import { errorSummary } from '../lib/errors';
 import { runStateLabel, isRunStateActive } from '../lib/runStateLabels';
 import { usePollingFallback } from '../hooks/usePollingFallback';
+import type { NoxStatsPayload } from '../components/NoxQuotaBanner';
 
 type ProductVariant = {
   id: string;
@@ -344,6 +345,7 @@ function ShortlistReviewPanel({
   env,
   onSubmit,
   approveBlockedReason,
+  configRefreshKey = 0,
 }: {
   campaignId: string;
   env: string;
@@ -352,6 +354,7 @@ function ShortlistReviewPanel({
   // banner + button tooltip. Used to lock approvals out while the
   // discovery quantity-gate is mid-cycle.
   approveBlockedReason?: string | null;
+  configRefreshKey?: number;
 }) {
   const [candidates, setCandidates] = useState<ShortlistCandidate[] | null>(null);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
@@ -362,7 +365,20 @@ function ShortlistReviewPanel({
   const [counts, setCounts] = useState<{ pending: number; already_approved: number; rejected_or_archived_hidden: number } | null>(null);
   const [showApproved, setShowApproved] = useState(false);
   const [removingHandle, setRemovingHandle] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const [noxStats, setNoxStats] = useState<NoxStatsPayload | null>(null);
+
+  const fetchNoxStats = async () => {
+    try {
+      const r = await api.get<{ stats?: NoxStatsPayload }>(
+        `/campaigns/${encodeURIComponent(campaignId)}/nox-stats?env=${env}`,
+      );
+      setNoxStats(r.stats ?? null);
+    } catch {
+      setNoxStats(null);
+    }
+  };
 
   const fetchShortlist = async (showSpinner: boolean, prefetchOg = false) => {
     if (showSpinner) setRefreshing(true);
@@ -387,9 +403,9 @@ function ShortlistReviewPanel({
         }
         return next;
       });
-      setErr(null);
+      setLoadErr(null);
     } catch (ex) {
-      setErr(errorSummary(ex));
+      setLoadErr(errorSummary(ex));
     } finally {
       if (showSpinner) setRefreshing(false);
     }
@@ -397,17 +413,26 @@ function ShortlistReviewPanel({
 
   useEffect(() => {
     void fetchShortlist(true);
+    void fetchNoxStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaignId, env]);
 
+  useEffect(() => {
+    if (configRefreshKey > 0) void fetchNoxStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configRefreshKey]);
+
   usePollingFallback(() => {
     void fetchShortlist(false);
+    void fetchNoxStats();
   }, 20_000);
 
-  if (err)
+  const noxQuotaEnabled = env !== 'LIVE' || noxStats?.nox_quota_enabled === true;
+
+  if (loadErr)
     return (
       <div className="rounded border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800">
-        Failed to load shortlist: {err}
+        Failed to load shortlist: {loadErr}
       </div>
     );
   if (candidates === null)
@@ -426,7 +451,7 @@ function ShortlistReviewPanel({
 
   const removeFromShortlist = async (c: ShortlistCandidate) => {
     if (typeof c.identity_id !== 'number') {
-      setErr('该候选缺少 identity_id，无法从 shortlist 移除');
+      setActionErr('该候选缺少 identity_id，无法从 shortlist 移除');
       return;
     }
     const ok = await dialog.confirm({
@@ -438,7 +463,7 @@ function ShortlistReviewPanel({
     });
     if (!ok) return;
     setRemovingHandle(c.handle);
-    setErr(null);
+    setActionErr(null);
     try {
       await api.post(
         `/campaigns/${encodeURIComponent(campaignId)}/candidates/status`,
@@ -452,7 +477,7 @@ function ShortlistReviewPanel({
       toast.success('已从 shortlist 移除', `@${c.handle}`);
       await fetchShortlist(false);
     } catch (ex) {
-      setErr(errorSummary(ex));
+      setActionErr(errorSummary(ex));
     } finally {
       setRemovingHandle(null);
     }
@@ -460,11 +485,17 @@ function ShortlistReviewPanel({
 
   const runNoxDiligenceBatch = async () => {
     if (selectedIdentityIds.length === 0) {
-      setErr('所选候选缺少 identity_id，无法批量 Nox 尽调');
+      setActionErr('所选候选缺少 identity_id，无法批量 Nox 尽调');
+      return;
+    }
+    if (!noxQuotaEnabled) {
+      setActionErr(
+        '请展开下方「编辑 campaign_config」，勾选 nox_quota_enabled 并保存，然后再点 Nox 批量尽调。',
+      );
       return;
     }
     setNoxBatchBusy(true);
-    setErr(null);
+    setActionErr(null);
     try {
       const r = await api.post<{ run_id?: string }>('/kols/nox-diligence-batch', {
         env,
@@ -477,8 +508,9 @@ function ShortlistReviewPanel({
         'Nox 批量尽调完成',
         `成功 ${n} 人${errN ? ` · 失败 ${errN}` : ''}`,
       );
+      void fetchNoxStats();
     } catch (ex) {
-      setErr(errorSummary(ex));
+      setActionErr(errorSummary(ex));
     } finally {
       setNoxBatchBusy(false);
     }
@@ -721,6 +753,16 @@ function ShortlistReviewPanel({
           {approveBlockedReason}
         </div>
       )}
+      {env === 'LIVE' && !noxQuotaEnabled && (
+        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+          Nox 未启用：请展开下方「编辑 campaign_config」，勾选 <span className="font-mono">nox_quota_enabled</span> 并保存后再批量尽调。
+        </div>
+      )}
+      {actionErr && (
+        <div className="mt-2 rounded border border-rose-300 bg-rose-50 px-2 py-1 text-[11px] text-rose-800">
+          {actionErr}
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
         <span className="text-xs text-slate-500">{selectedHandles.length} selected</span>
         <button
@@ -729,8 +771,13 @@ function ShortlistReviewPanel({
             noxBatchBusy
             || selectedIdentityIds.length === 0
             || !!approveBlockedReason
+            || !noxQuotaEnabled
           }
-          title="Gate A：对所选待审批候选串行 diligence-pack（同月 cache 免扣费）"
+          title={
+            !noxQuotaEnabled
+              ? '请先在 campaign_config 中开启 nox_quota_enabled'
+              : 'Gate A：对所选待审批候选串行 diligence-pack（同月 cache 免扣费）'
+          }
           onClick={() => void runNoxDiligenceBatch()}
           className="rounded border border-indigo-400 bg-white px-3 py-1 text-xs font-medium text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
         >
@@ -745,11 +792,11 @@ function ShortlistReviewPanel({
           title={approveBlockedReason ?? undefined}
           onClick={async () => {
             setBusy(true);
-            setErr(null);
+            setActionErr(null);
             try {
               await onSubmit(selectedHandles);
             } catch (ex) {
-              setErr(errorSummary(ex));
+              setActionErr(errorSummary(ex));
             } finally {
               setBusy(false);
             }
@@ -834,6 +881,7 @@ function CampaignCard({
   onRediscover: (id: string, env: string, additionalCount: number) => Promise<void>;
 }) {
   const [showReview, setShowReview] = useState(false);
+  const [configRefreshKey, setConfigRefreshKey] = useState(0);
   const [retryingDrafts, setRetryingDrafts] = useState(false);
   const approvedHandles = c.kol_identity_ids
     .map((id) => kols[String(id)]?.primary_handle)
@@ -959,6 +1007,7 @@ function CampaignCard({
         <ShortlistReviewPanel
           campaignId={c.campaign_id}
           env={c.env}
+          configRefreshKey={configRefreshKey}
           approveBlockedReason={
             c.gate_active
               ? '当前正在执行 rediscover / 自动补量，请等待发现流程完成后再审批 KOL（避免触发 floor 误判）'
@@ -1024,7 +1073,11 @@ function CampaignCard({
           {counts.pending_review > 0 ? ' 请在 shortlist review 中确认本轮候选。' : ' 当前没有新的候选待审批。'}
         </div>
       </div>
-      <EditCampaignConfigPanel campaignId={c.campaign_id} env={c.env} />
+      <EditCampaignConfigPanel
+        campaignId={c.campaign_id}
+        env={c.env}
+        onSaved={() => setConfigRefreshKey((k) => k + 1)}
+      />
       <NoxCampaignOpsPanel campaignId={c.campaign_id} env={c.env} />
       {contractReadyIds.length > 0 && (
         <div className="space-y-1">

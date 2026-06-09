@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { api, EscalationRow } from '../api';
 import { parseConflictBody, startedAtMs, useInflightLock } from '../useInflightLock';
-import InboundEmailCard, { type InboundEmail } from '../components/InboundEmailCard';
+import InboundEmailStack, { type PendingInbound } from '../components/InboundEmailStack';
+import type { InboundEmail } from '../components/InboundEmailCard';
 import { FactInput } from '../components/inputs/FactInput';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
 import { TimeAgo } from '../components/inputs/TimeAgo';
@@ -14,6 +15,21 @@ import { errorSummary } from '../lib/errors';
 import { dialog } from '../components/dialogs/useDialog';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
+
+type DraftFollowup = 'none' | 'expected' | 'already_pending' | 'in_flight';
+
+function draftFollowupHint(followup: DraftFollowup | undefined): string | null {
+  switch (followup) {
+    case 'expected':
+      return '约 30–60 秒后请到待审批查看升级恢复稿。';
+    case 'already_pending':
+      return '待审批页已有链接此升级的草稿，请直接审核。';
+    case 'in_flight':
+      return '草稿正在生成中，约 30–60 秒后请到待审批查看。';
+    default:
+      return null;
+  }
+}
 
 type ApprovalLikeRow = {
   identity_id: number;
@@ -232,6 +248,11 @@ function EscalationList() {
                       ))}
                     </div>
                   )}
+                  {(r.pending_inbound_count ?? 0) > 1 && (
+                    <span className="mt-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-900">
+                      {r.pending_inbound_count} 封待处理回信
+                    </span>
+                  )}
                   {r.suggested_question && (
                     <div className="mt-1 line-clamp-2 text-xs text-slate-500" title={r.suggested_question}>
                       {r.suggested_question}
@@ -380,7 +401,7 @@ function EscalationDetail({ id }: { id: number }) {
   const [relatedApprovals, setRelatedApprovals] = useState<ApprovalLikeRow[]>([]);
   const [lastActionAt, setLastActionAt] = useState<string | null>(null);
 
-  const [inbound, setInbound] = useState<InboundEmail | null>(null);
+  const [pendingInbounds, setPendingInbounds] = useState<PendingInbound[]>([]);
   const [inboundLoaded, setInboundLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -400,14 +421,20 @@ function EscalationDetail({ id }: { id: number }) {
   useEffect(() => {
     let alive = true;
     setInboundLoaded(false);
-    setInbound(null);
+    setPendingInbounds([]);
     api
-      .get<{ inbound: InboundEmail | null }>(
-        `/escalations/${id}/inbound-context?env=${env}`,
-      )
+      .get<{
+        inbound: InboundEmail | null;
+        pending_inbounds?: PendingInbound[];
+      }>(`/escalations/${id}/inbound-context?env=${env}`)
       .then((r) => {
         if (!alive) return;
-        setInbound(r.inbound ?? null);
+        const list = r.pending_inbounds?.length
+          ? r.pending_inbounds
+          : r.inbound
+            ? [{ ...r.inbound, role: 'trigger', label: '触发升级' }]
+            : [];
+        setPendingInbounds(list);
       })
       .catch(() => {
         // Non-fatal — InboundEmailCard renders fallback.
@@ -534,11 +561,20 @@ function EscalationDetail({ id }: { id: number }) {
         env,
       };
       if (decision === 'terminate') body.final_state = 'aborted';
-      await api.patch(`/escalations/${id}`, body);
+      const resp = await api.patch<{
+        draft_expected?: boolean;
+        draft_followup?: DraftFollowup;
+      }>(`/escalations/${id}`, body);
       const msg = decision === 'resume' ? '已提交并恢复' : '已终止';
-      setDone(msg);
+      const followupHint =
+        decision === 'resume' ? draftFollowupHint(resp.draft_followup) : null;
+      setDone(followupHint ? `${msg}。${followupHint}` : msg);
       setLastActionAt(new Date().toISOString());
-      toast.success(msg);
+      if (followupHint) {
+        toast.success(msg, followupHint);
+      } else {
+        toast.success(msg);
+      }
       refresh();
     } catch (ex) {
       setErr(ex);
@@ -684,17 +720,39 @@ function EscalationDetail({ id }: { id: number }) {
       </div>
 
       {inboundLoaded && (
-        <InboundEmailCard
-          inbound={inbound}
-          title="触发此升级的 KOL 回信"
-          variant="rose"
-        />
+        <div className="space-y-1">
+          {pendingInbounds.length > 1 && row.state === 'awaiting_answer' && (
+            <p className="text-xs text-amber-800">
+              KOL 在升级处理期间又追信了 — 下方已合并展示；请在答复里一并回应所有问题。
+            </p>
+          )}
+          <InboundEmailStack
+            items={pendingInbounds}
+            defaultExpanded={pendingInbounds.length <= 2}
+          />
+        </div>
       )}
 
       {row.state !== 'awaiting_answer' ? (
-        <div className="rounded border border-slate-200 bg-white p-3 text-sm text-slate-600">
-          已 {row.state}。操作员答复：{' '}
-          <em>{row.operator_answer || '(空)'}</em>
+        <div className="space-y-2">
+          <div className="rounded border border-slate-200 bg-white p-3 text-sm text-slate-600">
+            已 {row.state}。操作员答复：{' '}
+            <em>{row.operator_answer || '(空)'}</em>
+          </div>
+          {row.state === 'resolved' && (
+            <div className="rounded border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+              <div className="font-medium">下一步</div>
+              <ul className="mt-1 list-disc pl-4 text-xs leading-relaxed">
+                <li>
+                  若此升级来自 KOL 入站回信，请到{' '}
+                  <Link to="/approvals" className="underline">待审批</Link>{' '}
+                  查找带「升级恢复稿」标签的草稿并批准发送。
+                </li>
+                <li>若 60 秒内没有出现新稿，点刷新待审批列表。</li>
+                <li>勿批准仍带「追信占位」标签的旧稿 — 那是升级期间的临时占位。</li>
+              </ul>
+            </div>
+          )}
         </div>
       ) : (
         <div data-editing className="space-y-2 rounded border border-slate-200 bg-white p-3">

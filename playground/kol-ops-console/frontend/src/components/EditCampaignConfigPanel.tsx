@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { errorSummary } from '../lib/errors';
 import { toast } from '../lib/store';
@@ -27,14 +27,59 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
   const [commissionMinPct, setCommissionMinPct] = useState('');
   const [commissionMaxPct, setCommissionMaxPct] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [noxQuota, setNoxQuota] = useState<boolean | null>(null);
+  const [noxQuota, setNoxQuota] = useState(false);
   const [noxBudget, setNoxBudget] = useState('');
   const [noxSupplement, setNoxSupplement] = useState<boolean | null>(null);
   const [noxSupplementMax, setNoxSupplementMax] = useState('');
   const [noxCacheTz, setNoxCacheTz] = useState('');
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+
+  const loadConfig = useCallback(async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const r = await api.get<{ config?: Record<string, unknown> }>(
+        `/campaigns/${encodeURIComponent(campaignId)}/config?env=${env}`,
+      );
+      const cfg = r.config ?? {};
+      const platforms = Array.isArray(cfg.deliverable_platforms)
+        ? (cfg.deliverable_platforms as string[])
+        : [];
+      setPlatforms(Object.fromEntries(PLATFORM_CHOICES.map((p) => [p, platforms.includes(p)])));
+      if (typeof cfg.deliverable_count_per_platform === 'number') {
+        setCount(String(cfg.deliverable_count_per_platform));
+      }
+      if (typeof cfg.audit_standards_md === 'string') setAudit(cfg.audit_standards_md);
+      if (typeof cfg.color_variant_policy === 'string') setVariantPolicy(cfg.color_variant_policy);
+      if (typeof cfg.paid_ceiling === 'number') setPaidCeiling(String(cfg.paid_ceiling));
+      if (typeof cfg.product_display_name === 'string') setDisplayName(cfg.product_display_name);
+      const comp = cfg.compensation_mode ?? cfg.barter_policy;
+      if (typeof comp === 'string') {
+        setCompensationMode(comp as '' | 'gifted' | 'paid' | 'commission' | 'hybrid');
+      }
+      const band = cfg.commission_band as { min?: number; max?: number } | undefined;
+      if (band && typeof band.min === 'number') setCommissionMinPct(String(Math.round(band.min * 100)));
+      if (band && typeof band.max === 'number') setCommissionMaxPct(String(Math.round(band.max * 100)));
+      setNoxQuota(cfg.nox_quota_enabled === true);
+      if (typeof cfg.nox_monthly_budget === 'number') setNoxBudget(String(cfg.nox_monthly_budget));
+      setNoxSupplement(cfg.nox_supplement_enabled === true);
+      if (typeof cfg.nox_supplement_max_calls === 'number') {
+        setNoxSupplementMax(String(cfg.nox_supplement_max_calls));
+      }
+      if (typeof cfg.nox_cache_timezone === 'string') setNoxCacheTz(cfg.nox_cache_timezone);
+    } catch (ex) {
+      setErr(errorSummary(ex));
+    } finally {
+      setLoading(false);
+    }
+  }, [campaignId, env]);
+
+  useEffect(() => {
+    if (open) void loadConfig();
+  }, [open, loadConfig]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -106,7 +151,7 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
       }
       payload.product_display_name = trimmedDisplay;
     }
-    if (noxQuota !== null) payload.nox_quota_enabled = noxQuota;
+    payload.nox_quota_enabled = noxQuota;
     if (noxBudget.trim()) {
       const b = Number(noxBudget);
       if (!Number.isFinite(b) || b < 0 || b > 2000) {
@@ -164,6 +209,9 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
       </button>
       {open && (
         <form onSubmit={submit} className="space-y-2 border-t border-slate-200 p-2 text-xs">
+          {loading && (
+            <div className="text-[11px] text-slate-400">正在加载当前 campaign_config…</div>
+          )}
           <label className="flex flex-col">
             <span className="text-slate-500">
               product_display_name
@@ -276,10 +324,13 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
               <label className="inline-flex items-center gap-1">
                 <input
                   type="checkbox"
-                  checked={noxQuota === true}
-                  onChange={(e) => setNoxQuota(e.target.checked ? true : null)}
+                  checked={noxQuota}
+                  onChange={(e) => setNoxQuota(e.target.checked)}
                 />
                 nox_quota_enabled
+                {!noxQuota && (
+                  <span className="text-[10px] text-amber-700">（LIVE Nox 尽调/查邮箱需开启）</span>
+                )}
               </label>
               <label className="inline-flex items-center gap-1">
                 <input

@@ -213,8 +213,19 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
 
 Read `pending_replies[i].chase_context` **after** Step 3 re-fetch.
 
+When `recommended_action == "defer_escalation"` (open escalation
+`awaiting_answer` on this identity+campaign — see Bridge `reply_chase_hint`):
+
+- **Do not** `persist-reply-draft` this turn (no chase placeholder while the
+  operator is answering the escalation). The Bridge also returns **409**
+  `open_escalation_awaiting_answer` if you try without `linked_escalation_id`.
+- Confirm the escalation is already open (Step 3.5 or an existing row); do
+  not open a duplicate.
+- Skip Steps 4–5 drafting; jump to Step 6 and mark the inbound handled.
+
 When `recommended_action == "regenerate"` **and** `allow_autoflow` is still
-true (Step 3.25 did not block this turn):
+true (Step 3.25 did not block this turn) **and** Step 3.5 did not open a new
+escalation this turn:
 
 1. **Do not** write `approval.pending_action_reply_needed` / `pending_action_reason`
    as the sole outcome — the Bridge rejects these on follow-up inbounds.
@@ -273,10 +284,14 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
             "question_to_operator": "<escalation_hint.suggested_question>",
             "required_facts_to_resume": <escalation_hint.required_facts_to_resume>,
             "resume_context": {"matched_rule_id": "<id>",
-                                 "source": "classifier"}}'
+                                 "source": "classifier",
+                                 "source_message_id": "<latest_email.message_id>",
+                                 "thread_id": "<latest_email.thread_id if present>"}}'
 ```
 
 Notes:
+- Step 3.5 runs **before** Step 3.1 drafting obligations. When an escalation
+  opens here, Step 3.1 must not `persist-reply-draft` on the same turn.
 - The Bridge automatically tags `force_human_takeover_hint=true` in
   `resume_context` when the new escalation's `attempts_count` reaches
   `max_escalation_depth` (parsed from `policies/escalation_rules`,

@@ -351,6 +351,8 @@ export type EscalationRow = {
   // `max_escalation_depth`, `attempts_count`, etc.
   resume_context?: Record<string, unknown> | null;
   attempts_count?: number | null;
+  pending_inbound_count?: number | null;
+  latest_pending_inbound_message_id?: string | null;
 };
 
 export type Policy = {

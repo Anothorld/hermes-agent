@@ -7,7 +7,7 @@ from typing import Any, Mapping, Optional
 from fastapi import HTTPException, status
 
 from .bridge_client import BridgeClient, BridgeError
-from .nox_gate import extract_campaign_config
+from .nox_gate import _nox_quota_is_enabled, extract_campaign_config
 from .nox_tool_runner import run_nox_tool
 
 
@@ -55,6 +55,7 @@ async def fetch_campaign_nox_stats(
         raise RuntimeError(str(detail))
     stats["quota_exhausted"] = quota_exhausted_from_stats(stats)
     stats["supplement_max_calls"] = supplement_max
+    stats["nox_quota_enabled"] = _nox_quota_is_enabled(cfg)
     return stats
 
 

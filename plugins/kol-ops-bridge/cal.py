@@ -2848,6 +2848,27 @@ def collect_campaign_thread_ids(
     return threads
 
 
+def has_awaiting_escalation(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    env: str = "LIVE",
+    goal: str | None = None,
+) -> bool:
+    """True when an operator-visible escalation is still awaiting_answer."""
+    rows = list_escalations(
+        state="awaiting_answer",
+        env=env,
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+    )
+    if not rows:
+        return False
+    if goal is None:
+        return True
+    return any(str(r.get("goal") or "") == goal for r in rows)
+
+
 def reply_chase_hint(
     *,
     identity_id: int,
@@ -2873,6 +2894,12 @@ def reply_chase_hint(
             env=env,
         ),
     )
+    if has_awaiting_escalation(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+    ):
+        evaluation = reply_chase.apply_open_escalation_defer(evaluation)
     return {
         **reply_chase.chase_context_from_evaluation(evaluation),
         "recommended_action": evaluation.get("recommended_action"),
@@ -3028,7 +3055,10 @@ def open_escalation(
             # consumers (skill kol-escalation-resumer / web console)
             # surface a "human takeover suggested" badge. We never
             # auto-abort here — operator must explicitly terminate.
+            from . import escalation_inbounds
+
             ctx: dict[str, Any] = dict(resume_context or {})
+            ctx = escalation_inbounds.seed_trigger_inbound(ctx)
             max_depth = _read_max_escalation_depth(conn)
             if attempts >= max_depth:
                 ctx["force_human_takeover_hint"] = True
@@ -3232,6 +3262,65 @@ def note_rejected_draft(
             return True
 
     return bool(_safe("note_rejected_draft", _do))
+
+
+def append_pending_inbound_on_inbound_event(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    env: str,
+    payload: Mapping[str, Any],
+    event_id: Optional[int] = None,
+    event_ts: Optional[str] = None,
+) -> int:
+    """Attach a new inbound anchor to open ``awaiting_answer`` escalations.
+
+    Called deterministically when ``kol_inbound_reply`` events are written
+    so follow-ups during an open escalation appear in ``pending_inbounds``.
+    """
+    from . import escalation_inbounds
+
+    def _do() -> int:
+        anchor = escalation_inbounds.inbound_anchor_from_payload(
+            payload,
+            event_id=event_id,
+            ts=event_ts,
+            role="followup",
+        )
+        if not anchor:
+            return 0
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT id, resume_context_json, question_to_operator
+                     FROM kol_escalations
+                    WHERE identity_id=? AND campaign_id=? AND env=?
+                      AND state='awaiting_answer'""",
+                (identity_id, campaign_id, env),
+            ).fetchall()
+            if not rows:
+                return 0
+            now = _now()
+            updated = 0
+            for row in rows:
+                ctx = _jl(row["resume_context_json"], {}) or {}
+                merged = escalation_inbounds.append_pending_inbound(ctx, anchor)
+                if merged == ctx:
+                    continue
+                new_question = escalation_inbounds.append_followup_to_suggested_question(
+                    row["question_to_operator"],
+                    anchor,
+                )
+                conn.execute(
+                    """UPDATE kol_escalations
+                          SET resume_context_json=?, question_to_operator=?,
+                              updated_at=?
+                        WHERE id=?""",
+                    (_j(merged), new_question, now, int(row["id"])),
+                )
+                updated += 1
+            return updated
+
+    return int(_safe("append_pending_inbound_on_inbound_event", _do) or 0)
 
 
 def get_escalation_campaign_id(escalation_id: int) -> Optional[str]:

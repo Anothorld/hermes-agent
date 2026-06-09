@@ -3715,6 +3715,22 @@ class PatchCampaignConfigBody(BaseModel):
         return self
 
 
+@router.get("/{campaign_id}/config")
+async def get_campaign_config(
+    campaign_id: str,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+    env: str = Query("LIVE", pattern="^(LIVE|TEST)$"),
+) -> dict[str, Any]:
+    """Return persisted ``campaign_config`` for operator forms (incl. Nox knobs)."""
+    try:
+        campaign = await bridge.get_campaign(campaign_id, env=env)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    cfg = extract_campaign_config(campaign)
+    return {"ok": True, "campaign_id": campaign_id, "env": env, "config": cfg}
+
+
 @router.patch("/{campaign_id}/config")
 async def patch_campaign_config(
     campaign_id: str,

@@ -13,6 +13,7 @@ export type NoxStatsPayload = {
   usage?: NoxStatsUsage;
   supplement_usage?: { committed?: number; max_calls?: number; remaining?: number };
   quota_exhausted?: boolean;
+  nox_quota_enabled?: boolean;
 };
 
 export function isNoxQuotaExhausted(stats: NoxStatsPayload | null | undefined): boolean {

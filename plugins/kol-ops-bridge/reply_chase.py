@@ -17,7 +17,10 @@ ChaseAction = Literal[
     "skip_same_source",
     "regenerate",
     "escalate_thread_fork",
+    "defer_escalation",
 ]
+
+_DEFERRABLE_ACTIONS = frozenset({"regenerate", "escalate_thread_fork"})
 
 _PENDING_DECISIONS = frozenset({None, "pending"})
 
@@ -138,9 +141,21 @@ def evaluate_chase(
     return base
 
 
+def apply_open_escalation_defer(evaluation: Mapping[str, Any]) -> dict[str, Any]:
+    """When an escalation is awaiting operator answer, suppress chase drafting."""
+    out = dict(evaluation)
+    action = out.get("recommended_action")
+    if action not in _DEFERRABLE_ACTIONS:
+        return out
+    out["recommended_action"] = "defer_escalation"
+    out["defer_reason"] = "open_escalation_awaiting_answer"
+    out["deferred_chase_action"] = action
+    return out
+
+
 def chase_context_from_evaluation(evaluation: Mapping[str, Any]) -> dict[str, Any]:
     """Shape stored on ``pending_replies[i].chase_context``."""
-    return {
+    ctx: dict[str, Any] = {
         "prior_pending_draft": bool(evaluation.get("prior_pending_draft")),
         "prior_approved_unsent": bool(evaluation.get("prior_approved_unsent")),
         "prior_source_message_id": evaluation.get("prior_source_message_id"),
@@ -150,10 +165,16 @@ def chase_context_from_evaluation(evaluation: Mapping[str, Any]) -> dict[str, An
         "inbound_message_id": evaluation.get("inbound_message_id"),
         "inbound_thread_id": evaluation.get("inbound_thread_id"),
     }
+    if evaluation.get("defer_reason"):
+        ctx["defer_reason"] = evaluation.get("defer_reason")
+    if evaluation.get("deferred_chase_action"):
+        ctx["deferred_chase_action"] = evaluation.get("deferred_chase_action")
+    return ctx
 
 
 __all__ = [
     "ChaseAction",
     "evaluate_chase",
+    "apply_open_escalation_defer",
     "chase_context_from_evaluation",
 ]

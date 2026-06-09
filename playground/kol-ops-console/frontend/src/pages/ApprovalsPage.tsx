@@ -97,7 +97,29 @@ export type ApprovalRow = {
   opened_at: string;
   linked_escalation_id?: number | null;
   handle?: string | null;
+  draft_origin?: string | null;
+  draft_origin_label?: string | null;
 };
+
+const DRAFT_ORIGIN_BADGE_CLASS: Record<string, string> = {
+  inbound_auto: 'bg-sky-100 text-sky-800',
+  chase_supersede: 'bg-amber-100 text-amber-900',
+  proactive_followup: 'bg-violet-100 text-violet-900',
+  escalation_resume: 'bg-emerald-100 text-emerald-900',
+};
+
+function findOpenCampaignEscalation(
+  map: Record<number, EscalationRow>,
+  identityId: number,
+  campaignId: string,
+): EscalationRow | undefined {
+  return Object.values(map).find(
+    (e) =>
+      e.identity_id === identityId
+      && e.campaign_id === campaignId
+      && e.state === 'awaiting_answer',
+  );
+}
 
 type StatusFilter = 'pending' | 'approved' | 'rejected' | 'all';
 type SlaFilter = 'all' | 'at_risk' | 'breached';
@@ -618,6 +640,11 @@ export function ApprovalsPage() {
                   escalation={r.linked_escalation_id != null
                     ? escalationMap[r.linked_escalation_id]
                     : undefined}
+                  openCampaignEscalation={findOpenCampaignEscalation(
+                    escalationMap,
+                    r.identity_id,
+                    r.campaign_id,
+                  )}
                   onToggleHistory={() =>
                     setHistoryOpen((m) => ({ ...m, [rowKey(r)]: !m[rowKey(r)] }))
                   }
@@ -651,6 +678,7 @@ type ApprovalRowItemProps = {
   isHistoryOpen: boolean;
   selected: boolean;
   escalation?: EscalationRow;
+  openCampaignEscalation?: EscalationRow;
   onToggleHistory: () => void;
   onToggleSelected: () => void;
   onSetRefiningKey: (key: string | null) => void;
@@ -675,6 +703,7 @@ function ApprovalRowItem({
   isHistoryOpen,
   selected,
   escalation,
+  openCampaignEscalation,
   onToggleHistory,
   onToggleSelected,
   onSetRefiningKey,
@@ -767,6 +796,30 @@ function ApprovalRowItem({
         />
       )}
       <FactKeyChip factKey={row.fact_path} variant="filled" />
+      {isReplyDraft && row.draft_origin_label && (
+        <span
+          className={
+            'rounded px-2 py-0.5 text-[11px] font-medium ' +
+            (DRAFT_ORIGIN_BADGE_CLASS[row.draft_origin ?? ''] ??
+              'bg-slate-100 text-slate-700')
+          }
+        >
+          {row.draft_origin_label}
+        </span>
+      )}
+      {isReplyDraft && row.draft_origin === 'chase_supersede' && openCampaignEscalation && (
+        <span className="rounded bg-rose-50 px-2 py-0.5 text-[11px] text-rose-800">
+          升级 #{openCampaignEscalation.id} 待处理 — 请先答复升级，勿批准此占位稿
+        </span>
+      )}
+      {isReplyDraft
+        && row.draft_origin === 'chase_supersede'
+        && !openCampaignEscalation
+        && status === 'pending' && (
+        <span className="rounded bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">
+          旧追信占位稿 — 升级已处理，建议驳回后等待正式稿
+        </span>
+      )}
       {isStyleLearning && (
         <span className="rounded bg-violet-200 px-2 py-0.5 text-[11px] font-medium text-violet-900">
           学习提案

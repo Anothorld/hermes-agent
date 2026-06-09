@@ -122,10 +122,7 @@ VEEDCRAWL_TRANSCRIPT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "oneOf": [
-        {"required": ["url"]},
-        {"required": ["job_id"]},
-    ],
+    "required": ["url"],
     "additionalProperties": False,
 }
 
@@ -165,10 +162,7 @@ VEEDCRAWL_EXTRACT_SCHEMA: dict[str, Any] = {
         },
         **_PERSIST_SCHEMA_PROPS,
     },
-    "oneOf": [
-        {"required": ["url", "prompt"]},
-        {"required": ["job_id"]},
-    ],
+    "required": ["url", "prompt"],
     "additionalProperties": False,
 }
 
@@ -226,10 +220,7 @@ VEEDCRAWL_PROFILE_SCHEMA: dict[str, Any] = {
         "force_refresh": {"type": "boolean", "default": False},
         **_PERSIST_SCHEMA_PROPS,
     },
-    "allOf": [
-        {"required": ["platform"]},
-        {"oneOf": [{"required": ["username"]}, {"required": ["url"]}]},
-    ],
+    "required": ["platform", "username"],
     "additionalProperties": False,
 }
 
@@ -260,10 +251,7 @@ VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA: dict[str, Any] = {
         "force_refresh": {"type": "boolean", "default": False},
         **_PERSIST_SCHEMA_PROPS,
     },
-    "oneOf": [
-        {"required": ["username"]},
-        {"required": ["url"]},
-    ],
+    "required": ["username"],
     "additionalProperties": False,
 }
 
@@ -669,6 +657,55 @@ _handle_search = _wrap_persisted(
 )
 
 
+# --------------------------------------------------------------------- OpenAI function schema wrapper
+# Plugin tools must register ``{name, description, parameters}`` — not a bare
+# JSON-Schema parameters object. Bare objects make ``schema_sanitizer`` inject
+# empty ``parameters: {properties: {}}``, so models see no required fields.
+
+_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "veedcrawl_account": "Veedcrawl account health and credit balance (/v1/me).",
+    "veedcrawl_metadata": (
+        "Fetch public video metadata (views, likes, duration). Requires url."
+    ),
+    "veedcrawl_transcript": (
+        "Transcribe a public video (paid). Requires url. Poll existing jobs via "
+        "veedcrawl_job, not job_id here."
+    ),
+    "veedcrawl_extract": (
+        "Structured AI extraction from a public video (10 credits). Requires url "
+        "and prompt. Poll existing jobs via veedcrawl_job."
+    ),
+    "veedcrawl_profile": (
+        "Fetch TikTok or Instagram profile + recent posts. Requires platform and "
+        "username (or pass url instead of username at runtime)."
+    ),
+    "veedcrawl_instagram_profile": (
+        "Fetch Instagram profile + recent posts (free). Requires username — call "
+        "this function tool directly with JSON args, never via terminal."
+    ),
+    "veedcrawl_search_social_videos": (
+        "Search public social videos (free). Requires q — call this function tool "
+        "directly with JSON args, never via terminal."
+    ),
+    "veedcrawl_job": (
+        "Look up a prior veedcrawl_transcript or veedcrawl_extract async job."
+    ),
+}
+
+
+def as_function_schema(tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    """Wrap a JSON-Schema parameters object in an OpenAI function schema."""
+    params = dict(parameters)
+    description = str(
+        params.pop("description", "") or _TOOL_DESCRIPTIONS.get(tool_name, tool_name)
+    )
+    return {
+        "name": tool_name,
+        "description": description,
+        "parameters": params,
+    }
+
+
 # Public exports consumed by ``__init__.register``.
 __all__ = (
     "VEEDCRAWL_ACCOUNT_SCHEMA",
@@ -679,6 +716,8 @@ __all__ = (
     "VEEDCRAWL_INSTAGRAM_PROFILE_SCHEMA",
     "VEEDCRAWL_SEARCH_SCHEMA",
     "VEEDCRAWL_JOB_SCHEMA",
+    "as_function_schema",
+    "_TOOL_DESCRIPTIONS",
     "_handle_account",
     "_handle_metadata",
     "_handle_transcript",
