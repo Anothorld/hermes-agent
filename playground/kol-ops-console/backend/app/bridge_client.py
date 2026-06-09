@@ -108,6 +108,15 @@ class BridgeClient:
             "GET", f"/identities/{identity_id}", params={"env": env},
         )
 
+    async def transfer_campaign(
+        self, identity_id: int, body: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST",
+            f"/identities/{identity_id}/transfer-campaign",
+            json=body,
+        )
+
     async def batch_outreach_touch(
         self, identity_ids: list[int], *, env: str = "LIVE",
     ) -> dict[str, Any]:

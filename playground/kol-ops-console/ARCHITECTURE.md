@@ -143,6 +143,7 @@ kol-ops-console/
 | `facts.py` | `/facts` | kols |
 | `goals.py` | `/identities` | kols |
 | `relationships.py` | `/identities` | kols |
+| `campaign_transfer.py` | `/identities` | campaigns（Shortlist 转移） |
 | `escalations.py` | `/escalations` | escalations |
 | `approvals.py` | `/approvals` | approvals |
 | `learning.py` | `/learning` | learning |

@@ -7,7 +7,7 @@
 | `auth.py` | [auth-settings](../../../docs/features/auth-settings/GUIDE.md) |
 | `google_auth.py`, `internal.py` | [gmail](../../../docs/features/gmail/GUIDE.md) |
 | `products.py` | [products](../../../docs/features/products/GUIDE.md) |
-| `campaigns.py`, `candidates.py`, `reply_watcher.py` | [campaigns](../../../docs/features/campaigns/GUIDE.md) |
+| `campaigns.py`, `candidates.py`, `campaign_transfer.py`, `reply_watcher.py` | [campaigns](../../../docs/features/campaigns/GUIDE.md) |
 | `kols.py`, `facts.py`, `goals.py`, `relationships.py` | [kols](../../../docs/features/kols/GUIDE.md) |
 | `approvals.py` | [approvals](../../../docs/features/approvals/GUIDE.md) |
 | `learning.py` | [learning](../../../docs/features/learning/GUIDE.md) |

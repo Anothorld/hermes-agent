@@ -204,6 +204,21 @@ Cross-campaign **confirmed outreach sends** (`outreach.sent` events and
    enriches shortlist rows and KOL detail with `prior_outreach_touch`
    (`last_touch_at`, `within_cooldown`, optional `last_touch_campaign_id`).
 
+### Shortlist campaign transfer (Phase 1a)
+
+Move a KOL between campaign discovery pools **before** shortlist approval (no
+Gmail thread, archive, or gateway run):
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py transfer-campaign \
+  --identity-id 42 --from-campaign-id CAMPAIGN-A --to-campaign-id CAMPAIGN-B \
+  --env LIVE --reason "better product fit"
+```
+
+HTTP: `POST /identities/{id}/transfer-campaign` with
+`from_campaign_id`, `to_campaign_id`, `env`, `reason`. Source row →
+`rejected`; target row → `discovered` (`source=operator_transfer`).
+
 ### KOL registry (metrics table)
 
 `GET /kol-registry?env=LIVE&limit=50&offset=0` returns every identity in

@@ -22,6 +22,7 @@ from .routers import (
     auth,
     google_auth,
     internal,
+    campaign_transfer,
     campaigns,
     candidates,
     escalations,
@@ -152,6 +153,7 @@ def create_app() -> FastAPI:
     app.include_router(facts.router)
     app.include_router(goals.router)
     app.include_router(relationships.router)
+    app.include_router(campaign_transfer.router)
     app.include_router(escalations.router)
     app.include_router(approvals.router)
     app.include_router(learning.router)

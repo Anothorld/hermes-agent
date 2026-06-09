@@ -80,6 +80,7 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 - **未批准的候选会一直留在 shortlist**，直到操作员手动移除；批准 shortlist **不会**自动隐藏或拒绝未勾选的行。
 - `GET /campaigns/{id}/shortlist` 返回 `candidate_status` 不为 `rejected` / `archived` 的可见行；`counts.rejected_or_archived_hidden` 为已隐藏数量。
 - 产品页 Shortlist review 每行待审批候选有 **「从 shortlist 移除」**：调用 `POST /campaigns/{id}/candidates/status`，将 `candidate_status` 设为 `rejected`（`review_reason=operator_removed_from_shortlist`）。**CAL 行仍在库中**，只是不再出现在 shortlist、也无法被勾选批准；指标页等全量视图仍可看到该发现记录。
+- **「转到其他活动」**（Phase 1a，仅发现后、批准前）：`POST /identities/{identity_id}/transfer-campaign`，body 含 `from_campaign_id`、`to_campaign_id`、`env`、`reason`。Bridge 将源行标为 `rejected`（`review_reason` 含 `transferred_to:<目标>`），在目标活动写入 `discovered` + `source=operator_transfer`，并 `resolve-relationships`。目标活动须已存在 `campaign_config`。若目标已有非 terminal 候选行则 409。CLI：`kol_bridge_tool.py transfer-campaign --identity-id … --from-campaign-id … --to-campaign-id …`。
 
 ### 批准流程
 

@@ -28,10 +28,42 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
 
+import json
+import time
+
 from fastapi import FastAPI
+from starlette.requests import Request
 
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent
+_DEBUG_LOG = Path("/Users/arnold/agent_prj/.cursor/debug-a8fb01.log")
+_ACTIVE_REQUESTS = 0
+
+
+def _dbg_log(
+    *,
+    location: str,
+    message: str,
+    data: dict,
+    hypothesis_id: str,
+    run_id: str = "pre-fix",
+) -> None:
+    # region agent log
+    try:
+        payload = {
+            "sessionId": "a8fb01",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with _DEBUG_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # endregion
 _PKG_NAME = "kol_ops_bridge_pkg"
 _MOUNT = "/api/plugins/kol-ops-bridge"
 
@@ -83,6 +115,50 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="kol-ops-bridge (standalone)", lifespan=_lifespan)
     app.include_router(plugin_api.router, prefix=_MOUNT)
+
+    @app.middleware("http")
+    async def _perf_probe(request: Request, call_next):
+        global _ACTIVE_REQUESTS
+        path = request.url.path
+        if not path.startswith(_MOUNT):
+            return await call_next(request)
+        t0 = time.perf_counter()
+        _ACTIVE_REQUESTS += 1
+        active = _ACTIVE_REQUESTS
+        try:
+            response = await call_next(request)
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+            if elapsed_ms >= 500 or active >= 4:
+                _dbg_log(
+                    location="serve.py:middleware",
+                    message="slow_or_contended_request",
+                    data={
+                        "method": request.method,
+                        "path": path,
+                        "elapsed_ms": elapsed_ms,
+                        "active_requests": active,
+                        "status": response.status_code,
+                    },
+                    hypothesis_id="H2" if active >= 4 else "H3",
+                )
+            return response
+        except Exception as exc:
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+            _dbg_log(
+                location="serve.py:middleware",
+                message="request_failed",
+                data={
+                    "method": request.method,
+                    "path": path,
+                    "elapsed_ms": elapsed_ms,
+                    "active_requests": active,
+                    "error": type(exc).__name__,
+                },
+                hypothesis_id="H2",
+            )
+            raise
+        finally:
+            _ACTIVE_REQUESTS -= 1
 
     @app.get("/")
     def root() -> dict:

@@ -118,6 +118,22 @@ def cmd_get_reusable_facts(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_transfer_campaign(args: argparse.Namespace) -> None:
+    body = {
+        "from_campaign_id": args.from_campaign_id,
+        "to_campaign_id": args.to_campaign_id,
+        "env": args.env,
+        "source_stage": "shortlist",
+        "reason": args.reason or "",
+        "operator_note": args.operator_note or "",
+    }
+    print_json(client_from_args(args).request(
+        "POST",
+        f"/identities/{args.identity_id}/transfer-campaign",
+        body=body,
+    ))
+
+
 def cmd_get_goals(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request(
         "GET", f"/identities/{args.identity_id}/goals",
@@ -341,6 +357,22 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p, required=False)
     p.add_argument("--identity-id", type=int, required=True)
     p.set_defaults(func=cmd_get_reusable_facts)
+
+    p = sub.add_parser(
+        "transfer-campaign",
+        help=(
+            "POST .../transfer-campaign — move KOL between campaign shortlists "
+            "(pre-approval only)."
+        ),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--identity-id", type=int, required=True)
+    p.add_argument("--from-campaign-id", required=True)
+    p.add_argument("--to-campaign-id", required=True)
+    p.add_argument("--reason", default="", help="Operator reason (optional).")
+    p.add_argument("--operator-note", default="", help="Extra note (optional).")
+    p.set_defaults(func=cmd_transfer_campaign)
 
     p = sub.add_parser("get-goals",
                        help="GET /identities/{id}/goals — 10 goal states for (identity, campaign).")

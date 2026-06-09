@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, field_validator
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 from . import cal
+from . import campaign_transfer
 from . import discovery_skip
 from . import outreach_touch
 from . import campaign_validation
@@ -429,6 +430,21 @@ class ArchiveBody(_CampaignIdNormaliserMixin):
     )
     delivery_quality: Optional[float] = None
     decided_by: str = "skill:archival-writer"
+
+
+class TransferCampaignBody(BaseModel):
+    """Phase 1a: shortlist-only transfer between campaigns."""
+
+    from_campaign_id: str = Field(min_length=1)
+    to_campaign_id: str = Field(min_length=1)
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    source_stage: str = Field(
+        default="shortlist",
+        pattern="^shortlist$",
+        description="Phase 1b active_pipeline not implemented yet.",
+    )
+    reason: str = Field(default="", max_length=500)
+    operator_note: str = Field(default="", max_length=500)
 
 
 class RouteDiscoveryBody(BaseModel):
@@ -1007,6 +1023,36 @@ def archive_collab(
     )
     cal.recompute_goals(identity_id=identity_id, campaign_id=body.campaign_id)
     return {"ok": True}
+
+
+@router.post("/identities/{identity_id}/transfer-campaign")
+def transfer_campaign(
+    identity_id: int,
+    body: TransferCampaignBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Move a KOL from one campaign shortlist to another (pre-approval)."""
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    try:
+        return campaign_transfer.transfer_shortlist_candidate(
+            identity_id=identity_id,
+            from_campaign_id=body.from_campaign_id,
+            to_campaign_id=body.to_campaign_id,
+            env=body.env,
+            reason=body.reason,
+            operator_note=body.operator_note,
+        )
+    except campaign_transfer.CampaignTransferError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                **exc.details,
+            },
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

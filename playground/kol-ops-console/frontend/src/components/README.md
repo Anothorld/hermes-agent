@@ -9,7 +9,7 @@
 | `shell/` | 全局导航、TEST/LIVE、活动选择、面包屑 | 跨模块 |
 | `agent-dock/` | Agent 会话浮层 | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |
 | `gateway-approval/` | Gateway 命令审批浮层 + 顶栏徽章 | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |
-| `dialogs/` | 确认/输入/归档弹窗 | 跨模块 |
+| `dialogs/` | 确认/输入/归档/转移活动弹窗 | 跨模块 |
 | `feedback/` | Toast、错误提示 | §5 UI 规则 |
 | `inputs/` | 事实输入、KOL 搜索 | [kols](../../../docs/features/kols/GUIDE.md) |
 | `diff/` | 草稿 diff | [approvals](../../../docs/features/approvals/GUIDE.md) |
@@ -21,7 +21,7 @@
 | `ApprovalDetailPanel`, `ApprovalContextCard`, `ApprovalActionBar`, `RejectCorrectionModal`, `DraftEditDiffPanel` | [approvals](../../../docs/features/approvals/GUIDE.md) |
 | `LearningWorkflowStepper`, `LearningManualTriggerSection`, `StrategyPromotionPanel`, `OutcomePromotionPanel`, `LearningNextBatchPreview`, `LearningChannelTrends`, `PolicyMergeDiffPreview` | [learning](../../../docs/features/learning/GUIDE.md) |
 | `LaneFilterBar`, `GoalProgressBar`, `FactsEditor`, `KolProfileDashboard`, `KolSocialQuickLinks`, `KolProfilePreviewLink`, `NoxDiligencePanel`, `NoxInsightsSections`, `NoxDistributionChart`, `KolRegistryTable`, `NoxAudienceHoverPanel`, `AudienceProfileHoverButton` | [kols](../../../docs/features/kols/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md), [gate-metrics](../../../docs/features/gate-metrics/GUIDE.md) |
-| `EditCampaignConfigPanel`, `NoxCampaignOpsPanel`, `ContractReadinessPanel` | [campaigns](../../../docs/features/campaigns/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md) |
+| `EditCampaignConfigPanel`, `NoxCampaignOpsPanel`, `ContractReadinessPanel`, `KolTransferCampaignDialog` | [campaigns](../../../docs/features/campaigns/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md) |
 | `CommunicationHistoryPanel` | [gmail](../../../docs/features/gmail/GUIDE.md) |
 | `InboundEmailCard`, `InboundEmailStack`, `EscalationSuggestedQuestion` | [escalations](../../../docs/features/escalations/GUIDE.md) |
 | `AgentTranscriptPanel` | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |

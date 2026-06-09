@@ -1,0 +1,7 @@
+name: mysql-tools
+version: 0.1.0
+description: "Safe MySQL SQL execution with Hermes clarify human approval gate (once or session skip)."
+author: Hermes Agent
+kind: backend
+provides_tools:
+  - mysql_execute_sql

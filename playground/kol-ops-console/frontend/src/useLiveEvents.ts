@@ -68,6 +68,9 @@ export function useLiveEvents(onEvent: (e: WsEvent) => void): { connected: boole
       ws.onopen = () => {
         setConnected(true);
         retry = 0;
+        // #region agent log
+        fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bba44f'},body:JSON.stringify({sessionId:'bba44f',location:'useLiveEvents.ts:onopen',message:'ws opened',data:{retry},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
       };
       ws.onmessage = (msg) => {
         try {
@@ -77,8 +80,11 @@ export function useLiveEvents(onEvent: (e: WsEvent) => void): { connected: boole
           /* ignore non-JSON */
         }
       };
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
         setConnected(false);
+        // #region agent log
+        fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bba44f'},body:JSON.stringify({sessionId:'bba44f',location:'useLiveEvents.ts:onclose',message:'ws closed',data:{code:ev.code,reason:ev.reason,wasClean:ev.wasClean,stop,retry},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
         retry += 1;
         setTimeout(connect, Math.min(30_000, 1_000 * 2 ** retry));
       };
@@ -87,6 +93,9 @@ export function useLiveEvents(onEvent: (e: WsEvent) => void): { connected: boole
     connect();
     return () => {
       stop = true;
+      // #region agent log
+      fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bba44f'},body:JSON.stringify({sessionId:'bba44f',location:'useLiveEvents.ts:cleanup',message:'effect cleanup closing ws',data:{hadWs:!!ws},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
       ws?.close();
     };
   }, []);

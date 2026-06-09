@@ -14,6 +14,7 @@ import type { LinkPreviewPayload } from '../lib/kolProfileSnapshot';
 import { resolvePriorOutreachTouch } from '../lib/priorOutreachTouch';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { dialog } from '../components/dialogs/useDialog';
+import { KolTransferCampaignDialog } from '../components/dialogs/KolTransferCampaignDialog';
 import { useEnvStore, toast } from '../lib/store';
 import { errorSummary } from '../lib/errors';
 import { runStateLabel, isRunStateActive } from '../lib/runStateLabels';
@@ -365,6 +366,7 @@ function ShortlistReviewPanel({
   const [counts, setCounts] = useState<{ pending: number; already_approved: number; rejected_or_archived_hidden: number } | null>(null);
   const [showApproved, setShowApproved] = useState(false);
   const [removingHandle, setRemovingHandle] = useState<string | null>(null);
+  const [transferCandidate, setTransferCandidate] = useState<ShortlistCandidate | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [noxStats, setNoxStats] = useState<NoxStatsPayload | null>(null);
@@ -570,7 +572,23 @@ function ShortlistReviewPanel({
             key={c.handle}
             className="rounded border border-emerald-100 bg-white p-2 text-xs"
           >
-            <div className="mb-1 flex items-start justify-end">
+            <div className="mb-1 flex items-start justify-end gap-1">
+              <button
+                type="button"
+                disabled={
+                  typeof c.identity_id !== 'number'
+                  || !!approveBlockedReason
+                }
+                title={
+                  typeof c.identity_id !== 'number'
+                    ? '缺少 identity_id，无法转移'
+                    : '将该 KOL 移到另一产品的活动 shortlist（批准前）'
+                }
+                onClick={() => setTransferCandidate(c)}
+                className="rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] text-sky-800 hover:bg-sky-100 disabled:opacity-50"
+              >
+                转到其他活动
+              </button>
               <button
                 type="button"
                 disabled={
@@ -806,6 +824,20 @@ function ShortlistReviewPanel({
           {busy ? 'Approving…' : `Approve ${selectedHandles.length} KOL${selectedHandles.length === 1 ? '' : 's'}`}
         </button>
       </div>
+      {transferCandidate && typeof transferCandidate.identity_id === 'number' && (
+        <KolTransferCampaignDialog
+          open
+          identityId={transferCandidate.identity_id}
+          handle={transferCandidate.handle}
+          fromCampaignId={campaignId}
+          env={env as 'TEST' | 'LIVE'}
+          onClose={() => setTransferCandidate(null)}
+          onTransferred={() => {
+            setTransferCandidate(null);
+            void fetchShortlist(false);
+          }}
+        />
+      )}
     </div>
   );
 }

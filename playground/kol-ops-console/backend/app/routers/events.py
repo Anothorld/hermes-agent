@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import suppress
 from typing import Annotated
 
@@ -167,6 +168,33 @@ class _Hub:
 
 hub = _Hub()
 
+# #region agent log
+_DEBUG_LOG = "/Users/arnold/agent_prj/.cursor/debug-bba44f.log"
+
+
+def _agent_dbg(*, location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    try:
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "sessionId": "bba44f",
+                        "timestamp": int(time.time() * 1000),
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "hypothesisId": hypothesis_id,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
+# #endregion
+
 
 @router.websocket("/ws")
 async def ws_endpoint(
@@ -176,21 +204,57 @@ async def ws_endpoint(
 ) -> None:
     """Single channel for live updates. Auth: ?token=<jwt>."""
     if not token:
+        # #region agent log
+        _agent_dbg(
+            location="events.py:ws_endpoint",
+            message="ws rejected no token",
+            data={},
+            hypothesis_id="E",
+        )
+        # #endregion
         await ws.close(code=4401)
         return
     try:
         decode_token(token)
     except Exception:  # noqa: BLE001
+        # #region agent log
+        _agent_dbg(
+            location="events.py:ws_endpoint",
+            message="ws rejected bad token",
+            data={},
+            hypothesis_id="E",
+        )
+        # #endregion
         await ws.close(code=4401)
         return
     await ws.accept()
     await hub.add(ws)
+    # #region agent log
+    _agent_dbg(
+        location="events.py:ws_endpoint",
+        message="ws accepted",
+        data={"client_count": len(hub._clients)},
+        hypothesis_id="A",
+    )
+    # #endregion
     await hub.start_poller(bridge)
+    disconnect_code: int | None = None
     try:
         while True:
             # Discard inbound; this is a server-push channel.
             await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        disconnect_code = exc.code
     finally:
         await hub.drop(ws)
+        # #region agent log
+        _agent_dbg(
+            location="events.py:ws_endpoint",
+            message="ws disconnected",
+            data={
+                "disconnect_code": disconnect_code,
+                "client_count": len(hub._clients),
+            },
+            hypothesis_id="A",
+        )
+        # #endregion

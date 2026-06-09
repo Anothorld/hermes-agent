@@ -51,14 +51,20 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, Optional
 
-# Make sibling modules importable when run via `python scripts/foo.py`.
+# Register plugin as a package so relative imports in sibling modules work
+# when this file is executed as a script (reply watcher / one-shot poller).
 _PLUGIN_DIR = Path(__file__).resolve().parents[1]
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
+_PLUGIN_PKG = "kol_ops_bridge_pkg"
+if _PLUGIN_PKG not in sys.modules:
+    import types
 
-from gmail_client import GmailClient, GmailMessage, GmailUnavailable  # noqa: E402
-from gmail_console import list_operator_gmail_clients  # noqa: E402
-from mailbox_escalation import ensure_mailbox_mismatch_escalation  # noqa: E402
+    _pkg = types.ModuleType(_PLUGIN_PKG)
+    _pkg.__path__ = [str(_PLUGIN_DIR)]  # type: ignore[attr-defined]
+    sys.modules[_PLUGIN_PKG] = _pkg
+
+from kol_ops_bridge_pkg.gmail_client import GmailClient, GmailMessage, GmailUnavailable  # noqa: E402
+from kol_ops_bridge_pkg.gmail_console import list_operator_gmail_clients  # noqa: E402
+from kol_ops_bridge_pkg.mailbox_escalation import ensure_mailbox_mismatch_escalation  # noqa: E402
 
 # scripts/ dir already on sys.path indirectly via this file's location; add
 # explicitly so _cal_client resolves.
@@ -66,6 +72,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _cal_client import CALClient  # noqa: E402
 
 log = logging.getLogger("kol_reply_dispatcher")
+
+# region agent log
+_DEBUG_LOG_PATH = Path("/Users/arnold/agent_prj/.cursor/debug-d9f87f.log")
+
+
+def _agent_debug_log(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+    run_id: str = "pre-fix",
+) -> None:
+    try:
+        payload = {
+            "sessionId": "d9f87f",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+            "runId": run_id,
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+# endregion
 
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 _STATE_PATH = _HERMES_HOME / "kol-ops-bridge" / "poller_state.json"
@@ -482,7 +518,8 @@ def _match_identity(
     except SystemExit as exc:
         log.error("bridge /events/recent failed: %s", exc)
         return None
-    events: Iterable[dict[str, Any]] = (page or {}).get("events") or []
+    events_list: list[dict[str, Any]] = list((page or {}).get("events") or [])
+    events: Iterable[dict[str, Any]] = events_list
     strict_hit: Optional[tuple[int, Optional[str], str, str, Optional[str]]] = None
     weak_hit: Optional[tuple[int, Optional[str], str, str, Optional[str]]] = None
     sender_email = _extract_email(msg.from_addr)
@@ -585,6 +622,26 @@ def _match_identity(
                 "heuristic_unique_sender",
                 str(canonical_thread_id) if canonical_thread_id else (msg.thread_id or None),
             )
+    # region agent log
+    _agent_debug_log(
+        hypothesis_id="H2-H3-H4",
+        location="kol_reply_dispatcher.py:_match_identity",
+        message="identity_match_result",
+        data={
+            "msg_id": msg.message_id,
+            "thread_id": msg.thread_id,
+            "in_reply_to": (msg.in_reply_to or "")[:120],
+            "sender": sender_email,
+            "subject_norm": norm_subject[:120],
+            "event_count": len(events_list),
+            "strict_hit": strict_hit is not None,
+            "weak_hit": weak_hit[:2] if weak_hit else None,
+            "best_detached_score": best_detached_score,
+            "detached_candidates_n": len(detached_candidates),
+            "hit": hit[:3] if hit else None,
+        },
+    )
+    # endregion
     if hit is None:
         return None
 
@@ -904,6 +961,18 @@ def _process_message(
     """Return whether the message was dispatched, skipped, or should retry."""
     matched = _match_identity(msg, env=env)
     if not matched:
+        # region agent log
+        _agent_debug_log(
+            hypothesis_id="H4",
+            location="kol_reply_dispatcher.py:_process_message",
+            message="skip_no_identity_match",
+            data={
+                "msg_id": msg.message_id,
+                "from_domain": (_extract_email(msg.from_addr) or "").split("@")[-1],
+                "thread_id": msg.thread_id,
+            },
+        )
+        # endregion
         log.info("[skip] msg=%s no identity match (from=%s)", msg.message_id, msg.from_addr)
         return "skipped"
     identity_id = matched.identity_id
@@ -1056,6 +1125,20 @@ def _process_message(
         matched.identity_integrity,
         matched.content_risk,
     )
+    # region agent log
+    _agent_debug_log(
+        hypothesis_id="H1",
+        location="kol_reply_dispatcher.py:_process_message",
+        message="dispatched",
+        data={
+            "msg_id": msg.message_id,
+            "identity_id": identity_id,
+            "campaign_id": campaign_id,
+            "run_id": run_id,
+            "matched_by": matched.matched_by,
+        },
+    )
+    # endregion
     return "dispatched"
 
 
@@ -1099,6 +1182,20 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
     if not mailboxes:
         raise GmailUnavailable("Gmail token / google_api.py unavailable")
 
+    # region agent log
+    _agent_debug_log(
+        hypothesis_id="H1-H5",
+        location="kol_reply_dispatcher.py:run_once",
+        message="tick_start",
+        data={
+            "env": env,
+            "mailbox_count": len(mailboxes),
+            "lookback_days": lookback_days,
+            "max_results": max_results,
+        },
+    )
+    # endregion
+
     with _state_lock():
         state = _load_state()
         matched = 0
@@ -1113,6 +1210,17 @@ def run_once(*, env: str, lookback_days: int, max_results: int) -> dict[str, int
             scanned += len(messages)
             for stub in messages:
                 if stub.message_id in seen:
+                    # region agent log
+                    if "19ea876497705926" in stub.message_id or "techsource" in (
+                        stub.from_addr or ""
+                    ).lower():
+                        _agent_debug_log(
+                            hypothesis_id="H4",
+                            location="kol_reply_dispatcher.py:run_once",
+                            message="skip_already_seen",
+                            data={"msg_id": stub.message_id, "seen_key": seen_key},
+                        )
+                    # endregion
                     continue
                 if _global_message_seen(env=env, message_id=stub.message_id):
                     seen.add(stub.message_id)
