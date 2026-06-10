@@ -31,6 +31,8 @@ Login cookies and IG session stay shared because all tabs live in the same profi
 |----------|----------|
 | `local-chrome` (CDP, no cloud provider) — KOL default | Yes |
 | Concurrent agent runs, same gateway | Yes — one tab per bare `task_id` |
+| `BROWSER_CDP_URL=http://127.0.0.1:9222` (HTTP discovery from `start-debug-chrome.sh`) | Yes — pool opens page tabs on that Chrome |
+| `BROWSER_CDP_URL=ws://…/devtools/browser/…` (browser-level WebSocket) | No — legacy shared active-tab mode |
 | Cloud provider + hybrid `::local` sidecar (private URLs) | No — sidecar stays headless |
 | `LOCAL_CHROME_TAB_POOL=0` | Disabled — legacy shared CDP connection |
 

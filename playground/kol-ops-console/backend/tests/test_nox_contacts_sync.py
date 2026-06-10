@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from app.nox_contacts_sync import gate_b_eligible, resolve_nox_contacts_params
+from app.nox_contacts_sync import (
+    classify_nox_contacts_cli_failure,
+    gate_b_eligible,
+    resolve_nox_contacts_params,
+)
 from app.nox_quota import quota_exhausted_from_stats
 
 
@@ -36,3 +40,29 @@ def test_quota_exhausted_from_stats() -> None:
     assert quota_exhausted_from_stats({"usage": {"remaining_estimate": 0}})
     assert not quota_exhausted_from_stats({"usage": {"remaining_estimate": 3}})
     assert quota_exhausted_from_stats({"quota_exhausted": True})
+
+
+def test_classify_nox_contacts_cli_failure_upstream_40017() -> None:
+    out = {
+        "success": False,
+        "error_code": "NOX_CLI_ERROR",
+        "detail": 'noxinfluencer exit 8: {"summary":"SaaS 40017: 配额不足"}',
+    }
+    result = classify_nox_contacts_cli_failure(out)
+    assert result["reason"] == "nox_upstream_error"
+    assert result.get("upstream_code") == "40017"
+    assert "quota_exhausted" not in result
+
+
+def test_classify_nox_contacts_cli_failure_saas_quota() -> None:
+    out = {"success": False, "error_code": "NOX_QUOTA_EXCEEDED", "detail": "budget"}
+    result = classify_nox_contacts_cli_failure(out)
+    assert result["reason"] == "nox_saas_quota_exhausted"
+    assert result["quota_exhausted"] is True
+
+
+def test_classify_nox_contacts_cli_failure_generic() -> None:
+    out = {"success": False, "error_code": "NOX_CLI_ERROR", "detail": "timeout"}
+    result = classify_nox_contacts_cli_failure(out)
+    assert result["reason"] == "contacts_cli_failed"
+    assert "quota_exhausted" not in result

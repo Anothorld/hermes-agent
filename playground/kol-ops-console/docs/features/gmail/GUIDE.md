@@ -4,6 +4,8 @@
 
 每位操作员 **独立 OAuth** 连接 Gmail；首次批准回信时绑定 `offer.gmail_mailbox_*` 事实。Bridge 发信时经 `/internal` 取 token 文件路径。支持邮箱接管（takeover）。
 
+**Bridge 连接 Console：** poller 默认 `KOC_CONSOLE_BASE=http://127.0.0.1:8765`（与 Console `KOC_PORT` 一致）。若 Bridge 连不上 Console，会回退到本地 `gmail_tokens/*.json` 或 legacy token；占位邮箱名（`legacy`、`@imported.local`）会解析为 Gmail profile 真实地址，避免误报 `inbound_mailbox_mismatch`。
+
 ## 操作员路径
 
 | 路径 | 场景 |

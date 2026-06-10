@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -131,25 +132,68 @@ def pre_tool_call(
         return None
 
     if not tab_pool.is_enabled():
-        # Pooling is off — typically because the operator wired a shared
-        # browser-level CDP endpoint (BROWSER_CDP_URL via start-debug-chrome.sh).
-        # Still autostart debug Chrome on demand so the agent can open pages
-        # without a human launching the browser, then let the shared connection
-        # bind (no page-tab seeding in this mode). ``ensure_chrome_running``
-        # is a no-op when Chrome is already listening.
-        if tab_pool._external_browser_cdp_configured():
-            try:
-                tab_pool.ensure_chrome_running()
-            except Exception as exc:  # noqa: BLE001 — never block the tool call
-                logger.warning(
-                    "Shared-CDP mode: debug Chrome autostart failed for task=%s: %s",
-                    task_id, exc,
+        # #region agent log
+        try:
+            import json as _json
+
+            with open("/Users/arnold/agent_prj/.cursor/debug-46ec18.log", "a") as _df:
+                _df.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "46ec18",
+                            "hypothesisId": "H-pool-disabled",
+                            "location": "hooks.py:pre_tool_call",
+                            "message": "tab pool skipped",
+                            "data": {
+                                "task_id": task_id,
+                                "tool": tool_name,
+                                "LOCAL_CHROME_TAB_POOL": os.environ.get(
+                                    "LOCAL_CHROME_TAB_POOL"
+                                ),
+                                "LOCAL_CHROME_FORCE_SHARED_CDP": os.environ.get(
+                                    "LOCAL_CHROME_FORCE_SHARED_CDP"
+                                ),
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        }
+                    )
+                    + "\n"
                 )
+        except OSError:
+            pass
+        # #endregion
         return None
 
     tid = tab_pool.normalize_task_id(task_id)
     try:
         tab_info = tab_pool.acquire(tid)
+        # #region agent log
+        try:
+            import json as _json
+
+            with open("/Users/arnold/agent_prj/.cursor/debug-46ec18.log", "a") as _df:
+                _df.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "46ec18",
+                            "hypothesisId": "H-tab-seed",
+                            "location": "hooks.py:pre_tool_call",
+                            "message": "tab pool seeding browser session",
+                            "data": {
+                                "task_id": tid,
+                                "tool": tool_name,
+                                "target_id": tab_info.get("target_id"),
+                                "cdp_is_page_level": "/devtools/page/"
+                                in str(tab_info.get("cdp_url", "")),
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError:
+            pass
+        # #endregion
         if not _seed_browser_session(tid, tab_info):
             return {
                 "action": "block",

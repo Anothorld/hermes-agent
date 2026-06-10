@@ -340,7 +340,10 @@ def test_approve_shortlist_succeeds_when_gate_cleared() -> None:
                    status="closed")
     bridge = _StubBridge()
     bridge.candidates = [{"identity_id": 100, "primary_handle": "alice"}]
-    bridge.identity_map[100] = {"primary_handle": "alice"}
+    bridge.identity_map[100] = {
+        "primary_handle": "alice",
+        "primary_email": "alice@example.com",
+    }
     gateway = _StubGateway()
     gateway.states["run-discovery"] = {"status": "completed"}
 
@@ -363,6 +366,39 @@ def test_approve_shortlist_succeeds_when_gate_cleared() -> None:
     assert row["run_id"] == gateway.runs_started[0]["run_id"]
     assert row["gate_run_id"] is None
     assert row["status"] == "running"
+
+
+def test_approve_shortlist_queues_email_discovery_when_missing_email() -> None:
+    """Approved identities without primary_email get kol-email-discover runs."""
+    conn = _seed_conn()
+    _seed_campaign(conn, run_id="run-discovery", gate_run_id=None, status="closed")
+    bridge = _StubBridge()
+    bridge.candidates = [{"identity_id": 100, "primary_handle": "alice"}]
+    bridge.identity_map[100] = {"primary_handle": "alice"}
+    gateway = _StubGateway()
+    gateway.states["run-discovery"] = {"status": "completed"}
+    app = _build_app(conn, bridge, gateway)
+
+    r = TestClient(app).post(
+        "/campaigns/CID-1/approve-shortlist",
+        json={"env": "TEST", "selected_handles": ["alice"]},
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("email_discovery")
+    assert len(gateway.runs_started) == 2
+    sessions = [run["session_id"] for run in gateway.runs_started]
+    email_sessions = [s for s in sessions if s and s.startswith("kol-email-discover:")]
+    assert len(email_sessions) == 1
+    # env:identity_id:run_token — one browser tab per gateway run
+    assert email_sessions[0].count(":") >= 3
+    assert any(s and s.startswith("kol-campaign-outreach:") for s in sessions)
+    outreach = next(
+        run for run in gateway.runs_started
+        if (run.get("session_id") or "").startswith("kol-campaign-outreach:")
+    )
+    assert "email_discovery_queued" in outreach["input"]
 
 
 def test_approve_shortlist_dedup_blocks_double_click() -> None:

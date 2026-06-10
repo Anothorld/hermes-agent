@@ -53,6 +53,9 @@
 - **Gate A/B 前**：在产品页展开「编辑 campaign_config」，勾选
   `nox_quota_enabled` 并保存（写入 CAL `nox_integration_json`）。未保存时
   `POST /kols/.../nox-diligence` 或 `nox-diligence-batch` 返回 `nox_quota_disabled`。
+  保存后 shortlist 的「Nox 未启用」横幅应立刻消失；`PATCH /campaigns/{id}/config`
+  会清除 `GET /campaigns/{id}/nox-stats` 的 45s 内存缓存（前端保存后也会带
+  `bypass_cache=1` 刷新）。
 - LIVE 首次使用前：在 **`kol-orchestrator` profile** 的 `.env` 配置
   `NOXINFLUENCER_API_KEY`，并运行
   `nox_kol_tool.py doctor --env LIVE`（会自动 `noxinfluencer auth`）。

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from app.routers.campaigns import _merge_prior_outreach_touch
+from app.routers.campaigns import (
+    _apply_internal_touch_counts,
+    _merge_prior_outreach_touch,
+)
 from app.shortlist_profile_og import attach_cached_link_previews
 
 
@@ -34,3 +37,16 @@ def test_merge_prior_outreach_touch_prefers_newer_campaign_fact():
     )
     assert merged is not None
     assert merged["last_touch_at"] == "2026-06-05T12:00:00Z"
+
+
+def test_apply_internal_touch_counts_prefers_handle_fallback():
+    candidates = [
+        {"identity_id": 743, "handle": "glamorouslyliving"},
+        {"handle": "sheet_only"},
+    ]
+    _apply_internal_touch_counts(
+        candidates,
+        {"743": 0, "h:glamorouslyliving": 6, "h:sheet_only": 2},
+    )
+    assert candidates[0]["internal_touch_count"] == 6
+    assert candidates[1]["internal_touch_count"] == 2

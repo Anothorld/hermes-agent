@@ -80,26 +80,43 @@ def run_once(
             messages = mb.client.search(query=query, max_results=max_results)
             scanned += len(messages)
             for stub in messages:
-                if stub.message_id in seen:
-                    continue
-                if retry_not_before(state, env=env, message_id=stub.message_id) > time.time():
+                locally_seen = stub.message_id in seen
+                if not locally_seen and retry_not_before(
+                    state, env=env, message_id=stub.message_id,
+                ) > time.time():
                     deferred += 1
                     continue
-                globally_seen = global_message_seen(env=env, message_id=stub.message_id)
-                if globally_seen:
-                    seen.add(stub.message_id)
-                try:
-                    full = mb.client.get_message(stub.message_id)
-                except GmailUnavailable as exc:
-                    log.warning("gmail get %s failed: %s", stub.message_id, exc)
-                    retry += 1
-                    continue
-                if globally_seen and not needs_reprocess_after_global_seen(
-                    full,
-                    env=env,
-                    bridge=resolved.bridge,
-                ):
-                    continue
+                if locally_seen:
+                    try:
+                        full = mb.client.get_message(stub.message_id)
+                    except GmailUnavailable as exc:
+                        log.warning("gmail get %s failed: %s", stub.message_id, exc)
+                        retry += 1
+                        continue
+                    if not needs_reprocess_after_global_seen(
+                        full,
+                        env=env,
+                        bridge=resolved.bridge,
+                    ):
+                        continue
+                else:
+                    globally_seen = global_message_seen(
+                        env=env, message_id=stub.message_id,
+                    )
+                    if globally_seen:
+                        seen.add(stub.message_id)
+                    try:
+                        full = mb.client.get_message(stub.message_id)
+                    except GmailUnavailable as exc:
+                        log.warning("gmail get %s failed: %s", stub.message_id, exc)
+                        retry += 1
+                        continue
+                    if globally_seen and not needs_reprocess_after_global_seen(
+                        full,
+                        env=env,
+                        bridge=resolved.bridge,
+                    ):
+                        continue
                 try:
                     status = process_message(
                         full,

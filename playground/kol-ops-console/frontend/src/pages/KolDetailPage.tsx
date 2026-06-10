@@ -859,6 +859,37 @@ function parseApiErrorDetail(err: unknown): ApiErrorDetail | null {
   return { message: err.body || err.message };
 }
 
+function formatNoxContactsSkipMessage(gateB: Record<string, unknown>): string {
+  const reason = typeof gateB.reason === 'string' ? gateB.reason : '';
+  const detail = typeof gateB.detail === 'string' ? gateB.detail : '';
+  if (reason === 'no_nox_creator_or_url') {
+    return '缺少 Nox creator ID 或主页 URL，无法查询邮箱。';
+  }
+  if (reason === 'nox_quota_disabled') {
+    return '请先在 campaign_config 中开启 nox_quota_enabled 并保存。';
+  }
+  if (reason === 'test_env') {
+    return 'TEST 环境不跑 LIVE Nox Gate B。';
+  }
+  if (reason === 'nox_upstream_error') {
+    const requestId = detail.match(/"request_id":"([^"]+)"/)?.[1];
+    return (
+      'Nox「查邮箱」(creator contacts) 被拒绝（错误码 40017）。'
+      + ' 这与 Console「本地剩余估计」和总积分（quota 命令显示的 remaining_credit）不是同一套配额。'
+      + ' Nox 套餐通常另有「邮箱查看次数」上限（约 200 次/月），用尽后尽调/画像仍可用，但 contacts 会报 40017。'
+      + ' 请到 Nox 后台查看邮箱查看用量或升级套餐；也可改用「全网搜索」或手动填邮箱。'
+      + (requestId ? ` request_id: ${requestId}` : '')
+    );
+  }
+  if (reason === 'contacts_cli_failed') {
+    return detail ? `Nox 查邮箱失败：${detail}` : 'Nox 查邮箱失败，请稍后再试。';
+  }
+  if (reason) {
+    return detail ? `Nox Gate B 未执行：${reason} — ${detail}` : `Nox Gate B 未执行：${reason}`;
+  }
+  return detail || 'Nox 查邮箱未完成，请稍后再试。';
+}
+
 function RedraftPanel({
   campaignId,
   identityId,
@@ -2155,20 +2186,51 @@ function EmailPanel({
               });
               return;
             }
+            // #region agent log
+            fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f680ad'},body:JSON.stringify({sessionId:'f680ad',location:'KolDetailPage.tsx:noxContacts:start',message:'nox contacts click',data:{identityId,env,campaignId,quotaBlocked},timestamp:Date.now(),hypothesisId:'H1-H4'})}).catch(()=>{});
+            // #endregion
             setPhase({ kind: 'submitting', action: 'discover' });
             try {
               const r = await api.post<{
                 skipped?: boolean;
                 email_found?: boolean;
                 email?: string;
+                gate_b?: Record<string, unknown>;
+                reason?: string;
               }>(`/kols/${identityId}/nox-contacts`, { env, campaign_id: campaignId });
-              setPhase({ kind: 'idle' });
+              // #region agent log
+              fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f680ad'},body:JSON.stringify({sessionId:'f680ad',location:'KolDetailPage.tsx:noxContacts:success',message:'nox contacts response',data:{email_found:r.email_found,email:r.email,skipped:r.skipped,reason:r.reason,gate_b:r.gate_b},timestamp:Date.now(),hypothesisId:'H1-H2'})}).catch(()=>{});
+              // #endregion
               if (r.email_found && r.email) {
+                setPhase({ kind: 'idle' });
                 toast.success('Nox 已找到邮箱', r.email);
+                onChanged();
+                return;
+              }
+              const gateB = r.gate_b;
+              if (gateB && (gateB.skipped === true || gateB.reason)) {
+                setPhase({
+                  kind: 'error',
+                  action: 'discover',
+                  code: typeof gateB.reason === 'string' ? gateB.reason : 'nox_contacts_skipped',
+                  message: formatNoxContactsSkipMessage(gateB),
+                });
+                onChanged();
+                return;
+              }
+              setPhase({ kind: 'idle' });
+              if (!r.email_found) {
+                toast.info(
+                  'Nox 未找到邮箱',
+                  '该创作者在 Nox contacts API 中没有可用邮箱，可尝试「全网搜索」或手动填入。',
+                );
               }
               onChanged();
             } catch (ex) {
               const detail = parseApiErrorDetail(ex);
+              // #region agent log
+              fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f680ad'},body:JSON.stringify({sessionId:'f680ad',location:'KolDetailPage.tsx:noxContacts:error',message:'nox contacts failed',data:{code:detail?.code,message:detail?.message,raw:String(ex)},timestamp:Date.now(),hypothesisId:'H3-H5'})}).catch(()=>{});
+              // #endregion
               if (detail?.code === 'already_has_email') {
                 onChanged();
                 return;
@@ -2293,7 +2355,15 @@ function EmailPanel({
               : phase.code === 'gateway_concurrency_limit'
               ? 'Agent 任务已满，请稍后再试'
               : phase.code === 'nox_quota_exhausted'
-              ? 'Nox 配额已用尽'
+              ? 'Nox 本地配额已用尽'
+              : phase.code === 'nox_saas_quota_exhausted'
+              ? 'Nox 账号积分已用尽'
+              : phase.code === 'nox_upstream_error'
+              ? 'Nox 上游接口异常'
+              : phase.code === 'contacts_cli_failed'
+              ? 'Nox 查邮箱失败'
+              : phase.code === 'no_nox_creator_or_url'
+              ? '无法查询 Nox 邮箱'
               : phase.code === 'email_already_set'
               ? '已有邮箱（需 override_existing=true 才能覆盖）'
               : phase.code === 'invalid_email' || phase.code === 'empty_email'

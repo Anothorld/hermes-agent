@@ -64,6 +64,40 @@ def gate_b_eligible(params: Mapping[str, Optional[str]]) -> bool:
     return bool(params.get("platform") and params.get("url"))
 
 
+def _email_from_facts(facts_resp: Mapping[str, Any] | None) -> Optional[str]:
+    """Return validated ``identity.email`` from CAL facts when present."""
+    raw = _facts_map(facts_resp).get("identity.email")
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip().lower()
+    return normalized if _EMAIL_RE.match(normalized) else None
+
+
+def classify_nox_contacts_cli_failure(out: Mapping[str, Any]) -> dict[str, Any]:
+    """Map ``nox_kol_tool.py contacts`` failure to Console gate_b metadata."""
+    code = out.get("error_code")
+    detail = str(out.get("detail") or code or "")
+    if code == "NOX_QUOTA_EXCEEDED":
+        return {
+            "quota_exhausted": True,
+            "skipped": True,
+            "reason": "nox_saas_quota_exhausted",
+            "detail": detail,
+        }
+    if "40017" in detail or "SaaS 40017" in detail:
+        return {
+            "skipped": True,
+            "reason": "nox_upstream_error",
+            "detail": detail,
+            "upstream_code": "40017",
+        }
+    return {
+        "skipped": True,
+        "reason": "contacts_cli_failed",
+        "detail": detail,
+    }
+
+
 async def persist_nox_contact_email(
     bridge: BridgeClient,
     *,
@@ -168,8 +202,32 @@ async def attempt_gate_b_contacts(
     if not _nox_quota_is_enabled(cfg):
         return {"skipped": True, "reason": "nox_quota_disabled"}
 
+    promoted = _email_from_facts(facts_resp)
+    if promoted and not str(ident.get("primary_email") or "").strip():
+        handle = ident.get("primary_handle")
+        if handle:
+            await bridge.upsert_identity(
+                {
+                    "primary_handle": handle,
+                    "platform": ident.get("platform") or "instagram",
+                    "primary_email": promoted,
+                    "env": env,
+                },
+            )
+            return {
+                "email_found": True,
+                "email": promoted,
+                "gate_b": True,
+                "promoted_from_facts": True,
+            }
+
     params = resolve_nox_contacts_params(ident, facts_resp)
     if not gate_b_eligible(params):
+        # #region agent log
+        import json as _json, time as _time
+        with open("/Users/arnold/agent_prj/.cursor/debug-f680ad.log", "a") as _df:
+            _df.write(_json.dumps({"sessionId": "f680ad", "hypothesisId": "H2", "location": "nox_contacts_sync.py:attempt_gate_b_contacts", "message": "gate_b not eligible", "data": {"identity_id": identity_id, "params": params}, "timestamp": int(_time.time() * 1000)}) + "\n")
+        # #endregion
         return {"skipped": True, "reason": "no_nox_creator_or_url"}
 
     try:
@@ -193,15 +251,13 @@ async def attempt_gate_b_contacts(
         tz=tz,
         monthly_budget=budget,
     )
+    # #region agent log
+    import json as _json, time as _time
+    with open("/Users/arnold/agent_prj/.cursor/debug-f680ad.log", "a") as _df:
+        _df.write(_json.dumps({"sessionId": "f680ad", "hypothesisId": "H1-H3", "location": "nox_contacts_sync.py:attempt_gate_b_contacts", "message": "nox contacts cli result", "data": {"identity_id": identity_id, "success": out.get("success"), "error_code": out.get("error_code"), "email": (out.get("normalized_summary") or {}).get("email"), "cache_hit": out.get("cache_hit")}, "timestamp": int(_time.time() * 1000)}) + "\n")
+    # #endregion
     if out.get("success") is False:
-        code = out.get("error_code")
-        if code == "NOX_QUOTA_EXCEEDED":
-            return {"quota_exhausted": True, "skipped": True, "reason": "quota_exceeded_cli"}
-        return {
-            "skipped": True,
-            "reason": "contacts_cli_failed",
-            "detail": out.get("detail") or code,
-        }
+        return classify_nox_contacts_cli_failure(out)
 
     summary = out.get("normalized_summary") or {}
     email = summary.get("email")

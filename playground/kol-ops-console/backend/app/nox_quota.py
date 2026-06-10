@@ -8,6 +8,11 @@ from typing import Any, Mapping, Optional
 _STATS_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _STATS_CACHE_TTL_SEC = 45.0
 
+
+def invalidate_nox_stats_cache(campaign_id: str, *, env: str) -> None:
+    """Drop cached ``nox-stats`` for one campaign (e.g. after config patch)."""
+    _STATS_CACHE.pop((campaign_id, env.upper()), None)
+
 from fastapi import HTTPException, status
 
 from .bridge_client import BridgeClient, BridgeError
@@ -82,6 +87,24 @@ def raise_quota_exhausted(*, campaign_id: str, env: str) -> None:
                 "Local Nox monthly budget is exhausted (remaining_estimate=0). "
                 "Open an escalation for operator approval before more LIVE Nox API calls."
             ),
+            "campaign_id": campaign_id,
+            "env": env,
+        },
+    )
+
+
+def raise_nox_saas_quota_exhausted(*, campaign_id: str, env: str, detail: str = "") -> None:
+    """409 when upstream NoxInfluencer SaaS credits are exhausted (e.g. 40017)."""
+    hint = (
+        "Nox 平台账号配额已用尽（SaaS 40017）。请联系 Nox 账号管理员充值或升级套餐后再试。"
+    )
+    if detail and "配额不足" not in detail and "40017" not in detail:
+        hint = f"{hint} 详情：{detail[:240]}"
+    raise HTTPException(
+        status.HTTP_409_CONFLICT,
+        {
+            "code": "nox_saas_quota_exhausted",
+            "message": hint,
             "campaign_id": campaign_id,
             "env": env,
         },

@@ -19,13 +19,13 @@ import datetime as _dt
 import sqlite3
 from typing import Iterable, Literal, Optional
 
-RunKind = Literal["outreach", "reply", "draft", "resume", "refine"]
+RunKind = Literal["outreach", "reply", "draft", "resume", "refine", "email_discover"]
 
 # How long a registered run is considered "in flight" for dedup purposes.
 # Preview-draft / refine usually complete in 30-60 s; we err on the long
 # side so a slow LLM or a queued run still blocks a duplicate trigger,
 # but past this window the operator can re-fire if no fact appeared.
-INFLIGHT_TTL_SECONDS = 300
+INFLIGHT_TTL_SECONDS = 100
 
 
 def finalize_run_id(

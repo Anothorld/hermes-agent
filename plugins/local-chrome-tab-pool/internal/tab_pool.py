@@ -40,7 +40,7 @@ def _truthy_env(name: str, default: bool = True) -> bool:
 
 
 def _external_browser_cdp_configured() -> bool:
-    """True when the operator wired an external shared CDP endpoint.
+    """True when the operator wired a **shared browser-level** CDP endpoint.
 
     ``start-debug-chrome.sh`` sets ``BROWSER_CDP_URL`` for the proven
     shared-connection mode — either the stable HTTP discovery form
@@ -52,18 +52,33 @@ def _external_browser_cdp_configured() -> bool:
 
     A page-level ws (``…/devtools/page/…``) is a single target, not a shared
     endpoint, so it does NOT count.
+
+    **HTTP(S) discovery URLs are compatible with tab pooling** — the pool opens
+    per-task page tabs on the same Chrome instance via ``PUT /json/new``. Only
+    browser-level WebSocket URLs force shared active-tab mode.
     """
     cdp = os.environ.get("BROWSER_CDP_URL", "").strip().lower()
     if not cdp or "/devtools/page/" in cdp:
         return False
-    return cdp.startswith(("http://", "https://", "ws://", "wss://"))
+    if cdp.startswith(("http://", "https://")):
+        return False
+    return cdp.startswith(("ws://", "wss://"))
 
 
 def is_enabled() -> bool:
-    """Return True when per-task tab pooling should be active."""
+    """Return True when per-task tab pooling should be active.
+
+    ``BROWSER_CDP_URL`` (including browser-level ``ws://…/devtools/browser/…``
+    written by ``start-debug-chrome.sh``) does **not** disable the pool.
+    The pool opens per-task page tabs via HTTP ``PUT /json/new`` and seeds
+    page-level CDP URLs into ``browser_tool._active_sessions`` before
+    ``browser_navigate`` runs, so concurrent runs do not share one active tab.
+    Set ``LOCAL_CHROME_FORCE_SHARED_CDP=1`` only to restore legacy single-tab
+    behaviour (all runs share the browser-level endpoint).
+    """
     if not _truthy_env("LOCAL_CHROME_TAB_POOL", default=True):
         return False
-    if _external_browser_cdp_configured():
+    if _truthy_env("LOCAL_CHROME_FORCE_SHARED_CDP", default=False):
         return False
     return True
 
@@ -84,6 +99,9 @@ def _debug_port() -> int:
 
 
 def _base_http_url() -> str:
+    cdp = os.environ.get("BROWSER_CDP_URL", "").strip().rstrip("/")
+    if cdp.lower().startswith(("http://", "https://")):
+        return cdp
     return f"http://127.0.0.1:{_debug_port()}"
 
 
@@ -355,6 +373,32 @@ def acquire(task_id: str) -> Dict[str, str]:
             return dict(existing)
         _task_tabs[key] = dict(info)
         logger.info("Tab pool acquired tab %s for task=%s", info["target_id"], key)
+        # #region agent log
+        try:
+            import json as _json
+            import time as _time
+
+            with open("/Users/arnold/agent_prj/.cursor/debug-46ec18.log", "a") as _df:
+                _df.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "46ec18",
+                            "hypothesisId": "H-tab-acquire",
+                            "location": "tab_pool.py:acquire",
+                            "message": "tab pool acquired",
+                            "data": {
+                                "task_key": key,
+                                "target_id": info["target_id"],
+                                "cached": existing is not None,
+                            },
+                            "timestamp": int(_time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError:
+            pass
+        # #endregion
         return dict(info)
 
 

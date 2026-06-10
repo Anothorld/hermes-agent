@@ -17,6 +17,47 @@ from .gmail_client import GmailClient
 
 log = logging.getLogger(__name__)
 
+_DEBUG_LOG_PATH = Path(
+    os.environ.get(
+        "KOL_OPS_DEBUG_LOG_PATH",
+        "/Users/arnold/agent_prj/.cursor/debug-1496d6.log",
+    ),
+)
+
+
+def _debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "1496d6",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # #endregion
+
+
+def _needs_profile_email_resolution(google_email: str) -> bool:
+    label = (google_email or "").strip().lower()
+    return label in {"", "legacy"} or label.endswith("@imported.local")
+
+
+def resolve_mailbox_email(client: GmailClient, google_email: str) -> str:
+    """Return a real Gmail address; resolve placeholders via the live profile."""
+    label = (google_email or "").strip().lower()
+    if not _needs_profile_email_resolution(label):
+        return label
+    profile = client.get_profile_email()
+    if profile:
+        return profile.strip().lower()
+    return label or "legacy"
+
 _MULTI_OPERATOR_CACHE: tuple[float, bool] | None = None
 _CONNECTION_CACHE_TTL_SEC = float(os.environ.get("KOC_GMAIL_CONNECTION_CACHE_SEC", "60"))
 
@@ -31,7 +72,7 @@ class OperatorMailbox:
 def _console_base() -> str:
     return os.environ.get(
         "KOC_CONSOLE_BASE",
-        "http://127.0.0.1:8000",
+        "http://127.0.0.1:8765",
     ).rstrip("/")
 
 
@@ -146,10 +187,72 @@ def refresh_token_file_from_console(user_id: int) -> Path | None:
     return path if path.exists() else None
 
 
+def _local_token_mailboxes() -> list[OperatorMailbox]:
+    """Offline fallback: scan on-disk operator token files when Console is unreachable."""
+    from .gmail_credentials import tokens_dir
+
+    out: list[OperatorMailbox] = []
+    token_root = tokens_dir()
+    if not token_root.is_dir():
+        return out
+    for path in sorted(token_root.glob("*.json")):
+        if path.name == "legacy.json":
+            uid = 0
+        else:
+            try:
+                uid = int(path.stem)
+            except ValueError:
+                continue
+        client = GmailClient(credentials_path=path)
+        if not client.is_available():
+            continue
+        email = resolve_mailbox_email(client, path.stem if uid == 0 else "")
+        out.append(OperatorMailbox(user_id=uid, google_email=email, client=client))
+    return out
+
+
+def _append_mailbox(
+    out: list[OperatorMailbox],
+    *,
+    user_id: int,
+    google_email: str,
+    client: GmailClient,
+    source: str,
+    raw_label: str,
+) -> None:
+    resolved = resolve_mailbox_email(client, google_email)
+    _debug_log(
+        hypothesis_id="H2",
+        location="gmail_console.py:_append_mailbox",
+        message="mailbox email resolved",
+        data={
+            "source": source,
+            "user_id": user_id,
+            "raw_label": raw_label,
+            "resolved_email": resolved,
+        },
+    )
+    out.append(OperatorMailbox(user_id=user_id, google_email=resolved, client=client))
+
+
 def list_operator_gmail_clients(*, force_refresh: bool = False) -> list[OperatorMailbox]:
     """Materialise :class:`GmailClient` instances for every connected operator."""
+    console_base = _console_base()
+    connections = fetch_gmail_connections()
+    _debug_log(
+        hypothesis_id="H1",
+        location="gmail_console.py:list_operator_gmail_clients",
+        message="gmail connection discovery",
+        data={
+            "console_base": console_base,
+            "connection_count": len(connections),
+            "connection_emails": [
+                str(row.get("google_email") or "") for row in connections[:5]
+            ],
+        },
+    )
     out: list[OperatorMailbox] = []
-    for row in fetch_gmail_connections():
+    for row in connections:
         try:
             uid = int(row.get("user_id") or 0)
         except (TypeError, ValueError):
@@ -169,10 +272,38 @@ def list_operator_gmail_clients(*, force_refresh: bool = False) -> list[Operator
         if not client.is_available():
             log.warning("gmail token unavailable for user_id=%s", uid)
             continue
-        out.append(OperatorMailbox(user_id=uid, google_email=email, client=client))
+        _append_mailbox(
+            out,
+            user_id=uid,
+            google_email=email,
+            client=client,
+            source="console",
+            raw_label=email,
+        )
     if out:
         return out
-    legacy = GmailClient()
+    local = _local_token_mailboxes()
+    if local:
+        _debug_log(
+            hypothesis_id="H3",
+            location="gmail_console.py:list_operator_gmail_clients",
+            message="using local token fallback",
+            data={
+                "mailbox_count": len(local),
+                "emails": [mb.google_email for mb in local],
+            },
+        )
+        return local
+    from .gmail_credentials import legacy_token_path
+
+    legacy = GmailClient(credentials_path=legacy_token_path())
     if legacy.is_available():
-        return [OperatorMailbox(user_id=0, google_email="legacy", client=legacy)]
+        email = resolve_mailbox_email(legacy, "legacy")
+        _debug_log(
+            hypothesis_id="H2",
+            location="gmail_console.py:list_operator_gmail_clients",
+            message="using legacy token fallback",
+            data={"resolved_email": email},
+        )
+        return [OperatorMailbox(user_id=0, google_email=email, client=legacy)]
     return []

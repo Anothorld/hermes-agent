@@ -17,7 +17,7 @@ Discovery tools embed **monthly persist** via `kol-ops-bridge` `fetch_with_persi
 | --- | --- | --- | --- |
 | `veedcrawl_account` | `/v1/me`, `/health` | 0 | No |
 | `veedcrawl_metadata` | `GET /v1/metadata` | 0 | Yes |
-| `veedcrawl_search_social_videos` | `GET /v1/search` | 0 | Yes |
+| `veedcrawl_search_social_videos` | `POST /v1/search` (+ poll) | ~5–15 / platform | Yes |
 | `veedcrawl_instagram_profile` | `GET /v1/instagram/profile` | 0 | Yes |
 | `veedcrawl_profile` | `/v1/{instagram,tiktok}/profile` | 0 | Yes |
 | `veedcrawl_transcript` | `POST /v1/transcript?url=...` (+ poll) | 1 native / 5 whisper | Plugin TTL cache only |

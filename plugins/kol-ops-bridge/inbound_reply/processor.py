@@ -8,7 +8,10 @@ import logging
 from typing import Any, Literal
 
 from ..gmail_client import GmailClient, GmailMessage, GmailUnavailable
-from ..mailbox_escalation import ensure_mailbox_mismatch_escalation
+from ..mailbox_escalation import (
+    ensure_mailbox_mismatch_escalation,
+    resolve_false_positive_mailbox_mismatch,
+)
 from .deps import BridgeRequestError, InboundDeps, MatchBridgeError
 from .gateway_client import dispatcher_instructions
 from .matcher import match_identity
@@ -18,7 +21,61 @@ from .state import register_console_run
 
 log = logging.getLogger(__name__)
 
-MailboxMismatchOutcome = Literal["none", "skip", "retry"]
+MailboxMismatchOutcome = Literal["none", "retry"]
+
+
+def _try_resolve_false_positive_mismatch(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    env: str,
+    message_id: str,
+    mismatch: dict[str, Any],
+) -> bool:
+    """Auto-close stale mismatch escalation; return True when one was cleared."""
+    if mismatch.get("mailbox_mismatch"):
+        return False
+    cleared = resolve_false_positive_mailbox_mismatch(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        message_id=message_id,
+    )
+    if cleared is None:
+        return False
+    log.info(
+        "[mailbox_mismatch] auto-resolved false-positive escalation=%s "
+        "msg=%s identity=%s",
+        cleared,
+        message_id,
+        identity_id,
+    )
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        _payload = {
+            "sessionId": "1496d6",
+            "hypothesisId": "H5",
+            "location": "processor.py:_try_resolve_false_positive_mismatch",
+            "message": "auto-resolved mailbox mismatch escalation",
+            "data": {
+                "escalation_id": cleared,
+                "message_id": message_id,
+                "identity_id": identity_id,
+                "campaign_id": campaign_id,
+            },
+            "timestamp": int(_time.time() * 1000),
+        }
+        _Path("/Users/arnold/agent_prj/.cursor/debug-1496d6.log").open(
+            "a", encoding="utf-8",
+        ).write(_json.dumps(_payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # #endregion
+    return True
 
 
 def handle_mailbox_mismatch(
@@ -57,7 +114,7 @@ def handle_mailbox_mismatch(
     except Exception as exc:  # noqa: BLE001
         log.error("mailbox mismatch escalation failed msg=%s: %s", msg.message_id, exc)
         return "retry"
-    return "skip"
+    return "retry"
 
 
 def process_message(
@@ -99,24 +156,56 @@ def process_message(
         log.error("[retry] reply_dispatch_status failed msg=%s: %s", msg.message_id, exc)
         return "retry"
 
-    if isinstance(dispatch_status, dict) and dispatch_status.get("should_skip_poller"):
-        log.info(
-            "[skip] msg=%s identity=%s already has reply draft (poller idempotency)",
-            msg.message_id,
-            identity_id,
-        )
-        return "skipped"
-
-    retry_gateway_only = bool(
-        isinstance(dispatch_status, dict)
-        and dispatch_status.get("should_retry_gateway_only")
-    )
     mismatch = mailbox_mismatch_signal(
         bridge,
         identity_id=identity_id,
         campaign_id=campaign_id,
         env=env,
         detected_mailbox_email=mailbox_email,
+    )
+
+    if isinstance(dispatch_status, dict) and dispatch_status.get("should_skip_poller"):
+        mismatch_only = (
+            dispatch_status.get("has_mailbox_mismatch_escalation")
+            and not dispatch_status.get("has_draft_ready_event")
+            and not dispatch_status.get("has_pending_reply_draft")
+        )
+        if mismatch_only and campaign_id and _try_resolve_false_positive_mismatch(
+            identity_id=identity_id,
+            campaign_id=str(campaign_id),
+            env=env,
+            message_id=msg.message_id,
+            mismatch=mismatch,
+        ):
+            try:
+                dispatch_status = bridge.reply_dispatch_status(
+                    identity_id=identity_id,
+                    campaign_id=str(campaign_id),
+                    message_id=msg.message_id,
+                    env=env,
+                )
+            except BridgeRequestError as exc:
+                log.error(
+                    "[retry] reply_dispatch_status refresh failed msg=%s: %s",
+                    msg.message_id,
+                    exc,
+                )
+                return "retry"
+        if isinstance(dispatch_status, dict) and dispatch_status.get("should_skip_poller"):
+            log.info(
+                "[skip] msg=%s identity=%s poller idempotency "
+                "(draft=%s mismatch_esc=%s)",
+                msg.message_id,
+                identity_id,
+                dispatch_status.get("has_pending_reply_draft")
+                or dispatch_status.get("has_draft_ready_event"),
+                dispatch_status.get("has_mailbox_mismatch_escalation"),
+            )
+            return "skipped"
+
+    retry_gateway_only = bool(
+        isinstance(dispatch_status, dict)
+        and dispatch_status.get("should_retry_gateway_only")
     )
 
     event_body = {
@@ -181,9 +270,7 @@ def process_message(
         mailbox_email=mailbox_email,
         mismatch=mismatch,
     )
-    if mismatch_outcome == "skip":
-        return "skipped"
-    if mismatch_outcome == "retry":
+    if mismatch_outcome == "retry" and mismatch.get("mailbox_mismatch"):
         return "retry"
 
     session_id = f"kol-reply:{env}:{identity_id}:{msg.message_id}"

@@ -41,23 +41,16 @@ def test_is_enabled_can_disable(tab_pool, monkeypatch):
     assert tab_pool.is_enabled() is False
 
 
-def test_is_enabled_defers_to_shared_cdp(tab_pool, monkeypatch):
+def test_is_enabled_stays_on_with_browser_level_cdp(tab_pool, monkeypatch):
     monkeypatch.delenv("LOCAL_CHROME_TAB_POOL", raising=False)
-    # Browser-level ws shared endpoint → pool steps aside.
+    monkeypatch.delenv("LOCAL_CHROME_FORCE_SHARED_CDP", raising=False)
+    # start-debug-chrome.sh writes browser-level ws — pool still active.
     monkeypatch.setenv(
         "BROWSER_CDP_URL", "ws://127.0.0.1:9222/devtools/browser/abc-123",
     )
-    assert tab_pool.is_enabled() is False
-    # Stable HTTP discovery endpoint → also a shared endpoint → step aside.
-    monkeypatch.setenv("BROWSER_CDP_URL", "http://127.0.0.1:9222")
-    assert tab_pool.is_enabled() is False
-    # A page-level ws is a single target, not a shared endpoint → pool stays on.
-    monkeypatch.setenv(
-        "BROWSER_CDP_URL", "ws://127.0.0.1:9222/devtools/page/PAGE1",
-    )
     assert tab_pool.is_enabled() is True
-    monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
-    assert tab_pool.is_enabled() is True
+    monkeypatch.setenv("LOCAL_CHROME_FORCE_SHARED_CDP", "1")
+    assert tab_pool.is_enabled() is False
 
 
 def test_normalize_task_id_strips_sidecar_suffix(tab_pool):
@@ -108,6 +101,7 @@ def test_acquire_closes_orphan_when_race_lost(tab_pool, monkeypatch):
         return info
 
     monkeypatch.setattr(tab_pool, "_create_tab", fake_create_and_race)
+    monkeypatch.setattr(tab_pool, "reap_orphan_blank_tabs", lambda: 0)
     tab_pool._task_tabs.clear()
 
     info = tab_pool.acquire("task-race")

@@ -105,6 +105,11 @@ function extractDetail(body: string): string | null {
             '再继续 LIVE 尽调 / 查邮箱 / 补搜。'
           );
         }
+        if (inner.code === 'nox_saas_quota_exhausted') {
+          return typeof inner.message === 'string'
+            ? inner.message
+            : 'Nox 平台账号配额已用尽（SaaS 40017）。请联系 Nox 账号管理员充值后再试。';
+        }
         if (inner.code === 'gateway_concurrency_limit') {
           return typeof inner.message === 'string'
             ? inner.message

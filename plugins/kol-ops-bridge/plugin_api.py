@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Mapping, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from fastapi import Path as FastAPIPath
 from pydantic import BaseModel, Field, field_validator
 
@@ -404,6 +404,22 @@ class InboundPollerStartBody(BaseModel):
     interval: int = Field(default=60, ge=15, le=3600)
     lookback_days: int = Field(default=3, ge=1, le=30)
     max_results: int = Field(default=50, ge=1, le=500)
+
+
+def _inbound_poller_run_once_defaults() -> InboundPollerStartBody:
+    """Default run-once body from persisted poller config (falls back to LIVE)."""
+    from . import gmail_inbound_poller
+
+    state = gmail_inbound_poller.load_state()
+    env = str(state.get("env") or "LIVE").strip().upper()
+    if env not in {"TEST", "LIVE"}:
+        env = "LIVE"
+    return InboundPollerStartBody(
+        env=env,
+        interval=max(15, int(state.get("interval") or 60)),
+        lookback_days=max(1, int(state.get("lookback_days") or 3)),
+        max_results=max(1, int(state.get("max_results") or 50)),
+    )
 
 
 class BackfillEditLearningBody(BaseModel):
@@ -2809,7 +2825,7 @@ def inbound_poller_restart(
 
 @router.post("/gmail/inbound-poller/run-once")
 def inbound_poller_run_once(
-    body: InboundPollerStartBody,
+    body: InboundPollerStartBody = Body(default_factory=lambda: _inbound_poller_run_once_defaults()),
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
     """One-shot inbound poll (same as CLI without --watch)."""

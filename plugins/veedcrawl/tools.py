@@ -684,8 +684,9 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "this function tool directly with JSON args, never via terminal."
     ),
     "veedcrawl_search_social_videos": (
-        "Search public social videos (free). Requires q — call this function tool "
-        "directly with JSON args, never via terminal."
+        "Search public social videos via POST /v1/search async job (~5–15 credits "
+        "per platform). Requires q — call this function tool directly with JSON "
+        "args, never via terminal."
     ),
     "veedcrawl_job": (
         "Look up a prior veedcrawl_transcript or veedcrawl_extract async job."

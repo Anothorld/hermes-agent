@@ -38,7 +38,7 @@ from ..campaign_config_sync import (
 from ..campaign_locks import campaign_lock
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
-from ..nox_dispatch import dispatch_nox_contacts_batch
+from ..email_discover_dispatch import dispatch_email_discovery_for_approved_identities
 from ..nox_gate import (
     extract_campaign_config,
     materialize_campaign_config_file,
@@ -58,6 +58,7 @@ _SHORTLIST_BATCH_FACT_KEYS: list[str] = list(dict.fromkeys([
 from ..nox_quota import (
     assert_nox_quota_available,
     fetch_campaign_nox_stats,
+    invalidate_nox_stats_cache,
     open_nox_quota_escalation,
 )
 from ..bridge_agent_contract_loader import (
@@ -245,37 +246,24 @@ _APPROVAL_INSTRUCTIONS = (
     "   absent, use relationship.total_collabs (0 => cold, >0 =>\n"
     "   reengagement). If last_outcome is disputed/content_failed/aborted,\n"
     "   open an escalation and do not draft for that KOL.\n"
-    "4. ENRICHMENT (before any draft skill). For each approved identity\n"
-    "   whose `primary_email` (from get-identity) is empty or null:\n"
-    "   **NO browser / Chrome DevTools MCP in this run** — discovery already\n"
-    "   finished. Email enrichment is API-only (Nox) then escalation on miss.\n"
-    "   a0) If `campaign_config.nox_quota_enabled` is true, run\n"
-    "       `kol-nox-diligence` contacts path first:\n"
-    f"       `{_REPO_ROOT}/plugins/nox-kol-bridge/scripts/nox_kol_tool.py contacts`\n"
-    "       `--env <env> --gate pre_outreach_confirm --campaign-config-file ...`\n"
-    "       (or platform+url). On hit with email_quality>=1, persist email\n"
-    "       via `upsert-identity` + `identity.email_source=noxinfluencer_api`.\n"
-    "       Skip kol-email-discovery when email is now present.\n"
-    "   a) Only when Nox is disabled or returns no email: invoke\n"
-    "      `kol-email-discovery` (process identities sequentially).\n"
-    "      Tier 1: local Chrome Google via `browser_navigate` to\n"
-    "      google.com/search — NOT web_search/web_extract. Tier 2 browser:\n"
-    "      one page, single attempt; navigate/snapshot error or timeout →\n"
-    "      record in `tried` and move on; never hang the run.\n"
-    "      The skill returns `{found: true, email, source, tier, ...}` on\n"
-    "      hit (and has already persisted `primary_email` + provenance\n"
-    "      facts) or `{found: false, tried: [...]}` on miss.\n"
-    "   b) On hit: continue to step 5 for this identity.\n"
-    "   c) On miss: do NOT call `kol-cold-outreach` /\n"
-    "      `kol-reengagement-outreach` for this identity. Open an\n"
-    "      escalation via the bridge CLI with\n"
-    "      reason=`contact_email_not_found`, identity_id, campaign_id,\n"
-    "      and `question_to_operator` containing the `tried` list verbatim\n"
-    "      so the operator can see what was checked. Continue to the next\n"
-    "      approved identity — never invent an address, never invoke a\n"
-    "      draft skill without a verified email.\n"
-    "   Identities that already had a non-empty `primary_email` skip\n"
-    "   enrichment and proceed directly to step 5.\n"
+    "4. ENRICHMENT (before any draft skill). For each approved identity,\n"
+    "   call `get-identity` and check `primary_email`.\n"
+    "   **NO browser / Chrome DevTools MCP in this outreach run** — Console\n"
+    "   already queued `kol-email-discovery` (Nox Gate B + browser) for\n"
+    "   identities listed under `# email_discovery_queued` in the input brief.\n"
+    "   a) Non-empty `primary_email` → proceed to step 5.\n"
+    "   b) Empty email AND identity listed under `# email_discovery_queued`\n"
+    "      (status started/queued/accepted/inflight): skip drafting for this\n"
+    "      identity, do NOT open `contact_email_not_found` escalation — report\n"
+    "      `pending_email_discovery` in the per-KOL summary. The discover run\n"
+    "      will persist the email or open its own escalation on miss.\n"
+    "   c) Empty email AND NOT in `# email_discovery_queued` (Gate B hit on\n"
+    "      approve, quota skip, or discover launch failed): open escalation\n"
+    "    `contact_email_not_found` with identity_id, campaign_id, and a short\n"
+    "      简体中文 `question_to_operator` explaining email is still missing after\n"
+    "      approve. Continue to the next identity — never invent an address.\n"
+    "   d) Never invoke `kol-cold-outreach` / `kol-reengagement-outreach`\n"
+    "      without a verified `primary_email`.\n"
     "5. IDEMPOTENCY GATE (run BEFORE any draft skill invocation). For\n"
     "   each approved identity, call `get-facts --identity-id <id>\n"
     "   --campaign-id <id> --env <env>` and check:\n"
@@ -331,10 +319,11 @@ _APPROVAL_INSTRUCTIONS = (
     "  HERMES_KOL_OPS_BRIDGE_KEY; do not bypass CAL.\n"
     "- If required product facts are missing, open an escalation through\n"
     "  the bridge CLI instead of inventing values.\n"
-    "- Missing `primary_email` is NOT a hard failure: it is the trigger\n"
-    "  for step 4 (kol-email-discovery). Only if step 4 returns\n"
-    "  `found: false` do you open a `contact_email_not_found` escalation\n"
-    "  and skip the draft skill for that identity.\n"
+    "- Missing `primary_email` triggers step 4. Console queues\n"
+    "  `kol-email-discovery` on approve; do NOT re-run browser discovery\n"
+    "  in this outreach session. Open `contact_email_not_found` only for\n"
+    "  identities still missing email that are NOT under\n"
+    "  `# email_discovery_queued`.\n"
     "- Never invent an email address. Never invoke a draft skill for an\n"
     "  identity that does not have a verified `primary_email` after\n"
     "  step 4.\n"
@@ -344,14 +333,14 @@ _APPROVAL_INSTRUCTIONS = (
     "  (i)  Skill DID execute and returned no draft envelope (or a\n"
     "       malformed envelope). Open escalation with reason\n"
     "       `initial_outreach_draft_missing` and put the skill's actual\n"
-    "       return value (truncated) into `question_to_operator`.\n"
+    "       return value (truncated) into 简体中文 `question_to_operator`.\n"
     "  (ii) Skill could NOT be executed at all — e.g. SKILL.md unreadable,\n"
     "       tooling/runner confusion, transient bridge error during a\n"
     "       SKILL.md-dictated CAL call. Open escalation with reason\n"
     "       `child_skill_invocation_failed` and put the concrete failure\n"
     "       mode (\"could not locate SKILL.md\", \"bridge 503 on\n"
     "       get-facts\", \"argparse rejected subcommand X\", etc.) into\n"
-    "       `question_to_operator`. NEVER fall back to\n"
+    "       简体中文 `question_to_operator`. NEVER fall back to\n"
     "       `initial_outreach_draft_missing` for this case.\n"
 )
 
@@ -2583,6 +2572,48 @@ def _merge_prior_outreach_touch(
     return None
 
 
+def _shortlist_touch_handles(candidates: list[dict[str, Any]]) -> list[str]:
+    """Deduped shortlist handles for workbook touch lookup."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        if not isinstance(c.get("handle"), str):
+            continue
+        handle = str(c["handle"]).strip().lstrip("@")
+        if not handle:
+            continue
+        key = handle.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(handle)
+    return out
+
+
+def _parse_internal_touch_count(raw: Any) -> int:
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return 0
+
+
+def _apply_internal_touch_counts(
+    candidates: list[dict[str, Any]],
+    items: dict[str, Any],
+) -> None:
+    """Attach ``internal_touch_count`` from bridge batch items (id + handle keys)."""
+    for c in candidates:
+        count = 0
+        iid = c.get("identity_id")
+        if isinstance(iid, int):
+            count = _parse_internal_touch_count(items.get(str(iid)))
+        if count <= 0 and isinstance(c.get("handle"), str):
+            handle_key = f"h:{str(c['handle']).lstrip('@')}"
+            count = _parse_internal_touch_count(items.get(handle_key))
+        c["internal_touch_count"] = count
+
+
 async def _enrich_shortlist_rows(
     bridge: BridgeClient,
     candidates: list[dict[str, Any]],
@@ -2598,11 +2629,7 @@ async def _enrich_shortlist_rows(
         if isinstance(c.get("identity_id"), int)
     ]
     if not profile_ids:
-        handle_only = [
-            str(c["handle"]).lstrip("@")
-            for c in candidates
-            if isinstance(c.get("handle"), str) and str(c["handle"]).strip()
-        ]
+        handle_only = _shortlist_touch_handles(candidates)
         if handle_only:
             try:
                 internal_touch_result = await bridge.batch_internal_touch_count(
@@ -2616,17 +2643,7 @@ async def _enrich_shortlist_rows(
                 raw_internal = internal_touch_result.get("items")
                 if isinstance(raw_internal, dict):
                     internal_touch_items = raw_internal
-            for c in candidates:
-                if not isinstance(c.get("handle"), str):
-                    continue
-                handle_key = f"h:{str(c['handle']).lstrip('@')}"
-                raw_count = internal_touch_items.get(handle_key)
-                if isinstance(raw_count, int):
-                    c["internal_touch_count"] = raw_count
-                elif isinstance(raw_count, str) and raw_count.isdigit():
-                    c["internal_touch_count"] = int(raw_count)
-                else:
-                    c["internal_touch_count"] = 0
+            _apply_internal_touch_counts(candidates, internal_touch_items)
         await enrich_shortlist_profile_og(
             bridge,
             candidates,
@@ -2647,13 +2664,7 @@ async def _enrich_shortlist_rows(
         bridge.batch_internal_touch_count(
             env=env,
             identity_ids=profile_ids,
-            handles=[
-                str(c["handle"]).lstrip("@")
-                for c in candidates
-                if not isinstance(c.get("identity_id"), int)
-                and isinstance(c.get("handle"), str)
-                and str(c["handle"]).strip()
-            ],
+            handles=_shortlist_touch_handles(candidates),
         ),
         return_exceptions=True,
     )
@@ -2671,25 +2682,10 @@ async def _enrich_shortlist_rows(
         if isinstance(raw_internal, dict):
             internal_touch_items = raw_internal
 
+    _apply_internal_touch_counts(candidates, internal_touch_items)
+
     for c in candidates:
         iid = c.get("identity_id")
-        if isinstance(iid, int):
-            raw_count = internal_touch_items.get(str(iid))
-            if isinstance(raw_count, int):
-                c["internal_touch_count"] = raw_count
-            elif isinstance(raw_count, str) and raw_count.isdigit():
-                c["internal_touch_count"] = int(raw_count)
-            else:
-                c["internal_touch_count"] = 0
-        elif isinstance(c.get("handle"), str):
-            handle_key = f"h:{str(c['handle']).lstrip('@')}"
-            raw_count = internal_touch_items.get(handle_key)
-            if isinstance(raw_count, int):
-                c["internal_touch_count"] = raw_count
-            elif isinstance(raw_count, str) and raw_count.isdigit():
-                c["internal_touch_count"] = int(raw_count)
-            else:
-                c["internal_touch_count"] = 0
         if not isinstance(iid, int):
             continue
         facts = facts_by_id.get(iid) or {}
@@ -2837,6 +2833,7 @@ def _compose_approval_brief(
     actor_email: str,
     actor_user_id: int | None = None,
     test_mode_to: str | None,
+    email_discovery_queued: list[dict[str, Any]] | None = None,
 ) -> str:
     lines = [
         "# campaign_approval",
@@ -2866,11 +2863,24 @@ def _compose_approval_brief(
         "",
         terminal_safety_rules(repo_root=_REPO_ROOT),
         "",
-        "## Nox contacts (Gate B)",
-        "If `campaign_config.nox_quota_enabled` is true, for each approved identity "
-        "without `primary_email`, run `nox_kol_tool.py contacts --gate pre_outreach_confirm` "
-        "with `--campaign-config-file` before browser email-discovery.",
-        "",
+    ])
+    if email_discovery_queued:
+        lines.extend([
+            "# email_discovery_queued",
+            (
+                "Console queued kol-email-discovery (Nox Gate B + browser) "
+                "before this outreach run for these identities:"
+            ),
+        ])
+        for item in email_discovery_queued:
+            lines.append(f"- identity_id: {item.get('identity_id')}")
+            if item.get("handle"):
+                lines.append(f"  handle: {item['handle']}")
+            lines.append(f"  status: {item.get('status', 'queued')}")
+            if item.get("run_id"):
+                lines.append(f"  run_id: {item['run_id']}")
+        lines.append("")
+    lines.extend([
         "## Draft format (initial outreach — POVISON 683)",
         "Before `kol-cold-outreach` / `kol-reengagement-outreach`: "
         "`kol-email-style-loader` (pass `--owner-user-id <approved_by_user_id>` when "
@@ -2893,11 +2903,14 @@ async def campaign_nox_stats(
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
     env: str = Query("LIVE", pattern="^(LIVE|TEST)$"),
+    bypass_cache: bool = Query(False, description="Skip 45s stats cache (after config save)"),
 ) -> dict[str, Any]:
     """Local Nox cache/ledger stats (+ supplement usage when campaign known)."""
     _ = user
     try:
-        stats = await fetch_campaign_nox_stats(bridge, campaign_id, env=env)
+        stats = await fetch_campaign_nox_stats(
+            bridge, campaign_id, env=env, bypass_cache=bypass_cache,
+        )
     except (FileNotFoundError, RuntimeError) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return {"ok": True, "campaign_id": campaign_id, "stats": stats}
@@ -3157,6 +3170,22 @@ async def approve_shortlist(
             event_id = event.get("event_id")
             if isinstance(event_id, int):
                 event_ids.append(event_id)
+        email_discovery_outcomes = await dispatch_email_discovery_for_approved_identities(
+            bridge=bridge,
+            gateway=gateway,
+            conn=conn,
+            campaign_id=campaign_id,
+            env=body.env,
+            selected_rows=selected_rows,
+            actor_email=user["email"],
+            actor_user_id=user["id"],
+        )
+        email_discovery_queued = [
+            item for item in email_discovery_outcomes
+            if item.get("status") in (
+                "started", "queued", "accepted", "inflight",
+            )
+        ]
         approval_brief = _compose_approval_brief(
             campaign_id=campaign_id,
             env=body.env,
@@ -3164,6 +3193,7 @@ async def approve_shortlist(
             actor_email=user["email"],
             actor_user_id=user.get("id"),
             test_mode_to=test_mode_to,
+            email_discovery_queued=email_discovery_queued,
         )
         try:
             session_id = f"kol-campaign-outreach:{body.env}:{campaign_id}"
@@ -3222,30 +3252,20 @@ async def approve_shortlist(
                 session_id=f"kol-campaign-outreach:{body.env}:{campaign_id}",
                 dedup_key=dedup_key,
             )
-        nox_contacts_batch = await dispatch_nox_contacts_batch(
-            bridge=bridge,
-            gateway=gateway,
-            conn=conn,
-            campaign_id=campaign_id,
-            env=body.env,
-            identity_ids=identity_ids,
-            actor_user_id=user["id"],
-            actor_email=user["email"],
-        )
         write_audit(
             conn, actor_user_id=user["id"],
             action="campaign.approve_shortlist",
             target=campaign_id,
             payload={**payload, "selected_handles": body.selected_handles,
                      "run_id": new_run_id, "event_ids": event_ids,
-                     "nox_contacts_batch": nox_contacts_batch},
+                     "email_discovery": email_discovery_outcomes},
         )
         return {
             **route_out,
             "run_id": new_run_id,
             "approved_count": len(identity_ids),
             "event_ids": event_ids,
-            "nox_contacts_batch": nox_contacts_batch,
+            "email_discovery": email_discovery_outcomes,
         }
 
 
@@ -4084,6 +4104,7 @@ async def patch_campaign_config(
         await bridge.upsert_campaign(campaign_id, payload)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    invalidate_nox_stats_cache(campaign_id, env=env)
     write_audit(
         conn, actor_user_id=user["id"], action="campaign.config_patch",
         target=campaign_id, payload=payload,

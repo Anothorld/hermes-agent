@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 
-from plugins.veedcrawl._internal import cache, http as _http, jobs, rate_limit
+from plugins.veedcrawl._internal import cache, http as _http, jobs, rate_limit, search
 from plugins.veedcrawl._internal.errors import (
     VeedcrawlAPIError,
     VeedcrawlAuthRequiredError,
@@ -218,32 +218,19 @@ class VeedcrawlClient:
         platform: Optional[str] = None,
         limit: int = 6,
         force_refresh: bool = False,
+        timeout_s: float = _DEFAULT_TIMEOUT_S,
     ) -> list[dict[str, Any]]:
-        """``GET /v1/search`` — synchronous array response (REST, documented free)."""
-        query = (q or "").strip()
-        if not query:
-            raise VeedcrawlAPIError("search requires non-empty q", status_code=400)
-        limit = max(1, min(int(limit), 20))
-        params: dict[str, Any] = {"q": query, "limit": limit}
-        if platform:
-            params["platform"] = str(platform).strip().lower()
-        cache_key = {"q": query, **params}
-        if not force_refresh:
-            cached = cache.get("search", cache_key)
-            if cached is not None:
-                if isinstance(cached, list):
-                    return cached
-                if isinstance(cached, dict) and isinstance(cached.get("items"), list):
-                    return cached["items"]
-        payload, headers = self._request("GET", "/v1/search", params=params)
-        if isinstance(payload, list):
-            items = payload
-        elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
-            items = payload["items"]
-        else:
-            items = []
-        cache.put("search", cache_key, items, ttl_s=_CACHE_TTL_METADATA)
-        return items
+        """``POST /v1/search`` async job — returns normalized result list."""
+        return search.run_search(
+            q=q,
+            platform=platform,
+            limit=limit,
+            force_refresh=force_refresh,
+            timeout_s=timeout_s,
+            request=self._request,
+            ensure_credits=self._ensure_credits,
+            sleep=self._sleep,
+        )
 
     def transcript(  # async job
 

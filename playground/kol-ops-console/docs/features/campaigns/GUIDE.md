@@ -29,7 +29,7 @@
 | GET | `/campaigns/{id}/lanes` | 看板泳道数据（Bridge 批量读 CAL，**仅 shortlist 已批准**的 KOL；Console 约 8s 缓存） |
 | GET/PATCH | `/campaigns/{id}/config` | 活动配置 |
 | GET/POST | `/campaigns/{id}/candidates/*` | 发现池（GET 使用 handle JOIN，含 `total_collabs`） |
-| GET | `/campaigns/{id}/shortlist` | 短名单（`social_links`、`link_previews` 按 URL、`preview_facts`、Nox、`prior_outreach_touch`、**`internal_touch_count`**（曾触达列表.xlsx，同指标页「内部曾触达次数」））；默认 **快速路径**（单次 `batch_facts_subset` + 缓存 OG）；`?prefetch_og=1` 为慢路径（逐人 `read_facts` +  live OG，供 Refresh） |
+| GET | `/campaigns/{id}/shortlist` | 短名单（`social_links`、`link_previews` 按 URL、`preview_facts`、Nox、`prior_outreach_touch`、**`internal_touch_count`**（曾触达列表.xlsx，同指标页「内部曾触达次数」））；默认 **快速路径**（单次 `batch_facts_subset` + 缓存 OG）；`?prefetch_og=1` 为慢路径（逐人 `read_facts` +  live OG，供 Refresh）。**依赖 Bridge `GET /identities/internal-touch-count`** — 部署/更新 bridge 插件后需重启 bridge 进程，否则标签恒为 0。 |
 | GET | `/campaigns/{id}/agent-stream` | SSE  transcript |
 | POST | `/reply-watcher/*` | 入站回信监听（Bridge 内置 worker；`reconcile-sent` 为 SENT 对账）。产品页卡片展示 `running` / `enabled` / `inbound_disabled` 与 `last_tick_stats`（含 retry、deferred、errors） |
 
@@ -88,7 +88,9 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 
 1. 将操作员勾选的 handle 解析为 `identity_ids`
 2. **`route-discovery`（scoped）** — 仅对这批 `identity_ids` 写 `identity.outreach_path` 并 `select-candidates`；**不会**把池内其余 `discovered` 候选一并提升为已批准（**不再**重复调用 `select-candidates`，避免大批量超时）
-3. 写 `approved` 事件 + **带重试**拉起 post-approval gateway run（`bridge_approve_timeout_sec` 默认 180s；gateway 502/503/504 自动重试 2 次）
+3. **缺邮箱自动排队** — 对每个 `primary_email` 为空的已批 identity，Console 同步跑 Nox Gate B（LIVE + `nox_quota_enabled`）后排队 `kol-email-discover:{env}:{id}`（与详情页「全网搜索」同路径）；Gate B 命中则跳过 browser。响应体含 `email_discovery[]`。
+4. 写 `approved` 事件 + **带重试**拉起 post-approval gateway run（`bridge_approve_timeout_sec` 默认 180s；gateway 502/503/504 自动重试 2 次）；brief 含 `# email_discovery_queued`，outreach agent 对队列中的身份 **不** 开 `contact_email_not_found` escalation，报告 `pending_email_discovery`。
+5. **邮箱发现完成后自动起草** — `run_state_reconciler` 在 `kol-email-discover:*` run 到达 `completed` 且 `primary_email` 已写入、该 identity 仍为 `selected_for_outreach`、尚无待审批草稿时，自动拉起单 KOL 的 `kol-campaign-draft:*` run（与详情页 `redraft-outreach` 同 brief/技能）。audit 记 `campaign.auto_draft_after_email_discover`。有邮箱的 KOL 仍在步骤 4 的 outreach run 中同步起草，不等待队列。
 
 若 CAL 已更新但 gateway 启动失败，audit 会记 `campaign.approve_shortlist_gateway_failed`；操作员可再次点击批准（idempotent）或联系工程。
 
@@ -99,7 +101,7 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 Console `POST …/approve-shortlist` 拉起 gateway run（session `kol-campaign-outreach:{env}:{id}`，与 discovery 的 `kol-campaign:` 分离）；brief 含 `bridge_cli_checklist`：
 
 - 只用 **terminal** + **绝对路径** `kol-bridge-cli`（禁止 bare `python`、禁止相对 `plugins/…`、禁止 execute_code/curl）
-- **禁止 browser / Chrome DevTools MCP** 做 post-approval 邮箱 enrichment（Nox API → 失败则 escalation；guard 在 outreach/reply/draft 前缀 block `browser_*`，**所有** `kol-*` session block `mcp_chrome_devtools_*`）
+- **禁止 browser / Chrome DevTools MCP** 在 outreach run 内做邮箱 enrichment（邮箱发现由批准前/批准时排队的 `kol-email-discover:*` 完成；guard 在 outreach/reply/draft 前缀 block `browser_*`，**所有** `kol-*` session block `mcp_chrome_devtools_*`）
 - 冷触达草稿：`persist-initial-outreach-draft`（稳定 `draft:outreach_{campaign}_{identity}`）
 
 ### 草稿正文必须是 HTML（POVISON 683 根因修复）

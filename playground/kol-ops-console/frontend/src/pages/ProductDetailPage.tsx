@@ -25,6 +25,7 @@ import {
   resolveLaunchRunId,
 } from '../lib/launchJobs';
 import type { NoxStatsPayload } from '../components/NoxQuotaBanner';
+import { isAsyncNoxBatchJob, pollNoxBatchJob } from '../lib/noxBatchJobs';
 
 type ProductVariant = {
   id: string;
@@ -420,10 +421,12 @@ function ShortlistReviewPanel({
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [noxStats, setNoxStats] = useState<NoxStatsPayload | null>(null);
 
-  const fetchNoxStats = async () => {
+  const fetchNoxStats = async (bypassCache = false) => {
     try {
+      const qs = new URLSearchParams({ env });
+      if (bypassCache) qs.set('bypass_cache', '1');
       const r = await api.get<{ stats?: NoxStatsPayload }>(
-        `/campaigns/${encodeURIComponent(campaignId)}/nox-stats?env=${env}`,
+        `/campaigns/${encodeURIComponent(campaignId)}/nox-stats?${qs.toString()}`,
       );
       setNoxStats(r.stats ?? null);
     } catch {
@@ -469,7 +472,7 @@ function ShortlistReviewPanel({
   }, [campaignId, env]);
 
   useEffect(() => {
-    if (configRefreshKey > 0) void fetchNoxStats();
+    if (configRefreshKey > 0) void fetchNoxStats(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configRefreshKey]);
 
@@ -548,17 +551,43 @@ function ShortlistReviewPanel({
     setNoxBatchBusy(true);
     setActionErr(null);
     try {
-      const r = await api.post<{ run_id?: string }>('/kols/nox-diligence-batch', {
+      const r = await api.post<{
+        run_id?: string;
+        job_id?: string;
+        status?: string;
+        processed_count?: number;
+        error_count?: number;
+        processed?: unknown[];
+        errors?: unknown[];
+        identity_count?: number;
+      }>('/kols/nox-diligence-batch', {
         env,
         campaign_id: campaignId,
         identity_ids: selectedIdentityIds,
       });
-      const n = r.processed_count ?? r.processed?.length ?? 0;
-      const errN = r.error_count ?? r.errors?.length ?? 0;
-      toast.success(
-        'Nox 批量尽调完成',
-        `成功 ${n} 人${errN ? ` · 失败 ${errN}` : ''}`,
-      );
+      let outcome = r;
+      if (isAsyncNoxBatchJob(r)) {
+        toast.info(
+          'Nox 批量尽调已开始',
+          `共 ${r.identity_count ?? selectedIdentityIds.length} 人，请稍候…`,
+        );
+        outcome = await pollNoxBatchJob(r.job_id);
+      }
+      const n = outcome.processed_count ?? outcome.processed?.length ?? 0;
+      const errN = outcome.error_count ?? outcome.errors?.length ?? 0;
+      if (n === 0 && errN > 0) {
+        const sample = (outcome.errors as { reason?: string }[] | undefined)?.[0]?.reason;
+        toast.error(
+          'Nox 批量尽调未成功',
+          `失败 ${errN} 人${sample ? ` · ${sample}` : ''}`,
+        );
+        setActionErr(`Nox 批量尽调失败 ${errN} 人${sample ? `（${sample}）` : ''}`);
+      } else {
+        toast.success(
+          'Nox 批量尽调完成',
+          `成功 ${n} 人${errN ? ` · 失败 ${errN}` : ''}`,
+        );
+      }
       void fetchNoxStats();
     } catch (ex) {
       setActionErr(errorSummary(ex));

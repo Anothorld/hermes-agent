@@ -68,3 +68,34 @@ def test_reply_dispatch_status_skips_on_mailbox_mismatch_esc(cal_db, bridge_pkg)
     )
     assert out["has_mailbox_mismatch_escalation"] is True
     assert out["should_skip_poller"] is True
+
+
+def test_resolve_false_positive_mailbox_mismatch(cal_db, bridge_pkg, monkeypatch):
+    me = bridge_pkg.mailbox_escalation
+    resolved: list[int] = []
+
+    monkeypatch.setattr(
+        me.cal,
+        "list_escalations",
+        lambda **_k: [{
+            "id": 42,
+            "identity_id": 1,
+            "campaign_id": "C1",
+            "reason": "inbound_mailbox_mismatch",
+            "resume_context": {"source_message_id": "MSG1"},
+        }],
+    )
+    monkeypatch.setattr(
+        me.cal,
+        "resolve_escalation",
+        lambda **kwargs: resolved.append(kwargs["escalation_id"]),
+    )
+
+    esc_id = me.resolve_false_positive_mailbox_mismatch(
+        identity_id=1,
+        campaign_id="C1",
+        env="TEST",
+        message_id="MSG1",
+    )
+    assert esc_id == 42
+    assert resolved == [42]

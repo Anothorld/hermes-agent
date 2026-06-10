@@ -26,21 +26,15 @@ from ..nox_contacts_sync import attempt_gate_b_contacts
 from ..nox_diligence_sync import attempt_gate_a_diligence
 from ..nox_gate import materialize_campaign_config_file, require_nox_quota_enabled
 from ..nox_helpers import dedup_identity_ids_by_nox_creator
-from ..nox_quota import assert_nox_quota_available, raise_quota_exhausted
+from ..nox_quota import assert_nox_quota_available, raise_nox_saas_quota_exhausted, raise_quota_exhausted
 from ..bridge_agent_contract_loader import (
     gateway_contract_for_brief,
     terminal_safety_rules,
 )
 from ..background_jobs import create_job, get_job, run_in_background
 from ..launch_accept import launch_or_accept
-from ..launch_rollback import rollback_discover_email_failure
-from ..run_launch_queue import new_pending_run_id
-from ..run_registry import (
-    INFLIGHT_TTL_SECONDS,
-    finalize_run_id,
-    get_inflight_run,
-    register_run,
-)
+from ..email_discover_dispatch import dispatch_email_discovery_for_identity
+from ..run_registry import INFLIGHT_TTL_SECONDS, get_inflight_run, register_run
 
 router = APIRouter(prefix="/kols", tags=["kols"])
 
@@ -53,6 +47,7 @@ async def _start_detached_gateway_run(
     action_label: str,
     dedup_key: str | None = None,
     on_success: Any = None,
+    on_error: Any = None,
     job_meta: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> tuple[bool, dict[str, Any]]:
@@ -75,6 +70,7 @@ async def _start_detached_gateway_run(
             dedup_key=dedup_key,
             kind=kind,
             on_success=on_success,
+            on_error=on_error,
             job_meta=job_meta,
         )
     except GatewayError as exc:
@@ -452,100 +448,6 @@ class DiscoverEmailBody(CampaignIdNormaliserMixin):
     campaign_id: str | None = None
 
 
-_DISCOVER_EMAIL_INSTRUCTIONS = (
-    "You are running the `kol-email-discovery` skill for ONE specific\n"
-    "KOL identity at the request of the web console operator. Do NOT\n"
-    "loop over any other identity in this campaign.\n"
-    "\n"
-    "## Runtime contract (MEMORIZE before any tool call)\n"
-    f"{gateway_contract_for_brief(compact=True)}\n"
-    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
-    f"- Repo root for file tools is {_REPO_ROOT}.\n"
-    "- CLI failures print JSON on **stdout**. Empty output + exit 2 → read\n"
-    "  stdout for `error`/`hint`; never fall back to execute_code.\n"
-    "\n"
-    "## Pipeline\n"
-    "1. Read the identity row. If `primary_email` is already non-empty,\n"
-    "   stop immediately and report `{skipped: \"already_has_email\"}`.\n"
-    "   Do NOT overwrite an existing email under any circumstance.\n"
-    "1b. Gate B (Nox contacts) may already have run on the Console server\n"
-    "    before this gateway run (`gate_b_attempted: true` in brief). If not,\n"
-    "    and `campaign_config.nox_quota_enabled` with creator id or channel URL,\n"
-    "    run `nox_kol_tool.py contacts --gate pre_outreach_confirm` first.\n"
-    "    On email hit, stop — do not run browser discovery.\n"
-    "2. Invoke the `kol-email-discovery` skill with the supplied\n"
-    "   identity_id, env, and campaign_id. The skill resolves the\n"
-    "   email from public web sources (link-in-bio, personal site,\n"
-    "   media kit) and writes `primary_email` via `upsert-identity`\n"
-    "   plus provenance facts via `write-facts-multi`.\n"
-    "   **Browser tools:** Tier 1 + Tier 2 use built-in `browser_*` only.\n"
-    "   **NEVER** call `mcp_chrome_devtools_*` — remote CDP is unreachable.\n"
-    "   **NEVER** use `veedcrawl_*` (video/profile supplement — not for email),\n"
-    "   `delegate_task`, `execute_code` (browser/hermes_tools imports), or\n"
-    "   `terminal` curl/urllib/requests HTTP fetching (DuckDuckGo, Google,\n"
-    "   beacons.ai, bio.link, Instagram, any web page).\n"
-    "   **NEVER** use `web_search` / `web_extract` — Tier 1 Google search\n"
-    "   uses local debug Chrome: `browser_navigate` to\n"
-    "   `https://www.google.com/search?q=...` then `browser_snapshot`, open\n"
-    "   promising result URLs the same way. Tier 2 (JS-gated: Instagram /\n"
-    "   Linktree / Beacons) = same `browser_*` discipline.\n"
-    "3. On hit, report `{found: true, email, source, tier}`. On miss,\n"
-    "   report `{found: false, tried: [...]}` and open a\n"
-    "   `contact_email_not_found` escalation so the operator sees\n"
-    "   exactly which sources were checked.\n"
-    "4. Never invent an email address; heuristic guesses are\n"
-    "   explicitly forbidden by the skill SOP.\n"
-    "\n"
-    "## Browser (Tier 1 + Tier 2) — no-hang discipline\n"
-    "- Local debug Chrome auto-starts on the first `browser_*` call; do not\n"
-    "  open a browser yourself — just call `browser_navigate`.\n"
-    "- One page, single attempt. Never retry the same URL. If a navigate or\n"
-    "  snapshot errors/times out/returns nothing, record it in `tried` and\n"
-    "  move on — never loop on the same call.\n"
-    "- Spend the 8-page-load budget then return the miss envelope. A miss is\n"
-    "  a valid outcome; a hung run is not. If Chrome cannot be reached or\n"
-    "  auto-started, return a miss with reason_hint `browser_unavailable`.\n"
-)
-
-
-def _compose_discover_email_brief(
-    *,
-    identity_id: int,
-    handle: str | None,
-    env: str,
-    campaign_id: str | None,
-    actor_email: str,
-    gate_b_attempted: bool = False,
-    campaign_config_file: str = "",
-) -> str:
-    lines = [
-        "# kol_email_discovery",
-        f"identity_id: {identity_id}",
-        f"mode: {env}",
-        f"requested_by: {actor_email}",
-    ]
-    if handle:
-        lines.append(f"handle: {handle}")
-    if campaign_id:
-        lines.append(f"campaign_id: {campaign_id}")
-    if gate_b_attempted:
-        lines.append("gate_b_attempted: true")
-    if campaign_config_file:
-        lines.append(f"campaign_config_file: {campaign_config_file}")
-    lines.extend([
-        "",
-        "# required_next_step",
-        (
-            "Resolve the outreach email for the single identity_id "
-            "above by invoking `kol-email-discovery`. Do NOT loop "
-            "over any other identity. On miss, open a "
-            "`contact_email_not_found` escalation with the `tried` "
-            "list so the operator can audit which sources you checked."
-        ),
-    ])
-    return "\n".join(lines)
-
-
 @router.post("/{identity_id}/discover-email")
 async def discover_email(
     identity_id: int,
@@ -579,8 +481,20 @@ async def discover_email(
     if not ident:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "identity not found")
 
-    existing = str(ident.get("primary_email") or "").strip()
-    if existing:
+    outcome = await dispatch_email_discovery_for_identity(
+        bridge=bridge,
+        gateway=gateway,
+        conn=conn,
+        identity_id=identity_id,
+        env=env,
+        campaign_id=body.campaign_id,
+        actor_email=user["email"],
+        actor_user_id=user["id"],
+        ident=ident,
+        source="manual",
+    )
+
+    if outcome.get("reason") == "already_has_email":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             {
@@ -589,17 +503,10 @@ async def discover_email(
                     "this KOL already has a primary_email on file. "
                     "Edit it manually instead of re-running discovery."
                 ),
-                "current_email": existing,
+                "current_email": outcome.get("email"),
             },
         )
-
-    # Per-identity TTL dedup. We intentionally don't gate on
-    # ``_campaign_run_in_flight`` here — discovery is a single-identity
-    # web-crawl run, not a campaign-mutating run, and blocking it
-    # behind every approve cycle would feel unresponsive.
-    dedup_key = f"discover-email:{env}:{identity_id}"
-    inflight = get_inflight_run(conn, dedup_key=dedup_key)
-    if inflight is not None:
+    if outcome.get("status") == "inflight":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             {
@@ -609,179 +516,35 @@ async def discover_email(
                     f"in the last {INFLIGHT_TTL_SECONDS}s — wait for "
                     f"it to land (typically 30–120s) before retrying"
                 ),
-                "run_id": inflight.get("run_id"),
-                "started_at": inflight.get("started_at"),
+                "run_id": outcome.get("run_id"),
+                "started_at": outcome.get("started_at"),
             },
         )
-
-    gate_b_attempted = False
-    cfg_path = ""
-    if body.campaign_id and env.upper() == "LIVE":
-        facts_resp = None
-        try:
-            facts_resp = await bridge.read_facts(
-                identity_id,
-                campaign_id=body.campaign_id,
-                env=env,
-            )
-        except BridgeError:
-            facts_resp = None
-        gate_b = await attempt_gate_b_contacts(
-            bridge,
-            identity_id=identity_id,
-            ident=ident,
-            campaign_id=body.campaign_id,
-            env=env,
-            actor_email=user["email"],
-            facts_resp=facts_resp,
-        )
-        if gate_b.get("quota_exhausted"):
-            raise_quota_exhausted(campaign_id=body.campaign_id, env=env)
-        if gate_b.get("email_found"):
-            write_audit(
-                conn,
-                actor_user_id=user["id"],
-                action="kol.email.discover_gate_b",
-                target=str(identity_id),
-                payload={
-                    "env": env,
-                    "campaign_id": body.campaign_id,
-                    "email": gate_b.get("email"),
-                    "cache_hit": gate_b.get("cache_hit"),
-                },
-            )
-            return {
-                "ok": True,
-                "gate_b": True,
-                "skipped_browser_discover": True,
-                "email": gate_b.get("email"),
-                "identity_id": identity_id,
-            }
-        if gate_b.get("gate_b"):
-            gate_b_attempted = True
-            try:
-                cfg = await require_nox_quota_enabled(
-                    bridge, body.campaign_id, env=env,
-                )
-                cfg_path = materialize_campaign_config_file(
-                    body.campaign_id,
-                    cfg,
-                    allowed_gates=("pre_outreach_confirm",),
-                )
-            except HTTPException:
-                cfg_path = ""
-
-    ensure_gateway_bridge_key()
-    pending_run_id: str | None = None
-    if body.campaign_id:
-        pending_run_id = new_pending_run_id()
-        register_run(
-            conn,
-            campaign_id=body.campaign_id,
-            env=env,
-            run_id=pending_run_id,
-            kind="draft",
-            session_id=f"kol-email-discover:{env}:{identity_id}",
-            dedup_key=dedup_key,
-        )
-        conn.commit()
-    handle = ident.get("primary_handle")
-    brief = _compose_discover_email_brief(
-        identity_id=identity_id,
-        handle=handle if isinstance(handle, str) else None,
-        env=env,
-        campaign_id=body.campaign_id,
-        actor_email=user["email"],
-        gate_b_attempted=gate_b_attempted,
-        campaign_config_file=cfg_path,
-    )
-    campaign_id_val = body.campaign_id
-    identity_id_val = identity_id
-    pending_ref = pending_run_id
-    user_id = user["id"]
-
-    async def _on_discover_error(_exc: Exception) -> None:
-        await rollback_discover_email_failure(pending_run_id=pending_ref)
-
-    async def _on_discover_success(run: dict[str, Any], _result: Any) -> None:
-        rid = run.get("run_id") if isinstance(run, dict) else None
-        if not (campaign_id_val and pending_ref and isinstance(rid, str) and rid):
-            return
-        bg = _connect(get_settings().db_path)
-        try:
-            finalize_run_id(bg, pending_run_id=pending_ref, actual_run_id=rid)
-            write_audit(
-                bg,
-                actor_user_id=user_id,
-                action="kol.email.discover",
-                target=str(identity_id_val),
-                payload={
-                    "env": env,
-                    "campaign_id": campaign_id_val,
-                    "run_id": rid,
-                    "async_accept": True,
-                },
-            )
-            bg.commit()
-        finally:
-            bg.close()
-
-    accepted, run = await _start_detached_gateway_run(
-        gateway,
-        action_label="搜索邮箱",
-        dedup_key=dedup_key,
-        input=brief,
-        instructions=_DISCOVER_EMAIL_INSTRUCTIONS,
-        session_id=f"kol-email-discover:{env}:{identity_id}",
-        on_success=_on_discover_success,
-        on_error=_on_discover_error if pending_run_id else None,
-        job_meta={
+    if outcome.get("status") == "gate_b_hit":
+        return {
+            "ok": True,
+            "gate_b": True,
+            "skipped_browser_discover": True,
+            "email": outcome.get("email"),
             "identity_id": identity_id,
-            "campaign_id": body.campaign_id,
-            "env": env,
-        },
-    )
-    if accepted:
+        }
+    if outcome.get("status") == "accepted":
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content={
-                **run,
                 "ok": True,
                 "identity_id": identity_id,
-                "pending_run_id": pending_run_id,
-                "started_at": _dt.datetime.now(
-                    _dt.timezone.utc,
-                ).isoformat(timespec="seconds"),
+                "job_id": outcome.get("job_id"),
+                "poll": outcome.get("poll"),
+                "pending_run_id": outcome.get("pending_run_id"),
+                "started_at": outcome.get("started_at"),
             },
         )
 
-    run_id = run.get("run_id") if isinstance(run, dict) else None
-    if (
-        isinstance(run_id, str) and run_id
-        and body.campaign_id and pending_run_id
-    ):
-        finalize_run_id(conn, pending_run_id=pending_run_id, actual_run_id=run_id)
-        conn.commit()
-    write_audit(
-        conn,
-        actor_user_id=user["id"],
-        action="kol.email.discover",
-        target=str(identity_id),
-        payload={"env": env, "campaign_id": body.campaign_id, "run_id": run_id},
-    )
-    resp: dict[str, Any] = {
+    return {
         "ok": True,
-        "run_id": run_id,
-        "identity_id": identity_id,
-        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        **outcome,
     }
-    if isinstance(run, dict):
-        if run.get("_queued"):
-            resp["queued"] = True
-            resp["waited_sec"] = run.get("_waited_sec")
-        if run.get("_queue_position"):
-            resp["queue_position"] = run.get("_queue_position")
-    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -1123,6 +886,17 @@ async def nox_contacts(
             env=env,
             actor_email=user["email"],
             facts_resp=facts_resp,
+        )
+    # #region agent log
+    import json as _json, time as _time
+    with open("/Users/arnold/agent_prj/.cursor/debug-f680ad.log", "a") as _df:
+        _df.write(_json.dumps({"sessionId": "f680ad", "hypothesisId": "H1-H5", "location": "kols.py:nox_contacts", "message": "nox contacts gate_b result", "data": {"identity_id": identity_id, "env": env, "campaign_id": body.campaign_id, "has_primary_email": bool(str(ident.get("primary_email") or "").strip()), "gate_b": gate_b}, "timestamp": int(_time.time() * 1000)}) + "\n")
+    # #endregion
+    if gate_b.get("quota_exhausted") and gate_b.get("reason") == "nox_saas_quota_exhausted":
+        raise_nox_saas_quota_exhausted(
+            campaign_id=body.campaign_id or "",
+            env=env,
+            detail=str(gate_b.get("detail") or ""),
         )
     if gate_b.get("quota_exhausted"):
         raise_quota_exhausted(campaign_id=body.campaign_id or "", env=env)

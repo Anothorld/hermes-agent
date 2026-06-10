@@ -9,7 +9,7 @@ Browser Instagram discovery remains primary. These Hermes **plugin** tools
 
 | Tool | REST | Cost | Persist |
 |---|---|---|---|
-| `veedcrawl_search_social_videos` | `GET /v1/search` | 0 | Yes |
+| `veedcrawl_search_social_videos` | `POST /v1/search` (+ poll) | ~5–15 / platform | Yes |
 | `veedcrawl_instagram_profile` | `GET /v1/instagram/profile` | 0 | Yes |
 | `veedcrawl_metadata` | `GET /v1/metadata` | 0 | Yes |
 | `veedcrawl_extract` | `POST /v1/extract` + poll | 10 | Yes |

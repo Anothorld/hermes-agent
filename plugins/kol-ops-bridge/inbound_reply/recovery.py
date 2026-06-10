@@ -34,5 +34,11 @@ def needs_reprocess_after_global_seen(
     if dispatch_status.get("should_retry_gateway_only"):
         return True
     if dispatch_status.get("should_skip_poller"):
+        if (
+            dispatch_status.get("has_mailbox_mismatch_escalation")
+            and not dispatch_status.get("has_draft_ready_event")
+            and not dispatch_status.get("has_pending_reply_draft")
+        ):
+            return True
         return False
     return False

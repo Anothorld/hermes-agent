@@ -34,7 +34,7 @@
 | POST | `/kols/{id}/discover-email` | Nox Gate B（需 `campaign_id` + LIVE + `nox_quota_enabled`）→ `kol-email-discovery`（Tier 1 本地 Chrome Google 搜索 + 结果页 `browser_*`；Tier 2 JS 页面；**禁止** `web_search`/`web_extract`、`veedcrawl_*`、`delegate_task`、`mcp_chrome_devtools_*`；guard 在 `kol-email-discover:*` 硬拦） |
 | POST | `/kols/{id}/discover-social-links` | `kol-social-link-discovery`（Tier 1 本地 Chrome Google + 结果页；Tier 2 JS 页面；**禁止** `web_search`/`web_extract`；browser no-hang 纪律） |
 | POST | `/kols/{id}/email`, `/kols/{id}/nox-contacts`, `/kols/{id}/nox/*` | 手动邮箱 / 仅 Nox Gate B / 尽调与监测 |
-| POST | `/kols/nox-diligence-batch` | Gate A 批量尽调；≥5 个 identity 时默认 **202 异步**（`KOC_NOX_BATCH_ASYNC`），轮询 `GET /kols/jobs/{job_id}` |
+| POST | `/kols/nox-diligence-batch` | Gate A 批量尽调；≥5 个 identity 时默认 **202 异步**（`KOC_NOX_BATCH_ASYNC`），前端轮询 `GET /kols/jobs/{job_id}` 直至完成 |
 | GET | `/kols/jobs/{job_id}` | 查询 Nox batch 等后台 job 状态 |
 
 ## 全网搜索邮箱（kol-email-discovery）
@@ -55,7 +55,9 @@ Tier 1 不再使用 `web_search` / `web_extract`。模型应：
 |----------|----------|
 | Console `POST /kols/{id}/discover-email` 且 body 带 **`campaign_id`**、env=LIVE、campaign 配置 **`nox_quota_enabled: true`** | Console 端 **同步** 跑 `nox_kol_tool.py contacts --gate pre_outreach_confirm`（Gate B）。有邮箱则直接返回，不启 gateway；无邮箱则 brief 带 `gate_b_attempted: true`，gateway **不再重复** Nox |
 | 同上但 **未传 `campaign_id`** | Gate B **完全跳过**；gateway 仅靠 browser 发现 |
-| 活动审批 run（`kol-campaign:*` step 4a0） | 由 agent 在 gateway 上调用 `nox_kol_tool.py contacts`（非 Console 同步 Gate B）；与 discover-email API 是两条路径 |
+| 活动批准 `approve-shortlist` | Console 对每个缺邮箱的已批 identity 自动排队 `kol-email-discover:*`（Gate B 同步 + browser）；outreach run 不再内联调 Nox/browser |
+| 活动审批 run（`kol-campaign-outreach:*`） | 仅对已有 `primary_email` 的身份起草；`# email_discovery_queued` 中的身份报告 `pending_email_discovery`，不重复发现、不 premature escalation |
+| `kol-email-discover:*` 完成（approve 排队） | `run_state_reconciler` 检测 `completed` 后，若邮箱已写入且尚无草稿，自动拉起单 KOL `kol-campaign-draft:*`（等同 `redraft-outreach`）；audit `campaign.auto_draft_after_email_discover` |
 | brief 含 `gate_b_attempted: true` | Nox 已在 Console 跑过（含「API 无邮箱」）；agent 不得再调 Nox |
 
 常见「有 `nox_creator_id` 却没用 Nox 找邮箱」原因：
@@ -66,6 +68,17 @@ Tier 1 不再使用 `web_search` / `web_extract`。模型应：
 4. 身份缺 `nox_creator_id` 且无 platform profile URL → `gate_b_eligible` 为 false。
 
 手动补跑：`POST /kols/{id}/nox-contacts`（需 LIVE + `campaign_id`）。
+
+**仅 Nox 查邮箱** 失败时的 HTTP / UI：
+
+| 情况 | 后端 | 前端 |
+|------|------|------|
+| 本地 `nox_monthly_budget` 用尽 | `409` `nox_quota_exhausted` | 红色错误条 + NoxQuotaBanner |
+| NoxInfluencer 账号积分用尽（`NOX_QUOTA_EXCEEDED`） | `409` `nox_saas_quota_exhausted` | 红色错误条，提示联系 Nox 账号管理员充值 |
+| Nox contacts 被拒（`SaaS 40017`，多为套餐 **邮箱查看次数** 用尽；`quota` 总积分与 Console 本地预算仍可能充足） | `200` + `gate_b.reason=nox_upstream_error` | 红色错误条；建议查 Nox 后台邮箱用量、换「全网搜索」或手动填邮箱 |
+| CAL 已有 `identity.email` 但 `primary_email` 为空 | `200` `email_found: true` `promoted_from_facts: true` | 直接写入 `primary_email`，不重复调 contacts API |
+| CLI 其它失败 / Gate B 跳过（缺 creator id 等） | `200` + `gate_b.skipped` | 红色错误条说明原因 |
+| Gate B 成功但 API 无邮箱 | `200` `email_found: false` | 蓝色 info toast「Nox 未找到邮箱」 |
 
 ### Tier 2 无挂起纪律（POVISON 686 修复）
 

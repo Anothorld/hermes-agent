@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.nox_quota import fetch_campaign_nox_stats
+from app.nox_quota import fetch_campaign_nox_stats, invalidate_nox_stats_cache
 
 
 @pytest.mark.asyncio
@@ -40,3 +40,25 @@ async def test_fetch_campaign_nox_stats_argv_no_env_flag() -> None:
         "Asia/Shanghai",
     ]
     assert stats["quota_exhausted"] is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_campaign_nox_stats_cache_invalidated_on_config_change() -> None:
+    """``nox_quota_enabled`` must refresh after ``invalidate_nox_stats_cache``."""
+    bridge = AsyncMock()
+    bridge.get_campaign.side_effect = [
+        {"campaign_id": "C-1", "nox_quota_enabled": False},
+        {"campaign_id": "C-1", "nox_quota_enabled": True},
+    ]
+
+    def _fake_run(_argv: list[str], **_kwargs):
+        return {"usage": {"remaining_estimate": 50}}
+
+    with patch("app.nox_quota.run_nox_tool", side_effect=_fake_run):
+        first = await fetch_campaign_nox_stats(bridge, "C-1", env="LIVE")
+        assert first["nox_quota_enabled"] is False
+        second = await fetch_campaign_nox_stats(bridge, "C-1", env="LIVE")
+        assert second["nox_quota_enabled"] is False
+        invalidate_nox_stats_cache("C-1", env="LIVE")
+        third = await fetch_campaign_nox_stats(bridge, "C-1", env="LIVE")
+        assert third["nox_quota_enabled"] is True
