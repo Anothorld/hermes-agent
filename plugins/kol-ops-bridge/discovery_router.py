@@ -160,7 +160,7 @@ def route_discovery_pool(
                             "last_outcome": entry["last_outcome"]},
             question_to_operator=(
                 operator_note
-                or "Prior collab risk surfaced; confirm whether to proceed."
+                or "检测到历史合作风险，请确认是否继续触达该 KOL。"
             ),
             severity="normal",
             env=env,

@@ -343,7 +343,9 @@ Do **not** open an escalation from this skill. Return:
 ```
 
 Orchestrator / Console run should call `open-escalation` with
-`reason="contact_email_not_found"` and the `tried` list.
+`reason="contact_email_not_found"`, the `tried` list, and a
+**简体中文** `question_to_operator` summarizing what was searched and
+asking the operator how to proceed (manual email, skip, or retry).
 
 ---
 

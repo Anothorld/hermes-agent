@@ -1134,10 +1134,10 @@ async def evaluate_gate_after_terminal(
                     "env": env,
                     "campaign_id": campaign_id,
                     "reason": "discovery_floor_unmet",
-                    "question": (
-                        f"Discovery floor not met after {retry_count} "
-                        f"auto-retries: have {current}/{target_floor}. "
-                        f"Reason: {final_reason}."
+                    "question_to_operator": (
+                        f"自动重试 {retry_count} 次后仍未达到发现下限："
+                        f"当前 {current}/{target_floor}。原因：{final_reason}。"
+                        "请决定是放宽条件、手动补量，还是暂停本活动发现。"
                     ),
                 })
             except BridgeError as exc:

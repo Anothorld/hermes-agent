@@ -37,6 +37,20 @@
 
 大段 Markdown 编辑：保存需明确成功/失败提示；避免技术 scope 名直接作为主标题（可用中文说明对应项）。
 
+### 异常处理规则（`escalation_rules`）
+
+每条规则的 `suggested_question` 会原样显示在升级页 **「请求操作员答复」**，操作员惯用语言为 **简体中文**。请用 plain language 写清楚「需要决定什么」，避免英文模板或内部 jargon。
+
+示例：
+
+```markdown
+### rule_id: paid_quote_over_ceiling
+- signals_match: ["compensation.kol_quoted_over_ceiling"]
+- severity: high
+- suggested_question: "KOL 报价超过活动 paid_ceiling，是否批准提价？如需批准，请在升级答复中说明可接受上限。"
+- required_facts_to_resume: ["approval.paid_ceiling_override"]
+```
+
 - 历史版本支持「查看」（预览该版本内容）与「回滚」（基于该版本生成新版本，不删历史）。
 - 回滚是自动学习「退化护栏」的人工补救：当 `/learning` 的「编辑幅度趋势」告警变差时，可回滚到上一版。
 - 人工编辑同样计入收敛度量与护栏；自动学习提案是「建议草稿」，最终以人工把关为准。

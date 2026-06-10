@@ -54,7 +54,7 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
     "campaign_id": "<campaign_id>",
     "goal": "product_selection",
     "reason": "KOL requested variant outside whitelist/policy",
-    "question_to_operator": "<what KOL asked for vs allowed options>",
+    "question_to_operator": "<用简体中文说明 KOL 诉求与允许选项>",
     "severity": "normal"
   }'
 ```

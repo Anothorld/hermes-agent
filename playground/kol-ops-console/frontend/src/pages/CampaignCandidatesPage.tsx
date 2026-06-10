@@ -149,7 +149,7 @@ export function CampaignCandidatesPage() {
       const question = await dialog.prompt({
         title: `为 @${c.handle ?? c.identity_id} 开启升级`,
         description: '请输入需要操作员回答的问题。',
-        defaultValue: 'Repeat KOL detected — confirm whether to include in outreach.',
+        defaultValue: '检测到重复合作 KOL，请确认是否纳入本次触达。',
         required: true,
         multiline: true,
         confirmLabel: '开启升级',

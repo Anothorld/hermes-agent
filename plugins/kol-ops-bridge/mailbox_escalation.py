@@ -49,9 +49,8 @@ def ensure_mailbox_mismatch_escalation(
     if existing is not None:
         return existing
     question = (
-        f"KOL reply arrived at {detected_mailbox_email}, but this campaign's "
-        f"bound outbound mailbox is {bound_mailbox_email}. Take over the mailbox "
-        f"in Console or ask the KOL to reply to the bound address before auto-drafting."
+        f"KOL 回信落到了 {detected_mailbox_email}，但本活动绑定的发信邮箱是 "
+        f"{bound_mailbox_email}。请在 Console 接管该邮箱，或请 KOL 回复到绑定地址后再自动起草。"
     )
     resume_context: dict[str, Any] = {
         "source_message_id": message_id,
@@ -70,3 +69,31 @@ def ensure_mailbox_mismatch_escalation(
         resume_context=resume_context,
         goal="outreach",
     )
+
+
+def resolve_false_positive_mailbox_mismatch(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    env: str,
+    message_id: str,
+) -> Optional[int]:
+    """Close a stale mismatch escalation when the mailbox now aligns."""
+    esc_id = find_open_mailbox_mismatch(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        message_id=message_id,
+    )
+    if esc_id is None:
+        return None
+    cal.resolve_escalation(
+        escalation_id=esc_id,
+        decision="auto_false_positive",
+        decided_by="bridge:mailbox_mismatch_recovered",
+        operator_answer=(
+            "Mailbox mismatch cleared automatically; resuming reply dispatch."
+        ),
+        final_state="resolved",
+    )
+    return esc_id

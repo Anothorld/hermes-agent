@@ -299,6 +299,11 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
 Notes:
 - Step 3.5 runs **before** Step 3.1 drafting obligations. When an escalation
   opens here, Step 3.1 must not `persist-reply-draft` on the same turn.
+- **`question_to_operator` MUST be 简体中文** — it is shown verbatim in the
+  Console under「请求操作员答复」for non-technical operators. When copying
+  from `escalation_hint.suggested_question`, pass it through unchanged; when
+  opening an escalation without a rule match, write plain Chinese (no English
+  boilerplate).
 - The Bridge automatically tags `force_human_takeover_hint=true` in
   `resume_context` when the new escalation's `attempts_count` reaches
   `max_escalation_depth` (parsed from `policies/escalation_rules`,

@@ -275,6 +275,12 @@ When the KOL is asking or vague, prefer **omitting** committed keys (or
    **not** invent rule_ids and do **not** re-rank rules; the first match
    in declared order wins.
 
+**Operator language:** Policy `suggested_question` strings and any
+agent-authored escalation questions shown in Console MUST be **简体中文**
+(plain language for non-technical operators). English rule text in
+`escalation_rules` is a configuration bug — flag via `ambiguity`, do not
+translate at runtime.
+
 ## Minimal canonical output (format anchor)
 
 Use this as the minimum shape contract (JSON object only):

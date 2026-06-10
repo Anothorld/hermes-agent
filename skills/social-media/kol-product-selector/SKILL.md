@@ -91,7 +91,7 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
   --env <TEST|LIVE> \
   --json '{"identity_id":<id>,"campaign_id":"<cid>","goal":"product_selection",
            "reason":"KOL requested variant outside whitelist/policy",
-           "question_to_operator":"<summary>"}'
+           "question_to_operator":"<用简体中文说明 KOL 诉求与允许选项>"}'
 ```
 Return `escalation_opened`; skip draft body.
 

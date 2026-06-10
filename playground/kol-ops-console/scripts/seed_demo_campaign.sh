@@ -137,7 +137,7 @@ post /escalations -d @- <<JSON
  "goal": "product_selection",
  "reason": "kol_demands_off_whitelist",
  "severity": "high",
- "question_to_operator": "KOL wants a SKU not in the whitelist — allow?"}
+ "question_to_operator": "KOL 要求的 SKU 不在白名单内，是否允许？"}
 JSON
 
 echo ">> F. contract pending"
@@ -195,7 +195,7 @@ M_PARENT=$(post /escalations -d @- <<JSON | jq -r '.escalation_id'
 {"identity_id": ${M_ID}, "campaign_id": "${CID}", "env": "${ENV}",
  "goal": "compensation_negotiation",
  "reason": "paid_over_ceiling",
- "question_to_operator": "KOL quoted \$1200 > paid_ceiling \$800. Approve?",
+ "question_to_operator": "KOL 报价 \$1200 超过 paid_ceiling \$800，是否批准提价？",
  "resume_context": {"required_facts_to_resume":
                     ["approval.paid_ceiling_override", "offer.agreed_terms"]}}
 JSON
@@ -210,7 +210,7 @@ post /escalations -d @- <<JSON
  "goal": "compensation_negotiation",
  "reason": "operator_answer_ambiguous",
  "parent_escalation_id": ${M_PARENT},
- "question_to_operator": "Operator said 'within 1000' — counter-offer $950 or push for gifted?",
+ "question_to_operator": "操作员答复「不超过 1000」较模糊：应还价 \$950 还是改推赠品合作？",
  "resume_context": {"required_facts_to_resume":
                     ["offer.agreed_terms"]}}
 JSON

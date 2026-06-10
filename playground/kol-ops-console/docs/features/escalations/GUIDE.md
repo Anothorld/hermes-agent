@@ -33,8 +33,9 @@
 ## 操作员清单（入站升级）
 
 1. 在 **升级队列** `/escalations` 打开工单，阅读触发回信。
-2. 填写 **操作员答复** 与所需 facts（如 `approval.paid_ceiling_override`）。
-3. 点 **提交并恢复**（或先「让 AI 试写草稿」预览，不关闭升级）。
+2. 阅读 **请求操作员答复**（`suggested_question` / `question_to_operator`）— 文案应为 **简体中文**（来自策略规则模板、Bridge 确定性文案，或 Agent 开单时写入；KOL 追信块由系统自动追加）。
+3. 填写 **操作员答复** 与所需 facts（如 `approval.paid_ceiling_override`）。
+4. 点 **提交并恢复**（或先「让 AI 试写草稿」预览，不关闭升级）。
 4. 若 toast 提示「约 30–60 秒后请到待审批」→ 打开 **待审批** `/approvals`，找 **升级恢复稿** 标签。
 5. 批准草稿 → Gmail 草稿 → 发送。
 

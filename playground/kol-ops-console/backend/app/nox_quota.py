@@ -122,8 +122,8 @@ async def open_nox_quota_escalation(
             "or pausing Nox-gated actions."
         ),
         "question_to_operator": (
-            "Nox quota exhausted for this campaign. How should we proceed "
-            "(pause Nox calls, adjust nox_monthly_budget, or wait for next month)?"
+            "本活动 Nox 月度配额已用尽。请决定下一步：暂停 Nox 调用、"
+            "调高 nox_monthly_budget，还是等到下个月再试？"
         ),
         "severity": "high",
         "resume_context": {

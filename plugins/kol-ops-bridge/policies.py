@@ -18,7 +18,7 @@ extracts an ordered list of rule dicts. Markdown convention:
 ### rule_id: <id>
 - signals_match: ["foo", "bar"]
 - severity: high
-- suggested_question: "..."
+- suggested_question: "KOL 报价超过 paid_ceiling，是否批准提价？"
 - required_facts_to_resume: ["paid_ceiling_override"]
 ```
 

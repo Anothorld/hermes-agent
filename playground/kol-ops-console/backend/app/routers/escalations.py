@@ -694,6 +694,21 @@ async def open_escalation(
 ) -> dict:
     payload = body.model_dump(exclude_none=True)
     payload["env"] = _env(payload.get("env"))
+    suggested = payload.pop("suggested_question", None)
+    if suggested:
+        payload["question_to_operator"] = suggested
+    rule_id = payload.pop("rule_id", None)
+    parent_id = payload.pop("parent_id", None)
+    if parent_id is not None:
+        payload["parent_escalation_id"] = parent_id
+    if rule_id:
+        ctx = payload.get("resume_context") or {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+        ctx.setdefault("rule_id", rule_id)
+        ctx.setdefault("opened_by", f"web:{user['email']}")
+        ctx.setdefault("source", "kol-ops-console")
+        payload["resume_context"] = ctx
     try:
         out = await bridge.open_escalation(payload)
     except BridgeError as exc:

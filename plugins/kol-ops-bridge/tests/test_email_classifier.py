@@ -54,31 +54,31 @@ max_escalation_depth: 3
 ### rule_id: paid_quote_over_ceiling
 - signals_match: ["compensation.kol_quoted_over_ceiling", "compensation.over_budget"]
 - severity: high
-- suggested_question: "KOL quote exceeds paid_ceiling — approve override?"
+- suggested_question: "KOL 报价超过 paid_ceiling，是否批准 override？"
 - required_facts_to_resume: ["paid_ceiling_override"]
 
 ### rule_id: contract_change_request
 - signals_match: ["contract.change_request", "contract.exclusivity_objection"]
 - severity: normal
-- suggested_question: "KOL wants to renegotiate contract terms — accept?"
+- suggested_question: "KOL 希望重新协商合同条款，是否接受？"
 - required_facts_to_resume: []
 
 ### rule_id: off_whitelist_sku
 - signals_match: ["product.off_whitelist_request"]
 - severity: high
-- suggested_question: "KOL wants SKU not in whitelist — allow?"
+- suggested_question: "KOL 要求的 SKU 不在白名单内，是否允许？"
 - required_facts_to_resume: ["sku_override"]
 
 ### rule_id: shipping_address_change
 - signals_match: ["shipping.address_change_after_lock"]
 - severity: normal
-- suggested_question: "Shipping address change after lock — reissue?"
+- suggested_question: "发货地址在锁定后被修改，是否重新发货？"
 - required_facts_to_resume: []
 
 ### rule_id: content_brand_safety
 - signals_match: ["content.brand_safety_concern", "content.disclosure_missing"]
 - severity: high
-- suggested_question: "Content has brand-safety issues — block publish?"
+- suggested_question: "内容存在品牌安全风险，是否阻止发布？"
 - required_facts_to_resume: []
 """
 

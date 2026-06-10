@@ -159,7 +159,7 @@ operator UI can render it as chips (not just buried prose):
 open-escalation --json '{"identity_id":...,"campaign_id":"...",
   "goal":"deliverables_scope",
   "reason":"campaign_config_incomplete_for_scope_reply",
-  "question_to_operator":"...names the missing fields in plain text...",
+  "question_to_operator":"...用简体中文列出缺失字段，操作员能直接看懂...",
   "resume_context":{"missing_config_fields":["deliverable_platforms",
                                               "deliverable_count_per_platform"]}}'
 ```
