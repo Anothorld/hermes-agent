@@ -2,7 +2,37 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+
 import pytest
+
+
+def _backdate_candidate(cal, *, campaign_id: str, identity_id: int, days: int) -> None:
+    """Shift ``campaign_candidates.created_at`` into the past for funnel maturity."""
+    cutoff = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+    ).isoformat(timespec="seconds")
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            """UPDATE campaign_candidates
+                  SET created_at = ?, updated_at = ?
+                WHERE campaign_id = ? AND identity_id = ?""",
+            (cutoff, cutoff, campaign_id, identity_id),
+        )
+        conn.commit()
+
+
+def _backdate_events(cal, *, identity_id: int, days_ago: int) -> None:
+    """Shift all events for an identity into the past (draft-within-window tests)."""
+    ts = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days_ago)
+    ).isoformat(timespec="seconds")
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            "UPDATE kol_conversation_events SET ts = ? WHERE identity_id = ?",
+            (ts, identity_id),
+        )
+        conn.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -305,6 +335,7 @@ def test_funnel_adoption_and_reply_rates(bridge_pkg, cal_db, monkeypatch):
     cal.upsert_candidate(
         campaign_id=cid, identity_id=iid_old, source="discovery", env="LIVE",
     )
+    _backdate_candidate(cal, campaign_id=cid, identity_id=iid_old, days=20)
 
     iid_draft = cal.upsert_identity(
         primary_handle="@funnel_draft",
@@ -314,6 +345,7 @@ def test_funnel_adoption_and_reply_rates(bridge_pkg, cal_db, monkeypatch):
     cal.upsert_candidate(
         campaign_id=cid, identity_id=iid_draft, source="discovery", env="LIVE",
     )
+    _backdate_candidate(cal, campaign_id=cid, identity_id=iid_draft, days=20)
     cal.write_event(
         identity_id=iid_draft,
         campaign_id=cid,
@@ -323,6 +355,7 @@ def test_funnel_adoption_and_reply_rates(bridge_pkg, cal_db, monkeypatch):
         actor="test",
         env="LIVE",
     )
+    _backdate_events(cal, identity_id=iid_draft, days_ago=18)
 
     iid_reply = cal.upsert_identity(
         primary_handle="@funnel_reply",
@@ -332,6 +365,7 @@ def test_funnel_adoption_and_reply_rates(bridge_pkg, cal_db, monkeypatch):
     cal.upsert_candidate(
         campaign_id=cid, identity_id=iid_reply, source="discovery", env="LIVE",
     )
+    _backdate_candidate(cal, campaign_id=cid, identity_id=iid_reply, days=20)
     cal.write_event(
         identity_id=iid_reply,
         campaign_id=cid,
@@ -350,6 +384,7 @@ def test_funnel_adoption_and_reply_rates(bridge_pkg, cal_db, monkeypatch):
         actor="cron",
         env="LIVE",
     )
+    _backdate_events(cal, identity_id=iid_reply, days_ago=18)
 
     iid_idle = cal.upsert_identity(
         primary_handle="@funnel_idle",
@@ -359,15 +394,73 @@ def test_funnel_adoption_and_reply_rates(bridge_pkg, cal_db, monkeypatch):
     cal.upsert_candidate(
         campaign_id=cid, identity_id=iid_idle, source="discovery", env="LIVE",
     )
+    _backdate_candidate(cal, campaign_id=cid, identity_id=iid_idle, days=20)
 
-    out = cal.aggregate_kol_registry_funnel(env="LIVE")
+    out = cal.aggregate_kol_registry_funnel(env="LIVE", days=7)
     assert out["discovered_total"] == 4
     assert out["prior_collab_excluded"] == 1
     assert out["eligible_total"] == 3
+    assert out["mature_eligible_total"] == 3
+    assert out["mature_adopted_within_window_count"] == 2
+    assert out["pending_mature_backlog_count"] == 1
+    assert out["pending_immature_count"] == 0
+    assert out["mature_draft_total"] == 2
+    assert out["mature_replied_within_window_count"] == 1
     assert out["initial_outreach_draft_count"] == 2
     assert out["initial_outreach_reply_count"] == 1
     assert out["kol_candidate_adoption_rate"] == pytest.approx(2 / 3)
     assert out["initial_outreach_reply_rate"] == pytest.approx(0.5)
+    assert out["funnel_window_days"] == 30
+
+
+def test_funnel_adoption_excludes_immature_discoveries(bridge_pkg, cal_db):
+    cal = cal_db
+    cid = "FUNNEL-IMMATURE"
+    cal.upsert_campaign_config(campaign_id=cid, env="LIVE")
+    iid_new = cal.upsert_identity(
+        primary_handle="@funnel_new",
+        primary_email="new@example.com",
+        env="LIVE",
+    )
+    cal.upsert_candidate(
+        campaign_id=cid, identity_id=iid_new, source="discovery", env="LIVE",
+    )
+
+    out = cal.aggregate_kol_registry_funnel(env="LIVE")
+    assert out["eligible_total"] == 1
+    assert out["mature_eligible_total"] == 0
+    assert out["pending_immature_count"] == 1
+    assert out["kol_candidate_adoption_rate"] == 0.0
+
+
+def test_registry_funnel_trend_returns_series(bridge_pkg, cal_db):
+    cal = cal_db
+    cid = "FUNNEL-TREND-CAMP"
+    cal.upsert_campaign_config(campaign_id=cid, env="LIVE")
+    iid = cal.upsert_identity(
+        primary_handle="@funnel_trend",
+        primary_email="trend@example.com",
+        env="LIVE",
+    )
+    cal.upsert_candidate(
+        campaign_id=cid, identity_id=iid, source="discovery", env="LIVE",
+    )
+    _backdate_candidate(cal, campaign_id=cid, identity_id=iid, days=20)
+    cal.write_event(
+        identity_id=iid,
+        campaign_id=cid,
+        event_type="kol_initial_outreach_draft_ready",
+        goal="outreach",
+        lane="commerce",
+        actor="test",
+        env="LIVE",
+    )
+    _backdate_events(cal, identity_id=iid, days_ago=18)
+
+    out = cal.aggregate_kol_registry_funnel_trend(env="LIVE", bucket="month", periods=3)
+    adoption = out["series"]["kol_candidate_adoption_rate"]
+    assert len(adoption) == 3
+    assert any(row["value"] == 1.0 for row in adoption if row["value"] is not None)
 
 
 def test_registry_source_legacy_filter_returns_empty(bridge_pkg, cal_db):

@@ -10,20 +10,20 @@ const STEPS: ReadonlyArray<{
   {
     n: 1,
     title: '采集样本',
-    hint: '审批回信、编辑后发送、结构化驳回',
+    hint: '审批回信、shortlist 决策、编辑后发送',
     to: '/metrics',
   },
   {
     n: 2,
     title: '生成提案',
-    hint: '编辑批次达阈值后在此触发',
+    hint: '编辑或发现样本达阈值后触发',
     to: '/learning',
     hash: '#trigger',
   },
   {
     n: 3,
     title: '待审批批准',
-    hint: '批准 style + 策略沉淀',
+    hint: 'style / 发现标准 / 策略沉淀',
     to: '/approvals',
   },
   {
@@ -49,7 +49,7 @@ export function LearningWorkflowStepper({ activeStep = 1 }: { activeStep?: numbe
       className="rounded border border-slate-200 bg-gradient-to-r from-slate-50 to-white p-3"
     >
       <p className="mb-2 text-xs text-slate-600">
-        日常只需：<strong>待审批回信</strong> → 偶尔查看本页批次进度 → 批准学习提案。下方为完整闭环。
+        日常只需：<strong>待审批回信</strong>、<strong>shortlist 决策</strong> → 偶尔查看本页批次进度 → 批准学习提案。下方为完整闭环。
       </p>
       <ol className="flex flex-wrap gap-2">
         {STEPS.map((s) => {
@@ -84,8 +84,9 @@ export function LearningEmptySamplesHint() {
       <div className="font-medium text-slate-700">如何产生第一批学习样本？</div>
       <ul className="mt-1 list-disc pl-4 space-y-0.5">
         <li>在「待审批」批准或驳回 AI 回信草稿（驳回请选标签）</li>
+        <li>在产品页 shortlist 上批准 / 移除 / 转移 KOL，并填写原因标签与评论</li>
         <li>在 Gmail 发送后由系统对齐终稿，记录编辑差异</li>
-        <li>编辑批次达到阈值后，在本页点击「生成学习提案」</li>
+        <li>编辑或发现样本达到阈值后，在本页点击「生成学习提案」或等待夜间任务</li>
       </ul>
     </div>
   );

@@ -88,6 +88,44 @@ Final Fit = 0.6 × Match Score + 0.4 × Showcase Score
 ```
 Use **50/50** for Driver D or E. Shortlist eligibility requires **Match Score ≥ 70 AND Showcase Score ≥ 50**. No score-trading.
 
+## Learned Criteria (brief-injected)
+
+The brief may carry a `# learned_discovery_criteria` section — operator-approved
+judgment baselines distilled nightly from real shortlist decisions (approve /
+remove / transfer reasons + comments). It contains up to two blocks:
+**product-level criteria** (this SKU) and **category-level criteria** (the
+product's category). When both speak to the same trait, the product-level
+block wins.
+
+**Priority order (hard rule):**
+
+```
+HARD thresholds (table above)  >  learned criteria  >  default scoring emphasis
+```
+
+Apply learned criteria as:
+
+- **Preferred KOL profile** bullets → shift Match/Showcase emphasis toward
+  those traits when scoring (disclose the shift in your output).
+- **Veto signals** bullets → treat as SOFT vetoes: a candidate matching one
+  needs strong counter-evidence to stay on the shortlist; cite the evidence.
+- **Scoring adjustments** bullets → adjust the dynamic weighting within the
+  existing Match/Showcase formula.
+- **Exemplars** → use as few-shot anchors when borderline.
+
+Never use learned criteria to relax a HARD threshold (followers, region,
+views, ER, account type, skip lists). If the section is absent, proceed with
+the default framework — its absence is normal for new SKUs.
+
+✅ Good: learned criteria say "operators consistently remove creators whose
+audience skews teen"; you find a 250k-follower creator passing all HARD gates
+but with teen-skewed comments → flag as soft veto, keep off the shortlist,
+record the reason in the candidate payload.
+
+❌ Bad: learned criteria praise "premium minimalist visual style"; you use
+that to admit a 60k-follower creator ("style compensates for reach") → HARD
+threshold violation; the bridge-side floor is 100k regardless of style fit.
+
 ## Roles And Qualification
 Choose 1-3 roles per campaign: **Conversion**, **Authority**, **Lifestyle**, **Niche use-case**, **Showcase**, **Narrative / entertainment**. The shortlist must cover the chosen roles instead of duplicating one archetype; non-home creators are valid when they fill a role better.
 
@@ -685,6 +723,7 @@ action as visible to IG's risk system.
 - Do not chain 3 same-vertical lateral hops just because each individual hop met the follower / region threshold. The cross-vertical jump rule requires at least one vertical-switch per 3-hop chain; pure same-niche chains reinforce the bubble even when every individual candidate is qualified.
 - Do not let visual similarity outrank buyer intent for functional, technical, family-practical, or use-case products.
 - Do not shortlist on Audience Match alone; Match ≥ 70 and Showcase ≥ 50 must both pass.
+- Do not use the brief's `# learned_discovery_criteria` section to relax any HARD threshold (followers / region / views / ER / account type / skip lists). Learned criteria only adjust scoring emphasis and add soft vetoes; product-level criteria outrank category-level when they conflict.
 - Do not reject tech, gaming, comedy, entertainment, fashion, or lifestyle creators solely by niche.
 - Do not keep creators who self-sell furniture (own brand, DTC, persistent furniture storefront like `mytexashouse`-style accounts) — they are direct competitors no matter how lifestyle-personal the feed looks. Always check bio, link-in-bio, pinned posts, and the last 10-15 Reels for recurring furniture-commerce signals. Self-commerce in other categories (fashion / beauty / food / kitchenware / decor accessories / tech / pet) does NOT trigger this rule.
 - Do not overfit historical winners' surface style; reuse the conversion mechanism.

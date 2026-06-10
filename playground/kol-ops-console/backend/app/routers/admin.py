@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import datetime as _dt
 import json
 import sqlite3
-from collections import Counter, defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,6 +12,8 @@ from fastapi.responses import Response
 from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
 from ..deps import get_bridge, get_conn, require_role
+from ..gate_metrics_audit import compute_gate_audit_metrics
+from ..gate_metrics_trends import compute_audit_metric_trends
 from ..kol_registry_export import build_registry_xlsx
 from ..perf_snapshot import perf
 from ..run_launch_queue import launch_queue
@@ -80,108 +80,30 @@ async def gate_metrics(
     days: int = Query(7, ge=1, le=90),
 ) -> dict[str, Any]:
     """Read-only gate metrics for approvals/escalations operational quality."""
-    rows = conn.execute(
-        "SELECT action, target, payload_json, ts FROM audit_log "
-        "WHERE ts >= datetime('now', ?) ORDER BY id DESC",
-        (f"-{days} day",),
-    ).fetchall()
     env_norm = env.upper()
-    decisions_total = 0
-    decisions_approved = 0
-    live_decisions = 0
-    live_rejected = 0
-    total_handle_seconds = 0.0
-    total_handle_samples = 0
-    tag_counter: Counter[str] = Counter()
-    touches_by_campaign: dict[str, int] = defaultdict(int)
-    terminated_count = 0
-    resolved_count = 0
-
-    for row in rows:
-        action = str(row["action"] or "")
-        payload = json.loads(row["payload_json"] or "{}")
-        payload_env = str(payload.get("env") or env_norm).upper()
-        if payload_env != env_norm:
-            continue
-
-        if action in {"approval.approve", "approval.reject"}:
-            decisions_total += 1
-            if action == "approval.approve":
-                decisions_approved += 1
-            if payload_env == "LIVE":
-                live_decisions += 1
-                if action == "approval.reject":
-                    live_rejected += 1
-            cid = payload.get("campaign_id")
-            if isinstance(cid, str) and cid:
-                touches_by_campaign[cid] += 1
-            for tag in payload.get("reason_tags") or []:
-                if isinstance(tag, str) and tag.strip():
-                    tag_counter[tag.strip().lower()] += 1
-
-        if action == "approval.refine":
-            cid = payload.get("campaign_id")
-            if isinstance(cid, str) and cid:
-                touches_by_campaign[cid] += 1
-
-        if action == "escalation.resolve":
-            resolved_count += 1
-            if payload.get("decision") == "terminate":
-                terminated_count += 1
-            for tag in payload.get("reason_tags") or []:
-                if isinstance(tag, str) and tag.strip():
-                    tag_counter[tag.strip().lower()] += 1
-
-        # Best-effort handle-time approximation: from created/opened ts to decision ts.
-        if action in {"approval.approve", "approval.reject", "escalation.resolve"}:
-            ts = row["ts"]
-            if isinstance(ts, str):
-                decided_at = ts.replace("Z", "+00:00")
-                try:
-                    decided_dt = _dt.datetime.fromisoformat(decided_at)
-                except ValueError:
-                    decided_dt = None
-                created_at = payload.get("opened_at") or payload.get("created_at")
-                if decided_dt is not None and isinstance(created_at, str):
-                    try:
-                        created_dt = _dt.datetime.fromisoformat(
-                            created_at.replace("Z", "+00:00"),
-                        )
-                    except ValueError:
-                        created_dt = None
-                    if created_dt is not None:
-                        delta = (decided_dt - created_dt).total_seconds()
-                        if delta >= 0:
-                            total_handle_seconds += delta
-                            total_handle_samples += 1
+    audit_metrics = compute_gate_audit_metrics(conn, env=env_norm, days=days)
 
     try:
-        escalations = await bridge.list_escalations(env=env_norm)
         funnel = await bridge.get_kol_registry_funnel(env=env_norm, days=days)
+        re_esc = await bridge.get_escalation_re_escalation_window(
+            env=env_norm, days=days,
+        )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    re_escalated = sum(1 for r in escalations if isinstance(r, dict) and r.get("state") == "re_escalated")
-    escal_total = sum(1 for r in escalations if isinstance(r, dict))
-
-    avg_manual_touches = 0.0
-    if touches_by_campaign:
-        avg_manual_touches = sum(touches_by_campaign.values()) / len(touches_by_campaign)
 
     return {
         "env": env_norm,
         "window_days": days,
+        "funnel_window_days": funnel.get("funnel_window_days"),
         "metrics": {
-            "first_pass_approval_rate": (
-                (decisions_approved / decisions_total) if decisions_total else 0.0
-            ),
-            "avg_handle_minutes": (
-                (total_handle_seconds / 60.0 / total_handle_samples)
-                if total_handle_samples else 0.0
-            ),
-            "re_escalation_rate": (re_escalated / escal_total) if escal_total else 0.0,
-            "manual_touchpoints_per_campaign": avg_manual_touches,
-            "termination_rate": (terminated_count / resolved_count) if resolved_count else 0.0,
-            "live_incident_rate": (live_rejected / live_decisions) if live_decisions else 0.0,
+            "first_pass_approval_rate": audit_metrics["first_pass_approval_rate"],
+            "avg_handle_minutes": audit_metrics["avg_handle_minutes"],
+            "re_escalation_rate": float(re_esc.get("re_escalation_rate") or 0.0),
+            "manual_touchpoints_per_campaign": audit_metrics[
+                "manual_touchpoints_per_campaign"
+            ],
+            "termination_rate": audit_metrics["termination_rate"],
+            "live_incident_rate": audit_metrics["live_reject_rate"],
             "kol_candidate_adoption_rate": float(
                 funnel.get("kol_candidate_adoption_rate") or 0.0,
             ),
@@ -189,10 +111,38 @@ async def gate_metrics(
                 funnel.get("initial_outreach_reply_rate") or 0.0,
             ),
         },
+        "audit_meta": {
+            "first_pass_decisions_total": audit_metrics["first_pass_decisions_total"],
+            "reply_decisions_total": audit_metrics["reply_decisions_total"],
+            "handle_time_samples": audit_metrics["handle_time_samples"],
+            "touched_campaign_count": audit_metrics["touched_campaign_count"],
+            "child_escalation_opens": int(re_esc.get("child_escalation_opens") or 0),
+            "escalation_opens_total": int(re_esc.get("escalation_opens_total") or 0),
+        },
         "kol_funnel": {
+            "maturity_days": int(funnel.get("maturity_days") or 14),
+            "funnel_window_days": funnel.get("funnel_window_days"),
             "discovered_total": int(funnel.get("discovered_total") or 0),
             "prior_collab_excluded": int(funnel.get("prior_collab_excluded") or 0),
             "eligible_total": int(funnel.get("eligible_total") or 0),
+            "mature_eligible_total": int(funnel.get("mature_eligible_total") or 0),
+            "mature_adopted_within_window_count": int(
+                funnel.get("mature_adopted_within_window_count") or 0,
+            ),
+            "pending_mature_backlog_count": int(
+                funnel.get("pending_mature_backlog_count") or 0,
+            ),
+            "pending_immature_count": int(funnel.get("pending_immature_count") or 0),
+            "mature_draft_total": int(funnel.get("mature_draft_total") or 0),
+            "mature_replied_within_window_count": int(
+                funnel.get("mature_replied_within_window_count") or 0,
+            ),
+            "pending_draft_mature_no_reply_count": int(
+                funnel.get("pending_draft_mature_no_reply_count") or 0,
+            ),
+            "pending_draft_immature_count": int(
+                funnel.get("pending_draft_immature_count") or 0,
+            ),
             "initial_outreach_draft_count": int(
                 funnel.get("initial_outreach_draft_count") or 0,
             ),
@@ -200,10 +150,45 @@ async def gate_metrics(
                 funnel.get("initial_outreach_reply_count") or 0,
             ),
         },
-        "top_rejection_tags": [
-            {"tag": tag, "count": count}
-            for tag, count in tag_counter.most_common(10)
-        ],
+        "top_rejection_tags": audit_metrics["top_rejection_tags"],
+    }
+
+
+@router.get("/gate-metrics/trends")
+async def gate_metrics_trends(
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(require_role("owner", "operator"))],
+    env: str = Query("TEST"),
+    bucket: str = Query("week", pattern="^(day|week|month|year)$"),
+    periods: int | None = Query(None, ge=1, le=90),
+) -> dict[str, Any]:
+    """Time-bucketed series for all gate-metrics cards (read-only)."""
+    env_norm = env.upper()
+    try:
+        audit_trends = compute_audit_metric_trends(
+            conn, env=env_norm, bucket=bucket, periods=periods,
+        )
+        funnel_trends = await bridge.get_kol_registry_funnel_trend(
+            env=env_norm, bucket=bucket, periods=periods,
+        )
+        re_esc_trends = await bridge.get_escalation_re_escalation_trend(
+            env=env_norm, bucket=bucket, periods=periods,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    series: dict[str, list[dict[str, Any]]] = dict(audit_trends.get("series") or {})
+    for key, points in (funnel_trends.get("series") or {}).items():
+        series[key] = points
+    for key, points in (re_esc_trends.get("series") or {}).items():
+        series[key] = points
+
+    return {
+        "env": env_norm,
+        "bucket": audit_trends.get("bucket", bucket),
+        "periods": audit_trends.get("periods"),
+        "series": series,
     }
 
 

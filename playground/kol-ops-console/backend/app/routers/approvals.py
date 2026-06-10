@@ -42,6 +42,35 @@ def _refine_dedup_key(identity_id: int, campaign_id: str) -> str:
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
+REPLY_DRAFT_PATH = "approval.reply_draft"
+
+
+async def _pending_reply_draft_opened_at(
+    bridge: BridgeClient,
+    *,
+    identity_id: int,
+    campaign_id: str,
+    env: str,
+) -> str | None:
+    """Best-effort ``opened_at`` for gate-metrics handle-time audit."""
+    try:
+        raw = await bridge.list_approvals(status="pending", env=env)
+    except BridgeError:
+        return None
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        if row.get("identity_id") != identity_id:
+            continue
+        if str(row.get("campaign_id") or "") != campaign_id:
+            continue
+        fact = row.get("fact_key") or row.get("fact_path")
+        if fact != REPLY_DRAFT_PATH:
+            continue
+        opened = row.get("captured_at") or row.get("opened_at")
+        return str(opened) if opened else None
+    return None
+
 # Approvals whose decision is itself the deliverable. After approve, no
 # further agent run is needed (the bridge produced the artefact inline,
 # e.g. a Gmail draft for ``approval.reply_draft``).
@@ -49,6 +78,7 @@ _TERMINAL_APPROVAL_FACT_PATHS: frozenset[str] = frozenset({
     "approval.reply_draft",
     "approval.style_learning_proposal",
     "approval.outcome_learning_proposal",
+    "approval.discovery_learning_proposal",
 })
 
 _APPROVAL_RESUME_INSTRUCTIONS = (
@@ -548,15 +578,27 @@ async def approve(
         decided_by=f"web:{user['email']}",
         bridge_response=out if isinstance(out, dict) else {},
     )
+    opened_at: str | None = None
+    if fact_path == REPLY_DRAFT_PATH and body.identity_id and body.campaign_id:
+        opened_at = await _pending_reply_draft_opened_at(
+            bridge,
+            identity_id=int(body.identity_id),
+            campaign_id=str(body.campaign_id),
+            env=env,
+        )
+    audit_payload: dict[str, Any] = {
+        "env": env,
+        "identity_id": body.identity_id,
+        "campaign_id": body.campaign_id,
+        "run_id": run_id,
+        "reason_tags": body.reason_tags,
+    }
+    if opened_at:
+        audit_payload["opened_at"] = opened_at
     write_audit(
         conn, actor_user_id=user["id"], action="approval.approve",
         target=fact_path,
-        payload={
-            "identity_id": body.identity_id,
-            "campaign_id": body.campaign_id,
-            "run_id": run_id,
-            "reason_tags": body.reason_tags,
-        },
+        payload=audit_payload,
     )
     return {**(out if isinstance(out, dict) else {}), "run_id": run_id}
 
@@ -570,7 +612,16 @@ async def reject(
     conn=Depends(get_conn),
 ) -> dict[str, Any]:
     payload = body.model_dump(exclude_none=True)
-    payload["env"] = _env(payload.get("env"))
+    env = _env(payload.get("env"))
+    payload["env"] = env
+    opened_at: str | None = None
+    if fact_path == REPLY_DRAFT_PATH and body.identity_id and body.campaign_id:
+        opened_at = await _pending_reply_draft_opened_at(
+            bridge,
+            identity_id=int(body.identity_id),
+            campaign_id=str(body.campaign_id),
+            env=env,
+        )
     try:
         out = await bridge.reject(fact_path, payload)
     except BridgeError as exc:
@@ -582,12 +633,15 @@ async def reject(
         out.get("derived_escalation_id") if isinstance(out, dict) else None
     )
     audit_payload: dict[str, Any] = {
+        "env": env,
         "identity_id": body.identity_id,
         "campaign_id": body.campaign_id,
         "note": body.note,
         "reason_tags": body.reason_tags,
         "derived_escalation_id": derived_escalation_id,
     }
+    if opened_at:
+        audit_payload["opened_at"] = opened_at
     if body.correction is not None:
         audit_payload["correction"] = body.correction.model_dump(exclude_none=True)
     write_audit(
@@ -736,6 +790,7 @@ async def refine(
         conn, actor_user_id=user["id"], action="approval.refine",
         target=fact_path,
         payload={
+            "env": env,
             "identity_id": body.identity_id,
             "campaign_id": body.campaign_id,
             "run_id": run_id,

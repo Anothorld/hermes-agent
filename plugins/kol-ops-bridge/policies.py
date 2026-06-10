@@ -29,6 +29,7 @@ Top-level overrides (``max_escalation_depth: 5``) live as a single line
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import logging
 import re
 import sqlite3
@@ -61,13 +62,46 @@ PolicyScope = Literal[
     "outcome_strategy",
 ]
 
+# Dynamic scope family: learned discovery criteria, keyed per SPU or per
+# product category — ``discovery_criteria:spu:<sku>`` /
+# ``discovery_criteria:category:<slug>``. Env-scoped (TEST | LIVE), global
+# owner, append-only versioning like the static scopes.
+DISCOVERY_CRITERIA_SCOPE_PREFIX: Final[str] = "discovery_criteria:"
+_DISCOVERY_CRITERIA_SCOPE = re.compile(
+    r"^discovery_criteria:(spu|category):[A-Za-z0-9][A-Za-z0-9_\-\.]{0,79}$",
+)
+
+
+def is_discovery_criteria_scope(scope: str) -> bool:
+    """True when ``scope`` is a valid dynamic discovery-criteria scope."""
+    return bool(_DISCOVERY_CRITERIA_SCOPE.match(scope or ""))
+
+
+def discovery_criteria_scope(kind: str, key: str) -> str:
+    """Build a ``discovery_criteria:<kind>:<key>`` scope (validated)."""
+    scope = f"{DISCOVERY_CRITERIA_SCOPE_PREFIX}{kind}:{_slugify_scope_key(key)}"
+    if not is_discovery_criteria_scope(scope):
+        raise ValueError(f"cannot build discovery_criteria scope from {kind!r}/{key!r}")
+    return scope
+
+
+def _slugify_scope_key(key: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_\-\.]+", "-", str(key or "").strip())
+    cleaned = cleaned.strip("-")[:80]
+    if cleaned:
+        return cleaned
+    # Non-ASCII keys (e.g. Chinese category labels) slug to a stable digest so
+    # the scope stays deterministic for the same label.
+    digest = hashlib.md5(str(key or "").encode("utf-8")).hexdigest()[:12]
+    return f"x{digest}"
+
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def _validate_scope(scope: str) -> None:
-    if scope not in POLICY_SCOPES:
+    if scope not in POLICY_SCOPES and not is_discovery_criteria_scope(scope):
         raise ValueError(f"invalid policy scope: {scope!r}")
 
 
@@ -81,7 +115,7 @@ def _validate_owner(scope: str, owner_user_id: Optional[int]) -> None:
 
 
 def _resolve_env(scope: str, env: Optional[str]) -> Optional[str]:
-    if scope in ENV_SCOPED_POLICIES:
+    if scope in ENV_SCOPED_POLICIES or is_discovery_criteria_scope(scope):
         return env or "LIVE"
     return None
 
@@ -455,10 +489,13 @@ def _signal_names(signals: Any) -> set[str]:
 
 
 __all__ = [
+    "DISCOVERY_CRITERIA_SCOPE_PREFIX",
     "ENV_SCOPED_POLICIES",
     "POLICY_SCOPES",
     "PolicyScope",
     "DEFAULT_MAX_ESCALATION_DEPTH",
+    "discovery_criteria_scope",
+    "is_discovery_criteria_scope",
     "get_policy",
     "get_policy_version",
     "list_policy_history",

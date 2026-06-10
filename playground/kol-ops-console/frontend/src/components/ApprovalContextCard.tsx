@@ -648,6 +648,71 @@ function OutcomeLearningProposalView({ ctx, env }: { ctx: Ctx; env: string }) {
   );
 }
 
+function DiscoveryLearningProposalView({ ctx, env }: { ctx: Ctx; env: string }) {
+  const md = asString(ctx.proposed_markdown) ?? '';
+  const groupKind = asString(ctx.group_kind) ?? '';
+  const groupKey = asString(ctx.group_key) ?? '';
+  const scope = asString(ctx.scope) ?? '';
+  const sampleCount = ctx.sample_count;
+  const kolCount = ctx.sample_identity_count;
+  const batchThreshold = ctx.batch_threshold;
+  const llmUsed = ctx.llm_used === true;
+  const actionMix =
+    typeof ctx.action_mix === 'object' && ctx.action_mix !== null
+      ? (ctx.action_mix as Record<string, number>)
+      : {};
+  const eventIds = Array.isArray(ctx.source_event_ids) ? ctx.source_event_ids : [];
+  const ACTION_ZH: Record<string, string> = {
+    approve: '批准',
+    remove: '移除',
+    transfer: '转移',
+  };
+  const mixLabel = Object.entries(actionMix)
+    .filter(([, n]) => typeof n === 'number' && n > 0)
+    .map(([a, n]) => `${ACTION_ZH[a] ?? a} ${n}`)
+    .join(' / ');
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="rounded border border-indigo-200 bg-indigo-50 px-2 py-1 text-indigo-900">
+        <div className="font-medium">
+          KOL 发现标准提案（批准后用于下一轮 KOL 发现）
+        </div>
+        <div className="mt-0.5 text-[11px]">
+          根据您在 shortlist 上的批准/移除/转移理由汇总而成；批准后 AI 会按这些标准
+          挑选更符合预期的 KOL。列表上的 @handle 仅为系统挂载用，可忽略。
+        </div>
+        <div className="mt-0.5 text-[11px]">
+          学习层级：{groupKind === 'category' ? `品类 ${groupKey}` : `产品 ${groupKey}`}
+          {typeof kolCount === 'number' && kolCount > 0 && (
+            <> · 涉及 {String(kolCount)} 位 KOL</>
+          )}
+          {sampleCount != null && <> · 决策样本 {String(sampleCount)} 条</>}
+          {mixLabel && <> · {mixLabel}</>}
+          {batchThreshold != null && <> · 批次阈值 {String(batchThreshold)}</>}
+          {llmUsed ? ' · LLM 蒸馏' : ''}
+          {eventIds.length > 0 && <> · 来源事件 {eventIds.length} 条</>}
+        </div>
+      </div>
+      <div className="rounded border border-slate-100 bg-white px-2 py-1 text-[11px] text-slate-600">
+        提案为<strong>增量修订（delta）</strong>：批准后并入该
+        {groupKind === 'category' ? '品类' : '产品'}的发现标准，可能含
+        <code className="mx-0.5">ADJUST:</code>/<code className="mx-0.5">REMOVE:</code>
+        指令。展开下方可对比当前标准。提案只调整评分侧重与软性排除信号，
+        <strong>不会放宽硬性门槛</strong>（粉丝数 / 地区 / 互动率等）。
+      </div>
+      <PolicyMergeDiffPreview env={env} proposal={ctx} />
+      {md ? (
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-800">
+          {md}
+        </pre>
+      ) : (
+        <div className="italic text-slate-500">(无 proposed_markdown)</div>
+      )}
+      {scope && <CurrentPolicyPreview scope={scope} env={env} />}
+    </div>
+  );
+}
+
 function GenericApprovalView({ ctx }: { ctx: Ctx }) {
   return (
     <KeyValueTable
@@ -733,6 +798,9 @@ export default function ApprovalContextCard({
       break;
     case 'approval.outcome_learning_proposal':
       body = <OutcomeLearningProposalView ctx={context} env={env} />;
+      break;
+    case 'approval.discovery_learning_proposal':
+      body = <DiscoveryLearningProposalView ctx={context} env={env} />;
       break;
     default:
       body = <GenericApprovalView ctx={context} />;

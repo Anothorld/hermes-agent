@@ -264,8 +264,12 @@ def list_learning_events(
     campaign_id: Optional[str] = None,
     goal: Optional[str] = None,
     limit: int = 100,
+    before_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
-    """Return learning events newest-first."""
+    """Return learning events newest-first.
+
+    ``before_id`` enables keyset pagination (returns rows with ``id < before_id``).
+    """
     limit = max(1, min(int(limit), 500))
     placeholders = ",".join("?" * len(event_types))
     where = [f"env = ?", f"event_type IN ({placeholders})"]
@@ -279,6 +283,9 @@ def list_learning_events(
     if goal is not None:
         where.append("goal = ?")
         args.append(goal)
+    if before_id is not None:
+        where.append("id < ?")
+        args.append(int(before_id))
     sql = (
         "SELECT id, identity_id, campaign_id, event_type, goal, lane, "
         "actor, ts, payload_json, env FROM kol_conversation_events "

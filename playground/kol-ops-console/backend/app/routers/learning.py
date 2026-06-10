@@ -11,7 +11,11 @@ from pydantic import BaseModel, Field
 
 from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
-from ..deps import current_user, get_bridge, require_role
+from ..deps import current_user, get_bridge, get_conn, require_role
+from ..discovery_feedback import (
+    list_failed_shortlist_captures,
+    replay_shortlist_capture,
+)
 from ..learning_job_store import create_job, get_job, run_in_background
 
 router = APIRouter(prefix="/learning", tags=["learning"])
@@ -36,6 +40,13 @@ LEARNING_POLICY_SCOPES = frozenset({
     "pricing_calibration",
     "outcome_strategy",
 })
+
+# Dynamic learned-discovery-criteria scopes (per SPU / per category).
+DISCOVERY_CRITERIA_PREFIX = "discovery_criteria:"
+
+
+def _scope_allowed(scope: str) -> bool:
+    return scope in LEARNING_POLICY_SCOPES or scope.startswith(DISCOVERY_CRITERIA_PREFIX)
 
 
 @router.get("/overview")
@@ -370,10 +381,11 @@ async def get_learning_policy(
     _user: Annotated[dict, Depends(current_user)],
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
-    if scope not in LEARNING_POLICY_SCOPES:
+    if not _scope_allowed(scope):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"scope must be one of {sorted(LEARNING_POLICY_SCOPES)}",
+            f"scope must be one of {sorted(LEARNING_POLICY_SCOPES)} "
+            f"or start with {DISCOVERY_CRITERIA_PREFIX!r}",
         )
     try:
         return await bridge._req(
@@ -391,10 +403,11 @@ async def get_learning_policy_history(
     owner_user_id: Optional[int] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
-    if scope not in LEARNING_POLICY_SCOPES:
+    if not _scope_allowed(scope):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"scope must be one of {sorted(LEARNING_POLICY_SCOPES)}",
+            f"scope must be one of {sorted(LEARNING_POLICY_SCOPES)} "
+            f"or start with {DISCOVERY_CRITERIA_PREFIX!r}",
         )
     params: dict[str, Any] = {"limit": limit}
     if owner_user_id is not None:
@@ -421,10 +434,11 @@ async def rollback_learning_policy(
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
 ) -> dict[str, Any]:
     """Roll a learning policy back to a prior version (regression-guard remedy)."""
-    if scope not in LEARNING_POLICY_SCOPES:
+    if not _scope_allowed(scope):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"scope must be one of {sorted(LEARNING_POLICY_SCOPES)}",
+            f"scope must be one of {sorted(LEARNING_POLICY_SCOPES)} "
+            f"or start with {DISCOVERY_CRITERIA_PREFIX!r}",
         )
     payload: dict[str, Any] = {
         "to_version": body.to_version,
@@ -438,6 +452,189 @@ async def rollback_learning_policy(
         return await bridge._req(
             "POST", f"/policies/{scope}/rollback", json=payload,
         )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Discovery decision learning (shortlist approve / remove / transfer)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/discovery-tags")
+async def list_discovery_tags(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+    action: Optional[str] = Query(default=None, pattern="^(approve|remove|transfer)$"),
+    status_filter: str = Query(
+        default="active", alias="status", pattern="^(active|proposed|rejected)$",
+    ),
+) -> dict[str, Any]:
+    """Tag vocabulary for the shortlist feedback dialog and learning page."""
+    try:
+        return await bridge.list_discovery_tags(action=action, status=status_filter)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+class DecideDiscoveryTagBody(BaseModel):
+    tag: str = Field(min_length=1, max_length=64)
+    decision: str = Field(pattern="^(approved|rejected)$")
+
+
+@router.post("/discovery-tags/decide")
+async def decide_discovery_tag(
+    body: DecideDiscoveryTagBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """Approve / reject a mined tag proposal (becomes selectable when approved)."""
+    try:
+        return await bridge.decide_discovery_tag(body.model_dump())
+    except BridgeError as exc:
+        if exc.status == 404:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, exc.detail) from exc
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@router.get("/discovery-feedback-requirements")
+async def discovery_feedback_requirements(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+    sku: Optional[str] = Query(default=None, max_length=80),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Sample counts + whether the comment is still required for this SPU.
+
+    Always includes ``feedback_required`` (the Console-side kill switch
+    ``KOC_DISCOVERY_FEEDBACK_REQUIRED``) so the frontend can relax its dialog
+    validation in lockstep with the backend. Degrades instead of 502 when the
+    bridge is unreachable — the learning channel must never block shortlist
+    operations.
+    """
+    feedback_required = get_settings().discovery_feedback_required
+    try:
+        out = await bridge.discovery_feedback_requirements(sku=sku, env=env)
+    except BridgeError:
+        out = {
+            "sku": sku,
+            "comment_required": False,
+            "tags_required": feedback_required,
+            "degraded": True,
+        }
+    out["feedback_required"] = feedback_required
+    return out
+
+
+@router.get("/shortlist-decision-events")
+async def list_shortlist_decision_events(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    sku: Optional[str] = Query(default=None, max_length=80),
+    category: Optional[str] = Query(default=None, max_length=80),
+    action: Optional[str] = Query(default=None, pattern="^(approve|remove|transfer)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    try:
+        return await bridge.list_shortlist_decision_events(
+            env=env, sku=sku, category=category, action=action, limit=limit,
+        )
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@router.get("/pending-discovery-proposals")
+async def pending_discovery_proposals(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    try:
+        return await bridge.list_pending_discovery_proposals(env=env)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@router.get("/discovery-criteria")
+async def discovery_criteria(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+    sku: str = Query(min_length=1, max_length=80),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Learned SPU + category criteria for the learning page viewer."""
+    try:
+        return await bridge.get_discovery_criteria(sku=sku, env=env)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@router.get("/failed-shortlist-captures")
+def failed_shortlist_captures(
+    _user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    conn=Depends(get_conn),
+    limit: int = Query(default=30, ge=1, le=200),
+    include_replayed: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Learning samples that failed to persist after approve/remove/transfer."""
+    items = list_failed_shortlist_captures(
+        conn, limit=limit, include_replayed=include_replayed,
+    )
+    return {"items": items, "count": len(items)}
+
+
+class ReplayShortlistCaptureBody(BaseModel):
+    audit_id: int = Field(ge=1)
+
+
+@router.post("/replay-shortlist-capture")
+async def replay_shortlist_capture_route(
+    body: ReplayShortlistCaptureBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+    conn=Depends(get_conn),
+) -> dict[str, Any]:
+    """One-click replay of a failed learning capture from audit ``replay_body``."""
+    return await replay_shortlist_capture(
+        bridge,
+        conn,
+        audit_id=body.audit_id,
+        actor_user_id=int(user["id"]),
+    )
+
+
+@router.get("/product-categories")
+async def list_product_categories(
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _user: Annotated[dict, Depends(current_user)],
+) -> dict[str, Any]:
+    try:
+        return await bridge.list_product_categories()
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+class PutProductCategoryBody(BaseModel):
+    category: str = Field(min_length=1, max_length=80)
+    product_name: Optional[str] = Field(default=None, max_length=200)
+
+
+@router.put("/product-categories/{sku}")
+async def put_product_category(
+    sku: str,
+    body: PutProductCategoryBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    user: Annotated[dict, Depends(require_role("owner", "operator"))],
+) -> dict[str, Any]:
+    """Operator correction of a SKU's category (authoritative over LLM)."""
+    payload = {
+        "category": body.category,
+        "product_name": body.product_name,
+        "updated_by": f"console:{user.get('email', 'unknown')}",
+    }
+    try:
+        return await bridge.put_product_category(sku, payload)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 

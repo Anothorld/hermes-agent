@@ -713,10 +713,15 @@ async def open_escalation(
         out = await bridge.open_escalation(payload)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    open_env = str(payload.get("env") or body.env or _env(None)).upper()
     write_audit(
         conn, actor_user_id=user["id"], action="escalation.open",
         target=str(body.identity_id),
-        payload={"rule_id": body.rule_id, "campaign_id": body.campaign_id},
+        payload={
+            "env": open_env,
+            "rule_id": rule_id,
+            "campaign_id": body.campaign_id,
+        },
     )
     return out
 
@@ -837,10 +842,16 @@ async def resolve_escalation(
                 session_id=f"kol-campaign:{env}:{campaign_id}",
                 dedup_key=draft_dedup_key,
             )
+    resolve_env = str(
+        (escalation or {}).get("env") or body.env or _env(None),
+    ).upper()
     write_audit(
         conn, actor_user_id=user["id"], action="escalation.resolve",
         target=str(escalation_id),
         payload={
+            "env": resolve_env,
+            "campaign_id": (escalation or {}).get("campaign_id"),
+            "opened_at": (escalation or {}).get("created_at"),
             "decision": body.decision,
             "run_id": run_id,
             "reason_tags": body.reason_tags,
@@ -961,7 +972,12 @@ async def preview_draft(
     write_audit(
         conn, actor_user_id=user["id"], action="escalation.preview_draft",
         target=str(escalation_id),
-        payload={"run_id": run_id, "campaign_id": campaign_id},
+        payload={
+            "env": env,
+            "campaign_id": campaign_id,
+            "opened_at": escalation.get("created_at"),
+            "run_id": run_id,
+        },
     )
     return {"ok": True, "run_id": run_id,
             "hint": "Watch the Approvals page for an approval.reply_draft "

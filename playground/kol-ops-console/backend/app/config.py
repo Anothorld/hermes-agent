@@ -116,6 +116,16 @@ class Settings(BaseSettings):
     launch_http_202: bool = True
     launch_bridge_health_check: bool = True
 
+    # --- Discovery decision learning ---
+    # Require reason tags (+ early-phase comment) on shortlist approve /
+    # remove / transfer. Disable (KOC_DISCOVERY_FEEDBACK_REQUIRED=false) only
+    # as an emergency rollback — learning samples stop accumulating.
+    discovery_feedback_required: bool = True
+    # Inject learned discovery criteria (SPU + category policies) into the
+    # discovery launch / rediscover brief.
+    discovery_learned_criteria: bool = True
+    discovery_learned_criteria_max_chars: int = 4000
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

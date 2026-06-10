@@ -11,7 +11,7 @@
 | [features/campaigns/GUIDE.md](features/campaigns/GUIDE.md) | 活动生命周期、候选人池、回复监听 |
 | [features/kols/GUIDE.md](features/kols/GUIDE.md) | KOL 看板、详情、事实、目标、关系 |
 | [features/approvals/GUIDE.md](features/approvals/GUIDE.md) | 待审批队列、回信草稿、结构化驳回 |
-| [features/learning/GUIDE.md](features/learning/GUIDE.md) | 自主学习、策略反哺 |
+| [features/learning/GUIDE.md](features/learning/GUIDE.md) | 自主学习、策略反哺、发现决策学习（discover 闭环） |
 | [features/escalations/GUIDE.md](features/escalations/GUIDE.md) | 升级工单 |
 | [features/policies/GUIDE.md](features/policies/GUIDE.md) | 策略 Markdown 编辑 |
 | [features/gate-metrics/GUIDE.md](features/gate-metrics/GUIDE.md) | 门禁效果看板 |

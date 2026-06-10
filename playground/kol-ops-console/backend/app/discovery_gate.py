@@ -41,6 +41,7 @@ from .config import get_settings
 from .db import _connect
 from .launch_accept import launch_or_accept, queue_would_block
 from .launch_rollback import rollback_rediscover_failure
+from .learned_criteria import learned_criteria_brief_section
 from .run_launch_queue import new_pending_run_id
 from .run_registry import finalize_run_id, get_inflight_run, register_run
 
@@ -743,6 +744,11 @@ async def _trigger_rediscover_internal(
         prior_diagnostics=prior_diagnostics,
         nox_cfg_path=nox_cfg_path,
     )
+    learned_section = await learned_criteria_brief_section(
+        bridge, sku=product["sku"], env=env,
+    )
+    if learned_section:
+        brief_text = f"{brief_text}\n{learned_section}"
 
     ensure_gateway_bridge_key()
     session_id = f"kol-campaign:{env}:{campaign_id}"

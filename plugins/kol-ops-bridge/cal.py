@@ -668,18 +668,41 @@ def _registry_fact_is_true(value: Any) -> bool:
     return decoded is True
 
 
-def _batch_registry_pipeline_flags(
+FUNNEL_MATURITY_DAYS: Final[int] = 14
+FUNNEL_MIN_WINDOW_DAYS: Final[int] = 30
+
+
+def _merge_earliest_ts(
+    current: Optional[_dt.datetime],
+    raw: Any,
+) -> Optional[_dt.datetime]:
+    parsed = raw if isinstance(raw, _dt.datetime) else _parse_metrics_trend_ts(
+        str(raw) if raw is not None else None,
+    )
+    if parsed is None:
+        return current
+    if current is None or parsed < current:
+        return parsed
+    return current
+
+
+def _batch_registry_pipeline_detail(
     conn: Any,
     identity_ids: list[int],
     *,
     env: str,
-) -> dict[int, dict[str, bool]]:
-    """Per-identity outreach pipeline flags for the metrics registry table."""
+) -> dict[int, dict[str, Any]]:
+    """Per-identity outreach pipeline flags + earliest draft/reply timestamps."""
     if not identity_ids:
         return {}
     id_ph = ",".join("?" * len(identity_ids))
-    out: dict[int, dict[str, bool]] = {
-        iid: {"has_initial_outreach_draft": False, "has_inbound_reply": False}
+    out: dict[int, dict[str, Any]] = {
+        iid: {
+            "has_initial_outreach_draft": False,
+            "has_inbound_reply": False,
+            "first_draft_at": None,
+            "first_reply_at": None,
+        }
         for iid in identity_ids
     }
     for row in conn.execute(
@@ -689,8 +712,17 @@ def _batch_registry_pipeline_flags(
                          WHEN event_type = 'outbound_draft_created' AND goal = 'outreach' THEN 1
                          ELSE 0
                        END) AS has_initial_draft,
+                   MIN(CASE
+                         WHEN event_type = 'kol_initial_outreach_draft_ready' THEN ts
+                         WHEN event_type = 'outbound_draft_created' AND goal = 'outreach' THEN ts
+                         ELSE NULL
+                       END) AS first_draft_ts,
                    MAX(CASE WHEN event_type = 'kol_inbound_reply' THEN 1 ELSE 0 END)
-                       AS has_reply
+                       AS has_reply,
+                   MIN(CASE
+                         WHEN event_type = 'kol_inbound_reply' THEN ts
+                         ELSE NULL
+                       END) AS first_reply_ts
               FROM kol_conversation_events
              WHERE env=? AND identity_id IN ({id_ph})
           GROUP BY identity_id""",
@@ -700,18 +732,245 @@ def _batch_registry_pipeline_flags(
         out[iid] = {
             "has_initial_outreach_draft": bool(row["has_initial_draft"]),
             "has_inbound_reply": bool(row["has_reply"]),
+            "first_draft_at": _parse_metrics_trend_ts(row["first_draft_ts"]),
+            "first_reply_at": _parse_metrics_trend_ts(row["first_reply_ts"]),
         }
     for row in conn.execute(
-        f"""SELECT identity_id, fact_value
+        f"""SELECT identity_id, fact_value, captured_at
               FROM kol_facts_latest
              WHERE env=? AND identity_id IN ({id_ph})
                AND fact_key = 'offer.outreach_draft_created'""",
         (env, *identity_ids),
     ):
+        iid = int(row["identity_id"])
         if _registry_fact_is_true(row["fact_value"]):
-            iid = int(row["identity_id"])
             out[iid]["has_initial_outreach_draft"] = True
+            out[iid]["first_draft_at"] = _merge_earliest_ts(
+                out[iid]["first_draft_at"], row["captured_at"],
+            )
     return out
+
+
+def _batch_registry_pipeline_flags(
+    conn: Any,
+    identity_ids: list[int],
+    *,
+    env: str,
+) -> dict[int, dict[str, bool]]:
+    """Per-identity outreach pipeline flags for the metrics registry table."""
+    return {
+        iid: {
+            "has_initial_outreach_draft": bool(detail.get("has_initial_outreach_draft")),
+            "has_inbound_reply": bool(detail.get("has_inbound_reply")),
+        }
+        for iid, detail in _batch_registry_pipeline_detail(
+            conn, identity_ids, env=env,
+        ).items()
+    }
+
+
+def _parse_metrics_trend_ts(ts: str | None) -> Optional[_dt.datetime]:
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    try:
+        return _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _funnel_discovery_mature(
+    discovered_at: _dt.datetime,
+    *,
+    maturity_days: int = FUNNEL_MATURITY_DAYS,
+    now: Optional[_dt.datetime] = None,
+) -> bool:
+    anchor = now or _dt.datetime.now(_dt.timezone.utc)
+    if discovered_at.tzinfo is None:
+        discovered_at = discovered_at.replace(tzinfo=_dt.timezone.utc)
+    return discovered_at + _dt.timedelta(days=maturity_days) <= anchor
+
+
+def _effective_funnel_window_days(days: Optional[int]) -> Optional[int]:
+    if days is None or int(days) <= 0:
+        return None
+    return max(int(days), FUNNEL_MIN_WINDOW_DAYS)
+
+
+def _anchor_mature(
+    anchor_at: _dt.datetime,
+    *,
+    maturity_days: int = FUNNEL_MATURITY_DAYS,
+    now: Optional[_dt.datetime] = None,
+) -> bool:
+    anchor = now or _dt.datetime.now(_dt.timezone.utc)
+    if anchor_at.tzinfo is None:
+        anchor_at = anchor_at.replace(tzinfo=_dt.timezone.utc)
+    return anchor_at + _dt.timedelta(days=maturity_days) <= anchor
+
+
+def _event_within_days_after(
+    start_at: _dt.datetime,
+    event_at: Optional[_dt.datetime],
+    *,
+    window_days: int = FUNNEL_MATURITY_DAYS,
+) -> bool:
+    if event_at is None:
+        return False
+    if start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=_dt.timezone.utc)
+    if event_at.tzinfo is None:
+        event_at = event_at.replace(tzinfo=_dt.timezone.utc)
+    window_end = start_at + _dt.timedelta(days=window_days)
+    return start_at <= event_at <= window_end
+
+
+def _adopted_within_funnel_window(
+    discovered_at: _dt.datetime,
+    pipeline: Mapping[str, Any],
+    *,
+    window_days: int = FUNNEL_MATURITY_DAYS,
+) -> bool:
+    if not pipeline.get("has_initial_outreach_draft"):
+        return False
+    first_draft = pipeline.get("first_draft_at")
+    if first_draft is None:
+        return True
+    if not isinstance(first_draft, _dt.datetime):
+        first_draft = _parse_metrics_trend_ts(str(first_draft))
+    if first_draft is None:
+        return True
+    if discovered_at.tzinfo is None:
+        discovered_at = discovered_at.replace(tzinfo=_dt.timezone.utc)
+    if first_draft.tzinfo is None:
+        first_draft = first_draft.replace(tzinfo=_dt.timezone.utc)
+    return _event_within_days_after(
+        discovered_at, first_draft, window_days=window_days,
+    )
+
+
+def _replied_within_draft_window(pipeline: Mapping[str, Any]) -> bool:
+    if not pipeline.get("has_inbound_reply"):
+        return False
+    first_draft = pipeline.get("first_draft_at")
+    first_reply = pipeline.get("first_reply_at")
+    if not isinstance(first_draft, _dt.datetime):
+        first_draft = _parse_metrics_trend_ts(
+            str(first_draft) if first_draft is not None else None,
+        )
+    if not isinstance(first_reply, _dt.datetime):
+        first_reply = _parse_metrics_trend_ts(
+            str(first_reply) if first_reply is not None else None,
+        )
+    if first_draft is None:
+        return bool(pipeline.get("has_inbound_reply"))
+    return _event_within_days_after(
+        first_draft, first_reply, window_days=FUNNEL_MATURITY_DAYS,
+    )
+
+
+def _empty_funnel_slot() -> dict[str, int]:
+    return {
+        "discovered_total": 0,
+        "prior_collab_excluded": 0,
+        "eligible_total": 0,
+        "initial_outreach_draft_count": 0,
+        "initial_outreach_reply_count": 0,
+        "mature_eligible_total": 0,
+        "mature_adopted_within_window_count": 0,
+        "pending_mature_backlog_count": 0,
+        "pending_immature_count": 0,
+        "mature_draft_total": 0,
+        "mature_replied_within_window_count": 0,
+        "pending_draft_mature_no_reply_count": 0,
+        "pending_draft_immature_count": 0,
+    }
+
+
+def _in_funnel_cohort(
+    anchor_at: Optional[_dt.datetime],
+    *,
+    window_days: Optional[int],
+    now: _dt.datetime,
+) -> bool:
+    if anchor_at is None:
+        return True
+    if anchor_at.tzinfo is None:
+        anchor_at = anchor_at.replace(tzinfo=_dt.timezone.utc)
+    if window_days is not None:
+        lower = now - _dt.timedelta(days=window_days)
+        if anchor_at < lower:
+            return False
+    upper = now - _dt.timedelta(days=FUNNEL_MATURITY_DAYS)
+    return anchor_at <= upper
+
+
+def _accumulate_funnel_identity(
+    slot: dict[str, int],
+    *,
+    discovered_at: Optional[_dt.datetime],
+    pipeline: Mapping[str, Any],
+    is_prior_collab: bool,
+    now: Optional[_dt.datetime] = None,
+    funnel_window_days: Optional[int] = None,
+) -> None:
+    anchor = now or _dt.datetime.now(_dt.timezone.utc)
+    slot["discovered_total"] += 1
+    if is_prior_collab:
+        slot["prior_collab_excluded"] += 1
+        return
+    slot["eligible_total"] += 1
+    has_draft = bool(pipeline.get("has_initial_outreach_draft"))
+    adopted_in_window = False
+    if discovered_at is not None:
+        adopted_in_window = _adopted_within_funnel_window(discovered_at, pipeline)
+    elif has_draft:
+        adopted_in_window = True
+
+    if has_draft:
+        slot["initial_outreach_draft_count"] += 1
+        if pipeline.get("has_inbound_reply"):
+            slot["initial_outreach_reply_count"] += 1
+
+    in_adoption_cohort = _in_funnel_cohort(
+        discovered_at, window_days=funnel_window_days, now=anchor,
+    )
+    if discovered_at is not None:
+        discovery_mature = _funnel_discovery_mature(discovered_at, now=anchor)
+        if discovery_mature and not has_draft:
+            slot["pending_mature_backlog_count"] += 1
+        elif not discovery_mature and not has_draft:
+            slot["pending_immature_count"] += 1
+
+    if in_adoption_cohort:
+        slot["mature_eligible_total"] += 1
+        if adopted_in_window:
+            slot["mature_adopted_within_window_count"] += 1
+
+    if not has_draft:
+        return
+
+    first_draft = pipeline.get("first_draft_at")
+    if not isinstance(first_draft, _dt.datetime):
+        first_draft = _parse_metrics_trend_ts(
+            str(first_draft) if first_draft is not None else None,
+        )
+    in_reply_cohort = _in_funnel_cohort(
+        first_draft, window_days=funnel_window_days, now=anchor,
+    )
+    draft_mature = (
+        _anchor_mature(first_draft, now=anchor) if first_draft is not None else False
+    )
+    replied_in_window = _replied_within_draft_window(pipeline)
+
+    if draft_mature and not replied_in_window:
+        slot["pending_draft_mature_no_reply_count"] += 1
+    elif first_draft is not None and not draft_mature and not pipeline.get("has_inbound_reply"):
+        slot["pending_draft_immature_count"] += 1
+
+    if in_reply_cohort:
+        slot["mature_draft_total"] += 1
+        if replied_in_window:
+            slot["mature_replied_within_window_count"] += 1
 
 
 def _pick_instagram_url(
@@ -1029,20 +1288,23 @@ def aggregate_kol_registry_funnel(
 ) -> dict[str, Any]:
     """Funnel metrics for the gate-metrics dashboard.
 
-    * **kol_candidate_adoption_rate** — share of eligible discoveries that
-      reached initial outreach draft (approve), excluding prior-collab KOLs
-      on the legacy 曾触达 allowlist.
-    * **initial_outreach_reply_rate** — share of initial-draft KOLs with an
-      inbound reply (``kol_inbound_reply``).
+    * **kol_candidate_adoption_rate** — among eligible discoveries at least
+      ``FUNNEL_MATURITY_DAYS`` old, share that reached initial outreach draft
+      within that many days of ``first_discovered_at``.
+    * **initial_outreach_reply_rate** — among initial drafts at least
+      ``FUNNEL_MATURITY_DAYS`` old (in the cohort window), share that received
+      an inbound reply within that many days of ``first_draft_at``.
     """
     env_norm = env.upper()
+    funnel_window_days = _effective_funnel_window_days(days)
     pool_cte = _registry_pool_cte()
     pool_args: list[Any] = [env_norm]
     time_sql = ""
     time_args: list[Any] = []
-    if days is not None and int(days) > 0:
+    if funnel_window_days is not None:
         cutoff = (
-            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=int(days))
+            _dt.datetime.now(_dt.timezone.utc)
+            - _dt.timedelta(days=funnel_window_days)
         ).isoformat(timespec="seconds")
         time_sql = " AND a.first_discovered_at >= ?"
         time_args = [cutoff]
@@ -1052,10 +1314,14 @@ def aggregate_kol_registry_funnel(
     except ImportError:
         import prior_touch_allowlist as _pta  # type: ignore[no-redef]
 
+    now = _dt.datetime.now(_dt.timezone.utc)
+    slot = _empty_funnel_slot()
+
     with _connect() as conn:
         rows = conn.execute(
             f"""{pool_cte}
                 SELECT a.identity_id AS identity_id,
+                       a.first_discovered_at AS first_discovered_at,
                        i.primary_handle AS primary_handle,
                        i.primary_email AS primary_email
                   FROM agg a
@@ -1064,7 +1330,7 @@ def aggregate_kol_registry_funnel(
             pool_args + [env_norm] + time_args,
         ).fetchall()
         ids = [int(r["identity_id"]) for r in rows]
-        pipeline_by_id = _batch_registry_pipeline_flags(conn, ids, env=env_norm)
+        pipeline_by_id = _batch_registry_pipeline_detail(conn, ids, env=env_norm)
         facts_by_id = _batch_registry_facts(
             conn,
             ids,
@@ -1072,46 +1338,310 @@ def aggregate_kol_registry_funnel(
             fact_keys=("identity.primary_email_from_legacy",),
         )
 
-    discovered_total = len(rows)
-    prior_collab_excluded = 0
-    initial_outreach_draft_count = 0
-    initial_outreach_reply_count = 0
-
     for row in rows:
         iid = int(row["identity_id"])
         facts = facts_by_id.get(iid, {})
         email = _resolve_registry_email(row["primary_email"], facts)
-        if _pta.is_prior_touch_allowlisted(
+        is_prior = _pta.is_prior_touch_allowlisted(
             handle=row["primary_handle"], email=email,
-        ):
-            prior_collab_excluded += 1
-            continue
-        pipeline = pipeline_by_id.get(iid, {})
-        if not pipeline.get("has_initial_outreach_draft"):
-            continue
-        initial_outreach_draft_count += 1
-        if pipeline.get("has_inbound_reply"):
-            initial_outreach_reply_count += 1
+        )
+        _accumulate_funnel_identity(
+            slot,
+            discovered_at=_parse_metrics_trend_ts(row["first_discovered_at"]),
+            pipeline=pipeline_by_id.get(iid, {}),
+            is_prior_collab=is_prior,
+            now=now,
+            funnel_window_days=funnel_window_days,
+        )
 
-    eligible_total = discovered_total - prior_collab_excluded
     adoption_rate = (
-        initial_outreach_draft_count / eligible_total
-        if eligible_total else 0.0
+        slot["mature_adopted_within_window_count"] / slot["mature_eligible_total"]
+        if slot["mature_eligible_total"] else 0.0
     )
     reply_rate = (
-        initial_outreach_reply_count / initial_outreach_draft_count
-        if initial_outreach_draft_count else 0.0
+        slot["mature_replied_within_window_count"] / slot["mature_draft_total"]
+        if slot["mature_draft_total"] else 0.0
     )
     return {
         "env": env_norm,
         "window_days": int(days) if days else None,
-        "discovered_total": discovered_total,
-        "prior_collab_excluded": prior_collab_excluded,
-        "eligible_total": eligible_total,
-        "initial_outreach_draft_count": initial_outreach_draft_count,
-        "initial_outreach_reply_count": initial_outreach_reply_count,
+        "funnel_window_days": funnel_window_days,
+        "maturity_days": FUNNEL_MATURITY_DAYS,
+        "discovered_total": slot["discovered_total"],
+        "prior_collab_excluded": slot["prior_collab_excluded"],
+        "eligible_total": slot["eligible_total"],
+        "mature_eligible_total": slot["mature_eligible_total"],
+        "mature_adopted_within_window_count": slot["mature_adopted_within_window_count"],
+        "pending_mature_backlog_count": slot["pending_mature_backlog_count"],
+        "pending_immature_count": slot["pending_immature_count"],
+        "mature_draft_total": slot["mature_draft_total"],
+        "mature_replied_within_window_count": slot["mature_replied_within_window_count"],
+        "pending_draft_mature_no_reply_count": slot["pending_draft_mature_no_reply_count"],
+        "pending_draft_immature_count": slot["pending_draft_immature_count"],
+        "initial_outreach_draft_count": slot["initial_outreach_draft_count"],
+        "initial_outreach_reply_count": slot["initial_outreach_reply_count"],
         "kol_candidate_adoption_rate": adoption_rate,
         "initial_outreach_reply_rate": reply_rate,
+    }
+
+
+_METRICS_TREND_BUCKETS: Final[frozenset[str]] = frozenset(
+    {"day", "week", "month", "year"},
+)
+_METRICS_TREND_DEFAULT_PERIODS: Final[dict[str, int]] = {
+    "day": 30,
+    "week": 12,
+    "month": 12,
+    "year": 5,
+}
+_METRICS_TREND_MAX_PERIODS: Final[dict[str, int]] = {
+    "day": 90,
+    "week": 52,
+    "month": 36,
+    "year": 10,
+}
+
+
+def _metrics_trend_bucket_key(dt: _dt.datetime, bucket: str) -> str:
+    if bucket == "day":
+        return dt.strftime("%Y-%m-%d")
+    if bucket == "week":
+        iso = dt.isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+    if bucket == "month":
+        return dt.strftime("%Y-%m")
+    if bucket == "year":
+        return dt.strftime("%Y")
+    return dt.strftime("%Y-%m-%d")
+
+
+def _metrics_trend_shift_anchor(
+    bucket: str, anchor: _dt.datetime, steps_back: int,
+) -> _dt.datetime:
+    if bucket == "day":
+        return anchor - _dt.timedelta(days=steps_back)
+    if bucket == "week":
+        return anchor - _dt.timedelta(weeks=steps_back)
+    if bucket == "month":
+        month = anchor.month - steps_back
+        year = anchor.year
+        while month <= 0:
+            month += 12
+            year -= 1
+        day = min(anchor.day, 28)
+        return anchor.replace(year=year, month=month, day=day)
+    if bucket == "year":
+        return anchor.replace(year=anchor.year - steps_back)
+    return anchor
+
+
+def _metrics_trend_labels(*, bucket: str, periods: int) -> list[str]:
+    anchor = _dt.datetime.now(_dt.timezone.utc)
+    return [
+        _metrics_trend_bucket_key(
+            _metrics_trend_shift_anchor(bucket, anchor, steps_back), bucket,
+        )
+        for steps_back in range(periods - 1, -1, -1)
+    ]
+
+
+def aggregate_kol_registry_funnel_trend(
+    *,
+    env: str = "LIVE",
+    bucket: str = "week",
+    periods: int | None = None,
+) -> dict[str, Any]:
+    """Per-bucket KOL funnel rates keyed by ``first_discovered_at``.
+
+    Adoption series uses the same ``FUNNEL_MATURITY_DAYS`` cohort rule as the
+    summary card: only mature discoveries in each bucket contribute.
+    """
+    env_norm = env.upper()
+    bucket_norm = bucket if bucket in _METRICS_TREND_BUCKETS else "week"
+    period_count = periods if periods is not None else (
+        _METRICS_TREND_DEFAULT_PERIODS[bucket_norm]
+    )
+    period_count = max(
+        1, min(int(period_count), _METRICS_TREND_MAX_PERIODS[bucket_norm]),
+    )
+    labels = _metrics_trend_labels(bucket=bucket_norm, periods=period_count)
+    label_set = set(labels)
+    counts: dict[str, dict[str, int]] = {
+        label: _empty_funnel_slot() for label in labels
+    }
+
+    pool_cte = _registry_pool_cte()
+    try:
+        from . import prior_touch_allowlist as _pta
+    except ImportError:
+        import prior_touch_allowlist as _pta  # type: ignore[no-redef]
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""{pool_cte}
+                SELECT a.identity_id AS identity_id,
+                       a.first_discovered_at AS first_discovered_at,
+                       i.primary_handle AS primary_handle,
+                       i.primary_email AS primary_email
+                  FROM agg a
+                  JOIN kol_identity i ON i.id = a.identity_id
+                 WHERE i.env = ?""",
+            [env_norm, env_norm],
+        ).fetchall()
+        ids = [int(r["identity_id"]) for r in rows]
+        pipeline_by_id = _batch_registry_pipeline_detail(conn, ids, env=env_norm)
+        facts_by_id = _batch_registry_facts(
+            conn,
+            ids,
+            env=env_norm,
+            fact_keys=("identity.primary_email_from_legacy",),
+        )
+
+    for row in rows:
+        discovered_dt = _parse_metrics_trend_ts(row["first_discovered_at"])
+        if discovered_dt is None:
+            continue
+        key = _metrics_trend_bucket_key(discovered_dt, bucket_norm)
+        if key not in label_set:
+            continue
+        iid = int(row["identity_id"])
+        facts = facts_by_id.get(iid, {})
+        email = _resolve_registry_email(row["primary_email"], facts)
+        is_prior = _pta.is_prior_touch_allowlisted(
+            handle=row["primary_handle"], email=email,
+        )
+        _accumulate_funnel_identity(
+            counts[key],
+            discovered_at=discovered_dt,
+            pipeline=pipeline_by_id.get(iid, {}),
+            is_prior_collab=is_prior,
+            now=now,
+            funnel_window_days=None,
+        )
+
+    def _rate_point(label: str, numerator: int, denominator: int) -> dict[str, Any]:
+        value = (numerator / denominator) if denominator else None
+        return {"bucket": label, "value": value}
+
+    adoption_series = []
+    reply_series = []
+    for label in labels:
+        slot = counts[label]
+        adoption_series.append(
+            _rate_point(
+                label,
+                slot["mature_adopted_within_window_count"],
+                slot["mature_eligible_total"],
+            ),
+        )
+        reply_series.append(
+            _rate_point(
+                label,
+                slot["mature_replied_within_window_count"],
+                slot["mature_draft_total"],
+            ),
+        )
+
+    return {
+        "env": env_norm,
+        "bucket": bucket_norm,
+        "periods": period_count,
+        "maturity_days": FUNNEL_MATURITY_DAYS,
+        "series": {
+            "kol_candidate_adoption_rate": adoption_series,
+            "initial_outreach_reply_rate": reply_series,
+        },
+    }
+
+
+def aggregate_escalation_re_escalation_window(
+    *,
+    env: str = "LIVE",
+    days: int = 30,
+) -> dict[str, Any]:
+    """Windowed repeat-escalation rate (child opens / all opens)."""
+    env_norm = env.upper()
+    lookback = max(1, int(days))
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=lookback)
+    child_opens = 0
+    total_opens = 0
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT created_at, parent_escalation_id
+                 FROM kol_escalations
+                WHERE env = ?""",
+            (env_norm,),
+        ).fetchall()
+    for row in rows:
+        created_dt = _parse_metrics_trend_ts(row["created_at"])
+        if created_dt is None or created_dt < cutoff:
+            continue
+        total_opens += 1
+        if row["parent_escalation_id"] is not None:
+            child_opens += 1
+    rate = (child_opens / total_opens) if total_opens else 0.0
+    return {
+        "env": env_norm,
+        "window_days": lookback,
+        "child_escalation_opens": child_opens,
+        "escalation_opens_total": total_opens,
+        "re_escalation_rate": rate,
+    }
+
+
+def aggregate_escalation_re_escalation_trend(
+    *,
+    env: str = "LIVE",
+    bucket: str = "week",
+    periods: int | None = None,
+) -> dict[str, Any]:
+    """Per-bucket repeat-escalation rate (child opens / all opens)."""
+    env_norm = env.upper()
+    bucket_norm = bucket if bucket in _METRICS_TREND_BUCKETS else "week"
+    period_count = periods if periods is not None else (
+        _METRICS_TREND_DEFAULT_PERIODS[bucket_norm]
+    )
+    period_count = max(
+        1, min(int(period_count), _METRICS_TREND_MAX_PERIODS[bucket_norm]),
+    )
+    labels = _metrics_trend_labels(bucket=bucket_norm, periods=period_count)
+    label_set = set(labels)
+    totals = {label: 0 for label in labels}
+    repeats = {label: 0 for label in labels}
+
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT created_at, parent_escalation_id
+                 FROM kol_escalations
+                WHERE env = ?""",
+            (env_norm,),
+        ).fetchall()
+
+    for row in rows:
+        created_dt = _parse_metrics_trend_ts(row["created_at"])
+        if created_dt is None:
+            continue
+        key = _metrics_trend_bucket_key(created_dt, bucket_norm)
+        if key not in label_set:
+            continue
+        totals[key] += 1
+        if row["parent_escalation_id"] is not None:
+            repeats[key] += 1
+
+    series = [
+        {
+            "bucket": label,
+            "value": (repeats[label] / totals[label]) if totals[label] else None,
+        }
+        for label in labels
+    ]
+    return {
+        "env": env_norm,
+        "bucket": bucket_norm,
+        "periods": period_count,
+        "series": {"re_escalation_rate": series},
     }
 
 
@@ -4087,6 +4617,9 @@ __all__ = [
     "list_campaigns",
     "list_candidates",
     "aggregate_kol_registry_funnel",
+    "aggregate_kol_registry_funnel_trend",
+    "aggregate_escalation_re_escalation_trend",
+    "aggregate_escalation_re_escalation_window",
     "list_discovered_kol_registry",
     "list_escalations",
     "list_events",

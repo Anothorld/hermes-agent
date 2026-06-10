@@ -27,6 +27,7 @@ export function cardStatus(row: StatusRow): CardStatusKey {
     return 'interested';
   }
   if (!row.outreach_sent_at) {
+    if (row.reply_draft_state === 'sent') return 'sent_waiting';
     if (row.reply_draft_state === 'pending') return 'draft_pending_approval';
     if (row.reply_draft_state === 'approved_unsent' || row.outreach_draft_created) {
       return 'draft_pending_send';

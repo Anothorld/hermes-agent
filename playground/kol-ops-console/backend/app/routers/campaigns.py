@@ -38,6 +38,14 @@ from ..campaign_config_sync import (
 from ..campaign_locks import campaign_lock
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
+from ..discovery_feedback import (
+    DecisionFeedbackBody,
+    get_product_info,
+    record_decisions_safe,
+    resolve_per_kol_decisions,
+    validate_decision_feedback,
+)
+from ..learned_criteria import learned_criteria_brief_section
 from ..email_discover_dispatch import dispatch_email_discovery_for_approved_identities
 from ..nox_gate import (
     extract_campaign_config,
@@ -794,6 +802,11 @@ async def start(
     payload["product_url"] = product["url"]
     payload["sku_whitelist"] = whitelist_ids
     brief_text = _compose_brief(campaign_id, product, body)
+    learned_section = await learned_criteria_brief_section(
+        bridge, sku=product["sku"], env=body.env,
+    )
+    if learned_section:
+        brief_text = f"{brief_text}\n{learned_section}"
     payload["brief"] = brief_text
     payload["triggered_by"] = "web"
     payload["actor"] = f"web:{user['email']}"
@@ -1419,6 +1432,9 @@ class ApproveShortlistBody(BaseModel):
     note: str | None = None
     test_mode_to: str | None = None
     env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
+    # Decision-learning feedback: batch-shared tags/comment with optional
+    # per-KOL overrides (keyed by handle, without the leading ``@``).
+    decision_feedback: DecisionFeedbackBody | None = None
 
 
 def _clip_text(value: Any, limit: int = _MAX_TRANSCRIPT_CHARS) -> str:
@@ -3085,7 +3101,11 @@ async def approve_shortlist(
                 ).lstrip("@").lower()
                 if handle in selected:
                     identity_ids.append(identity_id)
-                    selected_rows.append({"identity_id": identity_id, "handle": handle})
+                    selected_rows.append({
+                        "identity_id": identity_id,
+                        "handle": handle,
+                        "candidate_status": str(row.get("candidate_status") or ""),
+                    })
         except BridgeError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
         if selected and not identity_ids:
@@ -3098,6 +3118,23 @@ async def approve_shortlist(
             "WHERE campaign_id=? AND env=?",
             (campaign_id, body.env),
         ).fetchone()
+        # Decision-learning feedback gate: fail fast (422) before any CAL
+        # mutation so the operator can add tags/comment and retry safely.
+        # Re-approving already-approved KOLs (retry draft run) is not a new
+        # decision, so only first-time approvals require feedback.
+        first_time_rows = [
+            row for row in selected_rows
+            if row.get("candidate_status") != "selected_for_outreach"
+        ]
+        product_info = get_product_info(conn, campaign_id=campaign_id, env=body.env)
+        await validate_decision_feedback(
+            bridge,
+            feedback=body.decision_feedback,
+            handles=[row["handle"] for row in first_time_rows],
+            sku=product_info.get("sku"),
+            env=body.env,
+            action="approve",
+        )
         test_mode_to = _recover_test_mode_to(
             conn,
             campaign_id=campaign_id,
@@ -3170,6 +3207,22 @@ async def approve_shortlist(
             event_id = event.get("event_id")
             if isinstance(event_id, int):
                 event_ids.append(event_id)
+        # Capture decision-learning samples (best-effort; CAL routing above
+        # already succeeded, so the approve decision is final at this point).
+        learning_capture: dict[str, Any] = {"recorded": 0}
+        if first_time_rows:
+            learning_capture = await record_decisions_safe(
+                bridge, conn,
+                campaign_id=campaign_id,
+                env=body.env,
+                action="approve",
+                decided_by=f"web:{user['email']}",
+                actor_user_id=user["id"],
+                decisions=resolve_per_kol_decisions(
+                    feedback=body.decision_feedback, rows=first_time_rows,
+                ),
+                product_info=product_info,
+            )
         email_discovery_outcomes = await dispatch_email_discovery_for_approved_identities(
             bridge=bridge,
             gateway=gateway,
@@ -3266,6 +3319,7 @@ async def approve_shortlist(
             "approved_count": len(identity_ids),
             "event_ids": event_ids,
             "email_discovery": email_discovery_outcomes,
+            "learning": learning_capture,
         }
 
 

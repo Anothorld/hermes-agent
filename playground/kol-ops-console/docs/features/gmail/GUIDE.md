@@ -37,6 +37,8 @@
 | 路径 | 职责 | 入口 |
 |------|------|------|
 | SENT 对账 | 操作员在 Gmail 点 Send 后标记已发 + edit-learning | `gmail_poller` tick / `POST /gmail/reconcile-sent` |
+
+**Note:** `run_reconcile_all_mailboxes` must call the unlocked reconcile helper while already holding `gmail_reconcile.lock`; re-entering the lock deadlocks the bridge worker and leaves cards stuck on「Draft 待发送」.
 | 入站回信 | 扫 INBOX → `kol_inbound_reply` → gateway dispatch | `gmail_inbound_poller` tick |
 | 运维快照 / one-shot | 最近 tick、手动跑一次 | `GET /gmail/worker/status`、`POST /gmail/inbound-poller/run-once` |
 

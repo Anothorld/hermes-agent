@@ -7,6 +7,8 @@ import os
 from typing import Any, Final, Optional
 
 from . import cal
+from . import discovery_decision_learning as discovery_dl
+from . import learning_discovery
 from . import learning_distill
 from . import learning_job_store as job_store
 from . import learning_outcome
@@ -31,6 +33,8 @@ JOB_CLASSIFIER_EVAL: Final[str] = "classifier_eval_deterministic"
 JOB_APPLY_EDIT_USER_STYLE: Final[str] = "apply_edit_user_style"
 JOB_ANALYZE_COLLAB_OUTCOME: Final[str] = "analyze_collab_outcome"
 JOB_APPLY_OUTCOME_POLICY: Final[str] = "apply_outcome_policy"
+JOB_APPLY_DISCOVERY_POLICY: Final[str] = "apply_discovery_policy"
+JOB_MINE_DISCOVERY_TAGS: Final[str] = "mine_discovery_tags"
 
 # Backward-compatible alias for older cron lines / docs.
 JOB_AUTO_PRICING_TEST: Final[str] = "auto_pricing_test_campaigns"
@@ -46,6 +50,8 @@ ALL_JOBS: Final[tuple[str, ...]] = (
     JOB_APPLY_EDIT_POLICY,
     JOB_APPLY_EDIT_USER_STYLE,
     JOB_APPLY_OUTCOME_POLICY,
+    JOB_APPLY_DISCOVERY_POLICY,
+    JOB_MINE_DISCOVERY_TAGS,
     JOB_APPLY_PRICING_POLICY,
     JOB_AUTO_PRICING_CAMPAIGNS,
     JOB_SNAPSHOT_FACT_CORRECTIONS,
@@ -63,6 +69,7 @@ JOB_SUITES: Final[dict[str, tuple[str, ...]]] = {
         JOB_APPLY_REJECT_POLICY,
         JOB_APPLY_EDIT_POLICY,
         JOB_APPLY_OUTCOME_POLICY,
+        JOB_APPLY_DISCOVERY_POLICY,
     ),
     "pricing": (JOB_APPLY_PRICING_POLICY, JOB_AUTO_PRICING_CAMPAIGNS),
     "audit": (JOB_SNAPSHOT_FACT_CORRECTIONS, JOB_SYNC_FAILURE_EXAMPLES),
@@ -72,6 +79,8 @@ JOB_SUITES: Final[dict[str, tuple[str, ...]]] = {
         JOB_APPLY_REJECT_POLICY,
         JOB_APPLY_EDIT_POLICY,
         JOB_APPLY_OUTCOME_POLICY,
+        JOB_APPLY_DISCOVERY_POLICY,
+        JOB_MINE_DISCOVERY_TAGS,
         JOB_APPLY_PRICING_POLICY,
         JOB_AUTO_PRICING_CAMPAIGNS,
         JOB_SNAPSHOT_FACT_CORRECTIONS,
@@ -317,6 +326,59 @@ def _execute_job(
         return learning_outcome.propose_outcome_learning_approval(
             conn, env=env, updated_by=_updated_by(triggered_by, job_name), limit=limit,
         )
+
+    if job_name == JOB_APPLY_DISCOVERY_POLICY:
+        threshold = learning_discovery.discovery_learning_batch_size()
+        fresh = learning_discovery._fresh_decision_events(conn, env=env, limit=limit)
+        if dry_run:
+            groups = learning_discovery._group_events(conn, fresh)
+            return {
+                "dry_run": True,
+                "fresh_decisions": len(fresh),
+                "groups": {
+                    f"{kind}:{key}": len(evts)
+                    for (kind, key), evts in sorted(groups.items())
+                },
+                "batch_threshold": threshold,
+            }
+        if not fresh:
+            return {"skipped": True, "reason": "no new shortlist decision events"}
+        # Category inference is best-effort prework so the category grouping
+        # has data; its failure must not block SPU-level distill.
+        category_inference: dict[str, Any]
+        try:
+            category_inference = learning_discovery.infer_missing_product_categories(
+                conn, env=env, updated_by=_updated_by(triggered_by, job_name), limit=limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("category inference failed; continuing distill: %s", exc)
+            category_inference = {"error": str(exc)}
+        result = learning_discovery.propose_discovery_learning_approval(
+            conn,
+            env=env,
+            updated_by=_updated_by(triggered_by, job_name),
+            limit=limit,
+        )
+        return {**result, "category_inference": category_inference}
+
+    if job_name == JOB_MINE_DISCOVERY_TAGS:
+        if dry_run:
+            events = learning_store.list_learning_events(
+                conn,
+                env=env,
+                event_types=(discovery_dl.SHORTLIST_DECISION_EVENT,),
+                limit=limit,
+            )
+            with_comment = sum(
+                1 for e in events if str((e.get("payload") or {}).get("comment") or "").strip()
+            )
+            return {
+                "dry_run": True,
+                "decision_events": len(events),
+                "with_comment": with_comment,
+                "min_count": learning_discovery.tag_mine_min_count(),
+            }
+        return learning_discovery.mine_discovery_tags(conn, env=env, limit=limit)
 
     if job_name == JOB_SYNC_FAILURE_EXAMPLES:
         if dry_run:

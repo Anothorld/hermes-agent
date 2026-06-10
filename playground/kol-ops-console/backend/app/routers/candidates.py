@@ -11,8 +11,19 @@ from ..audit import write_audit
 from ..bridge_client import BridgeClient, BridgeError
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, require_role
+from ..discovery_feedback import (
+    DecisionFeedbackBody,
+    get_product_info,
+    record_decisions_safe,
+    validate_decision_feedback,
+)
 
 router = APIRouter(prefix="/campaigns/{campaign_id}/candidates", tags=["candidates"])
+
+# review_reason marker the shortlist UI sends for an operator removal —
+# only this path requires decision-learning feedback (agent/automated
+# rejected writes stay untouched).
+SHORTLIST_REMOVAL_REASON = "operator_removed_from_shortlist"
 
 
 def _env(env: str | None) -> str:
@@ -39,6 +50,9 @@ class SetCandidateStatusBody(BaseModel):
     )
     review_reason: Optional[str] = Field(default=None, max_length=500)
     env: Optional[str] = None
+    # Decision-learning feedback (required for operator shortlist removals).
+    reason_tags: list[str] = Field(default_factory=list)
+    comment: Optional[str] = Field(default=None, max_length=2000)
 
 
 def _shape_candidate_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -148,12 +162,56 @@ async def set_candidate_status(
     user: Annotated[dict, Depends(require_role("owner", "operator"))],
     conn=Depends(get_conn),
 ) -> dict[str, Any]:
-    payload = body.model_dump(exclude_none=True)
-    payload["env"] = _env(payload.get("env"))
+    env = _env(body.env)
+    is_shortlist_removal = (
+        body.candidate_status == "rejected"
+        and body.review_reason == SHORTLIST_REMOVAL_REASON
+    )
+    product_info: dict[str, Any] = {}
+    if is_shortlist_removal:
+        product_info = get_product_info(conn, campaign_id=campaign_id, env=env)
+        # Best-effort handle lookup so 422 details name @handles, not raw ids.
+        handle_labels: list[str] = [str(i) for i in body.identity_ids]
+        try:
+            briefs = await bridge.batch_identity_briefs(body.identity_ids)
+            handle_labels = [
+                str((briefs.get(i) or {}).get("primary_handle") or i)
+                for i in body.identity_ids
+            ]
+        except Exception:  # noqa: BLE001 — labels only; ids are a fine fallback
+            pass
+        await validate_decision_feedback(
+            bridge,
+            feedback=DecisionFeedbackBody(
+                shared_tags=body.reason_tags,
+                shared_comment=body.comment,
+            ),
+            handles=handle_labels,
+            sku=product_info.get("sku"),
+            env=env,
+            action="remove",
+        )
+    payload = body.model_dump(exclude_none=True, exclude={"reason_tags", "comment"})
+    payload["env"] = env
     try:
         out = await bridge.set_candidate_status(campaign_id, payload)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if is_shortlist_removal:
+        learning = await record_decisions_safe(
+            bridge, conn,
+            campaign_id=campaign_id,
+            env=env,
+            action="remove",
+            decided_by=f"web:{user['email']}",
+            actor_user_id=user["id"],
+            decisions=[
+                {"identity_id": i, "tags": body.reason_tags, "comment": body.comment}
+                for i in body.identity_ids
+            ],
+            product_info=product_info,
+        )
+        out = {**out, "learning": learning}
     write_audit(
         conn, actor_user_id=user["id"], action="candidate.set_status",
         target=campaign_id,
@@ -161,6 +219,7 @@ async def set_candidate_status(
             "identity_ids": body.identity_ids,
             "candidate_status": body.candidate_status,
             "review_reason": body.review_reason,
+            "reason_tags": body.reason_tags,
         },
     )
     return out

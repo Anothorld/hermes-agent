@@ -224,6 +224,31 @@ TABLES: dict[str, str] = {
             error_message   TEXT
         )
     """,
+    "discovery_decision_tags": """
+        CREATE TABLE IF NOT EXISTS discovery_decision_tags (
+            tag             TEXT PRIMARY KEY,
+            label_zh        TEXT NOT NULL,
+            action_scope    TEXT NOT NULL DEFAULT 'any'
+                            CHECK (action_scope IN ('approve','remove','transfer','any')),
+            status          TEXT NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active','proposed','rejected')),
+            source          TEXT NOT NULL DEFAULT 'seed',     -- seed|mined|operator
+            evidence_json   TEXT NOT NULL DEFAULT '[]',       -- supporting comment excerpts (mined)
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )
+    """,
+    "product_category_map": """
+        CREATE TABLE IF NOT EXISTS product_category_map (
+            sku             TEXT PRIMARY KEY,
+            category        TEXT NOT NULL,
+            source          TEXT NOT NULL DEFAULT 'llm',      -- llm|operator
+            confidence      REAL,
+            product_name    TEXT,
+            updated_by      TEXT,
+            updated_at      TEXT NOT NULL
+        )
+    """,
 }
 
 
@@ -256,6 +281,7 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS ix_policy_scope_active    ON policy_documents (scope, is_active)",
     "CREATE INDEX IF NOT EXISTS ix_learning_job_name_ts  ON kol_learning_job_runs (job_name, started_at)",
     "CREATE INDEX IF NOT EXISTS ix_learning_job_env_ts     ON kol_learning_job_runs (env, started_at)",
+    "CREATE INDEX IF NOT EXISTS ix_decision_tags_status   ON discovery_decision_tags (status, action_scope)",
 ]
 
 

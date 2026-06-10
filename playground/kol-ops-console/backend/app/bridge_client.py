@@ -212,6 +212,44 @@ class BridgeClient:
         params: dict[str, Any] = {"env": env, "days": days}
         return await self._req("GET", "/kol-registry/funnel", params=params)
 
+    async def get_kol_registry_funnel_trend(
+        self,
+        *,
+        env: str = "LIVE",
+        bucket: str = "week",
+        periods: int | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"env": env, "bucket": bucket}
+        if periods is not None:
+            params["periods"] = periods
+        return await self._req("GET", "/kol-registry/funnel/trend", params=params)
+
+    async def get_escalation_re_escalation_trend(
+        self,
+        *,
+        env: str = "LIVE",
+        bucket: str = "week",
+        periods: int | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"env": env, "bucket": bucket}
+        if periods is not None:
+            params["periods"] = periods
+        return await self._req(
+            "GET", "/escalations/re-escalation-trend", params=params,
+        )
+
+    async def get_escalation_re_escalation_window(
+        self,
+        *,
+        env: str = "LIVE",
+        days: int = 30,
+    ) -> dict[str, Any]:
+        return await self._req(
+            "GET",
+            "/escalations/re-escalation-window",
+            params={"env": env, "days": days},
+        )
+
     async def get_reusable_facts(self, identity_id: int) -> dict[str, Any]:
         return await self._req(
             "GET", f"/identities/{identity_id}/relationship/reusable-facts"
@@ -588,6 +626,78 @@ class BridgeClient:
     async def promote_strategy(self, body: dict[str, Any]) -> dict[str, Any]:
         """Preview (dry_run) or apply promotion of a reply_strategy goal."""
         return await self._req("POST", "/learning/promote-strategy", json=body)
+
+    # ------------------------------------- Discovery decision learning
+    async def record_shortlist_decision(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Persist operator shortlist decisions (approve/remove/transfer) as learning events."""
+        return await self._req("POST", "/learning/shortlist-decision", json=body)
+
+    async def list_discovery_tags(
+        self, *, action: Optional[str] = None, status: str = "active",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"status": status}
+        if action:
+            params["action"] = action
+        return await self._req("GET", "/learning/discovery-tags", params=params)
+
+    async def decide_discovery_tag(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._req("POST", "/learning/discovery-tags/decide", json=body)
+
+    async def discovery_feedback_requirements(
+        self, *, sku: Optional[str], env: str = "LIVE",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"env": env}
+        if sku:
+            params["sku"] = sku
+        return await self._req(
+            "GET", "/learning/discovery-feedback-requirements", params=params,
+        )
+
+    async def list_shortlist_decision_events(
+        self,
+        *,
+        env: str = "LIVE",
+        sku: Optional[str] = None,
+        category: Optional[str] = None,
+        action: Optional[str] = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"env": env, "limit": limit}
+        if sku:
+            params["sku"] = sku
+        if category:
+            params["category"] = category
+        if action:
+            params["action"] = action
+        return await self._req(
+            "GET", "/learning/shortlist-decision-events", params=params,
+        )
+
+    async def get_discovery_criteria(
+        self, *, sku: str, env: str = "LIVE", max_chars: int = 4000,
+    ) -> dict[str, Any]:
+        return await self._req(
+            "GET",
+            "/learning/discovery-criteria",
+            params={"sku": sku, "env": env, "max_chars": max_chars},
+        )
+
+    async def list_pending_discovery_proposals(
+        self, *, env: str = "LIVE",
+    ) -> dict[str, Any]:
+        return await self._req(
+            "GET", "/learning/pending-discovery-proposals", params={"env": env},
+        )
+
+    async def list_product_categories(self) -> dict[str, Any]:
+        return await self._req("GET", "/learning/product-categories")
+
+    async def put_product_category(
+        self, sku: str, body: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._req(
+            "PUT", f"/learning/product-categories/{sku}", json=body,
+        )
 
     # --------------------------------------------------------- Escalations
     async def list_escalations(

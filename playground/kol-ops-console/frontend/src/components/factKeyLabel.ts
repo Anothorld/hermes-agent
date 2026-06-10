@@ -610,6 +610,11 @@ const FACT_DICT: Record<string, DictEntry> = {
     title: '编辑学习蒸馏提案（待人工批准）',
     kind: 'json',
   },
+  'approval.discovery_learning_proposal': {
+    short: '发现标准提案',
+    title: 'KOL 发现评判标准学习提案（待人工批准）',
+    kind: 'json',
+  },
   'approval.archival_outcome': { short: '归档结果', title: '合作结束后的归档结论', kind: 'string' },
   'approval.relationship_synced': {
     short: '关系已同步',

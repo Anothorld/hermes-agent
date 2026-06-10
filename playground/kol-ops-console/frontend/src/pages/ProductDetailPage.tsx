@@ -16,6 +16,18 @@ import { resolvePriorOutreachTouch } from '../lib/priorOutreachTouch';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { dialog } from '../components/dialogs/useDialog';
 import { KolTransferCampaignDialog } from '../components/dialogs/KolTransferCampaignDialog';
+import {
+  KolApproveAnnotationDialog,
+  ThumbsUpIcon,
+  mergeApproveFeedback,
+  type KolFeedbackEntry,
+} from '../components/dialogs/KolApproveAnnotationDialog';
+import {
+  ShortlistDecisionFeedbackDialog,
+  EMPTY_DECISION_FEEDBACK,
+  useFeedbackRequirements,
+  type DecisionFeedback,
+} from '../components/dialogs/ShortlistDecisionFeedbackDialog';
 import { useEnvStore, toast } from '../lib/store';
 import { errorSummary } from '../lib/errors';
 import { runStateLabel, isRunStateActive } from '../lib/runStateLabels';
@@ -26,6 +38,7 @@ import {
 } from '../lib/launchJobs';
 import type { NoxStatsPayload } from '../components/NoxQuotaBanner';
 import { isAsyncNoxBatchJob, pollNoxBatchJob } from '../lib/noxBatchJobs';
+import { ProductCategoryField } from '../components/ProductCategoryField';
 
 type ProductVariant = {
   id: string;
@@ -394,13 +407,15 @@ type ShortlistPayload = {
 function ShortlistReviewPanel({
   campaignId,
   env,
+  sku,
   onSubmit,
   approveBlockedReason,
   configRefreshKey = 0,
 }: {
   campaignId: string;
   env: string;
-  onSubmit: (selectedHandles: string[]) => Promise<void>;
+  sku?: string | null;
+  onSubmit: (selectedHandles: string[], feedback: DecisionFeedback) => Promise<void>;
   // When non-null, Approve is disabled and the reason is shown as a
   // banner + button tooltip. Used to lock approvals out while the
   // discovery quantity-gate is mid-cycle.
@@ -416,10 +431,38 @@ function ShortlistReviewPanel({
   const [counts, setCounts] = useState<{ pending: number; already_approved: number; rejected_or_archived_hidden: number } | null>(null);
   const [showApproved, setShowApproved] = useState(false);
   const [removingHandle, setRemovingHandle] = useState<string | null>(null);
+  const [removeCandidate, setRemoveCandidate] = useState<ShortlistCandidate | null>(null);
+  const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [transferCandidate, setTransferCandidate] = useState<ShortlistCandidate | null>(null);
+  const [annotateCandidate, setAnnotateCandidate] = useState<ShortlistCandidate | null>(null);
+  const [approveFeedbackByHandle, setApproveFeedbackByHandle] = useState<
+    Record<string, KolFeedbackEntry>
+  >({});
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [noxStats, setNoxStats] = useState<NoxStatsPayload | null>(null);
+  const feedbackReq = useFeedbackRequirements(sku, env, true);
+  const skipFeedbackDialog =
+    feedbackReq != null &&
+    (feedbackReq.feedback_required === false || feedbackReq.degraded === true);
+
+  const hasRowAnnotation = (handle: string) => {
+    const e = approveFeedbackByHandle[handle];
+    return !!e && (e.tags.length > 0 || !!(e.comment ?? '').trim());
+  };
+
+  const buildApproveFeedback = (
+    shared: Pick<DecisionFeedback, 'shared_tags' | 'shared_comment'>,
+    handles: string[],
+  ): DecisionFeedback => mergeApproveFeedback(handles, shared, approveFeedbackByHandle);
+
+  const clearApproveFeedbackForHandles = (handles: string[]) => {
+    setApproveFeedbackByHandle((prev) => {
+      const next = { ...prev };
+      for (const h of handles) delete next[h];
+      return next;
+    });
+  };
 
   const fetchNoxStats = async (bypassCache = false) => {
     try {
@@ -446,6 +489,14 @@ function ShortlistReviewPanel({
       setCandidates(nextCandidates);
       setSnapshotTs(r.snapshot_ts ?? null);
       setCounts(r.counts ?? null);
+      setApproveFeedbackByHandle((prev) => {
+        const pending = new Set(nextCandidates.map((c) => c.handle));
+        const next: Record<string, KolFeedbackEntry> = {};
+        for (const [handle, entry] of Object.entries(prev)) {
+          if (pending.has(handle)) next[handle] = entry;
+        }
+        return next;
+      });
       setPicked((prev) => {
         const next: Record<string, boolean> = {};
         for (const c of nextCandidates) {
@@ -503,35 +554,42 @@ function ShortlistReviewPanel({
   const pendingCount = counts?.pending ?? pendingCandidates.length;
   const approvedCount = counts?.already_approved ?? approvedCandidates.length;
 
-  const removeFromShortlist = async (c: ShortlistCandidate) => {
+  const removeFromShortlist = (c: ShortlistCandidate) => {
     if (typeof c.identity_id !== 'number') {
       setActionErr('该候选缺少 identity_id，无法从 shortlist 移除');
       return;
     }
-    const ok = await dialog.confirm({
-      title: `从 shortlist 移除 @${c.handle}？`,
-      description:
-        '候选人数据仍会保留在活动库中，只是不再显示在 shortlist，也无法被勾选批准。',
-      confirmLabel: '移除',
-      cancelLabel: '取消',
-    });
-    if (!ok) return;
+    if (skipFeedbackDialog) {
+      void submitRemoval(c, EMPTY_DECISION_FEEDBACK);
+      return;
+    }
+    setRemoveCandidate(c);
+  };
+
+  const submitRemoval = async (c: ShortlistCandidate, feedback: DecisionFeedback) => {
     setRemovingHandle(c.handle);
     setActionErr(null);
     try {
-      await api.post(
+      const override = feedback.per_kol_overrides[c.handle];
+      const r = await api.post<{ learning?: { recorded?: number; error?: string } }>(
         `/campaigns/${encodeURIComponent(campaignId)}/candidates/status`,
         {
           identity_ids: [c.identity_id],
           candidate_status: 'rejected',
           review_reason: 'operator_removed_from_shortlist',
           env,
+          reason_tags: override?.tags?.length ? override.tags : feedback.shared_tags,
+          comment: override?.comment ?? feedback.shared_comment,
         },
       );
       toast.success('已从 shortlist 移除', `@${c.handle}`);
+      if (r.learning?.error) {
+        toast.error(
+          '移除成功，但学习样本未能记录',
+          '系统已留底备查，无需重试移除；学习服务恢复后可补录。',
+        );
+      }
       await fetchShortlist(false);
-    } catch (ex) {
-      setActionErr(errorSummary(ex));
     } finally {
       setRemovingHandle(null);
     }
@@ -651,6 +709,25 @@ function ShortlistReviewPanel({
             className="rounded border border-emerald-100 bg-white p-2 text-xs"
           >
             <div className="mb-1 flex items-start justify-end gap-1">
+              <button
+                type="button"
+                disabled={!!approveBlockedReason}
+                title={
+                  hasRowAnnotation(c.handle)
+                    ? '已标注批准理由，点击修改'
+                    : '为这位 KOL 填写批准理由（批准时一并提交）'
+                }
+                onClick={() => setAnnotateCandidate(c)}
+                className={
+                  'inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] disabled:opacity-50 ' +
+                  (hasRowAnnotation(c.handle)
+                    ? 'border-emerald-400 bg-emerald-100 text-emerald-900 hover:bg-emerald-200'
+                    : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100')
+                }
+              >
+                <ThumbsUpIcon filled={hasRowAnnotation(c.handle)} />
+                {hasRowAnnotation(c.handle) ? '已标注' : '标注'}
+              </button>
               <button
                 type="button"
                 disabled={
@@ -888,28 +965,102 @@ function ShortlistReviewPanel({
             || !!approveBlockedReason
           }
           title={approveBlockedReason ?? undefined}
-          onClick={async () => {
-            setBusy(true);
-            setActionErr(null);
-            try {
-              await onSubmit(selectedHandles);
-            } catch (ex) {
-              setActionErr(errorSummary(ex));
-            } finally {
-              setBusy(false);
+          onClick={() => {
+            if (skipFeedbackDialog) {
+              void (async () => {
+                setBusy(true);
+                setActionErr(null);
+                try {
+                  const feedback = buildApproveFeedback(
+                    EMPTY_DECISION_FEEDBACK,
+                    selectedHandles,
+                  );
+                  await onSubmit(selectedHandles, feedback);
+                  clearApproveFeedbackForHandles(selectedHandles);
+                } catch (ex) {
+                  setActionErr(errorSummary(ex));
+                } finally {
+                  setBusy(false);
+                }
+              })();
+              return;
             }
+            setApproveDialogOpen(true);
           }}
           className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
         >
           {busy ? 'Approving…' : `Approve ${selectedHandles.length} KOL${selectedHandles.length === 1 ? '' : 's'}`}
         </button>
       </div>
+      <ShortlistDecisionFeedbackDialog
+        open={approveDialogOpen}
+        action="approve"
+        kols={pendingCandidates
+          .filter((c) => picked[c.handle])
+          .map((c) => ({ handle: c.handle, displayName: c.display_name }))}
+        sku={sku}
+        env={env}
+        title={`批准 ${selectedHandles.length} 个 KOL`}
+        description="批准后将进入外联流程。共享理由应用于未单独标注的 KOL；已在列表行标注的会在下方汇总。"
+        confirmLabel="确认批准"
+        perKolFeedback={approveFeedbackByHandle}
+        onClose={() => setApproveDialogOpen(false)}
+        onSubmit={async (feedback) => {
+          setBusy(true);
+          setActionErr(null);
+          try {
+            const merged = buildApproveFeedback(feedback, selectedHandles);
+            await onSubmit(selectedHandles, merged);
+            clearApproveFeedbackForHandles(selectedHandles);
+          } catch (ex) {
+            setActionErr(errorSummary(ex));
+            throw ex;
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
+      {annotateCandidate && (
+        <KolApproveAnnotationDialog
+          open
+          handle={annotateCandidate.handle}
+          displayName={annotateCandidate.display_name}
+          sku={sku}
+          env={env}
+          initial={approveFeedbackByHandle[annotateCandidate.handle] ?? null}
+          onClose={() => setAnnotateCandidate(null)}
+          onSave={(entry) => {
+            setApproveFeedbackByHandle((prev) => ({
+              ...prev,
+              [annotateCandidate.handle]: entry,
+            }));
+            setAnnotateCandidate(null);
+          }}
+        />
+      )}
+      {removeCandidate && (
+        <ShortlistDecisionFeedbackDialog
+          open
+          action="remove"
+          kols={[{ handle: removeCandidate.handle, displayName: removeCandidate.display_name }]}
+          sku={sku}
+          env={env}
+          title={`从 shortlist 移除 @${removeCandidate.handle}？`}
+          description="候选人数据仍会保留在活动库中，只是不再显示在 shortlist。请告诉我们为什么不合适。"
+          confirmLabel="确认移除"
+          onClose={() => setRemoveCandidate(null)}
+          onSubmit={async (feedback) => {
+            await submitRemoval(removeCandidate, feedback);
+          }}
+        />
+      )}
       {transferCandidate && typeof transferCandidate.identity_id === 'number' && (
         <KolTransferCampaignDialog
           open
           identityId={transferCandidate.identity_id}
           handle={transferCandidate.handle}
           fromCampaignId={campaignId}
+          sku={sku}
           env={env as 'TEST' | 'LIVE'}
           onClose={() => setTransferCandidate(null)}
           onTransferred={() => {
@@ -982,14 +1133,21 @@ function RediscoverControl({
 function CampaignCard({
   c,
   kols,
+  sku,
   onClose,
   onApprove,
   onRediscover,
 }: {
   c: CampaignRow;
   kols: Record<string, KolIdent>;
+  sku?: string | null;
   onClose: (id: string, env: string) => void;
-  onApprove: (id: string, env: string, selectedHandles: string[]) => Promise<void>;
+  onApprove: (
+    id: string,
+    env: string,
+    selectedHandles: string[],
+    feedback?: DecisionFeedback,
+  ) => Promise<void>;
   onRediscover: (id: string, env: string, additionalCount: number) => Promise<void>;
 }) {
   const [showReview, setShowReview] = useState(false);
@@ -1119,6 +1277,7 @@ function CampaignCard({
         <ShortlistReviewPanel
           campaignId={c.campaign_id}
           env={c.env}
+          sku={sku}
           configRefreshKey={configRefreshKey}
           approveBlockedReason={
             c.gate_active
@@ -1129,8 +1288,8 @@ function CampaignCard({
               ? '当前 agent run 仍在进行 — 等待终态或先 Stop + close 再审批'
               : null
           }
-          onSubmit={async (handles) => {
-            await onApprove(c.campaign_id, c.env, handles);
+          onSubmit={async (handles, feedback) => {
+            await onApprove(c.campaign_id, c.env, handles, feedback);
             setShowReview(false);
           }}
         />
@@ -2202,17 +2361,36 @@ export function ProductDetailPage() {
     }
   };
 
-  const approveShortlist = async (cid: string, env: string, selected: string[]) => {
+  const approveShortlist = async (
+    cid: string,
+    env: string,
+    selected: string[],
+    feedback?: DecisionFeedback,
+  ) => {
     setErr(null);
     try {
-      const r = await api.post<{ run_id?: string; approved_count?: number }>(
+      const r = await api.post<{
+        run_id?: string;
+        approved_count?: number;
+        learning?: { recorded?: number; error?: string };
+      }>(
         `/campaigns/${encodeURIComponent(cid)}/approve-shortlist`,
-        { env, selected_handles: selected },
+        {
+          env,
+          selected_handles: selected,
+          ...(feedback ? { decision_feedback: feedback } : {}),
+        },
       );
       toast.success(
         `已批准 ${r.approved_count ?? selected.length} 个 KOL`,
         `起草 run ${r.run_id ?? '(none)'}`,
       );
+      if (r.learning?.error) {
+        toast.error(
+          '批准成功，但学习样本未能记录',
+          '系统已留底备查，无需重试批准；学习服务恢复后可补录。',
+        );
+      }
       refreshCampaigns();
     } catch (ex) {
       setErr(ex);
@@ -2252,6 +2430,7 @@ export function ProductDetailPage() {
               floor: {p.default_absolute_floor ?? '—'}
             </div>
           </div>
+          <ProductCategoryField sku={p.sku} productName={p.name} />
         </div>
         <div className="mt-2">
           <div className="font-medium text-slate-500">
@@ -2347,6 +2526,7 @@ export function ProductDetailPage() {
                 key={`${c.campaign_id}:${c.env}`}
                 c={c}
                 kols={campaigns.kols}
+                sku={p.sku}
                 onClose={close}
                 onApprove={approveShortlist}
                 onRediscover={rediscover}

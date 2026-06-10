@@ -4,6 +4,7 @@ type ChannelTrends = {
   edits?: { buckets?: VolumeBucket[] };
   rejects?: { buckets?: VolumeBucket[]; total?: number };
   outcome_retros?: { buckets?: VolumeBucket[]; total?: number };
+  shortlist_decisions?: { buckets?: VolumeBucket[]; total?: number };
 };
 
 function MiniBars({
@@ -38,22 +39,31 @@ function MiniBars({
   );
 }
 
-/** Three learning channels: edit intensity, reject count, outcome retro count. */
+/** Multi-channel learning activity (edit intensity elsewhere; volume here). */
 export function LearningChannelTrends({ trends }: { trends?: ChannelTrends }) {
   if (!trends) return null;
   const editBuckets = trends.edits?.buckets ?? [];
   const rejectBuckets = trends.rejects?.buckets ?? [];
   const outcomeBuckets = trends.outcome_retros?.buckets ?? [];
-  if (!editBuckets.length && !rejectBuckets.length && !outcomeBuckets.length) {
+  const decisionBuckets = trends.shortlist_decisions?.buckets ?? [];
+  if (
+    !editBuckets.length &&
+    !rejectBuckets.length &&
+    !outcomeBuckets.length &&
+    !decisionBuckets.length
+  ) {
     return null;
   }
   return (
     <div className="rounded border border-slate-200 bg-white p-3">
-      <div className="text-sm font-medium text-slate-800">三通道活动趋势（近 90 天 · 按周）</div>
+      <div className="text-sm font-medium text-slate-800">学习通道活动趋势（近 90 天 · 按周）</div>
       <p className="mt-0.5 text-[11px] text-slate-500">
-        编辑通道看幅度（上一卡片）；此处为驳回次数与合作复盘条数。
+        编辑通道看幅度（上一卡片）；此处为 shortlist 决策、驳回回信与合作复盘条数。
       </p>
-      <div className="mt-3 grid gap-4 sm:grid-cols-2">
+      <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {decisionBuckets.length > 0 && (
+          <MiniBars label="Shortlist 决策" buckets={decisionBuckets} color="bg-indigo-400" />
+        )}
         {rejectBuckets.length > 0 && (
           <MiniBars label="驳回回信" buckets={rejectBuckets} color="bg-amber-400" />
         )}

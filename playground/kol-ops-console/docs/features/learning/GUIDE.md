@@ -2,7 +2,7 @@
 
 ## 功能说明
 
-从操作员 **编辑/驳回** 信号中学习：批次进度、生成 style 提案、策略反哺（`reply_strategy` → skill reference）。Bridge 执行学习任务；Console 提供可视化与手动触发。
+从操作员 **编辑/驳回/合作结局/发现决策** 信号中学习：批次进度、生成 style 提案、策略反哺（`reply_strategy` → skill reference）、KOL 发现评判标准沉淀。Bridge 执行学习任务；Console 提供可视化与手动触发。
 
 ## 操作员路径
 
@@ -31,7 +31,16 @@
 | POST | `/learning/propose-edit-policy` | apply-edit-policy |
 | POST | `/learning/backfill-edit-learning` | backfill sent drafts missing `draft_edit_learning` |
 | POST | `/learning/promote-strategy` | promote-strategy |
-| GET | `/learning/policies/{scope}` | policies |
+| GET | `/learning/policies/{scope}` | policies（含动态 `discovery_criteria:*`） |
+| GET | `/learning/discovery-tags` | 发现决策标签词表（`?action=approve\|remove\|transfer`、`?status=proposed` 看挖掘提案） |
+| POST | `/learning/discovery-tags/decide` | 批准/拒绝挖掘出的新标签 |
+| GET | `/learning/discovery-feedback-requirements` | 该 SPU 样本数 + 评论是否必填（早期必填） |
+| GET | `/learning/shortlist-decision-events` | 发现决策学习事件（可按 sku/category/action 过滤） |
+| GET | `/learning/pending-discovery-proposals` | 待审批的发现标准提案 |
+| GET | `/learning/discovery-criteria` | 某 SKU 已学到的 SPU + 品类评判标准 |
+| GET | `/learning/failed-shortlist-captures` | 采集失败待补录 audit 列表（只读） |
+| POST | `/learning/replay-shortlist-capture` | 一键补录（重放 audit `replay_body` → Bridge） |
+| GET/PUT | `/learning/product-categories[/{sku}]` | SKU→品类映射（人工修正优先于 LLM） |
 
 ## 批次语义（重要，避免误解）
 
@@ -44,7 +53,7 @@
 ## 收敛度量（是否「越来越准」）
 
 - `edit_distance ∈ [0,1]`（0=照发，1=完全重写）已对每封产出并入库。
-- `GET /learning/edit-distance-trend`（overview 内置近 90 天按周聚合）给出 `avg_edit_distance`、`was_edited_rate`、按时间桶趋势、`style_approval_markers`（趋势图绿色竖线）与 `channel_trends`（编辑/驳回/复盘三通道）。
+- `GET /learning/edit-distance-trend`（overview 内置近 90 天按周聚合）给出 `avg_edit_distance`、`was_edited_rate`、按时间桶趋势、`style_approval_markers`（趋势图绿色竖线）与 `channel_trends`（shortlist 决策 / 驳回 / 复盘多通道）。
 - 护栏：有批准记录时 `convergence_alert.guard_basis=after_last_approval`（最近一次批准后 vs 批准前平均幅度）；否则回退 `recent_vs_prior`。
 - 滑动窗默认 `KOL_LEARNING_WINDOW_DAYS=90`（`0` 关闭）。
 
@@ -61,6 +70,43 @@
 - Console：Learning 页「合作复盘学习」卡片（复盘数/失败数/触发进度）；批准在「待审批 → 合作复盘」Tab。
 - 实现：`learning_outcome.py`（Bridge）。
 
+## 发现决策学习（discover 闭环，新增）
+
+把 shortlist 三类操作员决策变成学习样本，夜间蒸馏出 **SPU 级**与**品类级**两条 KOL 评判标准，回灌到下一轮发现。
+
+### 采集
+
+| 操作 | 入口 | 采集内容 |
+|------|------|----------|
+| 批准 shortlist | 列表行点赞「标注」+ Approve 二级弹窗 | 行级标注暂存；弹窗填共享标签+评论并汇总已标注 KOL 后一并提交 |
+| 从 shortlist 移除 | 行内「从 shortlist 移除」→ 反馈弹窗 | 单个 KOL 标签+评论 |
+| 转到其他活动 | `KolTransferCampaignDialog` | 标签 + 原文 reason 即评论 |
+
+- 每个 KOL 落一条 `shortlist_decision_learning` 事件（`kol_conversation_events`），payload 含 **决策时刻冻结的 KOL 特征快照**（creator_type / followers / region / content_pillars / nox_* 尽调 / veedcrawl reels 数据含 extract_summary 与 last_reel_* / agent 各评分）。
+- **标签必选**（提交的标签会对照 Bridge 词表严格校验，失效标签返回 422 `decision_tags_invalid`，避免被静默归为 `other`）；**评论在早期必填**：该 SPU 样本数 < `KOL_DISCOVERY_COMMENT_MIN_SAMPLES`（默认 50，SQL COUNT 精确计数）时必填，达标后选填。弹窗会显示进度，**转移弹窗同样适用此策略**。
+- 采集失败**不阻塞主操作**：Console 重试一次（请求路径上限 2 次尝试）→ audit `learning.shortlist_decision_failed`（含完整 `replay_body`）→ 前端 toast 警告；学习页「Discovery 决策学习」面板可**一键补录**（`POST /learning/replay-shortlist-capture`）。紧急回滚：`KOC_DISCOVERY_FEEDBACK_REQUIRED=false`（跳过反馈弹窗、后端跳过校验；Bridge 不可达时 requirements 降级，弹窗同样不阻塞）。
+
+### 蒸馏（夜间，LIVE-only）
+
+| Job | 触发 | 产出 |
+|-----|------|------|
+| `apply_discovery_policy` | 某 SPU/品类组样本 ≥ `KOL_DISCOVERY_LEARNING_BATCH_SIZE`（默认 10） | pending `approval.discovery_learning_proposal`（每组一份，含 `sample_identity_count`）→ 批准后合并入 `discovery_criteria:spu:<sku>` / `discovery_criteria:category:<slug>` policy；任务前置做未归类 SKU 的 LLM 品类推断。蒸馏分页读取窗口内全部未消费样本（非单页 500 上限）。蒸馏 prompt 会引用该 scope 近期的 `discovery_proposal_rejected` 驳回反馈（被否原因不重提） |
+| `mine_discovery_tags` | 评论中某原因出现 ≥ `KOL_DISCOVERY_TAG_MINE_MIN_COUNT`（默认 5） | `discovery_decision_tags` 中 `status=proposed` 的新标签 → 学习页「Discovery 决策学习」面板批准后即出现在反馈弹窗。LLM 引用的 example 必须能在源评论中验证（防虚报频次，验证失败 `examples_not_found_in_comments` 忽略） |
+
+两个 job 均在 `nightly` / `distill` 套件内；审计走 `kol_learning_job_runs`。
+
+### 消费
+
+- 活动启动 / rediscover 时，Console 从 bridge 拉取该 SKU 的 SPU + 品类标准，拼入 brief 的 `# learned_discovery_criteria` 段（SPU 优先、品类补足；上限 `KOC_DISCOVERY_LEARNED_CRITERIA_MAX_CHARS`，默认 4000；开关 `KOC_DISCOVERY_LEARNED_CRITERIA`，bridge 不可用时跳过不阻塞 launch）。
+- `instagram-kol-discovery` 技能按「硬性门槛 > 学习标准 > 默认评分」优先级应用（见技能 *Learned Criteria* 章节）；改技能后需 `sync skills`。
+
+### 审批与面板
+
+- 发现标准提案在「待审批 → 发现标准」Tab，**专用卡片视图**（`DiscoveryLearningProposalView`：学习层级 / **涉及 KOL 数** / 样本构成 / 增量正文 / 合并效果对比 / 当前标准展开）；批准即合并 policy，驳回记 `discovery_proposal_rejected` 事件、样本留待下一批且下次蒸馏避开被否建议。
+- 学习页新增「Discovery 决策学习」面板（`DiscoveryLearningPanel.tsx`）：**蒸馏批次进度**、待审批提案、标签提案审批、品类映射、**已学标准（按产品 SKU 列表）**、**待补录样本**、最近样本。Workflow 引导条与 `channel_trends.shortlist_decisions` 已纳入 discover 通道。
+- 品类可在产品页「品类」字段人工修正（`ProductCategoryField.tsx`），人工值不会被 LLM 覆盖。
+- 实现：Bridge `discovery_decision_tags.py` / `discovery_decision_learning.py` / `learning_discovery.py`；Console `discovery_feedback.py` / `learned_criteria.py`。
+
 ## 关联模块
 
 - [approvals](../approvals/GUIDE.md) — 批准学习提案 / 合作复盘提案
@@ -72,7 +118,7 @@
 
 ## 闭环步骤（5 步）
 
-见 `LearningWorkflowStepper.tsx`：信号积累 → 提案 → 待审批 → 策略反哺 →（可选）sync skills
+见 `LearningWorkflowStepper.tsx`：信号积累（含 shortlist 决策）→ 提案（编辑或发现）→ 待审批（style / 发现标准 / 策略）→ 策略反哺 →（可选）sync skills
 
 ## 手动操作（页内 §2）
 

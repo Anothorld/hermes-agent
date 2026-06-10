@@ -24,6 +24,7 @@ type ApprovalTypeFilter =
   | 'reply_draft'
   | 'style_learning'
   | 'outcome_learning'
+  | 'discovery_learning'
   | 'other';
 
 const TYPE_FILTER_LABEL: Record<ApprovalTypeFilter, string> = {
@@ -31,6 +32,7 @@ const TYPE_FILTER_LABEL: Record<ApprovalTypeFilter, string> = {
   reply_draft: '回信草稿',
   style_learning: '学习提案',
   outcome_learning: '合作复盘',
+  discovery_learning: '发现标准',
   other: '其他',
 };
 
@@ -38,12 +40,18 @@ function approvalTypeOf(factPath: string): ApprovalTypeFilter {
   if (factPath === 'approval.reply_draft') return 'reply_draft';
   if (factPath === 'approval.style_learning_proposal') return 'style_learning';
   if (factPath === 'approval.outcome_learning_proposal') return 'outcome_learning';
+  if (factPath === 'approval.discovery_learning_proposal') return 'discovery_learning';
   return 'other';
 }
 
 const STYLE_LEARNING_FACT = 'approval.style_learning_proposal';
 const OUTCOME_LEARNING_FACT = 'approval.outcome_learning_proposal';
-const LEARNING_FACTS = [STYLE_LEARNING_FACT, OUTCOME_LEARNING_FACT];
+const DISCOVERY_LEARNING_FACT = 'approval.discovery_learning_proposal';
+const LEARNING_FACTS = [
+  STYLE_LEARNING_FACT,
+  OUTCOME_LEARNING_FACT,
+  DISCOVERY_LEARNING_FACT,
+];
 
 /** Learning proposals are cross-KOL; group by policy scope, not anchor identity. */
 function approvalGroupKey(row: ApprovalRow): string {
@@ -67,8 +75,17 @@ function styleLearningGroupTitle(ctx: Record<string, unknown>, factPath?: string
   const sampleCount = ctx.sample_count;
   const kolCount = ctx.sample_identity_count;
   const isOutcome = factPath === OUTCOME_LEARNING_FACT;
-  const parts = [isOutcome ? '跨 KOL 合作复盘' : '跨 KOL 编辑学习'];
-  parts.push(policyScopeLabel(scope));
+  const isDiscovery = factPath === DISCOVERY_LEARNING_FACT;
+  const parts = [
+    isDiscovery ? 'KOL 发现标准学习' : isOutcome ? '跨 KOL 合作复盘' : '跨 KOL 编辑学习',
+  ];
+  if (isDiscovery) {
+    const kind = String(ctx.group_kind ?? '');
+    const key = String(ctx.group_key ?? '');
+    if (key) parts.push(kind === 'category' ? `品类 ${key}` : `产品 ${key}`);
+  } else {
+    parts.push(policyScopeLabel(scope));
+  }
   if (typeof kolCount === 'number' && kolCount > 0) {
     parts.push(`${kolCount} 位 KOL`);
   }

@@ -941,6 +941,32 @@ def preview_policy_merge_from_proposal(
             "delta_chars": len(merged_s) - len(current_s),
         }
 
+    if pol.is_discovery_criteria_scope(scope) and combined:
+        # Lazy import: learning_discovery imports this module for merging.
+        from . import learning_discovery
+
+        cur_d = pol.get_policy(conn, scope=scope, env=env)
+        current_d = (cur_d or {}).get("content_md") or ""
+        merged_d = learning_discovery.merge_discovery_policy_content(
+            current_d, combined, mode=mode,
+        )
+        out["sections"]["discovery"] = {
+            "scope": scope,
+            "current_md": current_d,
+            "proposed_section_md": combined,
+            "merged_md": merged_d,
+            "merge_mode_used": mode,
+            "merge_effect": _section_merge_effect(
+                current_d,
+                marker=learning_discovery.DISCOVERY_LEARNING_MARKER,
+                mode=mode,
+            ),
+            "current_chars": len(current_d),
+            "merged_chars": len(merged_d),
+            "delta_chars": len(merged_d) - len(current_d),
+        }
+        return out
+
     is_outcome = scope == learning_store.OUTCOME_STRATEGY_SCOPE
     if is_outcome and combined:
         cur_o = pol.get_policy(

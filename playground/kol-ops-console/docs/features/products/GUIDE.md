@@ -26,13 +26,14 @@
 | GET/POST | `/products` | 列表/创建 SKU |
 | GET/PATCH | `/products/{sku}` | 详情/更新 |
 | GET | `/products/{sku}/campaigns` | SKU 下活动 |
+| GET/PUT | `/learning/product-categories[/{sku}]` | 产品页「品类」字段（`ProductCategoryField.tsx`，桥代理；用于发现学习按品类泛化，人工修正优先于 LLM 建议） |
 
 ## 关联模块
 
-- [campaigns](../campaigns/GUIDE.md) — 在产品详情页启动/管理活动；Shortlist review（`candidate_count` / `pending_candidate_count` 来自 Bridge `list-candidate-handles`，含 `discovered` 池；**不是** `get_lanes`；未批准候选持久显示，操作员可「从 shortlist 移除」）
+- [campaigns](../campaigns/GUIDE.md) — 在产品详情页启动/管理活动；Shortlist review（`candidate_count` / `pending_candidate_count` 来自 Bridge `list-candidate-handles`，含 `discovered` 池；**不是** `get_lanes`；未批准候选持久显示，操作员可「从 shortlist 移除」，移除/批准/转移均需打原因标签，见 [learning](../learning/GUIDE.md)）
 - [nox](../nox/GUIDE.md) — 产品页 shortlist 批量尽调
 - `ContractReadinessPanel.tsx` — 合约就绪块
 
 ## 数据归属
 
-SQLite 为 **权威**；活动运行态在 Bridge CAL。
+SQLite 为 **权威**；活动运行态在 Bridge CAL；品类映射在 Bridge `product_category_map`。

@@ -37,11 +37,11 @@ export const SUITE_LABELS: Record<string, string> = {
 /** One-line operator hint for the selected cron suite (Learning page). */
 export const SUITE_OPERATOR_HINTS: Record<string, string> = {
   capture: '对齐 Gmail 已发终稿、补录「编辑后发送」记录（不生成学习提案）。',
-  distill: '驳回原因写入策略；若编辑样本够数，会顺带生成学习提案（与右侧按钮相同）。',
+  distill: '驳回原因写入策略；编辑/复盘/发现决策样本够数时，各自生成待审批学习提案。',
   pricing: '根据历史谈判数据校准定价策略，并可能更新 campaign 出价比例。',
   audit: '记录人工改事实的错题、同步到分类器参考文档。',
   quality: '跑分类器金标评测（检查分类是否退化）。',
-  nightly: '夜间常用：蒸馏 + 定价 + 审计 + 评测（不含 Gmail 采集）。',
+  nightly: '夜间常用：蒸馏（含发现标准 + 标签挖掘）+ 定价 + 审计 + 评测（不含 Gmail 采集）。',
   all: '执行全部任务（含 Gmail 采集）；耗时长，建议先预览。',
 };
 
@@ -50,6 +50,8 @@ export const JOB_LABELS: Record<string, string> = {
   apply_reject_policy: '驳回策略蒸馏',
   apply_edit_policy: '编辑风格蒸馏',
   apply_edit_user_style: '个人风格蒸馏',
+  apply_discovery_policy: 'KOL 发现标准蒸馏',
+  mine_discovery_tags: '决策标签挖掘',
   apply_pricing_calibration_policy: '定价策略校准',
   auto_pricing_campaigns: 'LIVE 定价自动推广',
   snapshot_fact_corrections: '事实纠错快照',
@@ -116,6 +118,13 @@ export function jobStatusLabel(status: string): string {
 }
 
 export function policyScopeLabel(scope: string): string {
+  // Dynamic learned-discovery-criteria scopes: discovery_criteria:spu:<sku>
+  // / discovery_criteria:category:<slug>.
+  if (scope.startsWith('discovery_criteria:')) {
+    const [, kind, ...rest] = scope.split(':');
+    const key = rest.join(':');
+    return kind === 'category' ? `发现标准（品类 ${key}）` : `发现标准（产品 ${key}）`;
+  }
   return POLICY_SCOPE_LABELS[scope] ?? scope;
 }
 

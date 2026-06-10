@@ -64,6 +64,7 @@ class _StubBridge:
         self.route_calls: list[tuple[str, dict[str, Any]]] = []
         self.escalations: list[dict[str, Any]] = []
         self.route_response: dict[str, Any] = {"ok": True}
+        self.decision_learning_calls: list[dict[str, Any]] = []
 
     async def list_candidates(self, campaign_id: str, *, env: str):
         return list(self.candidates)
@@ -105,6 +106,14 @@ class _StubBridge:
     async def open_escalation(self, body: dict):
         self.escalations.append(body)
         return {"ok": True}
+
+    async def discovery_feedback_requirements(self, *, sku, env):
+        # Past the early-learning phase: comment optional, tags still required.
+        return {"comment_required": False}
+
+    async def record_shortlist_decision(self, body: dict):
+        self.decision_learning_calls.append(body)
+        return {"recorded": len(body.get("decisions") or []), "event_ids": []}
 
 
 class _StubGateway:
@@ -295,7 +304,7 @@ def test_approve_shortlist_409_while_gate_run_id_set() -> None:
     app = _build_app(conn, bridge, gateway)
     r = TestClient(app).post(
         "/campaigns/CID-1/approve-shortlist",
-        json={"env": "TEST", "selected_handles": ["alice"]},
+        json={"env": "TEST", "selected_handles": ["alice"], "decision_feedback": {"shared_tags": ["tone_match"], "shared_comment": "fits the brief"}},
     )
 
     assert r.status_code == 409, r.text
@@ -324,7 +333,7 @@ def test_approve_shortlist_409_during_brief_gate_eval_window() -> None:
     app = _build_app(conn, bridge, gateway)
     r = TestClient(app).post(
         "/campaigns/CID-1/approve-shortlist",
-        json={"env": "TEST", "selected_handles": ["alice"]},
+        json={"env": "TEST", "selected_handles": ["alice"], "decision_feedback": {"shared_tags": ["tone_match"], "shared_comment": "fits the brief"}},
     )
 
     assert r.status_code == 409, r.text
@@ -350,7 +359,7 @@ def test_approve_shortlist_succeeds_when_gate_cleared() -> None:
     app = _build_app(conn, bridge, gateway)
     r = TestClient(app).post(
         "/campaigns/CID-1/approve-shortlist",
-        json={"env": "TEST", "selected_handles": ["alice"]},
+        json={"env": "TEST", "selected_handles": ["alice"], "decision_feedback": {"shared_tags": ["tone_match"], "shared_comment": "fits the brief"}},
     )
 
     assert r.status_code == 200, r.text
@@ -381,7 +390,7 @@ def test_approve_shortlist_queues_email_discovery_when_missing_email() -> None:
 
     r = TestClient(app).post(
         "/campaigns/CID-1/approve-shortlist",
-        json={"env": "TEST", "selected_handles": ["alice"]},
+        json={"env": "TEST", "selected_handles": ["alice"], "decision_feedback": {"shared_tags": ["tone_match"], "shared_comment": "fits the brief"}},
     )
 
     assert r.status_code == 200, r.text
@@ -415,7 +424,7 @@ def test_approve_shortlist_dedup_blocks_double_click() -> None:
 
     first = TestClient(app).post(
         "/campaigns/CID-1/approve-shortlist",
-        json={"env": "TEST", "selected_handles": ["alice"]},
+        json={"env": "TEST", "selected_handles": ["alice"], "decision_feedback": {"shared_tags": ["tone_match"], "shared_comment": "fits the brief"}},
     )
     assert first.status_code == 200, first.text
 
@@ -432,7 +441,7 @@ def test_approve_shortlist_dedup_blocks_double_click() -> None:
 
     second = TestClient(app).post(
         "/campaigns/CID-1/approve-shortlist",
-        json={"env": "TEST", "selected_handles": ["alice"]},
+        json={"env": "TEST", "selected_handles": ["alice"], "decision_feedback": {"shared_tags": ["tone_match"], "shared_comment": "fits the brief"}},
     )
     assert second.status_code == 409, second.text
     assert second.json()["detail"]["code"] == "approve_inflight"

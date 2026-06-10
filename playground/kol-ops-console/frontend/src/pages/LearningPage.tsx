@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import DiscoveryLearningPanel from '../components/DiscoveryLearningPanel';
 import DraftEditDiffPanel from '../components/DraftEditDiffPanel';
 import { LearningChannelTrends } from '../components/LearningChannelTrends';
 import { LearningNextBatchPreview } from '../components/LearningNextBatchPreview';
@@ -103,8 +104,10 @@ type Overview = {
     edits?: EditDistanceTrend;
     rejects?: { buckets?: Array<{ bucket: string; count: number }> };
     outcome_retros?: { buckets?: Array<{ bucket: string; count: number }> };
+    shortlist_decisions?: { buckets?: Array<{ bucket: string; count: number }> };
   };
   promote_outcome_eligibility?: Overview['promote_eligibility'];
+  discovery_learning?: import('../components/DiscoveryLearningPanel').DiscoveryProgress;
 };
 
 type EditDistanceBucket = {
@@ -239,8 +242,14 @@ export function LearningPage() {
 
   const activeWorkflowStep = useMemo(() => {
     if (!overview) return 1;
-    if ((overview.pending_style_proposals?.length ?? 0) > 0) return 3;
+    const pendingStyle = overview.pending_style_proposals?.length ?? 0;
+    const pendingDiscovery = overview.discovery_learning?.pending_proposals ?? 0;
+    if (pendingStyle > 0 || pendingDiscovery > 0) return 3;
     if (overview.edit_stats?.ready_for_distill) return 2;
+    const discoveryReady = (overview.discovery_learning?.groups ?? []).some(
+      (g) => g.ready_for_distill && !g.has_pending_proposal,
+    );
+    if (discoveryReady) return 2;
     return 1;
   }, [overview]);
 
@@ -664,6 +673,8 @@ export function LearningPage() {
           </div>
         )}
       </section>
+
+      <DiscoveryLearningPanel env={env} progress={overview?.discovery_learning} />
 
       <section
         id="policies"

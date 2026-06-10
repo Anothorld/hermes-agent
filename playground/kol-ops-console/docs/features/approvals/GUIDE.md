@@ -41,6 +41,7 @@
   - 提案为**增量修订（delta）**：蒸馏已读取当前 policy 作基线，仅产出新增/`ADJUST:`/`REMOVE:`；卡片可展开「当前 policy」对比（`CurrentPolicyPreview`）。
   - 批准合并模式 `KOL_STYLE_LEARNING_MERGE_MODE`：`append`（默认累加）/`replace_section`（替换最新 Approved 节，历史留版本链）/`llm_compress`（二次 LLM 合并去矛盾，较慢，失败回退 append）。
   - **驳回**写 `style_proposal_rejected` 负反馈事件（不开升级），下次蒸馏 prompt 会引用「上次被否原因」以避免重复。
+- **`approval.discovery_learning_proposal`**（类型筛选「发现标准」）：发现决策学习提案，按 `discovery_criteria:spu:<sku>` / `discovery_criteria:category:<slug>` 范围分组，组头为「KOL 发现标准学习 · 产品/品类 …」。专用卡片视图（`DiscoveryLearningProposalView`）展示学习层级 / 样本数 / 批准-移除-转移构成 / 增量修订正文，并支持「批准后 policy 合并效果」对比（`PolicyMergeDiffPreview`，Bridge merge-preview 已支持 `discovery_criteria:*`）与「当前标准」展开。批准即合并入对应 policy 并被下一轮发现 brief 引用；驳回写 `discovery_proposal_rejected` 事件（不开升级），样本留待下一批蒸馏、**下次蒸馏 prompt 会引用被否原因避免重复**。详见 [learning](../learning/GUIDE.md#发现决策学习discover-闭环新增)。
 - **草稿来源标签**（`draft_origin` / `draft_origin_label`，仅 `approval.reply_draft`）：
   - `KOL回信自动` — 入站 dispatcher 正常起草
   - `升级恢复稿` — 操作员 resume 升级后自动起草（含 `linked_escalation_id`）

@@ -105,7 +105,7 @@ kol-ops-console/
 | 活动 Campaign | `/products/:sku`, `/campaigns/:id/*` | [campaigns](docs/features/campaigns/GUIDE.md)（含发现门控 / `pending_ingests` 结构化续跑） |
 | KOL 看板/详情 | `/kols`, `/kols/:id` | [kols](docs/features/kols/GUIDE.md) |
 | 待审批 | `/approvals` | [approvals](docs/features/approvals/GUIDE.md) |
-| 自主学习 | `/learning` | [learning](docs/features/learning/GUIDE.md) |
+| 自主学习 | `/learning` | [learning](docs/features/learning/GUIDE.md)（含发现决策学习：shortlist 标签/评论 → SPU/品类评判标准） |
 | 升级处理 | `/escalations` | [escalations](docs/features/escalations/GUIDE.md) |
 | 策略编辑 | `/policies` | [policies](docs/features/policies/GUIDE.md) |
 | 门禁指标 | `/metrics` | [gate-metrics](docs/features/gate-metrics/GUIDE.md) |

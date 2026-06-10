@@ -2,7 +2,7 @@
 
 ## 功能说明
 
-展示回信草稿 **首轮通过率**、**KOL 候选采纳率**、**初邀回信率**、高频 **驳回标签** 等指标，帮助操作员与运营评估 AI 质量（非开发监控）。
+展示回信 **首轮通过率**、**KOL 候选采纳率**、**初邀回信率**、高频 **驳回标签** 等指标，帮助操作员与运营评估 AI 质量（非开发监控）。
 
 ## 操作员路径
 
@@ -10,14 +10,48 @@
 |------|------|
 | `/metrics` | `GateMetricsPage.tsx`（门禁指标 + **红人列表**表格） |
 
-## 顶部 KOL 漏斗指标（随「近 N 天」窗口，按 `first_discovered_at` 筛选）
+## 时间窗口说明
+
+| 区域 | 窗口 |
+|------|------|
+| 审批/升级类指标 | 工具栏「近 7 / 14 / 30 天」 |
+| KOL 采纳/回信率 | 自动 **至少 30 天** cohort，且仅统计 **已满 14 天** 的成熟样本 |
+| 趋势图 | 与汇总窗口**独立**，按「趋势按天/周/月/年」粒度 |
+
+## 顶部指标公式
 
 | 指标 | 公式 | 说明 |
 |------|------|------|
-| KOL候选采纳率 | 初邀草稿数 ÷ 可采纳候选数 | 可采纳 = 发现总数 − **曾触达列表**历史合作红人 |
-| 初邀回信率 | 有回信数 ÷ 初邀草稿数 | 初邀草稿后存在 `kol_inbound_reply` |
+| 回信首轮通过率 | 无 prior refine 的 approve ÷ 首轮决策数 | 仅 `approval.reply_draft`；先「优化重写」再批准不计入首轮 |
+| 平均处理时长 | mean(决定时刻 − opened_at) | audit 须含 `opened_at`（新批准/驳回/结案自动写入） |
+| 重复升级率 | 子升级打开 ÷ 全部升级打开 | 近 N 天，与趋势图定义一致 |
+| 人工触点 / 有触达活动 | 触达次数之和 ÷ 有触达的活动数 | 含 approve/reject/refine/升级结案/预览草稿 |
+| 升级终止率 | terminate 结案 ÷ 全部升级结案 | 近 N 天 |
+| LIVE 驳回率 | LIVE reject ÷ LIVE 回信审批 | 非 gateway 事故；TEST 恒为 0 |
+| KOL候选采纳率 | 14 天内出初邀 ÷ 发现满 14 天且落在 cohort 窗口的可采纳候选 | cohort 窗口 = max(所选天数, 30) ～ 14 天前 |
+| 初邀回信率 | 14 天内回信 ÷ 初邀满 14 天且落在 cohort 窗口的草稿 | 锚点为 `first_draft_at` |
 
-卡片副文案展示分子/分母（如 `12 / 85 生成初邀草稿`）。
+### KOL 漏斗辅助计数
+
+| 字段 | 含义 |
+|------|------|
+| `mature_adopted_within_window_count` / `mature_eligible_total` | 采纳率分子/分母 |
+| `pending_mature_backlog_count` | 发现已满 14 天、仍无初邀草稿 |
+| `pending_immature_count` | 发现未满 14 天、尚无草稿 |
+| `mature_replied_within_window_count` / `mature_draft_total` | 回信率分子/分母 |
+| `pending_draft_mature_no_reply_count` | 初邀已满 14 天、14 天内仍无回信 |
+| `pending_draft_immature_count` | 初邀未满 14 天、尚无回信 |
+
+## 指标趋势图
+
+顶部 **8 张指标卡片**均内嵌迷你趋势图（柱形），工具栏可切换粒度：
+
+| 粒度 | 默认展示时段数 | 说明 |
+|------|----------------|------|
+| 按天 | 近 30 天 | 审批/升级等来自 Console `audit_log` |
+| 按周 | 近 12 周 | KOL 漏斗按成熟 cohort 规则分桶 |
+| 按月 | 近 12 月 | 重复升级率 = 子升级 ÷ 全部升级打开 |
+| 按年 | 近 5 年 | 悬停柱条可看该时段数值 |
 
 ## 红人列表（Agent红人列表模板）
 
@@ -46,18 +80,22 @@
 
 | 层 | 文件 |
 |----|------|
-| FE | `GateMetricsPage.tsx`, `KolRegistryTable.tsx`, `NoxAudienceHoverPanel.tsx` |
-| BE | `routers/admin.py`, `kol_registry_export.py`（`GET /admin/gate-metrics`, `GET /admin/kol-registry`, `GET /admin/kol-registry/export`） |
-| Bridge | `kol-ops-bridge/cal.py` → `list_discovered_kol_registry`, `GET /kol-registry` |
+| FE | `GateMetricsPage.tsx`, `MetricTrendSparkline.tsx`, `KolRegistryTable.tsx`, `NoxAudienceHoverPanel.tsx` |
+| BE | `gate_metrics_audit.py`, `gate_metrics_trends.py`, `routers/admin.py`, `routers/approvals.py`, `routers/escalations.py` |
+| Bridge | `cal.py` → funnel / escalation window aggregates |
 
 ## 主要 API
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/admin/gate-metrics` | 聚合指标（带 `env`, `days`）；含 `kol_funnel` 分子分母 |
+| GET | `/admin/gate-metrics` | 聚合指标（`env`, `days`）；含 `kol_funnel`, `audit_meta` |
+| GET | `/admin/gate-metrics/trends` | 趋势序列（`env`, `bucket`, 可选 `periods`） |
 | GET | `/kol-registry/funnel`（bridge） | 发现漏斗原始计数与比率 |
-| GET | `/admin/kol-registry` | 分页红人列表（`env`, `limit`, `offset`, 可选 `q`） |
-| GET | `/admin/kol-registry/export` | 下载 `.xlsx`（当前 `env`/`q` 下**全部**行，非仅本页） |
+| GET | `/kol-registry/funnel/trend`（bridge） | KOL 采纳/回信率分桶序列 |
+| GET | `/escalations/re-escalation-window`（bridge） | 近 N 天重复升级率 |
+| GET | `/escalations/re-escalation-trend`（bridge） | 重复升级率分桶序列 |
+| GET | `/admin/kol-registry` | 分页红人列表 |
+| GET | `/admin/kol-registry/export` | 下载 `.xlsx` |
 
 ## 关联模块
 
@@ -66,4 +104,4 @@
 
 ## UX
 
-图表/数字配 **中文说明**（何为「首轮通过」）；可按活动或时间筛选时写清筛选含义。
+图表/数字配 **中文说明**；KOL 指标注明成熟 cohort 与积压计数，避免误读「还没审/还没回」为质量差。

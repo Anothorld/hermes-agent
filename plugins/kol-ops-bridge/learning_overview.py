@@ -7,7 +7,9 @@ import os
 import sqlite3
 from typing import Any, Optional
 
+from . import learning_discovery
 from . import learning_distill
+from . import discovery_decision_learning as ddl
 from . import learning_job_store as job_store
 from . import learning_outcome
 from . import learning_promote
@@ -120,6 +122,13 @@ def build_learning_overview(
         **outcome_gate,
     }
 
+    # Shortlist-decision learning (discover loop): per SPU/category batch
+    # progress toward the next learned-criteria proposal.
+    try:
+        discovery_stats = learning_discovery.discovery_overview_stats(conn, env=env)
+    except Exception:  # noqa: BLE001 — dashboard must render without this block
+        discovery_stats = {"error": "discovery stats unavailable"}
+
     policy_versions: dict[str, Any] = {}
     for scope in (
         learning_store.REJECT_LEARNING_SCOPE,
@@ -192,6 +201,10 @@ def build_learning_overview(
             conn, env=env, event_type=learning_outcome.OUTCOME_LEARNING_EVENT,
             days=90, bucket="week",
         ),
+        "shortlist_decisions": learning_store.event_volume_trend(
+            conn, env=env, event_type=ddl.SHORTLIST_DECISION_EVENT,
+            days=90, bucket="week",
+        ),
     }
     # Regression guard: flag when recent edits got LARGER after learning (a bad
     # batch may have degraded the policy → consider rolling back).
@@ -249,6 +262,7 @@ def build_learning_overview(
         "channel_trends": channel_trends,
         "convergence_alert": convergence_alert,
         "outcome_learning": outcome_stats,
+        "discovery_learning": discovery_stats,
         "style_in_hints": learning_store._env_flag("KOL_STYLE_IN_HINTS", default=True),
         "batch_threshold": threshold,
         "edit_stats": {

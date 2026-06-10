@@ -79,18 +79,29 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 
 - **未批准的候选会一直留在 shortlist**，直到操作员手动移除；批准 shortlist **不会**自动隐藏或拒绝未勾选的行。
 - `GET /campaigns/{id}/shortlist` 返回 `candidate_status` 不为 `rejected` / `archived` 的可见行；`counts.rejected_or_archived_hidden` 为已隐藏数量。
-- 产品页 Shortlist review 每行待审批候选有 **「从 shortlist 移除」**：调用 `POST /campaigns/{id}/candidates/status`，将 `candidate_status` 设为 `rejected`（`review_reason=operator_removed_from_shortlist`）。**CAL 行仍在库中**，只是不再出现在 shortlist、也无法被勾选批准；指标页等全量视图仍可看到该发现记录。
-- **「转到其他活动」**（Phase 1a，仅发现后、批准前）：`POST /identities/{identity_id}/transfer-campaign`，body 含 `from_campaign_id`、`to_campaign_id`、`env`、`reason`。Bridge 将源行标为 `rejected`（`review_reason` 含 `transferred_to:<目标>`），在目标活动写入 `discovered` + `source=operator_transfer`，并 `resolve-relationships`。目标活动须已存在 `campaign_config`。若目标已有非 terminal 候选行则 409。CLI：`kol_bridge_tool.py transfer-campaign --identity-id … --from-campaign-id … --to-campaign-id …`。
+- 产品页 Shortlist review 每行待审批候选有 **「从 shortlist 移除」**：弹出反馈弹窗（原因标签必选 + 评论，见下「决策学习反馈」），随后调用 `POST /campaigns/{id}/candidates/status`，将 `candidate_status` 设为 `rejected`（`review_reason=operator_removed_from_shortlist`，body 另带 `reason_tags[]` + `comment`）。**CAL 行仍在库中**，只是不再出现在 shortlist、也无法被勾选批准；指标页等全量视图仍可看到该发现记录。
+- **「转到其他活动」**（Phase 1a，仅发现后、批准前）：`POST /identities/{identity_id}/transfer-campaign`，body 含 `from_campaign_id`、`to_campaign_id`、`env`、`reason`、`reason_tags[]`（标签必选；`reason` 即学习评论）。Bridge 将源行标为 `rejected`（`review_reason` 含 `transferred_to:<目标>`），在目标活动写入 `discovered` + `source=operator_transfer`，并 `resolve-relationships`。目标活动须已存在 `campaign_config`。若目标已有非 terminal 候选行则 409。CLI：`kol_bridge_tool.py transfer-campaign --identity-id … --from-campaign-id … --to-campaign-id …`。
+
+### 决策学习反馈（批准 / 移除 / 转移共用）
+
+- 三类操作都要求操作员打 **原因标签**（词表见 `GET /learning/discovery-tags`，按 action 过滤）并在**学习早期**（该 SPU 样本 < `KOL_DISCOVERY_COMMENT_MIN_SAMPLES`，默认 50）填写**真实理由评论**；达标后评论改为选填。
+- 批准为批量操作：二级弹窗填写**本批共享**标签+评论；需对单个 KOL 说明不同理由时，在列表行点击 **点赞「标注」**（与「转到其他活动 / 从 shortlist 移除」同位置），填写后暂存于本页，点 Approve 时在二级弹窗**汇总展示并一并提交**（`decision_feedback.per_kol_overrides`，按 handle 键控）。「Retry draft run」重批已批准 KOL 不要求反馈（不是新决策）。
+- 校验失败返回 422（`decision_feedback_required` / `decision_tags_required` / `decision_comment_required` / `decision_tags_invalid`——标签已失效或不存在，刷新词表后重选），不产生任何 CAL 副作用。词表不可达时跳过严格标签校验（降级，不阻塞）。
+- 学习采集失败不回滚主操作：Console 端**重试一次**（请求路径上限 2 次尝试）后写 audit `learning.shortlist_decision_failed`（payload 含完整 `replay_body`），并在前端 toast 提示「样本未能记录，已留底备查」；可在学习页 Discovery 面板**一键补录**。
+- 紧急关闭：`KOC_DISCOVERY_FEEDBACK_REQUIRED=false`——前后端同步生效（**跳过反馈弹窗**、后端跳过校验，不会卡住操作员）。
+- 样本落 Bridge `shortlist_decision_learning` 事件并冻结 KOL 特征快照；夜间蒸馏与回灌见 [learning GUIDE](../learning/GUIDE.md#发现决策学习discover-闭环新增)。
+- 活动启动 / rediscover 的 brief 末尾会附 `# learned_discovery_criteria`（已审批的 SPU/品类评判标准；开关 `KOC_DISCOVERY_LEARNED_CRITERIA`）。
 
 ### 批准流程
 
 `POST /campaigns/{id}/approve-shortlist` 流程：
 
 1. 将操作员勾选的 handle 解析为 `identity_ids`
-2. **`route-discovery`（scoped）** — 仅对这批 `identity_ids` 写 `identity.outreach_path` 并 `select-candidates`；**不会**把池内其余 `discovered` 候选一并提升为已批准（**不再**重复调用 `select-candidates`，避免大批量超时）
-3. **缺邮箱自动排队** — 对每个 `primary_email` 为空的已批 identity，Console 同步跑 Nox Gate B（LIVE + `nox_quota_enabled`）后排队 `kol-email-discover:{env}:{id}`（与详情页「全网搜索」同路径）；Gate B 命中则跳过 browser。响应体含 `email_discovery[]`。
-4. 写 `approved` 事件 + **带重试**拉起 post-approval gateway run（`bridge_approve_timeout_sec` 默认 180s；gateway 502/503/504 自动重试 2 次）；brief 含 `# email_discovery_queued`，outreach agent 对队列中的身份 **不** 开 `contact_email_not_found` escalation，报告 `pending_email_discovery`。
-5. **邮箱发现完成后自动起草** — `run_state_reconciler` 在 `kol-email-discover:*` run 到达 `completed` 且 `primary_email` 已写入、该 identity 仍为 `selected_for_outreach`、尚无待审批草稿时，自动拉起单 KOL 的 `kol-campaign-draft:*` run（与详情页 `redraft-outreach` 同 brief/技能）。audit 记 `campaign.auto_draft_after_email_discover`。有邮箱的 KOL 仍在步骤 4 的 outreach run 中同步起草，不等待队列。
+2. **决策反馈校验（fail-fast）** — 对首次批准的 KOL 校验 `decision_feedback`（标签必选、早期评论必填），不通过返回 422 且无任何 CAL 副作用
+3. **`route-discovery`（scoped）** — 仅对这批 `identity_ids` 写 `identity.outreach_path` 并 `select-candidates`；**不会**把池内其余 `discovered` 候选一并提升为已批准（**不再**重复调用 `select-candidates`，避免大批量超时）；随后 best-effort 写入决策学习事件（响应体 `learning`）
+4. **缺邮箱自动排队** — 对每个 `primary_email` 为空的已批 identity，Console 同步跑 Nox Gate B（LIVE + `nox_quota_enabled`）后排队 `kol-email-discover:{env}:{id}`（与详情页「全网搜索」同路径）；Gate B 命中则跳过 browser。响应体含 `email_discovery[]`。
+5. 写 `approved` 事件 + **带重试**拉起 post-approval gateway run（`bridge_approve_timeout_sec` 默认 180s；gateway 502/503/504 自动重试 2 次）；brief 含 `# email_discovery_queued`，outreach agent 对队列中的身份 **不** 开 `contact_email_not_found` escalation，报告 `pending_email_discovery`。
+6. **邮箱发现完成后自动起草** — `run_state_reconciler` 在 `kol-email-discover:*` run 到达 `completed` 且 `primary_email` 已写入、该 identity 仍为 `selected_for_outreach`、尚无待审批草稿时，自动拉起单 KOL 的 `kol-campaign-draft:*` run（与详情页 `redraft-outreach` 同 brief/技能）。audit 记 `campaign.auto_draft_after_email_discover`。有邮箱的 KOL 仍在步骤 4 的 outreach run 中同步起草，不等待队列。
 
 若 CAL 已更新但 gateway 启动失败，audit 会记 `campaign.approve_shortlist_gateway_failed`；操作员可再次点击批准（idempotent）或联系工程。
 

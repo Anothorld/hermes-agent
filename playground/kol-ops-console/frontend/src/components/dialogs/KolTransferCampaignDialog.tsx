@@ -2,12 +2,18 @@ import { useEffect, useState } from 'react';
 import { api, type CampaignListItem } from '../../api';
 import { errorSummary } from '../../lib/errors';
 import { toast } from '../../lib/store';
+import {
+  DecisionTagChecklist,
+  useDecisionTags,
+  useFeedbackRequirements,
+} from './ShortlistDecisionFeedbackDialog';
 
 type Props = {
   open: boolean;
   identityId: number;
   handle: string;
   fromCampaignId: string;
+  sku?: string | null;
   env: 'TEST' | 'LIVE';
   onClose: () => void;
   onTransferred?: (toCampaignId: string) => void;
@@ -18,6 +24,7 @@ export function KolTransferCampaignDialog({
   identityId,
   handle,
   fromCampaignId,
+  sku,
   env,
   onClose,
   onTransferred,
@@ -26,13 +33,24 @@ export function KolTransferCampaignDialog({
   const [loadingCampaigns, setLoadingCampaigns] = useState(false);
   const [toCampaignId, setToCampaignId] = useState('');
   const [reason, setReason] = useState('');
+  const [reasonTags, setReasonTags] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const { tags: decisionTags } = useDecisionTags('transfer', open);
+  const req = useFeedbackRequirements(sku, env, open);
+  // Same early-learning policy as approve/remove: the comment (reason) is
+  // mandatory only while the SPU is below the sample threshold; tags follow
+  // the global kill switch.
+  const feedbackRequired = !req?.degraded && req?.feedback_required !== false;
+  const commentRequired = feedbackRequired && req?.comment_required !== false;
+  const sampleCount = req?.sku_sample_count ?? 0;
+  const sampleThreshold = req?.comment_required_threshold ?? 0;
 
   useEffect(() => {
     if (!open) return;
     setToCampaignId('');
     setReason('');
+    setReasonTags([]);
     setSubmitting(false);
     setLoadErr(null);
     setLoadingCampaigns(true);
@@ -60,20 +78,34 @@ export function KolTransferCampaignDialog({
 
   const submit = async () => {
     if (!toCampaignId || submitting) return;
-    if (!reason.trim()) {
-      toast.error('请填写转移原因', '便于团队了解为何换到其他产品活动');
+    if (feedbackRequired && reasonTags.length === 0) {
+      toast.error('请至少勾选一个原因标签', '标签会成为 AI 学习样本，帮助下次发现更准');
+      return;
+    }
+    if (commentRequired && !reason.trim()) {
+      toast.error('请填写转移原因', '学习初期需要您用一句话说明真实理由');
       return;
     }
     setSubmitting(true);
     try {
-      await api.post(`/identities/${identityId}/transfer-campaign`, {
-        from_campaign_id: fromCampaignId,
-        to_campaign_id: toCampaignId,
-        env,
-        source_stage: 'shortlist',
-        reason: reason.trim(),
-      });
+      const r = await api.post<{ learning?: { recorded?: number; error?: string } }>(
+        `/identities/${identityId}/transfer-campaign`,
+        {
+          from_campaign_id: fromCampaignId,
+          to_campaign_id: toCampaignId,
+          env,
+          source_stage: 'shortlist',
+          reason: reason.trim(),
+          reason_tags: reasonTags,
+        },
+      );
       toast.success('已转到其他活动', `@${handle} → ${toCampaignId}`);
+      if (r.learning?.error) {
+        toast.error(
+          '转移成功，但学习样本未能记录',
+          '系统已留底备查，无需重试转移；学习服务恢复后可补录。',
+        );
+      }
       onTransferred?.(toCampaignId);
       onClose();
     } catch (ex) {
@@ -137,9 +169,32 @@ export function KolTransferCampaignDialog({
             )}
           </div>
 
+          {commentRequired && sampleThreshold > 0 && (
+            <div className="rounded border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] text-sky-900">
+              学习初期需要您说明真实理由（该产品已积累 {sampleCount}/{sampleThreshold} 条样本，达到后原因改为选填）
+            </div>
+          )}
+
+          <div>
+            <div className="mb-1 text-slate-600">
+              原因标签{feedbackRequired ? '（必选）' : '（选填）'}{' '}
+              <span className="text-slate-400">— 会成为 AI 学习样本</span>
+            </div>
+            <DecisionTagChecklist
+              tags={decisionTags}
+              selected={reasonTags}
+              idPrefix="transfer"
+              onToggle={(tag, checked) =>
+                setReasonTags((prev) =>
+                  checked ? [...prev, tag] : prev.filter((t) => t !== tag),
+                )
+              }
+            />
+          </div>
+
           <div>
             <label className="mb-1 block text-slate-600" htmlFor="transfer-reason">
-              原因（必填）
+              原因{commentRequired ? '（必填）' : '（选填，但越多越好）'}
             </label>
             <textarea
               id="transfer-reason"

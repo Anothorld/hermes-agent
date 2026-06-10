@@ -44,6 +44,9 @@ from . import policies as _policies
 from . import pricing_engine
 from . import reply_draft
 from . import orphan_gmail_draft
+from . import discovery_decision_learning
+from . import discovery_decision_tags
+from . import learning_discovery
 from . import learning_distill
 from . import learning_jobs
 from . import learning_job_store
@@ -802,6 +805,39 @@ def kol_registry_funnel(
     """Discovery funnel rates for gate-metrics (adoption + reply)."""
     window = int(days) if days > 0 else None
     return cal.aggregate_kol_registry_funnel(env=env, days=window)
+
+
+@router.get("/kol-registry/funnel/trend")
+def kol_registry_funnel_trend(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    bucket: str = Query(default="week", pattern="^(day|week|month|year)$"),
+    periods: int | None = Query(default=None, ge=1, le=90),
+) -> dict[str, Any]:
+    """Time-bucketed KOL funnel rates for gate-metrics trend charts."""
+    return cal.aggregate_kol_registry_funnel_trend(
+        env=env, bucket=bucket, periods=periods,
+    )
+
+
+@router.get("/escalations/re-escalation-trend")
+def escalation_re_escalation_trend(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    bucket: str = Query(default="week", pattern="^(day|week|month|year)$"),
+    periods: int | None = Query(default=None, ge=1, le=90),
+) -> dict[str, Any]:
+    """Repeat-escalation rate per time bucket (child opens / all opens)."""
+    return cal.aggregate_escalation_re_escalation_trend(
+        env=env, bucket=bucket, periods=periods,
+    )
+
+
+@router.get("/escalations/re-escalation-window")
+def escalation_re_escalation_window(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    days: int = Query(default=30, ge=1, le=365),
+) -> dict[str, Any]:
+    """Repeat-escalation rate over a rolling day window."""
+    return cal.aggregate_escalation_re_escalation_window(env=env, days=days)
 
 
 @router.get("/identities/{identity_id}/relationship/reusable-facts")
@@ -2078,12 +2114,14 @@ def _approve_or_reject(
             "gmail_draft": prior_draft,
             "idempotent_replay": True,
         }
-    # Idempotent replay: style/strategy or outcome batch already merged into policy.
+    # Idempotent replay: style/strategy, outcome, or discovery batch already
+    # merged into policy.
     if (
         decision == "approved"
         and fact_path in (
             learning_store.STYLE_LEARNING_APPROVAL_FACT,
             learning_outcome.OUTCOME_LEARNING_APPROVAL_FACT,
+            discovery_decision_learning.DISCOVERY_LEARNING_APPROVAL_FACT,
         )
         and isinstance(previous_value, dict)
         and previous_value.get("decision") == "approved"
@@ -2098,6 +2136,7 @@ def _approve_or_reject(
             "learning_event_id": None,
             "style_policy_apply": previous_value.get("style_policy_apply"),
             "outcome_policy_apply": previous_value.get("outcome_policy_apply"),
+            "discovery_policy_apply": previous_value.get("discovery_policy_apply"),
             "idempotent_replay": True,
         }
     gmail_draft: dict[str, Any] | None = None
@@ -2171,6 +2210,24 @@ def _approve_or_reject(
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    discovery_policy_apply: Optional[dict[str, Any]] = None
+    if (
+        decision == "approved"
+        and fact_path == discovery_decision_learning.DISCOVERY_LEARNING_APPROVAL_FACT
+        and isinstance(previous_value, dict)
+    ):
+        try:
+            with cal._connect() as conn:  # type: ignore[attr-defined]
+                discovery_policy_apply = (
+                    learning_discovery.apply_approved_discovery_proposal(
+                        conn,
+                        env=body.env,
+                        proposal=previous_value,
+                        updated_by=f"approval:{body.decided_by}",
+                    )
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     value.update({"decision": decision, "decided_by": body.decided_by})
     if body.note:
         value["note"] = body.note
@@ -2180,6 +2237,8 @@ def _approve_or_reject(
         value["style_policy_apply"] = style_policy_apply
     if outcome_policy_apply is not None:
         value["outcome_policy_apply"] = outcome_policy_apply
+    if discovery_policy_apply is not None:
+        value["discovery_policy_apply"] = discovery_policy_apply
     try:
         cal.write_facts(
             identity_id=body.identity_id,
@@ -2283,6 +2342,41 @@ def _approve_or_reject(
                 log.warning(
                     "failed to record outcome_proposal_rejected feedback", exc_info=True,
                 )
+        elif fact_path == discovery_decision_learning.DISCOVERY_LEARNING_APPROVAL_FACT:
+            # Rejecting a discovery-criteria proposal must not open an escalation;
+            # decision events stay unconsumed for the next distill batch.
+            try:
+                cal.write_event(
+                    identity_id=body.identity_id,
+                    campaign_id=None,
+                    event_type="discovery_proposal_rejected",
+                    goal=None,
+                    lane="meta",
+                    actor=f"approval:{body.decided_by}",
+                    payload={
+                        "scope": value.get("scope") if isinstance(value, dict) else None,
+                        "group_kind": (
+                            value.get("group_kind") if isinstance(value, dict) else None
+                        ),
+                        "group_key": (
+                            value.get("group_key") if isinstance(value, dict) else None
+                        ),
+                        "note": reject_note or "",
+                        "tags": reject_tags_list,
+                        "rejected_markdown": (
+                            value.get("proposed_markdown")
+                            if isinstance(value, dict) else None
+                        ),
+                        "source_event_ids": (
+                            value.get("source_event_ids") if isinstance(value, dict) else None
+                        ),
+                    },
+                    env=body.env,
+                )
+            except Exception:
+                log.warning(
+                    "failed to record discovery_proposal_rejected feedback", exc_info=True,
+                )
         elif fact_path == learning_store.STYLE_LEARNING_APPROVAL_FACT:
             # Rejecting a batch style/strategy proposal must not open a KOL-facing
             # escalation — edit events stay unconsumed for the next distill batch.
@@ -2346,6 +2440,8 @@ def _approve_or_reject(
         out["style_policy_apply"] = style_policy_apply
     if outcome_policy_apply is not None:
         out["outcome_policy_apply"] = outcome_policy_apply
+    if discovery_policy_apply is not None:
+        out["discovery_policy_apply"] = discovery_policy_apply
     return out
 
 
@@ -3829,6 +3925,180 @@ def list_learning_job_runs(
 
 
 # ---------------------------------------------------------------------------
+# Discovery decision learning (shortlist approve / remove / transfer)
+# ---------------------------------------------------------------------------
+
+
+class ShortlistDecisionItem(BaseModel):
+    identity_id: int = Field(ge=1)
+    tags: list[str] = Field(default_factory=list)
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ShortlistDecisionBatchBody(_CampaignIdNormaliserMixin):
+    campaign_id: str
+    action: str = Field(pattern="^(approve|remove|transfer)$")
+    decided_by: str = Field(min_length=1, max_length=120)
+    decisions: list[ShortlistDecisionItem] = Field(min_length=1)
+    operator_user_id: Optional[int] = Field(default=None, ge=1)
+    sku: Optional[str] = Field(default=None, max_length=80)
+    product_name: Optional[str] = Field(default=None, max_length=200)
+    pitch_excerpt: Optional[str] = Field(default=None, max_length=600)
+    transfer_to_campaign_id: Optional[str] = Field(default=None, max_length=120)
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+@router.post("/learning/shortlist-decision")
+def post_shortlist_decision(
+    body: ShortlistDecisionBatchBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Record operator shortlist decisions (one learning event per KOL).
+
+    Tags/comments arrive already resolved per KOL (batch-shared values merged
+    with per-KOL overrides by the Console). KOL feature snapshots are frozen
+    at write time.
+    """
+    _require_bridge_key(x_bridge_key)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        try:
+            return discovery_decision_learning.record_shortlist_decisions(
+                conn,
+                campaign_id=body.campaign_id,
+                env=body.env,
+                action=body.action,
+                decided_by=body.decided_by,
+                decisions=[d.model_dump() for d in body.decisions],
+                operator_user_id=body.operator_user_id,
+                sku=body.sku,
+                product_name=body.product_name,
+                pitch_excerpt=body.pitch_excerpt,
+                transfer_to_campaign_id=body.transfer_to_campaign_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/learning/discovery-tags")
+def get_discovery_tags(
+    action: Optional[str] = Query(default=None, pattern="^(approve|remove|transfer)$"),
+    status: str = Query(default="active", pattern="^(active|proposed|rejected)$"),
+) -> dict[str, Any]:
+    """Decision-tag vocabulary for the shortlist feedback dialog / learning page."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        tags = discovery_decision_tags.list_tags(conn, action=action, status=status)
+    return {"tags": tags, "count": len(tags)}
+
+
+class DiscoveryTagDecisionBody(BaseModel):
+    tag: str = Field(min_length=1, max_length=64)
+    decision: str = Field(pattern="^(approved|rejected)$")
+
+
+@router.post("/learning/discovery-tags/decide")
+def decide_discovery_tag(
+    body: DiscoveryTagDecisionBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Approve or reject a mined (``proposed``) decision tag."""
+    _require_bridge_key(x_bridge_key)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        try:
+            return discovery_decision_tags.decide_proposed_tag(
+                conn, tag=body.tag, decision=body.decision,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/learning/discovery-feedback-requirements")
+def get_discovery_feedback_requirements(
+    sku: Optional[str] = Query(default=None, max_length=80),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Sample counts + whether the free-text comment is still required."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        return discovery_decision_learning.feedback_requirements(
+            conn, env=env, sku=sku,
+        )
+
+
+@router.get("/learning/shortlist-decision-events")
+def get_shortlist_decision_events(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    sku: Optional[str] = Query(default=None, max_length=80),
+    category: Optional[str] = Query(default=None, max_length=80),
+    action: Optional[str] = Query(default=None, pattern="^(approve|remove|transfer)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Decision learning events newest-first (Console learning page)."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = discovery_decision_learning.list_decision_events(
+            conn, env=env, sku=sku, category=category, action=action, limit=limit,
+        )
+    return {"events": rows, "count": len(rows)}
+
+
+@router.get("/learning/discovery-criteria")
+def get_discovery_criteria(
+    sku: str = Query(min_length=1, max_length=80),
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    max_chars: int = Query(default=4000, ge=200, le=20000),
+) -> dict[str, Any]:
+    """Learned SPU + category criteria markdown (Console brief injection)."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        return learning_discovery.build_learned_discovery_criteria(
+            conn, env=env, sku=sku, max_chars=max_chars,
+        )
+
+
+@router.get("/learning/pending-discovery-proposals")
+def get_pending_discovery_proposals(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Pending ``approval.discovery_learning_proposal`` rows (newest first)."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = learning_discovery.list_pending_discovery_proposals(conn, env=env)
+    return {"proposals": rows, "count": len(rows)}
+
+
+@router.get("/learning/product-categories")
+def get_product_categories() -> dict[str, Any]:
+    """SKU → category map (LLM-inferred + operator-corrected)."""
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        rows = discovery_decision_learning.list_product_categories(conn)
+    return {"categories": rows, "count": len(rows)}
+
+
+class ProductCategoryPutBody(BaseModel):
+    category: str = Field(min_length=1, max_length=80)
+    updated_by: str = Field(min_length=1, max_length=120)
+    product_name: Optional[str] = Field(default=None, max_length=200)
+
+
+@router.put("/learning/product-categories/{sku}")
+def put_product_category(
+    sku: str,
+    body: ProductCategoryPutBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Operator correction of a SKU's category (authoritative over LLM)."""
+    _require_bridge_key(x_bridge_key)
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        try:
+            return discovery_decision_learning.set_product_category(
+                conn,
+                sku=sku,
+                category=body.category,
+                source="operator",
+                updated_by=body.updated_by,
+                product_name=body.product_name,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
 # Policy documents (Phase E)
 # ---------------------------------------------------------------------------
 
@@ -3842,6 +4112,11 @@ _POLICY_SCOPES = {
     "pricing_calibration",
     "outcome_strategy",
 }
+
+
+def _scope_known(scope: str) -> bool:
+    """Static scopes plus the dynamic ``discovery_criteria:*`` family."""
+    return scope in _POLICY_SCOPES or _policies.is_discovery_criteria_scope(scope)
 
 
 def _resolve_owner(scope: str, owner_user_id: Optional[int]) -> Optional[int]:
@@ -3860,7 +4135,7 @@ def get_policy(
     owner_user_id: Optional[int] = Query(default=None),
     env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
-    if scope not in _POLICY_SCOPES:
+    if not _scope_known(scope):
         raise HTTPException(status_code=404, detail="unknown scope")
     # Reads must degrade gracefully: a ``user_style`` lookup without an owner
     # id simply has no personal document yet (e.g. a redraft run that has no
@@ -3884,7 +4159,7 @@ def put_policy(
     x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
 ) -> dict[str, Any]:
     _require_bridge_key(x_bridge_key)
-    if scope not in _POLICY_SCOPES:
+    if not _scope_known(scope):
         raise HTTPException(status_code=404, detail="unknown scope")
     owner = _resolve_owner(scope, body.owner_user_id)
     with cal._connect() as conn:  # type: ignore[attr-defined]
@@ -3907,7 +4182,7 @@ def list_policy_history(
     env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
-    if scope not in _POLICY_SCOPES:
+    if not _scope_known(scope):
         raise HTTPException(status_code=404, detail="unknown scope")
     owner = _resolve_owner(scope, owner_user_id)
     with cal._connect() as conn:  # type: ignore[attr-defined]
@@ -3925,7 +4200,7 @@ def rollback_policy_route(
 ) -> dict[str, Any]:
     """Roll a policy back to a prior version (forward-write, audited)."""
     _require_bridge_key(x_bridge_key)
-    if scope not in _POLICY_SCOPES:
+    if not _scope_known(scope):
         raise HTTPException(status_code=404, detail="unknown scope")
     owner = _resolve_owner(scope, body.owner_user_id)
     with cal._connect() as conn:  # type: ignore[attr-defined]
@@ -3951,7 +4226,7 @@ def get_policy_version_route(
     env: Optional[str] = Query(default=None, pattern="^(TEST|LIVE)$"),
 ) -> dict[str, Any]:
     """Return a specific historical version (content) for diff/compare."""
-    if scope not in _POLICY_SCOPES:
+    if not _scope_known(scope):
         raise HTTPException(status_code=404, detail="unknown scope")
     owner = _resolve_owner(scope, owner_user_id)
     with cal._connect() as conn:  # type: ignore[attr-defined]

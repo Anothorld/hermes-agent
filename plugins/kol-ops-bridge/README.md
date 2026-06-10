@@ -464,6 +464,39 @@ cron — see `playground/learning/CRON.md`.
 `kol_bridge_tool list-learning-job-runs --env LIVE` or `GET /learning/job-runs`.
 Disable all jobs: `KOL_LEARNING_JOBS_DISABLED=1`.
 
+### Discovery decision learning (shortlist 决策级)
+
+Operator shortlist decisions (approve / remove / transfer, with reason tags +
+comments collected by the Console) land as ``shortlist_decision_learning``
+events with a frozen KOL feature snapshot. Modules:
+
+- ``discovery_decision_tags.py`` — dynamic tag vocabulary
+  (``discovery_decision_tags`` table; seed + nightly-mined proposals).
+- ``discovery_decision_learning.py`` — event capture, comment-required policy
+  (``KOL_DISCOVERY_COMMENT_MIN_SAMPLES``), SKU → category map
+  (``product_category_map``; operator edits beat LLM).
+- ``learning_discovery.py`` — nightly jobs ``apply_discovery_policy`` (SPU +
+  category distill → pending ``approval.discovery_learning_proposal`` → merge
+  into dynamic ``discovery_criteria:spu:*`` / ``discovery_criteria:category:*``
+  policy scopes) and ``mine_discovery_tags`` (comment clustering → proposed
+  tags). Batch gates: ``KOL_DISCOVERY_LEARNING_BATCH_SIZE`` (10),
+  ``KOL_DISCOVERY_TAG_MINE_MIN_COUNT`` (5).
+  Distill prompts cite recent ``discovery_proposal_rejected`` feedback for the
+  same scope (rejected suggestions are not re-proposed); mined tag proposals
+  require LLM-cited examples to verify against source comments
+  (``examples_not_found_in_comments`` otherwise). ``discovery_overview_stats``
+  feeds the Console learning dashboard (per-group batch progress), and
+  ``learning_distill.preview_policy_merge_from_proposal`` supports
+  ``discovery_criteria:*`` scopes for the approval-card merge preview.
+
+HTTP: ``POST /learning/shortlist-decision``, ``GET /learning/discovery-tags``,
+``POST /learning/discovery-tags/decide``,
+``GET /learning/discovery-feedback-requirements``,
+``GET /learning/shortlist-decision-events``, ``GET /learning/discovery-criteria``,
+``GET /learning/pending-discovery-proposals``,
+``GET/PUT /learning/product-categories[/{sku}]``. Approved criteria are pulled
+into discovery launch briefs by the Console (``# learned_discovery_criteria``).
+
 ## TEST/LIVE isolation
 
 Every row carries an `env` column (`TEST` | `LIVE`). The reconcile / clean

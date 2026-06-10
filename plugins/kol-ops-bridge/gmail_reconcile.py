@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import logging
 import os
 import sqlite3
@@ -18,6 +19,40 @@ from .gmail_client import GmailClient, GmailUnavailable
 from .gmail_console import list_operator_gmail_clients
 
 log = logging.getLogger(__name__)
+
+_DEBUG_LOG_PATH = Path(
+    os.environ.get(
+        "KOL_OPS_DEBUG_LOG_PATH",
+        "/Users/arnold/agent_prj/.cursor/debug-bc8612.log",
+    ),
+)
+
+
+def _dbg_log(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+    run_id: str = "pre-fix",
+) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "bc8612",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # #endregion
+
 
 _GMAIL_LOCK_PATH = Path(
     os.environ.get(
@@ -310,9 +345,11 @@ def _run_reconcile_sent_unlocked(
         ),
     )
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    draft_rows = cal.list_approved_reply_drafts(env=env)
     reconciled: list[dict[str, Any]] = []
     edit_learning_count = 0
-    for row in cal.list_approved_reply_drafts(env=env):
+    skip_reasons: dict[str, int] = {}
+    for row in draft_rows:
         outcome = _process_sent_reply_row(
             gmail=gmail,
             row=row,
@@ -324,10 +361,25 @@ def _run_reconcile_sent_unlocked(
             skip_if_edit_exists=False,
         )
         if outcome.get("skipped"):
+            reason = str(outcome.get("reason") or "unknown")
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             continue
         if outcome.get("edit_learning_written"):
             edit_learning_count += 1
         reconciled.append(outcome)
+    _dbg_log(
+        hypothesis_id="H1",
+        location="gmail_reconcile.py:_run_reconcile_sent_unlocked",
+        message="reconcile_pass_complete",
+        data={
+            "env": env,
+            "mailbox_user_id": mailbox_user_id,
+            "sent_threads_seen": len(sent_thread_ids),
+            "drafts_seen": len(draft_rows),
+            "reconciled_count": len(reconciled),
+            "skip_reasons": skip_reasons,
+        },
+    )
     return {
         "env": env,
         "sent_threads_seen": len(sent_thread_ids),
@@ -365,7 +417,8 @@ def _run_reconcile_all_mailboxes_unlocked(
     total_reconciled = 0
     total_edit_learning = 0
     for mb in mailboxes:
-        summary = run_reconcile_sent(
+        # Already under _gmail_reconcile_lock(); do not re-enter via run_reconcile_sent().
+        summary = _run_reconcile_sent_unlocked(
             env=env,
             lookback_days=lookback_days,
             max_results=max_results,

@@ -34,6 +34,10 @@
 | 慢 API 结构化日志 | `KOC_SLOW_API_LOG_ENABLED=1` | 写入 `perf_snapshot.slow_api_recent`，含 `campaign_id`/`identity_id` |
 | Gateway 审批单例 | `GatewayApprovalProvider.tsx` | 全应用共享一次 `/gateway-approvals` snapshot |
 | `write_facts_multi` 单次 recompute | bridge `cal.py` | 多 namespace 写入只触发一次 goal 重算 |
+| 发现决策反馈门 | `KOC_DISCOVERY_FEEDBACK_REQUIRED=true`（默认） | 批准/移除/转移要求标签+早期评论；false 为紧急回滚（停止学习采集） |
+| Learned criteria 注入 | `KOC_DISCOVERY_LEARNED_CRITERIA=true`（默认），`KOC_DISCOVERY_LEARNED_CRITERIA_MAX_CHARS=4000` | 启动/rediscover brief 末尾附已学评判标准；bridge 不可用时跳过不阻塞 launch |
+
+Bridge 侧发现学习相关：`KOL_DISCOVERY_COMMENT_MIN_SAMPLES=50`（早期评论必填阈值，SQL COUNT 精确计数无上限误判）、`KOL_DISCOVERY_LEARNING_BATCH_SIZE=10`（每组蒸馏批次）、`KOL_DISCOVERY_TAG_MINE_MIN_COUNT=5`（标签挖掘最小频次）。蒸馏/挖掘均为夜间 LIVE-only 批任务（`learning_llm` 直连，不占 gateway 并发）；采集挂在既有 POST 上、GET 路径零副作用（`/learning/discovery-feedback-requirements` 在 bridge 不可达时降级返回而非 502）。采集失败降级不回滚主操作：请求路径重试上限 2 次尝试（防 bridge 挂起拖长操作员请求），失败留 audit `replay_body`；学习页 `POST /learning/replay-shortlist-capture` 一键补录（幂等标记 `replayed_at`）。决策校验在请求路径多 2 个 bridge 轻量 GET（标签词表 + 评论必填），词表不可达时跳过严格校验。
 
 操作员可在 **Agent Session Dock** 看到「排队 N」提示（`GET /campaigns/run-launch-status`）。
 
