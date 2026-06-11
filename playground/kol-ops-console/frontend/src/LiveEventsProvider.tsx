@@ -58,6 +58,7 @@ export function LiveEventsProvider({ children }: { children: ReactNode }) {
       };
       ws.onclose = () => {
         setConnected(false);
+        if (stop) return;
         retry += 1;
         setTimeout(connect, Math.min(30_000, 1_000 * 2 ** retry));
       };

@@ -1,17 +1,9 @@
 import ApprovalActionBar from './ApprovalActionBar';
 import ApprovalContextCard from './ApprovalContextCard';
-import DraftEditDiffPanel from './DraftEditDiffPanel';
-
-type EditLearning = {
-  was_edited?: boolean;
-  edit_distance?: number;
-  normalized_agent_body?: string;
-  normalized_sent_body?: string;
-};
 
 /**
- * Combined approval detail: context preview + optional sent-body diff +
- * approve/reject actions (structured reject for reply drafts).
+ * Combined approval detail: context preview + approve/reject actions
+ * (structured reject for reply drafts). Sent-body diff belongs on history rows only.
  */
 export default function ApprovalDetailPanel({
   factPath,
@@ -21,7 +13,6 @@ export default function ApprovalDetailPanel({
   env,
   decidedBy,
   agentBody,
-  editLearning,
   onRejected,
   onApproved,
   showActions = true,
@@ -35,7 +26,6 @@ export default function ApprovalDetailPanel({
   env: string;
   decidedBy: string;
   agentBody?: string;
-  editLearning?: EditLearning | null;
   onRejected?: () => void;
   onApproved?: () => void;
   showActions?: boolean;
@@ -57,9 +47,6 @@ export default function ApprovalDetailPanel({
         campaignId={campaignId}
         env={env}
       />
-      {factPath === 'approval.reply_draft' && editLearning && (
-        <DraftEditDiffPanel agentBody={draftBody} editLearning={editLearning} />
-      )}
       {showActions && (
         <ApprovalActionBar
           factPath={factPath}

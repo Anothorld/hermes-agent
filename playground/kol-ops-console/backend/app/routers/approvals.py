@@ -31,6 +31,7 @@ from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
 from ..bridge_agent_contract_loader import gateway_contract_block
+from ..reply_draft_kind import is_initial_outreach_reply_draft
 from ..run_registry import get_inflight_run, register_run
 
 
@@ -261,11 +262,25 @@ def _to_row(raw: dict[str, Any], handle_map: dict[int, str | None]) -> dict[str,
     value = raw.get("value")
     draft_origin: str | None = None
     draft_origin_label: str | None = None
+    reply_draft_kind: str | None = None
     if isinstance(value, dict):
         context: dict[str, Any] | None = value
         opened_by = value.get("opened_by") or value.get("source")
         linked_escalation_id = value.get("linked_escalation_id") or value.get("escalation_id")
         draft_origin, draft_origin_label = _derive_draft_origin(fact_key, value)
+        if fact_key == REPLY_DRAFT_PATH:
+            identity_id = raw.get("identity_id")
+            campaign_id = str(raw.get("campaign_id") or "")
+            if isinstance(identity_id, int) and campaign_id:
+                reply_draft_kind = (
+                    "initial_outreach"
+                    if is_initial_outreach_reply_draft(
+                        value,
+                        campaign_id=campaign_id,
+                        identity_id=identity_id,
+                    )
+                    else "inbound_reply"
+                )
     elif value is None:
         context = None
         opened_by = None
@@ -294,6 +309,7 @@ def _to_row(raw: dict[str, Any], handle_map: dict[int, str | None]) -> dict[str,
         "handle": handle if isinstance(handle, str) else None,
         "draft_origin": draft_origin,
         "draft_origin_label": draft_origin_label,
+        "reply_draft_kind": reply_draft_kind,
     }
 
 

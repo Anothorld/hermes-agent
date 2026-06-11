@@ -13,6 +13,8 @@ import sqlite3
 from collections import defaultdict
 from typing import Any, Final, Optional
 
+from .gmail_client import is_bounce_body
+
 LEARNING_EVENT_TYPES = (
     "draft_rejected_learning",
     "draft_edit_learning",
@@ -43,6 +45,76 @@ _FACT_PREFIX_PRIORITY: Final[tuple[str, ...]] = (
     "fulfillment.",
     "payout.",
 )
+
+def is_bounce_edit_learning_payload(payload: dict[str, Any]) -> bool:
+    """True when stored sent body is a Gmail delivery-failure DSN, not operator text."""
+    sent = str(
+        payload.get("normalized_sent_body") or payload.get("sent_body") or "",
+    )
+    return bool(sent.strip()) and is_bounce_body(sent)
+
+
+def is_bounce_edit_learning_event(ev: dict[str, Any]) -> bool:
+    """True for ``draft_edit_learning`` rows whose sent body is a bounce DSN."""
+    if ev.get("event_type") != "draft_edit_learning":
+        return False
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    return is_bounce_edit_learning_payload(payload)
+
+
+def _edit_learning_pair_key(
+    identity_id: Any,
+    campaign_id: Any,
+) -> tuple[int, str]:
+    return (int(identity_id or 0), str(campaign_id or ""))
+
+
+def delivery_failed_edit_learning_pairs(
+    conn: sqlite3.Connection,
+    *,
+    env: str,
+) -> set[tuple[int, str]]:
+    """Identity+campaign pairs with a stored bounce DSN edit-learning row.
+
+    A bounce capture means Gmail delivery failed for that outreach; all edit
+    samples for the pair are excluded from UI, stats, and distill batches.
+    """
+    rows = conn.execute(
+        """SELECT identity_id, campaign_id, payload_json
+             FROM kol_conversation_events
+            WHERE env=? AND event_type='draft_edit_learning'""",
+        (env,),
+    ).fetchall()
+    failed: set[tuple[int, str]] = set()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict) or not is_bounce_edit_learning_payload(payload):
+            continue
+        failed.add(_edit_learning_pair_key(row["identity_id"], row["campaign_id"]))
+    return failed
+
+
+def exclude_delivery_failed_edit_events(
+    events: list[dict[str, Any]],
+    failed_pairs: set[tuple[int, str]],
+) -> list[dict[str, Any]]:
+    """Drop edit-learning rows for identity+campaign pairs with delivery failure."""
+    if not failed_pairs:
+        return events
+    out: list[dict[str, Any]] = []
+    for ev in events:
+        if ev.get("event_type") != "draft_edit_learning":
+            out.append(ev)
+            continue
+        pair = _edit_learning_pair_key(ev.get("identity_id"), ev.get("campaign_id"))
+        if pair in failed_pairs:
+            continue
+        out.append(ev)
+    return out
+
 
 def style_learning_batch_size() -> int:
     """Min ``draft_edit_learning`` (was_edited) events before LLM distill runs."""
@@ -255,6 +327,71 @@ def build_style_learning_sample(
     }
 
 
+def _dedupe_edit_learning_sql_rows(rows: list[Any]) -> list[Any]:
+    """Keep newest sqlite row per ``sent_message_id`` (max event id wins)."""
+    best_by_mid: dict[str, Any] = {}
+    no_mid: list[Any] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if is_bounce_edit_learning_payload(payload):
+            continue
+        mid = str(payload.get("sent_message_id") or "").strip()
+        if not mid:
+            no_mid.append(row)
+            continue
+        prev = best_by_mid.get(mid)
+        if prev is None or int(row["id"]) > int(prev["id"]):
+            best_by_mid[mid] = row
+    merged = sorted(best_by_mid.values(), key=lambda r: int(r["id"]))
+    merged.extend(no_mid)
+    merged.sort(key=lambda r: int(r["id"]))
+    return merged
+
+
+def edit_learning_dedupe_key(
+    *,
+    identity_id: Optional[int],
+    campaign_id: Optional[str],
+    payload: dict[str, Any],
+) -> str:
+    """Stable key for collapsing reconcile-retried ``draft_edit_learning`` rows."""
+    mid = str(payload.get("sent_message_id") or "").strip()
+    if mid:
+        return f"mid:{mid}"
+    iid = int(identity_id or 0)
+    cid = str(campaign_id or "")
+    dist = payload.get("edit_distance")
+    return f"pair:{iid}:{cid}:{dist}"
+
+
+def dedupe_edit_learning_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep newest row per Gmail ``sent_message_id`` (input order newest-first)."""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for ev in events:
+        if ev.get("event_type") != "draft_edit_learning":
+            out.append(ev)
+            continue
+        if is_bounce_edit_learning_event(ev):
+            continue
+        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        key = edit_learning_dedupe_key(
+            identity_id=ev.get("identity_id"),
+            campaign_id=ev.get("campaign_id"),
+            payload=payload,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ev)
+    return out
+
+
 def list_learning_events(
     conn: sqlite3.Connection,
     *,
@@ -269,8 +406,14 @@ def list_learning_events(
     """Return learning events newest-first.
 
     ``before_id`` enables keyset pagination (returns rows with ``id < before_id``).
+
+    When ``draft_edit_learning`` is requested, duplicate reconcile retries
+    (same ``payload.sent_message_id``) are collapsed to the newest row so UI
+    and distill batch counts are not inflated by pre-fix CAL rows.
     """
     limit = max(1, min(int(limit), 500))
+    needs_dedupe = "draft_edit_learning" in event_types
+    fetch_limit = min(500, max(limit * 20, limit)) if needs_dedupe else limit
     placeholders = ",".join("?" * len(event_types))
     where = [f"env = ?", f"event_type IN ({placeholders})"]
     args: list[Any] = [env, *event_types]
@@ -291,7 +434,7 @@ def list_learning_events(
         "actor, ts, payload_json, env FROM kol_conversation_events "
         f"WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?"
     )
-    args.append(limit)
+    args.append(fetch_limit)
     rows = conn.execute(sql, args).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -302,7 +445,12 @@ def list_learning_events(
         except (TypeError, ValueError):
             d["payload"] = {}
         out.append(d)
-    return out
+    if needs_dedupe:
+        failed_pairs = delivery_failed_edit_learning_pairs(conn, env=env)
+        out = [e for e in out if not is_bounce_edit_learning_event(e)]
+        out = exclude_delivery_failed_edit_events(out, failed_pairs)
+        out = dedupe_edit_learning_events(out)
+    return out[:limit]
 
 
 def list_fact_corrections(
@@ -537,10 +685,13 @@ def edit_distance_trend(
         where.append("goal = ?")
         args.append(goal)
     sql = (
-        "SELECT id, ts, goal, payload_json FROM kol_conversation_events "
+        "SELECT id, identity_id, campaign_id, ts, goal, payload_json "
+        "FROM kol_conversation_events "
         f"WHERE {' AND '.join(where)} ORDER BY id ASC"
     )
     rows = conn.execute(sql, args).fetchall()
+    rows = _dedupe_edit_learning_sql_rows(rows)
+    failed_pairs = delivery_failed_edit_learning_pairs(conn, env=env)
 
     bucketed: dict[str, dict[str, list[Any]]] = {}
     all_distances: list[float] = []
@@ -554,6 +705,11 @@ def edit_distance_trend(
         except (TypeError, ValueError):
             payload = {}
         if not isinstance(payload, dict):
+            continue
+        if is_bounce_edit_learning_payload(payload):
+            continue
+        pair = _edit_learning_pair_key(row["identity_id"], row["campaign_id"])
+        if pair in failed_pairs:
             continue
         if child_skill and str(payload.get("child_skill") or "") != child_skill:
             continue
@@ -632,10 +788,13 @@ def edit_distance_since_last_style_approval(
     where = ["env = ?", "event_type = 'draft_edit_learning'"]
     args: list[Any] = [env]
     rows = conn.execute(
-        "SELECT ts, payload_json FROM kol_conversation_events "
+        "SELECT id, identity_id, campaign_id, ts, payload_json "
+        "FROM kol_conversation_events "
         f"WHERE {' AND '.join(where)} ORDER BY id ASC",
         args,
     ).fetchall()
+    rows = _dedupe_edit_learning_sql_rows(rows)
+    failed_pairs = delivery_failed_edit_learning_pairs(conn, env=env)
 
     after: list[float] = []
     before: list[float] = []
@@ -648,6 +807,11 @@ def edit_distance_since_last_style_approval(
         except (TypeError, ValueError):
             continue
         if not isinstance(payload, dict) or not payload.get("was_edited"):
+            continue
+        if is_bounce_edit_learning_payload(payload):
+            continue
+        pair = _edit_learning_pair_key(row["identity_id"], row["campaign_id"])
+        if pair in failed_pairs:
             continue
         try:
             dist = float(payload.get("edit_distance"))
@@ -778,6 +942,9 @@ def build_learning_hints(
     strat_policy = pol.get_policy(conn, scope=REPLY_STRATEGY_SCOPE, env=env)
     strat_md = (strat_policy or {}).get("content_md") or ""
     if strat_md.strip() and goals:
+        from . import learning_distill as _ld
+
+        strat_md = _ld.strip_proposal_context_notes(strat_md)
         filtered_strat = slice_policy_md_for_goals(strat_md, goals)
         if filtered_strat.strip():
             hints.append({
@@ -805,6 +972,9 @@ def build_learning_hints(
         style_policy = pol.get_policy(conn, scope="company_style")
         style_md = (style_policy or {}).get("content_md") or ""
         if style_md.strip():
+            from . import learning_distill as _ld
+
+            style_md = _ld.strip_proposal_context_notes(style_md)
             hints.append({
                 "source": "policy",
                 "scope": "company_style",

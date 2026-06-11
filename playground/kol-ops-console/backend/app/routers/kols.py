@@ -887,11 +887,6 @@ async def nox_contacts(
             actor_email=user["email"],
             facts_resp=facts_resp,
         )
-    # #region agent log
-    import json as _json, time as _time
-    with open("/Users/arnold/agent_prj/.cursor/debug-f680ad.log", "a") as _df:
-        _df.write(_json.dumps({"sessionId": "f680ad", "hypothesisId": "H1-H5", "location": "kols.py:nox_contacts", "message": "nox contacts gate_b result", "data": {"identity_id": identity_id, "env": env, "campaign_id": body.campaign_id, "has_primary_email": bool(str(ident.get("primary_email") or "").strip()), "gate_b": gate_b}, "timestamp": int(_time.time() * 1000)}) + "\n")
-    # #endregion
     if gate_b.get("quota_exhausted") and gate_b.get("reason") == "nox_saas_quota_exhausted":
         raise_nox_saas_quota_exhausted(
             campaign_id=body.campaign_id or "",

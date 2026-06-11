@@ -190,6 +190,13 @@ def cmd_get_lanes(args: argparse.Namespace) -> None:
     ))
 
 
+def cmd_merge_campaigns(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "POST", f"/campaigns/{args.target_campaign_id}/merge-from",
+        body={"source_campaign_id": args.source_campaign_id, "env": args.env},
+    ))
+
+
 # -------------------------------------------------------------- registration
 def register(sub: "argparse._SubParsersAction") -> None:
     p = sub.add_parser(
@@ -373,3 +380,17 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p)
     p.add_argument("--campaign-id", required=True)
     p.set_defaults(func=cmd_get_lanes)
+
+    p = sub.add_parser(
+        "merge-campaigns",
+        help=("POST /campaigns/{target}/merge-from — fold one campaign's CAL "
+              "rows into another (one-product-one-campaign migration; "
+              "target rows win on conflicts; source campaign_config is deleted)."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--source-campaign-id", required=True,
+                   help="Campaign to dissolve (its rows move to the target).")
+    p.add_argument("--target-campaign-id", required=True,
+                   help="Surviving campaign that receives all rows.")
+    p.set_defaults(func=cmd_merge_campaigns)

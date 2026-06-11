@@ -575,9 +575,11 @@ function StyleLearningProposalView({ ctx, env }: { ctx: Ctx; env: string }) {
         </div>
       </div>
       <div className="rounded border border-slate-100 bg-white px-2 py-1 text-[11px] text-slate-600">
-        提案为<strong>增量修订（delta）</strong>：批准后并入对应 policy，可能含
-        <code className="mx-0.5">ADJUST:</code>/<code className="mx-0.5">REMOVE:</code>
-        指令。展开下方可对比当前 policy。
+        提案为<strong>增量修订（delta）</strong>：批准后默认由 <strong>LLM 智能合并</strong>
+        进现有 policy（去重、处理 <code className="mx-0.5">ADJUST:</code>/
+        <code className="mx-0.5">REMOVE:</code>）；失败时自动回退确定性 patch。
+        <strong>Context notes</strong> 仅供审批参考，不会写入 policy；无实质规则则跳过写入。
+        下方预览为 patch 近似，批准结果以 LLM 合并为准。
       </div>
       <PolicyMergeDiffPreview env={env} proposal={ctx} />
       {strategyMd ? (

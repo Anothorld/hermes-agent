@@ -3,7 +3,6 @@ import { api } from '../api';
 import { toast } from '../lib/store';
 import { errorSummary } from '../lib/errors';
 import { dialog } from './dialogs/useDialog';
-import DraftEditDiffPanel from './DraftEditDiffPanel';
 import RejectCorrectionModal, { type RejectCorrectionModalProps } from './RejectCorrectionModal';
 import type { RejectCorrection } from '../constants/rejectTags';
 
@@ -39,7 +38,6 @@ export default function ApprovalActionBar({
   campaignId,
   env,
   decidedBy,
-  agentBody,
   onRejected,
   onApproved,
   rejectButtonLabel = '驳回',
@@ -47,7 +45,6 @@ export default function ApprovalActionBar({
 }: Props) {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [lastEdit, setLastEdit] = useState<Record<string, unknown> | null>(null);
   const isReplyDraft = factPath === 'approval.reply_draft';
 
   const postDecision = async (
@@ -95,30 +92,8 @@ export default function ApprovalActionBar({
     }
   };
 
-  const loadLatestEdit = async () => {
-    if (!isReplyDraft) return;
-    try {
-      const params = new URLSearchParams({
-        env,
-        identity_id: String(identityId),
-        campaign_id: campaignId,
-        limit: '1',
-      });
-      const res = await api.get<{ events: Array<{ payload?: Record<string, unknown> }> }>(
-        `/learning/edit-events?${params}`,
-      );
-      setLastEdit(res.events?.[0]?.payload ?? null);
-    } catch {
-      setLastEdit(null);
-    }
-  };
-
   return (
     <div className="space-y-2">
-      {isReplyDraft && lastEdit && (
-        <DraftEditDiffPanel agentBody={agentBody} editLearning={lastEdit} />
-      )}
-
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
@@ -135,7 +110,6 @@ export default function ApprovalActionBar({
           disabled={loading}
           onClick={() => {
             if (isReplyDraft) {
-              void loadLatestEdit();
               setRejectOpen(true);
             } else {
               void postDecision('reject');

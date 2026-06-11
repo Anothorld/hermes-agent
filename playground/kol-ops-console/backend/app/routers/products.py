@@ -20,6 +20,7 @@ from ..run_state_reconciler import (
     get_cached_run_updates,
     reconcile_run_states,
 )
+from ..sku_prior_approval import count_prior_sku_dupes_in_pool, prior_sku_approval_by_identity
 from ..gateway_client import (
     GatewayClient,
     GatewayError,
@@ -724,6 +725,15 @@ async def list_product_campaigns(
             1 for c in visible_shortlist
             if c.get("candidate_status") != "selected_for_outreach"
         )
+        prior_by_identity = await prior_sku_approval_by_identity(
+            conn,
+            bridge,
+            sku=sku,
+            env=e,
+            exclude_campaign_id=r["campaign_id"],
+        )
+        prior_sku_dupes = count_prior_sku_dupes_in_pool(visible_shortlist, prior_by_identity)
+        pending_actionable = max(0, pending_count - prior_sku_dupes)
         shortlist_ids = [
             c.get("identity_id") for c in visible_shortlist if isinstance(c.get("identity_id"), int)
         ]
@@ -733,9 +743,10 @@ async def list_product_campaigns(
         active_ids = [iid for iid in outreach.get("outreach_active_ids", []) if isinstance(iid, int)]
         kol_identity_ids = list(dict.fromkeys([*summary["kol_identity_ids"], *shortlist_ids, *lane_ids]))
         gw = run_state_map.get(r["campaign_id"], {})
-        outreach["outreach_counts"]["pending_review"] = pending_count
+        outreach["outreach_counts"]["pending_review"] = pending_actionable
         outreach["outreach_counts"]["approved"] = selected_count
         outreach["outreach_counts"]["discovered"] = len(visible_shortlist)
+        outreach["outreach_counts"]["prior_sku_approved_hidden"] = prior_sku_dupes
         target_floor = r["target_floor"]
         return {
             "needed_ids": set(kol_identity_ids) | set(active_ids),
@@ -756,7 +767,8 @@ async def list_product_campaigns(
                 "kol_identity_ids": kol_identity_ids,
                 "contacted_kol_ids": list(dict.fromkeys([*summary.get("contacted_kol_ids", []), *active_ids])),
                 "candidate_count": len(visible_shortlist),
-                "pending_candidate_count": pending_count,
+                "pending_candidate_count": pending_actionable,
+                "prior_sku_approved_hidden_count": prior_sku_dupes,
                 "shortlist_ready": summary["shortlist_ready"] or bool(visible_shortlist),
                 "shortlist_approved": summary["shortlist_approved"] or selected_count > 0,
                 "target_floor": target_floor,

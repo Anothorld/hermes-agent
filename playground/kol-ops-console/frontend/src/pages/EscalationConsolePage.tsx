@@ -16,6 +16,12 @@ import { errorSummary } from '../lib/errors';
 import { dialog } from '../components/dialogs/useDialog';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
+import {
+  escalationDisplaySummary,
+  escalationRuleLabel,
+  isEscalationReasonCode,
+  isLikelyEnglishOperatorText,
+} from '../constants/escalationLabels';
 
 type DraftFollowup = 'none' | 'expected' | 'already_pending' | 'in_flight';
 
@@ -217,6 +223,7 @@ function EscalationList() {
         <tbody>
           {visibleRows.map((r) => {
             const missing = extractMissingFields(r);
+            const summary = escalationDisplaySummary(r.reason, r.rule_id);
             return (
               <tr key={r.id} className="border-t border-slate-100 align-top hover:bg-slate-50">
                 <td className="p-2">
@@ -239,9 +246,18 @@ function EscalationList() {
                   )}
                 </td>
                 <td className="p-2">{r.campaign_id ?? '—'}</td>
-                <td className="p-2">{r.rule_id ?? '—'}</td>
+                <td className="p-2" title={r.rule_id ?? undefined}>
+                  {escalationRuleLabel(r.rule_id) ?? r.rule_id ?? '—'}
+                </td>
                 <td className="p-2">
-                  <div className="text-xs text-slate-800">{r.reason}</div>
+                  <div className="text-xs text-slate-800" title={summary.title}>
+                    <div className="font-medium">{summary.primary}</div>
+                    {summary.secondary && (
+                      <div className="mt-0.5 line-clamp-2 text-[10px] leading-snug text-slate-500">
+                        {summary.secondary}
+                      </div>
+                    )}
+                  </div>
                   {missing.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {missing.map((f) => (
@@ -630,6 +646,9 @@ function EscalationDetail({ id }: { id: number }) {
   if (err && !row) return <ErrorAlert error={err} onRetry={refresh} />;
   if (!row) return <div className="text-sm text-slate-500">加载中…</div>;
 
+  const summary = escalationDisplaySummary(row.reason, row.rule_id);
+  const questionIsEnglish = isLikelyEnglishOperatorText(row.suggested_question);
+
   return (
     <div className="space-y-3">
       <Link to="/escalations" className="text-xs text-sky-700 hover:underline">
@@ -660,7 +679,8 @@ function EscalationDetail({ id }: { id: number }) {
         </div>
         <div>Campaign：{row.campaign_id ?? <span className="italic text-slate-500">无（identity 级 escalation）</span>}</div>
         <div>
-          规则：{row.rule_id ?? '—'} · 状态：{row.state} · 创建于 <TimeAgo iso={row.created_at} />
+          规则：{escalationRuleLabel(row.rule_id) ?? row.rule_id ?? '—'} · 状态：{row.state} · 创建于{' '}
+          <TimeAgo iso={row.created_at} />
           {slaLevel(row.created_at) === 'at_risk' && (
             <span className="ml-2 rounded bg-amber-100 px-1 text-xs text-amber-800">SLA 30m+</span>
           )}
@@ -669,8 +689,21 @@ function EscalationDetail({ id }: { id: number }) {
           )}
         </div>
         <div className="mt-2 rounded bg-slate-50 p-2">
-          <div className="text-xs uppercase tracking-wide text-slate-500">原因代码</div>
-          <div className="mt-0.5 font-mono text-xs text-slate-800">{row.reason}</div>
+          <div className="text-xs uppercase tracking-wide text-slate-500">升级类型</div>
+          <div className="mt-0.5 text-sm font-medium text-slate-900">{summary.primary}</div>
+          {summary.secondary && (
+            <div className="mt-2">
+              <div className="text-xs uppercase tracking-wide text-slate-500">
+                详细说明{questionIsEnglish ? '（AI 英文原文，历史记录）' : ''}
+              </div>
+              <div className="mt-0.5 text-sm leading-relaxed text-slate-700">{summary.secondary}</div>
+            </div>
+          )}
+          {!summary.secondary && isEscalationReasonCode(row.reason) && (
+            <div className="mt-1 font-mono text-[11px] text-slate-500" title={row.reason}>
+              {row.reason}
+            </div>
+          )}
           {detailedReasons.length > 0 && (
             <div className="mt-2 space-y-1">
               <div className="text-xs uppercase tracking-wide text-slate-500">为什么会出现这个升级</div>
@@ -682,8 +715,13 @@ function EscalationDetail({ id }: { id: number }) {
         </div>
         {row.suggested_question && (
           <div className="mt-2 rounded border border-sky-200 bg-sky-50 p-2 text-sky-950">
-            <div className="text-xs font-semibold uppercase tracking-wide text-sky-700">
-              请求操作员答复
+            <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wide text-sky-700">
+              <span>请求操作员答复</span>
+              {questionIsEnglish && (
+                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-normal normal-case text-amber-900">
+                  AI 英文原文（新升级应写简体中文）
+                </span>
+              )}
             </div>
             <EscalationSuggestedQuestion text={row.suggested_question} />
           </div>

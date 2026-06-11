@@ -373,32 +373,6 @@ def acquire(task_id: str) -> Dict[str, str]:
             return dict(existing)
         _task_tabs[key] = dict(info)
         logger.info("Tab pool acquired tab %s for task=%s", info["target_id"], key)
-        # #region agent log
-        try:
-            import json as _json
-            import time as _time
-
-            with open("/Users/arnold/agent_prj/.cursor/debug-46ec18.log", "a") as _df:
-                _df.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "46ec18",
-                            "hypothesisId": "H-tab-acquire",
-                            "location": "tab_pool.py:acquire",
-                            "message": "tab pool acquired",
-                            "data": {
-                                "task_key": key,
-                                "target_id": info["target_id"],
-                                "cached": existing is not None,
-                            },
-                            "timestamp": int(_time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except OSError:
-            pass
-        # #endregion
         return dict(info)
 
 

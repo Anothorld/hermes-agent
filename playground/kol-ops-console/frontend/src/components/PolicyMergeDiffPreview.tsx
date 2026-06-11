@@ -7,24 +7,34 @@ type MergeSection = {
   current_md: string;
   merged_md: string;
   merge_mode_used?: string;
-  merge_effect?: 'replace' | 'add_new' | 'append_delta';
+  merge_effect?: 'replace' | 'patch_delta' | 'llm_merge' | 'add_new' | 'append_delta' | 'unchanged';
+  merge_skipped?: boolean;
+  merge_skip_reason?: string | null;
   delta_chars?: number;
 };
 
 const MERGE_EFFECT_LABEL: Record<string, string> = {
   replace: '将替换',
+  patch_delta: '将增量合并',
+  llm_merge: 'LLM 智能合并',
   add_new: '将新增',
   append_delta: '将追加',
+  unchanged: '保持不变',
 };
 
 const MERGE_EFFECT_CLASS: Record<string, string> = {
   replace: 'bg-amber-100 text-amber-900',
+  patch_delta: 'bg-emerald-100 text-emerald-900',
+  llm_merge: 'bg-violet-100 text-violet-900',
   add_new: 'bg-emerald-100 text-emerald-900',
   append_delta: 'bg-sky-100 text-sky-900',
+  unchanged: 'bg-slate-100 text-slate-700',
 };
 
 type MergePreview = {
   merge_mode?: string;
+  preview_merge_mode?: string;
+  preview_note?: string | null;
   sections?: Record<string, MergeSection>;
 };
 
@@ -70,8 +80,11 @@ export function PolicyMergeDiffPreview({
         className="text-[11px] font-medium text-sky-800 hover:text-sky-950"
       >
         {open ? '收起' : '查看'}批准后 policy 合并效果（与当前对比）
-        {preview?.merge_mode ? ` · 模式 ${preview.merge_mode}` : ''}
+        {preview?.merge_mode ? ` · 批准模式 ${preview.merge_mode}` : ''}
       </button>
+      {preview?.preview_note && (
+        <p className="mt-1 text-[11px] text-violet-800">{preview.preview_note}</p>
+      )}
       {err && <p className="mt-1 text-[11px] text-rose-700">{err}</p>}
       {open && keys.length > 0 && (
         <div className="mt-2 space-y-2">

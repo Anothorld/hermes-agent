@@ -292,33 +292,6 @@ async def dispatch_email_discovery_for_identity(
     ensure_gateway_bridge_key()
     run_token = new_pending_run_id()
     session_id = email_discover_session_id(env, identity_id, run_token)
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-
-        with open("/Users/arnold/agent_prj/.cursor/debug-46ec18.log", "a") as _df:
-            _df.write(
-                _json.dumps(
-                    {
-                        "sessionId": "46ec18",
-                        "hypothesisId": "H-session-run",
-                        "location": "email_discover_dispatch.py:dispatch",
-                        "message": "email discover session_id allocated",
-                        "data": {
-                            "session_id": session_id,
-                            "run_token": run_token,
-                            "identity_id": identity_id,
-                            "campaign_id": campaign_id,
-                        },
-                        "timestamp": int(_time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
     if campaign_id:
         register_run(
             conn,

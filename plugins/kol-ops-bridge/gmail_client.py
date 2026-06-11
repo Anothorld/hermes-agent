@@ -42,6 +42,9 @@ from typing import Any, Iterable, Optional
 log = logging.getLogger(__name__)
 
 
+class GmailUnavailable(Exception):
+    """Raised when the Gmail CLI is not available or returns an error."""
+
 # Resolve once at import time — both paths are static under HERMES_HOME.
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 _TOKEN_PATH = _HERMES_HOME / "google_token.json"
@@ -60,8 +63,40 @@ _GOOGLE_API_PY = (
 )
 
 
-class GmailUnavailable(RuntimeError):
-    """Raised when Gmail cannot be reached (missing token, missing CLI, etc)."""
+def _msg_labels(msg: dict[str, Any]) -> set[str]:
+    raw = msg.get("labels")
+    if not isinstance(raw, list):
+        return set()
+    return {str(x) for x in raw}
+
+
+def _is_draft_message(msg: dict[str, Any]) -> bool:
+    return "DRAFT" in _msg_labels(msg)
+
+
+def _is_sent_message(msg: dict[str, Any]) -> bool:
+    return "SENT" in _msg_labels(msg)
+
+
+def _is_bounce_message(msg: dict[str, Any]) -> bool:
+    """True for Gmail DSN / mailer-daemon delivery failures threaded with sends."""
+    return is_bounce_body(
+        str(msg.get("body") or ""),
+        from_addr=str(msg.get("from") or ""),
+    )
+
+
+def is_bounce_body(body: str, *, from_addr: str = "") -> bool:
+    """True when ``body`` / ``from_addr`` look like a delivery-failure DSN."""
+    addr = from_addr.lower()
+    if "mailer-daemon" in addr or "postmaster@" in addr:
+        return True
+    text = body.lower()
+    if "address not found" in text and "wasn't delivered" in text:
+        return True
+    if "550 5.1.1" in text and "does not exist" in text:
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -337,7 +372,12 @@ class GmailClient:
                         if str(item.get("id") or "") == preferred_message_id:
                             start = idx
                             break
-                for item in reversed(thread[start:]):
+                scan = list(reversed(thread[start:]))
+                for item in scan:
+                    if _is_draft_message(item) or _is_bounce_message(item):
+                        continue
+                    if not _is_sent_message(item):
+                        continue
                     body = str(item.get("body") or "")
                     mid = str(item.get("id") or "")
                     if body.strip():

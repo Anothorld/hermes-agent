@@ -31,6 +31,7 @@
 ## 关联模块
 
 - [campaigns](../campaigns/GUIDE.md) — 在产品详情页启动/管理活动；Shortlist review（`candidate_count` / `pending_candidate_count` 来自 Bridge `list-candidate-handles`，含 `discovered` 池；**不是** `get_lanes`；未批准候选持久显示，操作员可「从 shortlist 移除」，移除/批准/转移均需打原因标签，见 [learning](../learning/GUIDE.md)）
+- **一个产品只允许一个 campaign**（见 [campaigns GUIDE「概念」](../campaigns/GUIDE.md#概念)）：`/start` 对同 SKU 第二个 campaign_id 返回 409；启动表单默认回填已有 campaign_id；历史多 campaign 数据用 `scripts/ops/merge_campaigns.py` 合并。合并前的遗留双活动场景仍有兜底：已在同 SKU 其他活动批准过的 KOL 不会出现在「待审批（本轮）」（`prior_sku_approved_in_pending` / `prior_sku_approved_hidden_count`），discovery brief 也会排除这些 handle。
 - [nox](../nox/GUIDE.md) — 产品页 shortlist 批量尽调
 - `ContractReadinessPanel.tsx` — 合约就绪块
 

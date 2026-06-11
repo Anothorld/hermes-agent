@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError, Lane } from '../api';
 import { GoalProgressBar } from '../components/GoalProgressBar';
 import { goalLabel, laneLabel } from '../constants/domainLabels';
+import { escalationDisplaySummary } from '../constants/escalationLabels';
 import { FactsEditor } from '../components/FactsEditor';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
 import { TimeAgo } from '../components/inputs/TimeAgo';
@@ -527,16 +528,25 @@ export function KolDetailPage() {
             未解决的升级 ({escalationsList.length})
           </div>
           <ul className="space-y-1 text-sm">
-            {escalationsList.map((e) => (
-              <li key={e.id}>
-                <Link
-                  to={`/escalations/${e.id}`}
-                  className="text-amber-900 underline-offset-2 hover:underline"
-                >
-                  #{e.id} · {e.rule_id || 'manual'} · {e.reason}
-                </Link>
-              </li>
-            ))}
+            {escalationsList.map((e) => {
+              const summary = escalationDisplaySummary(e.reason, e.rule_id);
+              return (
+                <li key={e.id}>
+                  <Link
+                    to={`/escalations/${e.id}`}
+                    className="text-amber-900 underline-offset-2 hover:underline"
+                    title={summary.title}
+                  >
+                    #{e.id} · {summary.primary}
+                  </Link>
+                  {summary.secondary && (
+                    <div className="ml-1 line-clamp-1 text-[11px] text-amber-800/80">
+                      {summary.secondary}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -2186,9 +2196,6 @@ function EmailPanel({
               });
               return;
             }
-            // #region agent log
-            fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f680ad'},body:JSON.stringify({sessionId:'f680ad',location:'KolDetailPage.tsx:noxContacts:start',message:'nox contacts click',data:{identityId,env,campaignId,quotaBlocked},timestamp:Date.now(),hypothesisId:'H1-H4'})}).catch(()=>{});
-            // #endregion
             setPhase({ kind: 'submitting', action: 'discover' });
             try {
               const r = await api.post<{
@@ -2198,9 +2205,6 @@ function EmailPanel({
                 gate_b?: Record<string, unknown>;
                 reason?: string;
               }>(`/kols/${identityId}/nox-contacts`, { env, campaign_id: campaignId });
-              // #region agent log
-              fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f680ad'},body:JSON.stringify({sessionId:'f680ad',location:'KolDetailPage.tsx:noxContacts:success',message:'nox contacts response',data:{email_found:r.email_found,email:r.email,skipped:r.skipped,reason:r.reason,gate_b:r.gate_b},timestamp:Date.now(),hypothesisId:'H1-H2'})}).catch(()=>{});
-              // #endregion
               if (r.email_found && r.email) {
                 setPhase({ kind: 'idle' });
                 toast.success('Nox 已找到邮箱', r.email);
@@ -2228,9 +2232,6 @@ function EmailPanel({
               onChanged();
             } catch (ex) {
               const detail = parseApiErrorDetail(ex);
-              // #region agent log
-              fetch('http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f680ad'},body:JSON.stringify({sessionId:'f680ad',location:'KolDetailPage.tsx:noxContacts:error',message:'nox contacts failed',data:{code:detail?.code,message:detail?.message,raw:String(ex)},timestamp:Date.now(),hypothesisId:'H3-H5'})}).catch(()=>{});
-              // #endregion
               if (detail?.code === 'already_has_email') {
                 onChanged();
                 return;

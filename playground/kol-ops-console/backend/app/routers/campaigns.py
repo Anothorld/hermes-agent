@@ -56,6 +56,7 @@ from ..nox_gate import (
 from ..kol_profile_url import SHORTLIST_PREVIEW_FACT_KEYS, resolve_profile_url
 from ..nox_helpers import NOX_SHORTLIST_FACT_KEYS, _nox_fields_from_facts
 from ..shortlist_profile_og import enrich_shortlist_profile_og
+from ..sku_prior_approval import prior_sku_approval_by_identity, prior_sku_approved_handles
 
 _SHORTLIST_BATCH_FACT_KEYS: list[str] = list(dict.fromkeys([
     *SHORTLIST_PREVIEW_FACT_KEYS,
@@ -84,6 +85,7 @@ from ..discovery_gate import (
 from ..gateway_client import GatewayClient, GatewayError, RUNNING_STATES, TERMINAL_STATES
 from ..gateway_http import http_exception_from_gateway_start
 from ..variant_candidates import human_spec_text, resolve_campaign_variants
+from ..reply_draft_kind import is_initial_outreach_reply_draft as _is_initial_outreach_reply_draft
 from ..run_launch_queue import new_pending_run_id
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
@@ -767,6 +769,31 @@ async def start(
                 },
             )
 
+    # One product == one campaign (hard constraint, NOT bypassable via
+    # force). If this SKU already has a campaign under a different
+    # campaign_id, the operator must reuse that campaign (restart /
+    # rediscover) or merge legacy duplicates first. Re-firing the SAME
+    # campaign_id stays allowed below.
+    existing_for_sku = conn.execute(
+        "SELECT campaign_id, status FROM product_campaigns "
+        "WHERE sku=? AND env=? AND campaign_id != ? LIMIT 1",
+        (product["sku"], body.env, campaign_id),
+    ).fetchone()
+    if existing_for_sku is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "code": "one_campaign_per_product",
+                "message": (
+                    f"这个产品已经有 campaign（{existing_for_sku['campaign_id']}），"
+                    "一个产品只能有一个 campaign。请在该 campaign 上继续操作"
+                    "（重新启动 / 再发现），不要新建。"
+                ),
+                "existing_campaign_id": existing_for_sku["campaign_id"],
+                "existing_status": existing_for_sku["status"],
+            },
+        )
+
     # Anti-duplicate guard. The bridge does not currently dedupe, so the
     # console owns this check. ``force=true`` lets the operator re-fire
     # intentionally (e.g. after a 402 failure) without dropping the audit row.
@@ -807,6 +834,56 @@ async def start(
     )
     if learned_section:
         brief_text = f"{brief_text}\n{learned_section}"
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        with _Path("/Users/arnold/agent_prj/.cursor/debug-8ea4a0.log").open(
+            "a", encoding="utf-8",
+        ) as _fh:
+            _fh.write(
+                _json.dumps(
+                    {
+                        "sessionId": "8ea4a0",
+                        "hypothesisId": "H2",
+                        "location": "campaigns.py:launch_campaign",
+                        "message": "launch_brief_before_gateway",
+                        "data": {
+                            "campaign_id": campaign_id,
+                            "env": body.env,
+                            "sku": product["sku"],
+                            "learned_section_len": len(learned_section or ""),
+                            "brief_len": len(brief_text),
+                            "brief_has_learned_header": (
+                                "# learned_discovery_criteria" in brief_text
+                            ),
+                        },
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+            )
+    except Exception:
+        pass
+    # #endregion
+    prior_sku_handles = await prior_sku_approved_handles(
+        conn,
+        bridge,
+        sku=product["sku"],
+        env=body.env,
+        exclude_campaign_id=campaign_id,
+    )
+    if prior_sku_handles:
+        lines = [
+            "",
+            "# sku_prior_approved_handles (same product — do NOT re-ingest)",
+            "already_discovered_handles:",
+        ]
+        lines.extend(f"  - {handle}" for handle in prior_sku_handles)
+        brief_text = f"{brief_text}\n" + "\n".join(lines)
     payload["brief"] = brief_text
     payload["triggered_by"] = "web"
     payload["actor"] = f"web:{user['email']}"
@@ -2738,6 +2815,7 @@ async def _enrich_shortlist_rows(
 async def get_shortlist(
     campaign_id: str,
     bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    conn: Annotated[sqlite3.Connection, Depends(get_conn)],
     _: Annotated[dict, Depends(current_user)],
     env: str = Query("TEST", pattern="^(LIVE|TEST)$"),
     prefetch_og: bool = Query(
@@ -2751,7 +2829,8 @@ async def get_shortlist(
     """Return the agent's latest shortlist_ready payload (candidates + scores).
 
     Used by the per-product review panel so operators can pick a subset
-    before approval.
+    before approval. Already-approved rows (``selected_for_outreach``) are
+    excluded from ``candidates`` but counted in ``counts.already_approved``.
     """
     try:
         raw_candidates = await bridge.list_candidate_handles(campaign_id, env=env)
@@ -2826,9 +2905,37 @@ async def get_shortlist(
         "already_approved": sum(1 for c in candidates if c.get("candidate_status") == "selected_for_outreach"),
         "rejected_or_archived_hidden": hidden_count,
     }
+    product_info = get_product_info(conn, campaign_id=campaign_id, env=env)
+    sku = product_info.get("sku")
+    prior_by_identity: dict[int, dict[str, Any]] = {}
+    if isinstance(sku, str) and sku.strip():
+        prior_by_identity = await prior_sku_approval_by_identity(
+            conn,
+            bridge,
+            sku=sku.strip(),
+            env=env,
+            exclude_campaign_id=campaign_id,
+        )
+    prior_in_pending = 0
+    for cand in candidates:
+        iid = cand.get("identity_id")
+        prior = prior_by_identity.get(iid) if isinstance(iid, int) else None
+        cand["prior_sku_campaign_approval"] = prior
+        if (
+            prior
+            and cand.get("candidate_status") != "selected_for_outreach"
+        ):
+            prior_in_pending += 1
+    counts["prior_sku_approved_in_pending"] = prior_in_pending
+    counts["pending_actionable"] = max(0, counts["pending"] - prior_in_pending)
+    counts["pending"] = counts["pending_actionable"]
+    review_candidates = [
+        c for c in candidates
+        if c.get("candidate_status") != "selected_for_outreach"
+    ]
     await _enrich_shortlist_rows(
         bridge,
-        candidates,
+        review_candidates,
         campaign_id=campaign_id,
         env=env,
         prefetch_og=prefetch_og,
@@ -2837,7 +2944,7 @@ async def get_shortlist(
         "campaign_id": campaign_id,
         "snapshot_ts": snapshot_ts,
         "counts": counts,
-        "candidates": candidates,
+        "candidates": review_candidates,
     }
 
 
@@ -3634,38 +3741,6 @@ async def redraft_outreach(
             "env": env,
             "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         }
-
-
-_INITIAL_OUTREACH_CHILD_SKILLS = frozenset({
-    "kol-cold-outreach",
-    "kol-reengagement-outreach",
-})
-
-
-def _is_initial_outreach_reply_draft(
-    reply_draft: Mapping[str, Any],
-    *,
-    campaign_id: str,
-    identity_id: int,
-) -> bool:
-    """True when ``approval.reply_draft`` is the first-touch outreach envelope."""
-    child_skill = str(reply_draft.get("child_skill") or "").strip()
-    if child_skill in _INITIAL_OUTREACH_CHILD_SKILLS:
-        return True
-    draft = reply_draft.get("draft")
-    if isinstance(draft, dict) and draft.get("kind") == "initial_outreach":
-        return True
-    expected_thread = f"outreach_{campaign_id}_{identity_id}"
-    expected_source = f"draft:outreach_{campaign_id}_{identity_id}"
-    for key in ("source_message_id", "thread_id"):
-        anchor = str(reply_draft.get(key) or "").strip()
-        if not anchor:
-            continue
-        if anchor.startswith("draft:outreach_") or anchor.startswith("outreach_"):
-            return True
-        if anchor in (expected_thread, expected_source):
-            return True
-    return False
 
 
 def _approved_reply_draft_blocks_followup(

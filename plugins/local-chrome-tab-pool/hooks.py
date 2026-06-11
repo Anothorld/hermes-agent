@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import os
 import sys
 import time
 from pathlib import Path
@@ -50,6 +49,73 @@ def _session_keys(task_id: str) -> list[str]:
     and are not tab-pooled — see docs/local-chrome-concurrent-tabs.md.
     """
     return [tab_pool.normalize_task_id(task_id)]
+
+
+# CDP domains that legitimately operate at browser level (no tab scope).
+# Everything else is page-scoped and must run inside the task's own pooled tab.
+_BROWSER_LEVEL_CDP_DOMAINS = frozenset(
+    {"Target", "Browser", "Storage", "SystemInfo", "IO", "Tethering"}
+)
+
+# Browser-level Target.* methods that act ON a tab (params.targetId) — these
+# must also be restricted to the task's own pooled tab, otherwise a run can
+# navigate/close/attach to another run's tab (the POVISON cross-talk bug).
+_TARGET_SCOPED_CDP_METHODS = frozenset(
+    {
+        "Target.attachToTarget",
+        "Target.activateTarget",
+        "Target.closeTarget",
+        "Page.navigate",
+    }
+)
+
+
+def _guard_browser_cdp(args: Dict[str, Any], own_target_id: str, tid: str) -> HookResult:
+    """Enforce per-task tab ownership for raw ``browser_cdp`` calls.
+
+    The ``browser_cdp`` tool connects to the **browser-level** CDP socket and
+    can address any tab by ``target_id`` — bypassing the tab pool entirely.
+    Concurrent runs were hijacking each other's tabs this way (confirmed:
+    run A ran ``Runtime.evaluate`` inside run B's pooled tab).
+
+    Policy:
+      - ``target_id`` (or ``params.targetId``) referring to a foreign tab → block,
+        telling the agent its own tab id.
+      - Page-scoped method without ``target_id`` → inject the task's own
+        pooled tab id so the call lands in the right tab.
+      - Browser-level read-only methods (``Target.getTargets`` etc.) pass through.
+
+    Returns:
+        None to allow the (possibly arg-rewritten) call, or a block directive.
+    """
+    method = str(args.get("method") or "")
+    domain = method.split(".", 1)[0] if method else ""
+    params = args.get("params")
+    params_target = (params or {}).get("targetId") if isinstance(params, dict) else None
+    used_target = args.get("target_id") or params_target
+
+    if used_target and used_target != own_target_id:
+        return {
+            "action": "block",
+            "message": (
+                f"browser_cdp blocked: target_id={used_target} belongs to another "
+                f"concurrent run's tab. This task (task={tid}) owns the dedicated "
+                f"tab target_id={own_target_id} — pass that target_id instead "
+                f"(or omit target_id to have it filled in automatically). Do NOT "
+                f"navigate, evaluate in, attach to, or close tabs you do not own; "
+                f"use browser_navigate to load pages in your own tab."
+            ),
+        }
+
+    if not used_target and (
+        domain not in _BROWSER_LEVEL_CDP_DOMAINS
+        or method in _TARGET_SCOPED_CDP_METHODS
+    ):
+        # Page-scoped call with no explicit target → pin to the task's own tab.
+        args["target_id"] = own_target_id
+        if isinstance(params, dict) and "targetId" in params:
+            params["targetId"] = own_target_id
+    return None
 
 
 def _make_session_info(session_key: str, tab_info: Dict[str, str]) -> Dict[str, Any]:
@@ -123,7 +189,7 @@ def pre_tool_call(
     session_id: str = "",
     tool_call_id: str = "",
 ) -> HookResult:
-    del args, session_id, tool_call_id
+    del session_id, tool_call_id
 
     if tool_name == "cleanup_browser":
         return None
@@ -132,68 +198,11 @@ def pre_tool_call(
         return None
 
     if not tab_pool.is_enabled():
-        # #region agent log
-        try:
-            import json as _json
-
-            with open("/Users/arnold/agent_prj/.cursor/debug-46ec18.log", "a") as _df:
-                _df.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "46ec18",
-                            "hypothesisId": "H-pool-disabled",
-                            "location": "hooks.py:pre_tool_call",
-                            "message": "tab pool skipped",
-                            "data": {
-                                "task_id": task_id,
-                                "tool": tool_name,
-                                "LOCAL_CHROME_TAB_POOL": os.environ.get(
-                                    "LOCAL_CHROME_TAB_POOL"
-                                ),
-                                "LOCAL_CHROME_FORCE_SHARED_CDP": os.environ.get(
-                                    "LOCAL_CHROME_FORCE_SHARED_CDP"
-                                ),
-                            },
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except OSError:
-            pass
-        # #endregion
         return None
 
     tid = tab_pool.normalize_task_id(task_id)
     try:
         tab_info = tab_pool.acquire(tid)
-        # #region agent log
-        try:
-            import json as _json
-
-            with open("/Users/arnold/agent_prj/.cursor/debug-46ec18.log", "a") as _df:
-                _df.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "46ec18",
-                            "hypothesisId": "H-tab-seed",
-                            "location": "hooks.py:pre_tool_call",
-                            "message": "tab pool seeding browser session",
-                            "data": {
-                                "task_id": tid,
-                                "tool": tool_name,
-                                "target_id": tab_info.get("target_id"),
-                                "cdp_is_page_level": "/devtools/page/"
-                                in str(tab_info.get("cdp_url", "")),
-                            },
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except OSError:
-            pass
-        # #endregion
         if not _seed_browser_session(tid, tab_info):
             return {
                 "action": "block",
@@ -203,6 +212,10 @@ def pre_tool_call(
                     "Call cleanup_browser for this task or set LOCAL_CHROME_TAB_POOL=0."
                 ),
             }
+        if tool_name == "browser_cdp" and isinstance(args, dict):
+            guard_result = _guard_browser_cdp(args, tab_info["target_id"], tid)
+            if guard_result is not None:
+                return guard_result
     except Exception as exc:
         logger.warning("Tab pool pre_tool_call failed for task=%s: %s", tid, exc)
         return {

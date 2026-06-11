@@ -92,6 +92,9 @@ kol-ops-console/
 │       ├── lib/
 │       └── constants/       # domainLabels, rejectTags
 └── scripts/
+    ├── health/              # 性能/健康探针
+    ├── load/                # 压测
+    └── ops/                 # 运维工具（campaign 合并等，见 ops/README.md）
 ```
 
 ---

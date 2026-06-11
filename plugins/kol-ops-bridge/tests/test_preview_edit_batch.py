@@ -86,4 +86,4 @@ def test_learning_defaults(bridge_pkg, monkeypatch):
     monkeypatch.delenv("KOL_STYLE_LEARNING_BATCH_SIZE", raising=False)
     monkeypatch.delenv("KOL_STYLE_LEARNING_MERGE_MODE", raising=False)
     assert store.style_learning_batch_size() == 5
-    assert distill._merge_mode() == "replace_section"
+    assert distill._merge_mode() == "llm_compress"

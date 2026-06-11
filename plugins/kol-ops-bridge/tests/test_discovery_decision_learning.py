@@ -330,6 +330,31 @@ class TestDiscoveryDistill:
             )
             assert "bullet" in row["content_md"]
 
+    def test_apply_approved_strips_background_notes_from_policy(self, pkg):
+        proposal = {
+            "scope": "discovery_criteria:spu:SKU1",
+            "proposed_markdown": (
+                "## Approved discovery learning\n"
+                "### Preferred KOL profile\n"
+                "- approve creators with strong engagement\n"
+                "### 背景说明\n"
+                "- 批次大小：总共 **31** 个决策。\n"
+                "- 样本中观察到的行动组合：**8 批准 / 22 移除**\n"
+            ),
+            "title": "Discovery learning (spu:SKU1, LIVE)",
+        }
+        with pkg.cal._connect() as conn:
+            pkg.learning_discovery.apply_approved_discovery_proposal(
+                conn, env="LIVE", proposal=proposal, updated_by="approval:op",
+            )
+            row = pkg.policies.get_policy(
+                conn, scope="discovery_criteria:spu:SKU1", env="LIVE",
+            )
+            content = row["content_md"]
+            assert "strong engagement" in content
+            assert "背景说明" not in content
+            assert "批次大小" not in content
+
     def test_apply_rejects_bad_scope(self, pkg):
         with pkg.cal._connect() as conn:
             with pytest.raises(ValueError):
@@ -419,6 +444,26 @@ class TestDiscoveryDistill:
         assert section["scope"] == scope
         assert "baseline" in section["current_md"]
         assert "new bullet" in section["merged_md"]
+
+    def test_merge_preview_keeps_background_in_proposal_only(self, pkg):
+        scope = "discovery_criteria:spu:SKU1"
+        proposed = (
+            "## Approved discovery learning\n"
+            "- rule bullet\n"
+            "### 背景说明\n"
+            "- batch meta\n"
+        )
+        with pkg.cal._connect() as conn:
+            preview = pkg.learning_distill.preview_policy_merge_from_proposal(
+                conn,
+                env="LIVE",
+                proposal={"scope": scope, "proposed_markdown": proposed},
+            )
+        section = preview["sections"]["discovery"]
+        assert "背景说明" in section["proposed_section_md"]
+        assert "batch meta" in section["proposed_section_md"]
+        assert "背景说明" not in section["policy_merge_section_md"]
+        assert "背景说明" not in section["merged_md"]
 
     def test_brief_section_prefers_spu_then_category(self, pkg):
         with pkg.cal._connect() as conn:

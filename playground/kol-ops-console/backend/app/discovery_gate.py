@@ -42,6 +42,7 @@ from .db import _connect
 from .launch_accept import launch_or_accept, queue_would_block
 from .launch_rollback import rollback_rediscover_failure
 from .learned_criteria import learned_criteria_brief_section
+from .sku_prior_approval import prior_sku_approved_handles
 from .run_launch_queue import new_pending_run_id
 from .run_registry import finalize_run_id, get_inflight_run, register_run
 
@@ -708,6 +709,22 @@ async def _trigger_rediscover_internal(
     except BridgeError:
         candidates_snapshot = []
     excluded_handles = await _excluded_handles_from(bridge, candidates_snapshot)
+    prior_sku_handles = await prior_sku_approved_handles(
+        conn,
+        bridge,
+        sku=str(product["sku"]),
+        env=env,
+        exclude_campaign_id=campaign_id,
+    )
+    if prior_sku_handles:
+        merged = list(excluded_handles)
+        seen = {h.lower() for h in merged}
+        for handle in prior_sku_handles:
+            norm = handle.strip().lstrip("@").lower()
+            if norm and norm not in seen:
+                seen.add(norm)
+                merged.append(norm)
+        excluded_handles = merged
 
     test_mode_to = _recover_test_mode_to(
         conn,
@@ -749,6 +766,42 @@ async def _trigger_rediscover_internal(
     )
     if learned_section:
         brief_text = f"{brief_text}\n{learned_section}"
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        with _Path("/Users/arnold/agent_prj/.cursor/debug-8ea4a0.log").open(
+            "a", encoding="utf-8",
+        ) as _fh:
+            _fh.write(
+                _json.dumps(
+                    {
+                        "sessionId": "8ea4a0",
+                        "hypothesisId": "H2",
+                        "location": "discovery_gate.py:_trigger_rediscover_internal",
+                        "message": "rediscover_brief_before_gateway",
+                        "data": {
+                            "campaign_id": campaign_id,
+                            "env": env,
+                            "sku": product["sku"],
+                            "is_auto_retry": is_auto_retry,
+                            "learned_section_len": len(learned_section or ""),
+                            "brief_len": len(brief_text),
+                            "brief_has_learned_header": (
+                                "# learned_discovery_criteria" in brief_text
+                            ),
+                        },
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+            )
+    except Exception:
+        pass
+    # #endregion
 
     ensure_gateway_bridge_key()
     session_id = f"kol-campaign:{env}:{campaign_id}"

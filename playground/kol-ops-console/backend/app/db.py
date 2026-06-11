@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Iterator
 
 from .config import get_settings
+
+log = logging.getLogger("kol_ops_console.db")
 
 SCHEMA = [
     """CREATE TABLE IF NOT EXISTS users (
@@ -189,6 +192,7 @@ def init_db() -> None:
             row["name"] for row in conn.execute("PRAGMA table_info(products)")
         }
         _migrate_gmail_tables(conn)
+        _enforce_one_campaign_per_product(conn)
         _prune_old_audit_log(conn)
         for col, ddl in (
             ("pitch_md", "TEXT"),
@@ -202,6 +206,32 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col} {ddl}")
     finally:
         conn.close()
+
+
+def _enforce_one_campaign_per_product(conn: sqlite3.Connection) -> None:
+    """One product == one campaign: UNIQUE(sku, env) on product_campaigns.
+
+    Legacy DBs may still hold multiple campaigns for one SKU; the index
+    cannot be created until those are merged via
+    ``scripts/ops/merge_campaigns.py``. In that case we log the offenders
+    and skip — the ``/campaigns/{id}/start`` handler still hard-rejects any
+    NEW second campaign, so the constraint holds going forward either way.
+    """
+    dupes = conn.execute(
+        "SELECT sku, env, COUNT(*) AS n, GROUP_CONCAT(campaign_id) AS ids "
+        "FROM product_campaigns GROUP BY sku, env HAVING n > 1"
+    ).fetchall()
+    if dupes:
+        log.warning(
+            "one-campaign-per-product index skipped; merge these first via "
+            "scripts/ops/merge_campaigns.py: %s",
+            "; ".join(f"{r['sku']}/{r['env']}: {r['ids']}" for r in dupes),
+        )
+        return
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_product_campaigns_sku_env "
+        "ON product_campaigns(sku, env)"
+    )
 
 
 def _prune_old_audit_log(conn: sqlite3.Connection, *, days: int = 90) -> None:

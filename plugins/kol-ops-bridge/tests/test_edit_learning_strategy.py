@@ -139,3 +139,143 @@ def test_build_learning_hints_style_toggle_off(cal_db, bridge_pkg, monkeypatch):
             conn, env="LIVE", active_goals=["compensation_negotiation"],
         )
     assert not [h for h in hints["hints"] if h.get("scope") == "company_style"]
+
+
+def test_strip_proposal_context_notes_zh_background(bridge_pkg):
+    distill = bridge_pkg.learning_distill
+    md = (
+        "## Approved discovery learning\n"
+        "### Preferred KOL profile\n"
+        "- keep this\n"
+        "### 背景说明\n"
+        "- 批次大小：31\n"
+    )
+    body = distill.proposal_section_for_policy_merge(md)
+    assert "keep this" in body
+    assert "背景说明" not in body
+    assert "批次大小" not in body
+
+
+def test_strip_proposal_context_notes(bridge_pkg):
+    distill = bridge_pkg.learning_distill
+    md = (
+        "## Proposed strategy updates\n\n"
+        "## compensation_negotiation\n\n"
+        "- Ask scope first\n\n"
+        "### Context notes\n\n"
+        "- Batch size: 5\n"
+    )
+    body = distill.proposal_section_for_policy_merge(md)
+    assert "Ask scope first" in body
+    assert "Context notes" not in body
+    assert "Batch size" not in body
+
+
+def test_is_actionable_policy_delta_skips_no_new_rules(bridge_pkg):
+    distill = bridge_pkg.learning_distill
+    md = (
+        "## Proposed strategy updates\n\n"
+        "### interest_qualification\n\n"
+        "- **No new strategy rules emerge from this batch.**\n\n"
+        "### Context notes\n\n"
+        "- Batch size: 5\n"
+    )
+    assert not distill.is_actionable_policy_delta(md)
+
+
+def test_apply_skips_non_actionable_strategy_preserves_policy(cal_db, bridge_pkg):
+    distill = bridge_pkg.learning_distill
+    pol = bridge_pkg.policies
+    store = bridge_pkg.learning_store
+
+    proposal = {
+        "scope": "company_style",
+        "proposed_style_markdown": (
+            "## Proposed style updates\n\n"
+            "- **No new style rules emerge from this batch.**\n"
+        ),
+        "proposed_strategy_markdown": (
+            "## Proposed strategy updates\n\n"
+            "- **No new strategy rules emerge from this batch.**\n\n"
+            "### Context notes\n\n"
+            "- Batch size: 5\n"
+        ),
+    }
+    with cal_db._connect() as conn:  # type: ignore[attr-defined]
+        pol.put_policy(
+            conn,
+            scope=store.REPLY_STRATEGY_SCOPE,
+            content_md="## Approved strategy learning\n\n- keep this rule\n",
+            updated_by="test",
+            env="LIVE",
+        )
+        out = distill.apply_approved_style_proposal(
+            conn, env="LIVE", proposal=proposal, updated_by="test",
+        )
+        row = pol.get_policy(conn, scope=store.REPLY_STRATEGY_SCOPE, env="LIVE")
+    assert out.get("strategy_policy", {}).get("skipped") is True
+    assert "keep this rule" in (row.get("content_md") or "")
+    assert "Batch size" not in (row.get("content_md") or "")
+
+
+def test_sanitize_removes_context_notes_from_stored_policy(cal_db, bridge_pkg):
+    d = bridge_pkg.learning_distill
+    pol = bridge_pkg.policies
+    store = bridge_pkg.learning_store
+    dirty = (
+        "## Approved strategy learning\n\n"
+        "## Proposed strategy updates\n\n"
+        "### interest_qualification\n\n"
+        "- Keep this rule\n\n"
+        "### Context notes\n\n"
+        "- Batch size: 5\n"
+    )
+    with cal_db._connect() as conn:  # type: ignore[attr-defined]
+        pol.put_policy(
+            conn,
+            scope=store.REPLY_STRATEGY_SCOPE,
+            content_md=dirty,
+            updated_by="test",
+            env="LIVE",
+        )
+        out = d.sanitize_stored_policy_learning_metadata(
+            conn,
+            scope=store.REPLY_STRATEGY_SCOPE,
+            env="LIVE",
+            updated_by="test:sanitize",
+        )
+        row = pol.get_policy(conn, scope=store.REPLY_STRATEGY_SCOPE, env="LIVE")
+    assert out.get("had_context_notes") is True
+    assert out.get("removed_chars", 0) > 0
+    content = row.get("content_md") or ""
+    assert "Keep this rule" in content
+    assert "Context notes" not in content
+    assert "Batch size" not in content
+
+
+def test_apply_merges_actionable_rule_without_context_notes(cal_db, bridge_pkg):
+    distill = bridge_pkg.learning_distill
+    pol = bridge_pkg.policies
+    store = bridge_pkg.learning_store
+
+    proposal = {
+        "scope": "company_style",
+        "proposed_style_markdown": "## Proposed style updates\n\n- tone fix\n",
+        "proposed_strategy_markdown": (
+            "## Proposed strategy updates\n\n"
+            "## compensation_negotiation\n\n"
+            "- clarify scope first\n\n"
+            "### Context notes\n\n"
+            "- Batch size: 5\n"
+        ),
+    }
+    with cal_db._connect() as conn:  # type: ignore[attr-defined]
+        out = distill.apply_approved_style_proposal(
+            conn, env="LIVE", proposal=proposal, updated_by="test",
+        )
+        row = pol.get_policy(conn, scope=store.REPLY_STRATEGY_SCOPE, env="LIVE")
+    assert out.get("strategy_policy", {}).get("scope") == store.REPLY_STRATEGY_SCOPE
+    content = row.get("content_md") or ""
+    assert "clarify scope first" in content
+    assert "Context notes" not in content
+    assert "Batch size" not in content

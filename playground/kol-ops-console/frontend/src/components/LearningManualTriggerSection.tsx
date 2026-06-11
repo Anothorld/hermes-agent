@@ -50,7 +50,7 @@ export function LearningManualTriggerSection({
   const suiteHint = SUITE_OPERATOR_HINTS[suite] ?? '';
   const batchLabel =
     editedUnconsumed != null && batchThreshold != null
-      ? `${editedUnconsumed} / ${batchThreshold} 条可蒸馏样本`
+      ? `积压 ${editedUnconsumed} 条 · 单份提案取 ${batchThreshold} 条`
       : '—';
   const queuedNote =
     editedQueuedInPending != null && editedQueuedInPending > 0

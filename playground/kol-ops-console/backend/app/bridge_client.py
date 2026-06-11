@@ -17,6 +17,12 @@ import httpx
 from .bridge_runtime import resolve_bridge_key
 from .config import get_settings
 
+_LEARNING_APPROVAL_FACT_PATHS = frozenset({
+    "approval.style_learning_proposal",
+    "approval.outcome_learning_proposal",
+    "approval.discovery_learning_proposal",
+})
+
 
 class BridgeError(RuntimeError):
     def __init__(self, status: int, detail: str) -> None:
@@ -38,6 +44,14 @@ class BridgeClient:
             timeout=self._default_timeout,
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
         )
+
+    def approval_timeout_for(self, fact_path: str) -> float:
+        """Per-approval Bridge timeout (LLM merge and Gmail draft need longer waits)."""
+        if fact_path in _LEARNING_APPROVAL_FACT_PATHS:
+            return self._learning_timeout
+        if fact_path == "approval.reply_draft":
+            return self._approve_timeout
+        return self._default_timeout
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -65,6 +79,9 @@ class BridgeClient:
         # console does not 502 on a single blip while the UI auto-refreshes.
         if retry == 0 and method.upper() in {"GET", "HEAD"}:
             retry = 2
+        effective_timeout = (
+            timeout_sec if timeout_sec is not None else self._default_timeout
+        )
         attempts = retry + 1
         for i in range(attempts):
             try:
@@ -74,7 +91,7 @@ class BridgeClient:
                     params=params,
                     json=json,
                     headers=headers,
-                    timeout=timeout_sec if timeout_sec is not None else self._default_timeout,
+                    timeout=effective_timeout,
                 )
                 break
             except httpx.HTTPError as exc:
@@ -82,9 +99,15 @@ class BridgeClient:
                     await asyncio.sleep(0.5)
                     continue
                 hint = (
-                    "（学习蒸馏可能需 1–3 分钟，若超时请调大 KOC_BRIDGE_LEARNING_TIMEOUT_SEC）"
-                    if timeout_sec is not None and timeout_sec > self._default_timeout
-                    else ""
+                    "（学习蒸馏/批准合并可能需 1–3 分钟，若超时请调大 KOC_BRIDGE_LEARNING_TIMEOUT_SEC）"
+                    if effective_timeout > self._default_timeout
+                    else (
+                        "（批准学习提案需 LLM 合并，请确认 Console 已使用学习超时；"
+                        "或调大 KOC_BRIDGE_LEARNING_TIMEOUT_SEC）"
+                        if "/approvals/approval." in path
+                        and "learning_proposal" in path
+                        else ""
+                    )
                 )
                 raise BridgeError(502, f"bridge unreachable: {exc}{hint}") from exc
         if r.status_code >= 400:
@@ -568,6 +591,7 @@ class BridgeClient:
             f"/approvals/{fact_path}/approve",
             json=body,
             operator_user_id=operator_user_id,
+            timeout_sec=self.approval_timeout_for(fact_path),
         )
 
     async def reject(
@@ -582,6 +606,7 @@ class BridgeClient:
             f"/approvals/{fact_path}/reject",
             json=body,
             operator_user_id=operator_user_id,
+            timeout_sec=self.approval_timeout_for(fact_path),
         )
 
     async def reconcile_sent(self, body: dict[str, Any]) -> dict[str, Any]:

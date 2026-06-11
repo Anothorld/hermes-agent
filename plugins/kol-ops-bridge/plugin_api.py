@@ -337,6 +337,13 @@ class CandidateStatusBody(BaseModel):
     env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 
+class MergeCampaignsBody(BaseModel):
+    """Body for ``POST /campaigns/{target}/merge-from``."""
+
+    source_campaign_id: str = Field(min_length=1)
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
 class FactsWriteBody(_CampaignIdNormaliserMixin):
     campaign_id: Optional[str] = None
     namespace: str
@@ -1441,6 +1448,27 @@ def set_candidate_status(
         env=body.env,
     )
     return {"updated": n}
+
+
+@router.post("/campaigns/{campaign_id}/merge-from")
+def merge_campaigns(
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
+    body: MergeCampaignsBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Fold another campaign's CAL rows into ``campaign_id`` (the target).
+
+    One-product-one-campaign migration helper; target rows win on conflicts.
+    """
+    _require_bridge_key(x_bridge_key)
+    try:
+        return cal.merge_campaigns(
+            source_campaign_id=body.source_campaign_id,
+            target_campaign_id=campaign_id,
+            env=body.env,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/campaigns/{campaign_id}/candidates/route-discovery")
@@ -3687,6 +3715,32 @@ def post_policy_merge_preview(body: PolicyMergePreviewBody) -> dict[str, Any]:
         return learning_distill.preview_policy_merge_from_proposal(
             conn, env=body.env, proposal=body.proposal,
         )
+
+
+class PolicySanitizeBody(BaseModel):
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    scope: str = Field(min_length=1, max_length=120)
+    updated_by: str = Field(default="bridge:sanitize-policy", min_length=1, max_length=120)
+    owner_user_id: Optional[int] = None
+
+
+@router.post("/learning/sanitize-policy-metadata")
+def sanitize_policy_metadata_route(
+    body: PolicySanitizeBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Remove Context notes / distill headings from a stored learning policy."""
+    _require_bridge_key(x_bridge_key)
+    style_env = body.env if body.scope in _policies.ENV_SCOPED_POLICIES else None
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        result = learning_distill.sanitize_stored_policy_learning_metadata(
+            conn,
+            scope=body.scope,
+            env=style_env if body.scope in _policies.ENV_SCOPED_POLICIES else None,
+            updated_by=body.updated_by,
+            owner_user_id=body.owner_user_id,
+        )
+    return {"ok": True, "env": body.env, **result}
 
 
 class LearningApplyBody(BaseModel):

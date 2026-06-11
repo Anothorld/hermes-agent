@@ -19,9 +19,22 @@ def test_replace_section_keeps_preamble_drops_old(bridge_pkg):
     out1 = d.merge_style_policy_content(base, "- old rule", mode="replace_section")
     assert "keep me" in out1 and "old rule" in out1
     out2 = d.merge_style_policy_content(out1, "- new rule", mode="replace_section")
-    assert "keep me" in out2  # preamble preserved
-    assert "new rule" in out2
-    assert "old rule" not in out2  # old approved block replaced
+    assert "keep me" in out2
+    assert "old rule" in out2 and "new rule" in out2
+
+
+def test_replace_section_remove_drops_old_rule(bridge_pkg):
+    d = bridge_pkg.learning_distill
+    base = (
+        "## Approved style learning\n\n"
+        "- keep this\n"
+        "- drop me\n"
+    )
+    out = d.merge_style_policy_content(
+        base, "- REMOVE: drop me\n", mode="replace_section",
+    )
+    assert "keep this" in out
+    assert "drop me" not in out
 
 
 def test_strategy_merge_marker(bridge_pkg):
@@ -35,12 +48,53 @@ def test_consolidate_policy_llm_uses_llm(bridge_pkg, monkeypatch):
     monkeypatch.setattr(
         d.learning_llm,
         "invoke_learning_llm",
-        lambda prompt, runner=None: "## Merged\n- consolidated rule\n",
+        lambda prompt, runner=None: "### goal\n- consolidated rule\n",
     )
     out = d.consolidate_policy_llm(
-        "## Old\n- a", "- ADJUST: a → b", scope="company_style",
+        "## Preamble\n\n## Approved style learning\n\n- old rule\n",
+        "- ADJUST: old → consolidated rule\n",
+        scope="company_style",
     )
+    assert "Preamble" in out
     assert "consolidated rule" in out
+    assert "Context notes" not in out
+
+
+def test_llm_compress_mode_calls_consolidate(bridge_pkg, monkeypatch):
+    d = bridge_pkg.learning_distill
+    calls: list[str] = []
+
+    def _fake_llm(prompt: str, runner=None) -> str:
+        calls.append(prompt)
+        return "- merged via llm\n"
+
+    monkeypatch.setattr(d.learning_llm, "invoke_learning_llm", _fake_llm)
+    monkeypatch.setenv("KOL_STYLE_LEARNING_MERGE_MODE", "llm_compress")
+    out = d.merge_style_policy_content(
+        "## Approved style learning\n\n- keep\n",
+        "- new signal\n",
+        policy_scope="company_style",
+    )
+    assert calls
+    assert "merged via llm" in out
+    assert "keep" in out or "Approved style learning" in out
+
+
+def test_llm_compress_falls_back_to_patch(bridge_pkg, monkeypatch):
+    d = bridge_pkg.learning_distill
+
+    def _fail(prompt: str, runner=None) -> str:
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(d.learning_llm, "invoke_learning_llm", _fail)
+    monkeypatch.setenv("KOL_STYLE_LEARNING_MERGE_MODE", "llm_compress")
+    out = d.merge_style_policy_content(
+        "## Approved style learning\n\n- old rule\n",
+        "- new rule\n",
+        policy_scope="company_style",
+    )
+    assert "old rule" in out
+    assert "new rule" in out
 
 
 def test_apply_approved_respects_merge_mode(cal_db, bridge_pkg, monkeypatch):
@@ -70,4 +124,4 @@ def test_apply_approved_respects_merge_mode(cal_db, bridge_pkg, monkeypatch):
     content = row["content_md"]
     assert "preamble rule" in content
     assert "fresh rule" in content
-    assert "stale rule" not in content
+    assert "stale rule" in content

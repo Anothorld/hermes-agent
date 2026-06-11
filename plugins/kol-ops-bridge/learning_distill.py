@@ -5,10 +5,11 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 from statistics import mean
-from typing import Any, Optional
+from typing import Any, Final, Optional
 
 from . import cal
 from . import learning_llm
@@ -284,6 +285,273 @@ def resolve_learning_anchor_identity_id(
 
 _STYLE_SECTION_HEADING = "## Proposed style updates"
 _STRATEGY_SECTION_HEADING = "## Proposed strategy updates"
+_CONTEXT_NOTES_HEADING = "### Context notes"
+# Operator-only batch summary headings (approval UI — never merge into policy).
+_CONTEXT_NOTE_HEADINGS: Final[tuple[str, ...]] = (
+    _CONTEXT_NOTES_HEADING,
+    "### 背景说明",
+)
+_NO_NEW_RULES_MARKERS = (
+    "no new style rules",
+    "no new strategy rules",
+    "does not provide sufficient evidence",
+    "insufficient evidence",
+)
+
+
+def _context_notes_cut_index(text: str) -> int:
+    """Index of the earliest operator-only context heading, or -1."""
+    lower = text.lower()
+    indices: list[int] = []
+    for heading in _CONTEXT_NOTE_HEADINGS:
+        if heading.isascii():
+            idx = lower.find(heading.lower())
+        else:
+            idx = text.find(heading)
+        if idx >= 0:
+            indices.append(idx)
+    return min(indices) if indices else -1
+
+
+def strip_proposal_context_notes(md: str) -> str:
+    """Remove operator batch summary (``Context notes`` / ``背景说明``) — approval UI only."""
+    text = (md or "").strip()
+    if not text:
+        return ""
+    idx = _context_notes_cut_index(text)
+    if idx >= 0:
+        text = text[:idx].rstrip()
+    return text
+
+
+def _strip_distill_section_heading(md: str) -> str:
+    text = (md or "").strip()
+    for heading in (_STYLE_SECTION_HEADING, _STRATEGY_SECTION_HEADING):
+        if text.lower().startswith(heading.lower()):
+            text = text[len(heading) :].lstrip("\n").strip()
+    return text
+
+
+def proposal_section_for_policy_merge(md: str) -> str:
+    """Markdown body merged into policy (no Context notes or distill headings)."""
+    return _strip_distill_section_heading(strip_proposal_context_notes(md))
+
+
+def is_actionable_policy_delta(md: str) -> bool:
+    """True when the section has at least one rule bullet worth merging."""
+    body = proposal_section_for_policy_merge(md)
+    if not body:
+        return False
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(("-", "*")):
+            continue
+        lower = stripped.lower()
+        if re.search(r"\b(remove|adjust):", lower):
+            return True
+        if any(marker in lower for marker in _NO_NEW_RULES_MARKERS):
+            continue
+        return True
+    return False
+
+
+_ADJUST_SPLIT = re.compile(r"\s*[→]|->")
+
+
+def _normalize_bullet_text(line: str) -> str:
+    s = line.strip()
+    if s.startswith(("-", "*")):
+        s = s[1:].strip()
+    s = re.sub(r"^\*\*|\*\*$", "", s).strip()
+    s = re.sub(r"^(REMOVE|ADJUST):\s*", "", s, flags=re.IGNORECASE).strip()
+    return re.sub(r"\s+", " ", s).lower()
+
+
+def _parse_bullet_directive(line: str) -> tuple[str, str]:
+    """Return kind ``add|adjust|remove`` and payload (text after directive)."""
+    raw = line.strip()
+    if raw.startswith(("-", "*")):
+        raw = raw[1:].strip()
+    raw = re.sub(r"^\*\*|\*\*$", "", raw).strip()
+    m = re.match(r"^(REMOVE|ADJUST):\s*(.*)$", raw, re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).lower(), m.group(2).strip()
+    return "add", raw
+
+
+def _adjust_target_and_replacement(payload: str) -> tuple[str, str]:
+    parts = _ADJUST_SPLIT.split(payload, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return payload.strip(), payload.strip()
+
+
+def _match_needle(bullet: str, needle: str) -> bool:
+    if not needle:
+        return False
+    nb = _normalize_bullet_text(bullet)
+    nn = _normalize_bullet_text(needle)
+    if not nn:
+        return False
+    if nn in nb or nb in nn:
+        return True
+    n_words = {w for w in re.findall(r"[a-z0-9']+", nn) if len(w) > 3}
+    b_words = {w for w in re.findall(r"[a-z0-9']+", nb) if len(w) > 3}
+    if not n_words:
+        return False
+    return len(n_words & b_words) / len(n_words) >= 0.5
+
+
+def _is_no_op_bullet_line(line: str) -> bool:
+    return any(marker in line.lower() for marker in _NO_NEW_RULES_MARKERS)
+
+
+def _parse_md_sections(md: str) -> list[tuple[str | None, list[str]]]:
+    sections: list[tuple[str | None, list[str]]] = []
+    heading: str | None = None
+    lines: list[str] = []
+    for raw in md.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            if lines or heading is not None:
+                sections.append((heading, lines))
+            heading = stripped
+            lines = []
+        else:
+            lines.append(raw.rstrip())
+    sections.append((heading, lines))
+    return sections
+
+
+def apply_policy_delta_patch(existing_block: str, delta: str) -> str:
+    """Apply an approved delta onto an existing approved block.
+
+    - ``REMOVE:`` drops matching bullets from the existing block
+    - ``ADJUST: old → new`` replaces matching bullets
+    - other bullets append (deduped); new ``###`` sections append when absent
+    """
+    existing_block = (existing_block or "").strip()
+    delta = (delta or "").strip()
+    if not delta:
+        return existing_block
+    if not existing_block:
+        return delta
+
+    prose_lines: list[str] = []
+    bullets: list[str] = []
+    for line in existing_block.splitlines():
+        if line.strip().startswith(("-", "*")):
+            bullets.append(line.rstrip())
+        else:
+            prose_lines.append(line.rstrip())
+
+    existing_headings = {
+        ln.strip() for ln in existing_block.splitlines() if ln.strip().startswith("#")
+    }
+    extra_sections: list[str] = []
+
+    for heading, lines in _parse_md_sections(delta):
+        sec_bullets = [ln.rstrip() for ln in lines if ln.strip().startswith(("-", "*"))]
+        if heading and heading not in existing_headings:
+            actionable = [b for b in sec_bullets if not _is_no_op_bullet_line(b)]
+            if actionable:
+                extra_sections.append("\n".join([heading, *actionable]))
+            continue
+        for bullet in sec_bullets:
+            if _is_no_op_bullet_line(bullet):
+                continue
+            kind, payload = _parse_bullet_directive(bullet)
+            if kind == "remove":
+                bullets = [b for b in bullets if not _match_needle(b, payload)]
+            elif kind == "adjust":
+                target, replacement = _adjust_target_and_replacement(payload)
+                new_line = bullet
+                if replacement and replacement != target:
+                    new_line = f"- {replacement}"
+                replaced = False
+                for i, b in enumerate(bullets):
+                    if _match_needle(b, target):
+                        bullets[i] = new_line
+                        replaced = True
+                        break
+                if not replaced:
+                    bullets.append(new_line)
+            elif not any(
+                _normalize_bullet_text(b) == _normalize_bullet_text(bullet) for b in bullets
+            ):
+                bullets.append(bullet)
+
+    out: list[str] = [ln for ln in prose_lines if ln]
+    if bullets:
+        if out:
+            out.append("")
+        out.extend(bullets)
+    for block in extra_sections:
+        out.append("")
+        out.extend(block.splitlines())
+
+    text = "\n".join(out).strip()
+    return f"{text}\n" if text else ""
+
+
+def sanitize_stored_policy_learning_metadata(
+    conn,
+    *,
+    scope: str,
+    updated_by: str,
+    env: Optional[str] = None,
+    owner_user_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Strip Context notes / distill headings from a stored policy (maintenance)."""
+    row = pol.get_policy(
+        conn, scope=scope, env=env, owner_user_id=owner_user_id,
+    )
+    if not row:
+        return {"skipped": True, "reason": "no_policy", "scope": scope}
+    content = (row.get("content_md") or "").strip()
+    if not content:
+        return {"skipped": True, "reason": "empty", "scope": scope}
+
+    marker = _approved_block_marker(scope=scope)
+    had_context_notes = _context_notes_cut_index(content) >= 0
+    if marker in content:
+        head, block = content.split(marker, 1)
+        head = head.rstrip()
+        block_clean = proposal_section_for_policy_merge(block)
+        if block_clean.strip():
+            cleaned = f"{head}\n\n{marker}\n\n{block_clean}".strip() + "\n"
+        elif head.strip():
+            cleaned = f"{head.strip()}\n"
+        else:
+            cleaned = ""
+    else:
+        cleaned = proposal_section_for_policy_merge(content)
+        cleaned = f"{cleaned.strip()}\n" if cleaned.strip() else ""
+
+    if cleaned.strip() == content.strip():
+        return {
+            "skipped": True,
+            "reason": "already_clean",
+            "scope": scope,
+            "had_context_notes": had_context_notes,
+        }
+
+    new_row = pol.put_policy(
+        conn,
+        scope=scope,
+        content_md=cleaned,
+        updated_by=updated_by,
+        title=str(row.get("title") or scope),
+        env=env,
+        owner_user_id=owner_user_id,
+    )
+    return {
+        "scope": scope,
+        "version": new_row.get("version"),
+        "policy_id": new_row.get("id"),
+        "removed_chars": len(content) - len(cleaned),
+        "had_context_notes": had_context_notes,
+    }
 
 
 def split_style_and_strategy_markdown(md: str) -> tuple[str, str]:
@@ -456,11 +724,17 @@ def distill_edit_learning_llm(
         "Rules:\n"
         "- Output only the DELTA vs the baseline: new rules, adjustments, or removals.\n"
         "- Do NOT repeat baseline rules that the samples leave unchanged.\n"
-        "- If a sample CONTRADICTS a baseline rule, propose an explicit adjustment and "
-        "prefix the bullet with `ADJUST:` (or `REMOVE:` when the rule should be dropped).\n"
-        "- Every bullet must cite evidence from diffs and/or thread/facts.\n"
+        "- On approval, deltas are merged into policy"
+        f" ({'LLM intelligent merge' if _merge_mode() == 'llm_compress' else 'deterministic patch'}): "
+        "new bullets append, `ADJUST: old → new` replaces, `REMOVE: …` drops.\n"
+        "- If a sample CONTRADICTS a baseline rule, use `ADJUST: old → new` "
+        "(or `REMOVE:` when the rule should be dropped).\n"
+        "- If this batch adds no style/strategy signal, say so in ONE bullet under that "
+        "section (e.g. \"No new … rules\") — do not restate unchanged baseline rules.\n"
+        "- Every actionable bullet must cite evidence from diffs and/or thread/facts.\n"
         "- Do NOT invent rules not supported by samples.\n"
-        "- End with `### Context notes` (batch size, distinct campaigns, what changed vs baseline).\n\n"
+        "- End with `### Context notes` (batch size, invalid samples, what changed vs baseline).\n"
+        "  Context notes are for operator review only — they are NOT written into policy.\n\n"
         f"SAMPLES_JSON:\n{json.dumps(samples, indent=2, ensure_ascii=False)}"
     )
     try:
@@ -498,32 +772,73 @@ def distill_edit_style_llm(
 
 
 def _merge_mode() -> str:
-    """``replace_section`` (default) | ``append`` | ``llm_compress``.
+    """``llm_compress`` (default) | ``replace_section`` | ``append``.
 
-    - replace_section: keep preamble before the marker; replace the approved block.
-    - append: legacy — accumulate approved deltas under the marker.
-    - llm_compress: consolidate baseline + delta via a second LLM pass.
+    - llm_compress: LLM merges delta into the approved block (fallback: patch).
+    - replace_section: deterministic patch — REMOVE/ADJUST/append.
+    - append: accumulate each approved delta under the marker (may duplicate).
     """
     raw = os.environ.get(
-        "KOL_STYLE_LEARNING_MERGE_MODE", "replace_section",
+        "KOL_STYLE_LEARNING_MERGE_MODE", "llm_compress",
     ).strip().lower()
     if raw in ("append", "replace_section", "llm_compress"):
         return raw
-    return "replace_section"
+    return "llm_compress"
 
 
-def _merge_section(current_md: str, proposed_section: str, *, marker: str, mode: str) -> str:
+def _preview_merge_mode(mode: str) -> str:
+    """Approval-card preview uses deterministic patch when approve-time merge is LLM."""
+    return "replace_section" if mode == "llm_compress" else mode
+
+
+def _approved_block_marker(*, scope: str) -> str:
+    if scope == learning_store.REPLY_STRATEGY_SCOPE:
+        return "## Approved strategy learning"
+    if scope == learning_store.OUTCOME_STRATEGY_SCOPE:
+        return OUTCOME_LEARNING_MARKER
+    return "## Approved style learning"
+
+
+def _merge_section_patch(current_md: str, proposed_section: str, *, marker: str) -> str:
+    """Deterministic patch merge (replace_section semantics)."""
     base = (current_md or "").strip()
     section = (proposed_section or "").strip()
     if section.startswith(marker):
         section = section[len(marker) :].lstrip("\n").strip()
     if not section:
         return base
-    if mode == "replace_section":
-        # Keep preamble before the marker; drop the old approved block entirely.
-        head = base.split(marker, 1)[0].rstrip() if marker in base else base
+    head = base.split(marker, 1)[0].rstrip() if marker in base else base
+    if marker in base:
+        old_block = base.split(marker, 1)[1].lstrip("\n").strip()
+        patched = apply_policy_delta_patch(old_block, section)
+        tail = f"{marker}\n\n{patched}".rstrip() + "\n"
+    else:
         tail = f"{marker}\n\n{section}\n"
-        return f"{head}\n\n{tail}".strip() if head else tail.strip()
+    return f"{head}\n\n{tail}".strip() if head else tail.strip()
+
+
+def _merge_section(current_md: str, proposed_section: str, *, marker: str, mode: str, scope: str = "") -> str:
+    base = (current_md or "").strip()
+    section = (proposed_section or "").strip()
+    if section.startswith(marker):
+        section = section[len(marker) :].lstrip("\n").strip()
+    if not section:
+        return base
+    if mode == "llm_compress":
+        try:
+            return consolidate_policy_llm(
+                base, section, scope=scope or marker, marker=marker,
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "llm_compress merge failed for %s; falling back to patch", scope or marker,
+                exc_info=True,
+            )
+            return _merge_section_patch(base, section, marker=marker)
+    if mode == "replace_section":
+        return _merge_section_patch(base, section, marker=marker)
     # append: accumulate under a single marker.
     if marker not in base:
         tail = f"{marker}\n\n{section}\n"
@@ -531,25 +846,56 @@ def _merge_section(current_md: str, proposed_section: str, *, marker: str, mode:
     return f"{base}\n\n{section}\n"
 
 
-def consolidate_policy_llm(current_md: str, proposed_section: str, *, scope: str) -> str:
-    """LLM-merge baseline + approved delta into a clean consolidated policy.
+def consolidate_policy_llm(
+    current_md: str,
+    proposed_section: str,
+    *,
+    scope: str,
+    marker: Optional[str] = None,
+) -> str:
+    """LLM-merge approved delta into the approved block; preserves preamble before marker.
 
-    Raises on failure so callers can fall back to a deterministic merge.
+    Raises on failure so callers can fall back to deterministic patch merge.
     """
+    marker = marker or _approved_block_marker(scope=scope)
+    base = (current_md or "").strip()
+    section = proposal_section_for_policy_merge(proposed_section)
+    if not section:
+        return base
+
+    head = ""
+    existing_block = base
+    if marker in base:
+        head, existing_block = base.split(marker, 1)
+        head = head.rstrip()
+        existing_block = existing_block.lstrip("\n").strip()
+
     prompt = (
         f"You maintain the `{scope}` guideline document for KOL outreach emails.\n"
-        "Merge the APPROVED CHANGES into the CURRENT document, producing one clean,\n"
-        "de-duplicated, contradiction-free markdown document. Apply ADJUST:/REMOVE:\n"
-        "directives, drop superseded rules, keep section headings stable, stay concise.\n"
-        "Output ONLY the merged markdown.\n\n"
-        f"CURRENT DOCUMENT:\n{(current_md or '(empty)').strip()}\n\n"
-        f"APPROVED CHANGES:\n{(proposed_section or '').strip()}\n"
+        "Merge APPROVED DELTA into EXISTING APPROVED RULES.\n"
+        "Output one clean, de-duplicated, contradiction-free markdown block.\n\n"
+        "Merge rules:\n"
+        "- Apply `ADJUST: old → new` by replacing the matching existing bullet\n"
+        "- Apply `REMOVE: …` by dropping the matching existing bullet\n"
+        "- Append genuinely new rule bullets from the delta\n"
+        "- Do NOT repeat existing rules unchanged\n"
+        "- Omit 'no new rules' sentinel bullets and any Context notes / batch metadata\n"
+        "- Keep ### goal / child_skill subsection headings stable\n"
+        "- Output ONLY the merged approved-block body (no preamble, no outer marker)\n\n"
+        f"EXISTING APPROVED RULES:\n{(existing_block or '(empty)').strip()}\n\n"
+        f"APPROVED DELTA:\n{section}\n"
     )
     raw = learning_llm.invoke_learning_llm(prompt)
-    merged = learning_llm.strip_markdown_fences(raw).strip()
-    if not merged:
+    merged_block = proposal_section_for_policy_merge(
+        learning_llm.strip_markdown_fences(raw).strip(),
+    )
+    if not merged_block:
         raise RuntimeError("empty consolidation output")
-    return merged
+
+    tail = f"{marker}\n\n{merged_block}".rstrip() + "\n"
+    if head:
+        return f"{head}\n\n{tail}".strip() + "\n"
+    return tail.strip() + "\n"
 
 
 OUTCOME_LEARNING_MARKER = "## Approved outcome learning"
@@ -559,11 +905,13 @@ def merge_strategy_policy_content(
     current_md: str, proposed_section: str, *, mode: Optional[str] = None,
 ) -> str:
     """Merge approved strategy section (goal-oriented, env-scoped policy)."""
+    marker = _approved_block_marker(scope=learning_store.REPLY_STRATEGY_SCOPE)
     return _merge_section(
         current_md,
         proposed_section,
-        marker="## Approved strategy learning",
+        marker=marker,
         mode=mode or _merge_mode(),
+        scope=learning_store.REPLY_STRATEGY_SCOPE,
     )
 
 
@@ -571,23 +919,31 @@ def merge_outcome_policy_content(
     current_md: str, proposed_section: str, *, mode: Optional[str] = None,
 ) -> str:
     """Merge approved outcome guidance into ``outcome_strategy`` policy."""
+    marker = _approved_block_marker(scope=learning_store.OUTCOME_STRATEGY_SCOPE)
     return _merge_section(
         current_md,
         proposed_section,
-        marker=OUTCOME_LEARNING_MARKER,
+        marker=marker,
         mode=mode or _merge_mode(),
+        scope=learning_store.OUTCOME_STRATEGY_SCOPE,
     )
 
 
 def merge_style_policy_content(
-    current_md: str, proposed_section: str, *, mode: Optional[str] = None,
+    current_md: str,
+    proposed_section: str,
+    *,
+    mode: Optional[str] = None,
+    policy_scope: str = "company_style",
 ) -> str:
     """Merge an approved proposal section into existing policy markdown."""
+    marker = _approved_block_marker(scope=policy_scope)
     return _merge_section(
         current_md,
         proposed_section,
-        marker="## Approved style learning",
+        marker=marker,
         mode=mode or _merge_mode(),
+        scope=policy_scope,
     )
 
 
@@ -816,9 +1172,9 @@ def _section_merge_effect(
     base = (current_md or "").strip()
     has_marker = marker in base
     if mode == "replace_section":
-        return "replace" if has_marker else "add_new"
+        return "patch_delta" if has_marker else "add_new"
     if mode == "llm_compress":
-        return "replace" if has_marker else "add_new"
+        return "llm_merge" if has_marker else "add_new"
     return "append_delta" if has_marker else "add_new"
 
 
@@ -884,6 +1240,7 @@ def preview_policy_merge_from_proposal(
     if owner_user_id is not None:
         owner_user_id = int(owner_user_id)
     mode = _merge_mode()
+    preview_mode = _preview_merge_mode(mode)
 
     style_md = str(proposal.get("proposed_style_markdown") or "").strip()
     strategy_md = str(proposal.get("proposed_strategy_markdown") or "").strip()
@@ -891,7 +1248,17 @@ def preview_policy_merge_from_proposal(
     if not style_md and not strategy_md and combined:
         style_md, strategy_md = split_style_and_strategy_markdown(combined)
 
-    out: dict[str, Any] = {"env": env, "merge_mode": mode, "sections": {}}
+    out: dict[str, Any] = {
+        "env": env,
+        "merge_mode": mode,
+        "preview_merge_mode": preview_mode,
+        "preview_note": (
+            "预览为 patch 近似；批准时将 LLM 智能合并"
+            if mode == "llm_compress"
+            else None
+        ),
+        "sections": {},
+    }
 
     if scope in learning_store.EDIT_LEARNING_SCOPES and style_md:
         style_env = env if scope in pol.ENV_SCOPED_POLICIES else None
@@ -899,19 +1266,29 @@ def preview_policy_merge_from_proposal(
             conn, scope=scope, owner_user_id=owner_user_id, env=style_env,
         )
         current_md = (cur or {}).get("content_md") or ""
-        merged_md, mode_used = _merge_policy_section(
-            current_md, style_md, scope=scope, mode=mode,
-        )
         style_marker = "## Approved style learning"
+        style_merge_md = proposal_section_for_policy_merge(style_md)
+        style_actionable = is_actionable_policy_delta(style_md)
+        if style_actionable:
+            merged_md, mode_used = _merge_policy_section(
+                current_md, style_merge_md, scope=scope, mode=preview_mode,
+            )
+            merge_effect = _section_merge_effect(
+                current_md, marker=style_marker, mode=mode,
+            )
+        else:
+            merged_md, mode_used = current_md, mode
+            merge_effect = "unchanged"
         out["sections"]["style"] = {
             "scope": scope,
             "current_md": current_md,
             "proposed_section_md": style_md,
+            "policy_merge_section_md": style_merge_md,
+            "merge_skipped": not style_actionable,
+            "merge_skip_reason": None if style_actionable else "no_actionable_rules",
             "merged_md": merged_md,
             "merge_mode_used": mode_used,
-            "merge_effect": _section_merge_effect(
-                current_md, marker=style_marker, mode=mode_used,
-            ),
+            "merge_effect": merge_effect,
             "current_chars": len(current_md),
             "merged_chars": len(merged_md),
             "delta_chars": len(merged_md) - len(current_md),
@@ -920,22 +1297,32 @@ def preview_policy_merge_from_proposal(
     if strategy_md.strip():
         cur_s = pol.get_policy(conn, scope=learning_store.REPLY_STRATEGY_SCOPE, env=env)
         current_s = (cur_s or {}).get("content_md") or ""
-        merged_s, mode_used_s = _merge_policy_section(
-            current_s,
-            strategy_md,
-            scope=learning_store.REPLY_STRATEGY_SCOPE,
-            mode=mode,
-        )
         strat_marker = "## Approved strategy learning"
+        strategy_merge_md = proposal_section_for_policy_merge(strategy_md)
+        strategy_actionable = is_actionable_policy_delta(strategy_md)
+        if strategy_actionable:
+            merged_s, mode_used_s = _merge_policy_section(
+                current_s,
+                strategy_merge_md,
+                scope=learning_store.REPLY_STRATEGY_SCOPE,
+                mode=preview_mode,
+            )
+            merge_effect_s = _section_merge_effect(
+                current_s, marker=strat_marker, mode=mode,
+            )
+        else:
+            merged_s, mode_used_s = current_s, mode
+            merge_effect_s = "unchanged"
         out["sections"]["strategy"] = {
             "scope": learning_store.REPLY_STRATEGY_SCOPE,
             "current_md": current_s,
             "proposed_section_md": strategy_md,
+            "policy_merge_section_md": strategy_merge_md,
+            "merge_skipped": not strategy_actionable,
+            "merge_skip_reason": None if strategy_actionable else "no_actionable_rules",
             "merged_md": merged_s,
             "merge_mode_used": mode_used_s,
-            "merge_effect": _section_merge_effect(
-                current_s, marker=strat_marker, mode=mode_used_s,
-            ),
+            "merge_effect": merge_effect_s,
             "current_chars": len(current_s),
             "merged_chars": len(merged_s),
             "delta_chars": len(merged_s) - len(current_s),
@@ -950,10 +1337,12 @@ def preview_policy_merge_from_proposal(
         merged_d = learning_discovery.merge_discovery_policy_content(
             current_d, combined, mode=mode,
         )
+        policy_merge_md = proposal_section_for_policy_merge(combined)
         out["sections"]["discovery"] = {
             "scope": scope,
             "current_md": current_d,
             "proposed_section_md": combined,
+            "policy_merge_section_md": policy_merge_md,
             "merged_md": merged_d,
             "merge_mode_used": mode,
             "merge_effect": _section_merge_effect(
@@ -995,20 +1384,15 @@ def _merge_policy_section(
     current_md: str, section: str, *, scope: str, mode: str,
 ) -> tuple[str, str]:
     """Merge one section; return (merged_md, mode_used)."""
-    if mode == "llm_compress":
-        try:
-            return consolidate_policy_llm(current_md, section, scope=scope), "llm_compress"
-        except Exception:
-            if scope == learning_store.REPLY_STRATEGY_SCOPE:
-                return merge_strategy_policy_content(current_md, section, mode="append"), "append_fallback"
-            if scope == learning_store.OUTCOME_STRATEGY_SCOPE:
-                return merge_outcome_policy_content(current_md, section, mode="append"), "append_fallback"
-            return merge_style_policy_content(current_md, section, mode="append"), "append_fallback"
     if scope == learning_store.REPLY_STRATEGY_SCOPE:
-        return merge_strategy_policy_content(current_md, section, mode=mode), mode
-    if scope == learning_store.OUTCOME_STRATEGY_SCOPE:
-        return merge_outcome_policy_content(current_md, section, mode=mode), mode
-    return merge_style_policy_content(current_md, section, mode=mode), mode
+        merged = merge_strategy_policy_content(current_md, section, mode=mode)
+    elif scope == learning_store.OUTCOME_STRATEGY_SCOPE:
+        merged = merge_outcome_policy_content(current_md, section, mode=mode)
+    else:
+        merged = merge_style_policy_content(
+            current_md, section, mode=mode, policy_scope=scope,
+        )
+    return merged, mode
 
 
 def list_style_approval_markers(
@@ -1155,6 +1539,40 @@ def propose_style_learning_approval(
         source=f"learning:propose:{scope}",
         env=env,
     )
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        _log_path = _Path("/Users/arnold/agent_prj/.cursor/debug-cfcf5c.log")
+        _log_path.parent.mkdir(parents=True, exist_ok=True)
+        with _log_path.open("a", encoding="utf-8") as _fh:
+            _fh.write(
+                _json.dumps(
+                    {
+                        "sessionId": "cfcf5c",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H3",
+                        "location": "learning_distill.py:propose_style_learning_approval",
+                        "message": "style_proposal_created",
+                        "data": {
+                            "env": env,
+                            "scope": scope,
+                            "batch_threshold": threshold,
+                            "edited_available": len(edited_available),
+                            "sample_count": len(batch),
+                            "source_event_ids_len": len(event_ids),
+                        },
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
     return {
         "approval_fact": learning_store.STYLE_LEARNING_APPROVAL_FACT,
         "identity_id": anchor_id,
@@ -1195,78 +1613,102 @@ def apply_approved_style_proposal(
     if not style_md and not strategy_md:
         raise ValueError("proposal missing style/strategy markdown")
 
+    style_actionable = bool(style_md) and is_actionable_policy_delta(style_md)
+    strategy_actionable = bool(strategy_md.strip()) and is_actionable_policy_delta(
+        strategy_md,
+    )
+    if not style_actionable and not strategy_actionable:
+        return {
+            "scope": scope,
+            "skipped": True,
+            "reason": "no_actionable_policy_delta",
+            "merge_mode": _merge_mode(),
+            "strategy_policy": {
+                "skipped": True,
+                "reason": "no_actionable_rules",
+            },
+        }
+
     mode = _merge_mode()
 
     def _merge(current_md: str, section: str, *, kind: str) -> tuple[str, str]:
-        """Return (merged_md, mode_used). llm_compress falls back deterministically."""
-        if mode == "llm_compress":
-            try:
-                return consolidate_policy_llm(current_md, section, scope=kind), "llm_compress"
-            except Exception:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "llm_compress merge failed for %s; falling back to append", kind,
-                    exc_info=True,
-                )
-                if kind == learning_store.REPLY_STRATEGY_SCOPE:
-                    return merge_strategy_policy_content(current_md, section, mode="append"), "append_fallback"
-                return merge_style_policy_content(current_md, section, mode="append"), "append_fallback"
+        """Return (merged_md, mode_used). llm_compress falls back to patch in _merge_section."""
         if kind == learning_store.REPLY_STRATEGY_SCOPE:
-            return merge_strategy_policy_content(current_md, section, mode=mode), mode
-        return merge_style_policy_content(current_md, section, mode=mode), mode
+            merged = merge_strategy_policy_content(current_md, section, mode=mode)
+        else:
+            merged = merge_style_policy_content(
+                current_md, section, mode=mode, policy_scope=kind,
+            )
+        return merged, mode
 
     style_policy_env = env if scope in pol.ENV_SCOPED_POLICIES else None
     current_style = pol.get_policy(
         conn, scope=scope, owner_user_id=owner_user_id, env=style_policy_env,
     )
-    merged_style, style_mode = _merge(
-        (current_style or {}).get("content_md") or "", style_md, kind=scope,
-    )
-    style_row = pol.put_policy(
-        conn,
-        scope=scope,
-        content_md=merged_style,
-        updated_by=updated_by,
-        title=str(proposal.get("title") or f"Style learning ({scope})"),
-        owner_user_id=owner_user_id,
-    )
+    current_style_md = (current_style or {}).get("content_md") or ""
+    style_row: dict[str, Any] = {}
+    style_mode = mode
+    merged_style = current_style_md
+    if style_actionable:
+        style_merge_md = proposal_section_for_policy_merge(style_md)
+        merged_style, style_mode = _merge(
+            current_style_md, style_merge_md, kind=scope,
+        )
+        style_row = pol.put_policy(
+            conn,
+            scope=scope,
+            content_md=merged_style,
+            updated_by=updated_by,
+            title=str(proposal.get("title") or f"Style learning ({scope})"),
+            owner_user_id=owner_user_id,
+        )
 
     strategy_result: dict[str, Any] = {"skipped": True, "reason": "no strategy section"}
     if strategy_md.strip():
-        current_strat = pol.get_policy(
-            conn,
-            scope=learning_store.REPLY_STRATEGY_SCOPE,
-            env=env,
-        )
-        merged_strat, _strat_mode = _merge(
-            (current_strat or {}).get("content_md") or "",
-            strategy_md,
-            kind=learning_store.REPLY_STRATEGY_SCOPE,
-        )
-        strat_row = pol.put_policy(
-            conn,
-            scope=learning_store.REPLY_STRATEGY_SCOPE,
-            content_md=merged_strat,
-            updated_by=updated_by,
-            title=f"Reply strategy learning ({env})",
-            env=env,
-        )
-        strategy_result = {
-            "scope": learning_store.REPLY_STRATEGY_SCOPE,
-            "version": strat_row.get("version"),
-            "policy_id": strat_row.get("id"),
-            "merged_chars": len(merged_strat),
-        }
+        if strategy_actionable:
+            current_strat = pol.get_policy(
+                conn,
+                scope=learning_store.REPLY_STRATEGY_SCOPE,
+                env=env,
+            )
+            strategy_merge_md = proposal_section_for_policy_merge(strategy_md)
+            merged_strat, _strat_mode = _merge(
+                (current_strat or {}).get("content_md") or "",
+                strategy_merge_md,
+                kind=learning_store.REPLY_STRATEGY_SCOPE,
+            )
+            strat_row = pol.put_policy(
+                conn,
+                scope=learning_store.REPLY_STRATEGY_SCOPE,
+                content_md=merged_strat,
+                updated_by=updated_by,
+                title=f"Reply strategy learning ({env})",
+                env=env,
+            )
+            strategy_result = {
+                "scope": learning_store.REPLY_STRATEGY_SCOPE,
+                "version": strat_row.get("version"),
+                "policy_id": strat_row.get("id"),
+                "merged_chars": len(merged_strat),
+            }
+        else:
+            strategy_result = {
+                "skipped": True,
+                "reason": "no_actionable_rules",
+            }
 
-    return {
+    out: dict[str, Any] = {
         "scope": scope,
-        "version": style_row.get("version"),
-        "policy_id": style_row.get("id"),
-        "merged_chars": len(merged_style),
         "merge_mode": style_mode,
         "strategy_policy": strategy_result,
     }
+    if style_actionable:
+        out["version"] = style_row.get("version")
+        out["policy_id"] = style_row.get("id")
+        out["merged_chars"] = len(merged_style)
+    else:
+        out["style_policy"] = {"skipped": True, "reason": "no_actionable_rules"}
+    return out
 
 
 def apply_edit_policy(

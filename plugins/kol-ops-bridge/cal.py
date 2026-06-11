@@ -70,10 +70,24 @@ log = logging.getLogger(__name__)
 # Connection / init
 # ---------------------------------------------------------------------------
 
-_DEFAULT_DB_PATH = Path(os.path.expanduser("~/.hermes/kol-ops-bridge/cal.db"))
 _DB_PATH_OVERRIDE: Optional[Path] = None
 _INIT_LOCK = threading.Lock()
 _INIT_DONE: set[str] = set()
+
+
+def _default_cal_db_path() -> Path:
+    """Resolve the canonical CAL SQLite file.
+
+    Prefer ``HERMES_HOME`` over ``$HOME`` so profile/cron shells that set
+    ``HOME`` to a nested profile home (e.g. ``~/.hermes/profiles/.../home``)
+    do not silently open an empty DB at
+    ``.../home/.hermes/kol-ops-bridge/cal.db`` while operator data lives in
+    ``$HERMES_HOME/kol-ops-bridge/cal.db``.
+    """
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        return Path(hermes_home).expanduser() / "kol-ops-bridge" / "cal.db"
+    return Path(os.path.expanduser("~/.hermes/kol-ops-bridge/cal.db"))
 
 
 def db_path() -> Path:
@@ -82,7 +96,7 @@ def db_path() -> Path:
     env = os.environ.get("HERMES_KOL_OPS_CAL_DB")
     if env:
         return Path(env)
-    return _DEFAULT_DB_PATH
+    return _default_cal_db_path()
 
 
 def set_db_path(path: Optional[Path]) -> None:
@@ -1999,6 +2013,13 @@ def _assert_discovery_not_skipped(*, identity_id: int, env: str) -> None:
     _ds.assert_discovery_not_skipped(identity_id=identity_id, env=env)
 
 
+# Statuses that must not be silently downgraded by a discovery re-ingest.
+_PROTECTED_CANDIDATE_STATUSES = frozenset({
+    "selected_for_outreach",
+    "needs_review",
+})
+
+
 def upsert_candidate(
     *,
     campaign_id: str,
@@ -2023,12 +2044,23 @@ def upsert_candidate(
         with _connect() as conn:
             now = _now()
             existing = conn.execute(
-                "SELECT id FROM campaign_candidates WHERE campaign_id=? AND identity_id=? AND env=?",
+                """SELECT id, candidate_status, selected_at, selected_by
+                     FROM campaign_candidates
+                    WHERE campaign_id=? AND identity_id=? AND env=?""",
                 (campaign_id, identity_id, env),
             ).fetchone()
             payload_json = _j(payload or {})
             if existing:
-                clear_selection = candidate_status in ("discovered", "shortlisted")
+                prior_status = str(existing["candidate_status"] or "")
+                effective_status = candidate_status
+                if (
+                    prior_status in _PROTECTED_CANDIDATE_STATUSES
+                    and candidate_status in ("discovered", "shortlisted")
+                ):
+                    # A discovery re-ingest must never silently undo an
+                    # operator approval / needs_review decision.
+                    effective_status = prior_status
+                clear_selection = effective_status in ("discovered", "shortlisted")
                 conn.execute(
                     """UPDATE campaign_candidates SET
                           source = ?, discovery_score = COALESCE(?, discovery_score),
@@ -2038,7 +2070,7 @@ def upsert_candidate(
                           selected_by = CASE WHEN ? THEN NULL ELSE selected_by END,
                           selected_at = CASE WHEN ? THEN NULL ELSE selected_at END
                        WHERE id = ?""",
-                    (source, discovery_score, relationship_status, candidate_status,
+                    (source, discovery_score, relationship_status, effective_status,
                      review_reason, payload_json, now,
                      clear_selection, clear_selection, existing["id"]),
                 )
@@ -2226,6 +2258,111 @@ def select_candidates_for_outreach(
             return cur.rowcount or 0
 
     return _safe("select_candidates_for_outreach", _do) or 0
+
+
+def merge_campaigns(
+    *, source_campaign_id: str, target_campaign_id: str, env: str = "LIVE"
+) -> dict[str, Any]:
+    """Fold every CAL row of ``source_campaign_id`` into ``target_campaign_id``.
+
+    One-product-one-campaign migration helper. Single transaction; raises on
+    error (NOT ``_safe``-wrapped — an ops merge must fail loudly, not half-run).
+
+    Conflict policy (when one identity exists in both campaigns):
+
+    * ``campaign_candidates`` — the **target** row wins (it carries the
+      operator's approval / rejection decision); the source row is dropped.
+    * ``kol_goal_state`` — the target row wins per (identity, goal); the
+      conflicting source row is dropped.
+    * ``kol_facts`` / ``kol_conversation_events`` / ``kol_escalations`` —
+      append-only logs, simply re-pointed at the target campaign.
+    * ``campaign_config`` — the target config is kept; the source row is
+      deleted (FK CASCADE requires candidates to be moved first).
+    * ``kol_relationship.last_campaign_id`` — re-pointed at the target.
+
+    Returns a summary dict of moved/dropped row counts.
+    """
+    if source_campaign_id == target_campaign_id:
+        raise ValueError("source and target campaign ids must differ")
+    if env not in ("TEST", "LIVE"):
+        raise ValueError(f"env must be TEST or LIVE; got {env!r}")
+
+    with _connect() as conn:
+        target_cfg = conn.execute(
+            "SELECT campaign_id FROM campaign_config WHERE campaign_id=?",
+            (target_campaign_id,),
+        ).fetchone()
+        if target_cfg is None:
+            raise ValueError(f"target campaign_config not found: {target_campaign_id}")
+
+        summary: dict[str, Any] = {
+            "source_campaign_id": source_campaign_id,
+            "target_campaign_id": target_campaign_id,
+            "env": env,
+        }
+
+        # 1. Candidates — drop source rows whose identity already exists in
+        #    the target (target carries the operator decision), move the rest.
+        dropped = conn.execute(
+            """DELETE FROM campaign_candidates
+                WHERE campaign_id=? AND env=?
+                  AND identity_id IN (
+                        SELECT identity_id FROM campaign_candidates
+                         WHERE campaign_id=? AND env=?)""",
+            (source_campaign_id, env, target_campaign_id, env),
+        ).rowcount
+        moved = conn.execute(
+            "UPDATE campaign_candidates SET campaign_id=?, updated_at=? "
+            "WHERE campaign_id=? AND env=?",
+            (target_campaign_id, _now(), source_campaign_id, env),
+        ).rowcount
+        summary["candidates_moved"] = moved
+        summary["candidates_dropped_as_duplicates"] = dropped
+
+        # 2. Goal states — target wins per (identity, goal).
+        gs_dropped = conn.execute(
+            """DELETE FROM kol_goal_state
+                WHERE campaign_id=? AND env=?
+                  AND EXISTS (
+                        SELECT 1 FROM kol_goal_state t
+                         WHERE t.campaign_id=? AND t.env=kol_goal_state.env
+                           AND t.identity_id=kol_goal_state.identity_id
+                           AND t.goal=kol_goal_state.goal)""",
+            (source_campaign_id, env, target_campaign_id),
+        ).rowcount
+        gs_moved = conn.execute(
+            "UPDATE kol_goal_state SET campaign_id=? WHERE campaign_id=? AND env=?",
+            (target_campaign_id, source_campaign_id, env),
+        ).rowcount
+        summary["goal_states_moved"] = gs_moved
+        summary["goal_states_dropped_as_duplicates"] = gs_dropped
+
+        # 3. Append-only logs — re-point campaign_id.
+        for table, key in (
+            ("kol_facts", "facts_moved"),
+            ("kol_conversation_events", "events_moved"),
+            ("kol_escalations", "escalations_moved"),
+        ):
+            summary[key] = conn.execute(
+                f"UPDATE {table} SET campaign_id=? WHERE campaign_id=? AND env=?",
+                (target_campaign_id, source_campaign_id, env),
+            ).rowcount
+
+        # 4. Relationship pointers.
+        summary["relationships_repointed"] = conn.execute(
+            "UPDATE kol_relationship SET last_campaign_id=? WHERE last_campaign_id=?",
+            (target_campaign_id, source_campaign_id),
+        ).rowcount
+
+        # 5. Drop the now-empty source campaign_config.
+        summary["source_config_deleted"] = conn.execute(
+            "DELETE FROM campaign_config WHERE campaign_id=?",
+            (source_campaign_id,),
+        ).rowcount
+
+        conn.commit()
+    log.info("merge_campaigns %s", summary)
+    return summary
 
 
 def resolve_candidate_relationships(*, campaign_id: str, env: str = "LIVE") -> int:
@@ -2845,6 +2982,36 @@ def _truthy(v: Any) -> bool:
     return True
 
 
+def _filter_outreach_sent_downgrade(
+    facts: Mapping[str, Any],
+    *,
+    identity_id: int,
+    campaign_id: Optional[str],
+    env: str,
+    source: str,
+    conn: Optional[sqlite3.Connection] = None,
+) -> dict[str, Any]:
+    """Drop ``offer.outreach_sent=false`` when a confirmed send timestamp exists.
+
+    Bounce DSN classifier turns must not undo ``gmail:sent-reconcile`` delivery.
+    """
+    if "offer.outreach_sent" not in facts or _truthy(facts.get("offer.outreach_sent")):
+        return dict(facts)
+    if not (isinstance(source, str) and source.startswith("email:")):
+        return dict(facts)
+    existing = latest_facts_for(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        conn=conn,
+    )
+    if existing.get("offer.outreach_sent_at"):
+        filtered = dict(facts)
+        filtered.pop("offer.outreach_sent", None)
+        return filtered
+    return dict(facts)
+
+
 def write_facts(
     *,
     identity_id: int,
@@ -2891,8 +3058,20 @@ def write_facts(
     def _do() -> int:
         with _connect() as conn:
             now = _now()
+            effective_facts = (
+                _filter_outreach_sent_downgrade(
+                    facts,
+                    identity_id=identity_id,
+                    campaign_id=campaign_id,
+                    env=env,
+                    source=source,
+                    conn=conn,
+                )
+                if namespace == "offer"
+                else dict(facts)
+            )
             n = 0
-            for k, v in facts.items():
+            for k, v in effective_facts.items():
                 conn.execute(
                     """INSERT INTO kol_facts
                        (identity_id, campaign_id, fact_namespace, fact_key,
@@ -3040,8 +3219,20 @@ def write_facts_multi(
             for ns, facts in namespaces.items():
                 if not facts:
                     continue
+                effective_facts = (
+                    _filter_outreach_sent_downgrade(
+                        facts,
+                        identity_id=identity_id,
+                        campaign_id=campaign_id,
+                        env=env,
+                        source=source,
+                        conn=conn,
+                    )
+                    if ns == "offer"
+                    else dict(facts)
+                )
                 n = 0
-                for k, v in facts.items():
+                for k, v in effective_facts.items():
                     conn.execute(
                         """INSERT INTO kol_facts
                            (identity_id, campaign_id, fact_namespace, fact_key,
@@ -4374,7 +4565,11 @@ def list_approved_reply_drafts(*, env: str = "LIVE") -> list[dict[str, Any]]:
         facts = latest_facts_for(
             identity_id=identity_id, campaign_id=campaign_id, env=env
         )
-        if facts.get("offer.outreach_sent") is True:
+        from .outreach_touch import _fact_is_true as _outreach_sent_is_true
+
+        if _outreach_sent_is_true(facts.get("offer.outreach_sent")):
+            continue
+        if facts.get("offer.outreach_sent_at"):
             continue
         value = _jl(r["fact_value"], None)
         if not isinstance(value, dict) or value.get("decision") != "approved":
@@ -4487,9 +4682,18 @@ def archive_collab(
     if run_outcome_retro:
         try:
             from . import learning_outcome
+            import time as _time
 
+            # #region agent log
+            _retro_t0 = _time.perf_counter()
+            try:
+                with open("/Users/arnold/agent_prj/.cursor/debug-6df93f.log", "a") as _df:
+                    _df.write(json.dumps({"sessionId": "6df93f", "hypothesisId": "H1", "location": "cal.py:archive_collab:before_retro", "message": "outcome_retro_start", "data": {"identity_id": identity_id, "campaign_id": campaign_id}, "timestamp": int(_time.time() * 1000)}) + "\n")
+            except Exception:
+                pass
+            # #endregion
             with _connect() as conn:
-                learning_outcome.analyze_one_collab_outcome(
+                retro = learning_outcome.analyze_one_collab_outcome(
                     conn,
                     identity_id=identity_id,
                     campaign_id=campaign_id,
@@ -4497,6 +4701,13 @@ def archive_collab(
                     outcome=outcome,
                     updated_by=f"archive:{decided_by}",
                 )
+            # #region agent log
+            try:
+                with open("/Users/arnold/agent_prj/.cursor/debug-6df93f.log", "a") as _df:
+                    _df.write(json.dumps({"sessionId": "6df93f", "hypothesisId": "H1", "location": "cal.py:archive_collab:after_retro", "message": "outcome_retro_done", "data": {"identity_id": identity_id, "campaign_id": campaign_id, "elapsed_ms": round((_time.perf_counter() - _retro_t0) * 1000, 1), "skipped": bool((retro or {}).get("skipped")), "llm_used": (retro or {}).get("llm_used")}, "timestamp": int(_time.time() * 1000)}) + "\n")
+            except Exception:
+                pass
+            # #endregion
         except Exception:
             log.warning(
                 "Tier1 collab outcome retro failed after archive_collab",
@@ -4627,6 +4838,7 @@ __all__ = [
     "list_decided_approvals",
     "list_approved_reply_drafts",
     "list_sent_reply_drafts_for_edit_learning",
+    "merge_campaigns",
     "open_escalation",
     "recompute_goals",
     "reply_dispatch_status",

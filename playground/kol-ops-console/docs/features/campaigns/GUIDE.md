@@ -43,6 +43,11 @@
 ## 概念
 
 - `campaign_id` + `env` 唯一标识活动
+- **一个产品（SKU）+ env 只允许一个 campaign**（product ≡ campaign）：
+  - `POST /campaigns/{id}/start` 对「同 SKU 已存在不同 campaign_id」硬性返回 409 `one_campaign_per_product`（**不可用 `force` 绕过**），响应含 `existing_campaign_id`；重启**同一** campaign_id 不受影响。
+  - 产品页启动表单默认回填该 SKU 已有的 campaign_id。
+  - `init_db` 在无历史重复时创建 `UNIQUE(sku, env)` 索引（`ux_product_campaigns_sku_env`）；存在历史重复则记 WARNING 并跳过，需先用合并工具清理。
+  - **合并历史重复**：`playground/kol-ops-console/scripts/ops/merge_campaigns.py --source <旧> --target <留存> --env LIVE`（自动备份 app.db + cal.db；Bridge 侧走 `POST /campaigns/{target}/merge-from`，冲突时 target 行优先即保留操作员审批状态；Console 侧迁移 `product_campaign_runs`、删源行、写 `campaign.merge` audit）。
 - 全局 `useCampaignStore` 决定 Kanban/审批过滤范围
 
 ## 发现数量门控与结构化续跑
@@ -78,7 +83,7 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 ### 显示与持久化
 
 - **未批准的候选会一直留在 shortlist**，直到操作员手动移除；批准 shortlist **不会**自动隐藏或拒绝未勾选的行。
-- `GET /campaigns/{id}/shortlist` 返回 `candidate_status` 不为 `rejected` / `archived` 的可见行；`counts.rejected_or_archived_hidden` 为已隐藏数量。
+- `GET /campaigns/{id}/shortlist` 的 `candidates` **仅含待审批池**（`discovered` / `shortlisted` / `needs_review` 等，不含 `selected_for_outreach`）；已批准人数在 `counts.already_approved`，产品页提供 KOL 看板链接。`rejected` / `archived` 不出现在 `candidates`；`counts.rejected_or_archived_hidden` 为已隐藏数量。
 - 产品页 Shortlist review 每行待审批候选有 **「从 shortlist 移除」**：弹出反馈弹窗（原因标签必选 + 评论，见下「决策学习反馈」），随后调用 `POST /campaigns/{id}/candidates/status`，将 `candidate_status` 设为 `rejected`（`review_reason=operator_removed_from_shortlist`，body 另带 `reason_tags[]` + `comment`）。**CAL 行仍在库中**，只是不再出现在 shortlist、也无法被勾选批准；指标页等全量视图仍可看到该发现记录。
 - **「转到其他活动」**（Phase 1a，仅发现后、批准前）：`POST /identities/{identity_id}/transfer-campaign`，body 含 `from_campaign_id`、`to_campaign_id`、`env`、`reason`、`reason_tags[]`（标签必选；`reason` 即学习评论）。Bridge 将源行标为 `rejected`（`review_reason` 含 `transferred_to:<目标>`），在目标活动写入 `discovered` + `source=operator_transfer`，并 `resolve-relationships`。目标活动须已存在 `campaign_config`。若目标已有非 terminal 候选行则 409。CLI：`kol_bridge_tool.py transfer-campaign --identity-id … --from-campaign-id … --to-campaign-id …`。
 

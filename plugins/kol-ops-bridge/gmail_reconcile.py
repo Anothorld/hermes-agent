@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import fcntl
-import json
 import logging
 import os
 import sqlite3
@@ -15,44 +14,10 @@ from typing import Any, Iterator, Optional
 from . import cal
 from . import mailbox_resolver
 from . import reply_diff
-from .gmail_client import GmailClient, GmailUnavailable
+from .gmail_client import GmailClient, GmailUnavailable, is_bounce_body
 from .gmail_console import list_operator_gmail_clients
 
 log = logging.getLogger(__name__)
-
-_DEBUG_LOG_PATH = Path(
-    os.environ.get(
-        "KOL_OPS_DEBUG_LOG_PATH",
-        "/Users/arnold/agent_prj/.cursor/debug-bc8612.log",
-    ),
-)
-
-
-def _dbg_log(
-    *,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, Any],
-    run_id: str = "pre-fix",
-) -> None:
-    # #region agent log
-    try:
-        payload = {
-            "sessionId": "bc8612",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-        }
-        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-    # #endregion
-
 
 _GMAIL_LOCK_PATH = Path(
     os.environ.get(
@@ -123,6 +88,45 @@ def has_draft_edit_learning_event(
     return row is not None
 
 
+def has_draft_edit_learning_for_sent_message(
+    conn: sqlite3.Connection,
+    *,
+    env: str,
+    sent_message_id: str,
+) -> bool:
+    """True when this Gmail sent message id was already captured for learning."""
+    mid = str(sent_message_id or "").strip()
+    if not mid:
+        return False
+    row = conn.execute(
+        """SELECT 1 FROM kol_conversation_events
+            WHERE env=? AND event_type='draft_edit_learning'
+              AND json_extract(payload_json, '$.sent_message_id') = ?
+            LIMIT 1""",
+        (env, mid),
+    ).fetchone()
+    return row is not None
+
+
+def _thread_has_delivery_bounce(gmail: GmailClient, thread_id: str) -> bool:
+    """True when the Gmail thread contains a mailer-daemon delivery failure."""
+    if not thread_id:
+        return False
+    try:
+        thread = gmail.get_thread(str(thread_id))
+    except GmailUnavailable:
+        return False
+    if not thread:
+        return False
+    for item in thread:
+        if is_bounce_body(
+            str(item.get("body") or ""),
+            from_addr=str(item.get("from") or ""),
+        ):
+            return True
+    return False
+
+
 def _build_edit_payload(
     *,
     gmail: GmailClient,
@@ -146,6 +150,14 @@ def _build_edit_payload(
     except GmailUnavailable as exc:
         log.warning("resolve_sent_body failed for thread %s: %s", thread_id, exc)
     if not agent_body or not sent_body:
+        return None
+    if is_bounce_body(sent_body):
+        return None
+    if _thread_has_delivery_bounce(gmail, str(thread_id)):
+        log.info(
+            "skip edit-learning for thread %s: delivery bounce present",
+            thread_id,
+        )
         return None
     return reply_diff.build_edit_learning_payload(
         agent_body=agent_body,
@@ -200,9 +212,24 @@ def _process_sent_reply_row(
         gmail=gmail, row=row, thread_id=str(thread_id), gmail_draft=gmail_draft,
         operator_user_id=mailbox_user_id,
     )
+    sent_message_id = str((edit_payload or {}).get("sent_message_id") or "").strip()
+
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        edit_already_captured = bool(
+            sent_message_id
+            and has_draft_edit_learning_for_sent_message(
+                conn, env=env, sent_message_id=sent_message_id,
+            )
+        )
 
     event_id: Optional[int] = None
     edit_event_written = False
+    if write_outbound_sent and edit_payload is None:
+        return {
+            "skipped": True,
+            "reason": "no_valid_sent_body",
+            "thread_id": thread_id,
+        }
     if write_outbound_sent:
         event_id = cal.write_event(
             identity_id=identity_id,
@@ -231,7 +258,7 @@ def _process_sent_reply_row(
             source_event_id=event_id,
             env=env,
         )
-    elif edit_payload is not None:
+    elif edit_payload is not None and not edit_already_captured:
         cal.write_event(
             identity_id=identity_id,
             campaign_id=campaign_id,
@@ -244,7 +271,7 @@ def _process_sent_reply_row(
         )
         edit_event_written = True
 
-    if write_outbound_sent and edit_payload is not None:
+    if write_outbound_sent and edit_payload is not None and not edit_already_captured:
         cal.write_event(
             identity_id=identity_id,
             campaign_id=campaign_id,
@@ -367,19 +394,6 @@ def _run_reconcile_sent_unlocked(
         if outcome.get("edit_learning_written"):
             edit_learning_count += 1
         reconciled.append(outcome)
-    _dbg_log(
-        hypothesis_id="H1",
-        location="gmail_reconcile.py:_run_reconcile_sent_unlocked",
-        message="reconcile_pass_complete",
-        data={
-            "env": env,
-            "mailbox_user_id": mailbox_user_id,
-            "sent_threads_seen": len(sent_thread_ids),
-            "drafts_seen": len(draft_rows),
-            "reconciled_count": len(reconciled),
-            "skip_reasons": skip_reasons,
-        },
-    )
     return {
         "env": env,
         "sent_threads_seen": len(sent_thread_ids),

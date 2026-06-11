@@ -18,29 +18,74 @@ import {
 } from '../useInflightLock';
 import { REJECT_TAGS } from '../constants/rejectTags';
 import { policyScopeLabel } from '../constants/domainLabels';
+import {
+  escalationDisplaySummary,
+  isLikelyEnglishOperatorText,
+} from '../constants/escalationLabels';
 
 type ApprovalTypeFilter =
   | 'all'
-  | 'reply_draft'
+  | 'reply_draft_initial'
+  | 'reply_draft_inbound'
   | 'style_learning'
   | 'outcome_learning'
   | 'discovery_learning'
   | 'other';
 
+const TYPE_FILTER_ORDER: ApprovalTypeFilter[] = [
+  'all',
+  'reply_draft_initial',
+  'reply_draft_inbound',
+  'style_learning',
+  'outcome_learning',
+  'discovery_learning',
+  'other',
+];
+
 const TYPE_FILTER_LABEL: Record<ApprovalTypeFilter, string> = {
   all: '全部',
-  reply_draft: '回信草稿',
+  reply_draft_initial: '初邀',
+  reply_draft_inbound: '来信回复',
   style_learning: '学习提案',
   outcome_learning: '合作复盘',
   discovery_learning: '发现标准',
   other: '其他',
 };
 
-function approvalTypeOf(factPath: string): ApprovalTypeFilter {
-  if (factPath === 'approval.reply_draft') return 'reply_draft';
-  if (factPath === 'approval.style_learning_proposal') return 'style_learning';
-  if (factPath === 'approval.outcome_learning_proposal') return 'outcome_learning';
-  if (factPath === 'approval.discovery_learning_proposal') return 'discovery_learning';
+const INITIAL_OUTREACH_CHILD_SKILLS = new Set([
+  'kol-cold-outreach',
+  'kol-reengagement-outreach',
+]);
+
+function isInitialOutreachReplyDraft(row: ApprovalRow): boolean {
+  if (row.fact_path !== 'approval.reply_draft') return false;
+  if (row.reply_draft_kind === 'initial_outreach') return true;
+  if (row.reply_draft_kind === 'inbound_reply') return false;
+  const ctx = row.context ?? {};
+  const childSkill = String(ctx.child_skill ?? '').trim();
+  if (INITIAL_OUTREACH_CHILD_SKILLS.has(childSkill)) return true;
+  const draft = ctx.draft;
+  if (draft && typeof draft === 'object' && (draft as { kind?: string }).kind === 'initial_outreach') {
+    return true;
+  }
+  const expectedThread = `outreach_${row.campaign_id}_${row.identity_id}`;
+  const expectedSource = `draft:outreach_${row.campaign_id}_${row.identity_id}`;
+  for (const key of ['source_message_id', 'thread_id'] as const) {
+    const anchor = String(ctx[key] ?? '').trim();
+    if (!anchor) continue;
+    if (anchor.startsWith('draft:outreach_') || anchor.startsWith('outreach_')) return true;
+    if (anchor === expectedThread || anchor === expectedSource) return true;
+  }
+  return false;
+}
+
+function approvalTypeOf(row: ApprovalRow): ApprovalTypeFilter {
+  if (row.fact_path === 'approval.reply_draft') {
+    return isInitialOutreachReplyDraft(row) ? 'reply_draft_initial' : 'reply_draft_inbound';
+  }
+  if (row.fact_path === 'approval.style_learning_proposal') return 'style_learning';
+  if (row.fact_path === 'approval.outcome_learning_proposal') return 'outcome_learning';
+  if (row.fact_path === 'approval.discovery_learning_proposal') return 'discovery_learning';
   return 'other';
 }
 
@@ -116,6 +161,7 @@ export type ApprovalRow = {
   handle?: string | null;
   draft_origin?: string | null;
   draft_origin_label?: string | null;
+  reply_draft_kind?: 'initial_outreach' | 'inbound_reply' | null;
 };
 
 const DRAFT_ORIGIN_BADGE_CLASS: Record<string, string> = {
@@ -405,7 +451,7 @@ export function ApprovalsPage() {
 
   const visibleRows = useMemo(() => {
     return rows.filter((r) => {
-      if (typeFilter !== 'all' && approvalTypeOf(r.fact_path) !== typeFilter) {
+      if (typeFilter !== 'all' && approvalTypeOf(r) !== typeFilter) {
         return false;
       }
       if (sla === 'all') return true;
@@ -492,7 +538,7 @@ export function ApprovalsPage() {
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-lg font-semibold">待审批</h1>
         <div className="flex flex-wrap gap-1 rounded border border-slate-200 bg-slate-50 p-0.5 text-xs">
-          {(Object.keys(TYPE_FILTER_LABEL) as ApprovalTypeFilter[]).map((t) => (
+          {TYPE_FILTER_ORDER.map((t) => (
             <button
               key={t}
               type="button"
@@ -558,6 +604,24 @@ export function ApprovalsPage() {
           </>
         )}
       </div>
+      {typeFilter === 'reply_draft_initial' && (
+        <div className="rounded border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+          <div className="font-medium">初邀草稿说明</div>
+          <p className="mt-1 text-xs leading-relaxed">
+            首次冷启动触达（主题通常不是 <code className="text-[11px]">Re:</code>）。
+            批准后在 Gmail <strong>新建独立草稿</strong>，不挂到已有会话；请核对产品链接与称呼。
+          </p>
+        </div>
+      )}
+      {typeFilter === 'reply_draft_inbound' && (
+        <div className="rounded border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+          <div className="font-medium">来信回复草稿说明</div>
+          <p className="mt-1 text-xs leading-relaxed">
+            KOL 来信后的回复草稿（含升级恢复、追信、自动起草等）。
+            批准后在<strong>原 Gmail 线程</strong>内创建回复草稿，卡片可展开查看对方来信。
+          </p>
+        </div>
+      )}
       {typeFilter === 'style_learning' && (
         <div className="rounded border border-violet-300 bg-violet-50 px-3 py-2 text-sm text-violet-900">
           <div className="font-medium">学习提案说明</div>
@@ -753,8 +817,10 @@ function ApprovalRowItem({
   };
   const [editLearning, setEditLearning] = useState<EditLearning | null>(null);
 
+  const isPendingRow = status === 'pending' && row.status === 'pending';
+
   useEffect(() => {
-    if (!isReplyDraft) {
+    if (!isReplyDraft || isPendingRow) {
       setEditLearning(null);
       return;
     }
@@ -778,7 +844,7 @@ function ApprovalRowItem({
     return () => {
       alive = false;
     };
-  }, [isReplyDraft, row.identity_id, row.campaign_id, env, row.opened_at, lastActionAt]);
+  }, [isReplyDraft, isPendingRow, row.identity_id, row.campaign_id, env, row.opened_at, lastActionAt]);
 
   // Release the refine lock as soon as a newer draft revision lands —
   // otherwise the "优化生成中…" banner sticks for the full 5-min TTL
@@ -870,7 +936,6 @@ function ApprovalRowItem({
             campaignId={row.campaign_id}
             env={env}
             decidedBy="console-user"
-            editLearning={editLearning}
             approveButtonLabel="批准并创建 Gmail 草稿"
             onApproved={() => {
               void onRefresh();
@@ -898,14 +963,28 @@ function ApprovalRowItem({
             editLearning={editLearning}
           />
         )}
-        {escalation && (
-          <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-900">
-            <div className="font-medium">升级上下文：{escalation.reason}</div>
-            {escalation.suggested_question && (
-              <div className="mt-0.5 line-clamp-2">{escalation.suggested_question}</div>
-            )}
-          </div>
-        )}
+        {escalation && (() => {
+          const escSummary = escalationDisplaySummary(escalation.reason, escalation.rule_id);
+          const questionIsEnglish = isLikelyEnglishOperatorText(escalation.suggested_question);
+          return (
+            <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-xs text-rose-900">
+              <div className="font-medium">升级上下文：{escSummary.primary}</div>
+              {escSummary.secondary && (
+                <div className="mt-0.5 line-clamp-2 text-rose-800/80">{escSummary.secondary}</div>
+              )}
+              {escalation.suggested_question && (
+                <div className="mt-1">
+                  {questionIsEnglish && (
+                    <span className="mr-1 rounded bg-rose-100 px-1 text-[10px] text-rose-700">
+                      AI 英文原文
+                    </span>
+                  )}
+                  <span className="line-clamp-2">{escalation.suggested_question}</span>
+                </div>
+              )}
+            </div>
+          );
+        })()}
         {refineHintText && (
           <div className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
             {refineHintText}

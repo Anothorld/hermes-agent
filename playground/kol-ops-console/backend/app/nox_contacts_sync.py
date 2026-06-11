@@ -223,11 +223,6 @@ async def attempt_gate_b_contacts(
 
     params = resolve_nox_contacts_params(ident, facts_resp)
     if not gate_b_eligible(params):
-        # #region agent log
-        import json as _json, time as _time
-        with open("/Users/arnold/agent_prj/.cursor/debug-f680ad.log", "a") as _df:
-            _df.write(_json.dumps({"sessionId": "f680ad", "hypothesisId": "H2", "location": "nox_contacts_sync.py:attempt_gate_b_contacts", "message": "gate_b not eligible", "data": {"identity_id": identity_id, "params": params}, "timestamp": int(_time.time() * 1000)}) + "\n")
-        # #endregion
         return {"skipped": True, "reason": "no_nox_creator_or_url"}
 
     try:
@@ -251,11 +246,6 @@ async def attempt_gate_b_contacts(
         tz=tz,
         monthly_budget=budget,
     )
-    # #region agent log
-    import json as _json, time as _time
-    with open("/Users/arnold/agent_prj/.cursor/debug-f680ad.log", "a") as _df:
-        _df.write(_json.dumps({"sessionId": "f680ad", "hypothesisId": "H1-H3", "location": "nox_contacts_sync.py:attempt_gate_b_contacts", "message": "nox contacts cli result", "data": {"identity_id": identity_id, "success": out.get("success"), "error_code": out.get("error_code"), "email": (out.get("normalized_summary") or {}).get("email"), "cache_hit": out.get("cache_hit")}, "timestamp": int(_time.time() * 1000)}) + "\n")
-    # #endregion
     if out.get("success") is False:
         return classify_nox_contacts_cli_failure(out)
 

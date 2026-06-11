@@ -38,6 +38,11 @@
 |------|------|------|
 | SENT 对账 | 操作员在 Gmail 点 Send 后标记已发 + edit-learning | `gmail_poller` tick / `POST /gmail/reconcile-sent` |
 
+SENT 对账护栏（2026-06-11）：
+- **退信 DSN**（`mailer-daemon` / `Address not found`）不会写入 `draft_edit_learning`，也不会把 `offer.outreach_sent` 标为 true。
+- 已有 `offer.outreach_sent_at` 时，入站分类器不得再用 `email:<message_id>` 把 `offer.outreach_sent` 写回 false（避免 reconcile 每 9 分钟重复跑同一 approved 稿）。
+- `list_approved_reply_drafts` 在 `outreach_sent_at` 已存在时跳过，即使 `outreach_sent` 被误写成 false。
+
 **Note:** `run_reconcile_all_mailboxes` must call the unlocked reconcile helper while already holding `gmail_reconcile.lock`; re-entering the lock deadlocks the bridge worker and leaves cards stuck on「Draft 待发送」.
 | 入站回信 | 扫 INBOX → `kol_inbound_reply` → gateway dispatch | `gmail_inbound_poller` tick |
 | 运维快照 / one-shot | 最近 tick、手动跑一次 | `GET /gmail/worker/status`、`POST /gmail/inbound-poller/run-once` |

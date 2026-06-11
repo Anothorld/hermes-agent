@@ -173,6 +173,27 @@ Use dedicated projection commands such as
 `list-candidate-handles` instead of piping `list-candidates` into ad hoc
 `python -c` snippets.
 
+### Merging duplicate campaigns (one product == one campaign)
+
+`POST /campaigns/{target}/merge-from` (CLI: `merge-campaigns`) folds every CAL
+row of a source campaign into the target: candidates, goal states, facts,
+events, escalations, `kol_relationship.last_campaign_id`; the source
+`campaign_config` is deleted. On conflicts (same identity in both pools) the
+**target** row wins — operator approvals are never downgraded. Console-side
+state is migrated by `playground/kol-ops-console/scripts/ops/merge_campaigns.py`,
+which backs up both DBs first and calls this endpoint.
+
+```bash
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py merge-campaigns \
+  --env LIVE \
+  --source-campaign-id "SEB8010-20260610" \
+  --target-campaign-id "SEB8010-20260608"
+```
+
+Related invariant: `cal.upsert_candidate` never downgrades an existing
+`selected_for_outreach` / `needs_review` row back to `discovered`/`shortlisted`
+on re-ingest (rediscovery cannot undo operator approval).
+
 ### Outreach touch cooldown (14 days)
 
 Cross-campaign **confirmed outreach sends** (`outreach.sent` events and

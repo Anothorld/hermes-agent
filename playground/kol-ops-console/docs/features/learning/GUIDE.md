@@ -10,6 +10,21 @@
 |------|------|
 | `/learning` | `LearningPage.tsx` |
 
+## 自主调度（cron）
+
+除人工审批外，采集与蒸馏可由系统 cron 自动执行（LIVE only）。安装：
+
+```bash
+playground/learning/install_learning_cron.sh
+```
+
+- **每 15 分钟** — `capture`（Gmail 编辑对齐、回填、合作复盘 Tier1）
+- **每天 03:20** — `nightly`（蒸馏提案、发现学习、定价、审计；**提案仍须待审批**）
+
+日志：`~/.hermes/logs/learning/{capture,nightly}.log`。前提：Bridge HTTP 可达。详见 `agent_prj/playground/learning/CRON.md`。
+
+手动「运行套件」与 cron 调用同一 Bridge API，用于补跑或预览。
+
 ## 关键文件
 
 | 层 | 文件 |
@@ -26,6 +41,7 @@
 | GET | `/learning/edit-distance-trend` | 编辑幅度趋势（收敛度量，只读；含批准标注） |
 | GET | `/learning/preview-edit-batch` | 下一批将蒸馏的编辑样本预览（只读）；`edited_available` 为**条数**（与 overview 一致），未达阈值时 `reason=below_style_learning_batch_threshold` |
 | POST | `/learning/policy-merge-preview` | 批准前 current vs merged policy 预览 |
+| POST | `/learning/sanitize-policy-metadata` | 清理存量 policy 中的 Context notes / 蒸馏标题（维护） |
 | POST | `/learning/run-jobs` | scheduled jobs（LIVE） |
 | GET | `/learning/job-runs`, `edit-events`, `reject-events` | 同名 |
 | POST | `/learning/propose-edit-policy` | apply-edit-policy |
@@ -45,8 +61,12 @@
 ## 批次语义（重要，避免误解）
 
 - 「生成学习提案」的阈值 `KOL_STYLE_LEARNING_BATCH_SIZE`（默认 **5**）指**累计 N 条 `draft_edit_learning` 事件**（操作员在 Gmail 改过 AI 草稿后发送，`was_edited=true`），**不是「N 封任意邮件」也不是「固定 N 个 KOL」**。
-- **编辑批次进度**显示全库可蒸馏合计；**按范围分表**（`edit_stats_by_scope`）分别统计 `company_style` 与各 `user_style` 操作员。已生成、待审批的提案会占用一批样本（`edited_queued_in_pending`），批准后才从池子消费。
-- 批准合并默认 `KOL_STYLE_LEARNING_MERGE_MODE=replace_section`；审批卡可展开「合并效果」并显示 **将新增 / 将替换 / 将追加**（`merge_effect`）。
+- **待蒸馏样本积压**（学习页 §1）显示窗口内尚未消费的 `draft_edit_learning` **总条数**（可远大于单批阈值，例如积压 175 条但单份提案仍只取 5 条）。**待审批页**卡片上的「编辑样本 N 条」才是该提案实际规模（`sample_count` / `source_event_ids`）。
+- Gmail **sent-reconcile** 定时对齐会为每封已发终稿写入学习样本；2026-06-10 曾因未按 `sent_message_id` 去重导致同一封邮件被重复计数（已修复：`gmail_reconcile.has_draft_edit_learning_for_sent_message`）。修复前写入 CAL 的重复行**仍留在库里**，但 **API 读取**（`learning_store.list_learning_events`、编辑趋势）会按 `sent_message_id` 折叠为一条，学习页「编辑信号」不再重复展示同一封已发邮件。
+- **编辑信号**（学习页 § 编辑信号）展示的是已入库的 `draft_edit_learning` 历史记录，**不是**当前待审批草稿。同一 KOL+活动 若既有 pending 回信又有历史已发编辑，容易误以为「未发送也算样本」——以事件时间戳 / `sent_message_id` 为准。
+- **发送失败（退信 DSN）**不入学习样本、不计入统计：采集时 `is_bounce_body` + 线程内退信检测会跳过 `draft_edit_learning`；读取时 `learning_store` 会剔除退信正文行，并排除同一 KOL+活动 下所有编辑样本（含后续正文正确的行）。历史 CAL 行仍保留，但 API/UI/蒸馏批次不再展示或计数。
+- **按范围分表**（`edit_stats_by_scope`）分别统计 `company_style` 与各 `user_style` 操作员。已生成、待审批的提案会占用一批样本（`edited_queued_in_pending`），**仅批准**后才从池子消费；驳回后样本回到队列。
+- 批准合并默认 `KOL_STYLE_LEARNING_MERGE_MODE=llm_compress`（**LLM 智能合并**；失败回退 patch）；预览用 patch 近似（`preview_note`）。`### Context notes` **不会写入新批准**；**08:04 之前已写入的存量**需一次性 `POST /learning/sanitize-policy-metadata`（scope=`reply_strategy`, env=LIVE）清理。无规则段跳过（`merge_skipped`）。
 - **每条事件 = 一次「Agent 草稿→操作员终稿」的 diff**，并附带该 KOL+campaign 的会话时间线（最多 30 条）+ 当前 facts，作为 1 个 LLM 样本。
 - 10 条事件可能来自 10 个不同 KOL，也可能少于 10 个（同一 KOL 多次编辑各占一条）。提案卡片展示 `sample_identity_count`（涉及多少位 KOL）。
 
@@ -90,7 +110,7 @@
 
 | Job | 触发 | 产出 |
 |-----|------|------|
-| `apply_discovery_policy` | 某 SPU/品类组样本 ≥ `KOL_DISCOVERY_LEARNING_BATCH_SIZE`（默认 10） | pending `approval.discovery_learning_proposal`（每组一份，含 `sample_identity_count`）→ 批准后合并入 `discovery_criteria:spu:<sku>` / `discovery_criteria:category:<slug>` policy；任务前置做未归类 SKU 的 LLM 品类推断。蒸馏分页读取窗口内全部未消费样本（非单页 500 上限）。蒸馏 prompt 会引用该 scope 近期的 `discovery_proposal_rejected` 驳回反馈（被否原因不重提） |
+| `apply_discovery_policy` | 某 SPU/品类组样本 ≥ `KOL_DISCOVERY_LEARNING_BATCH_SIZE`（默认 10） | pending `approval.discovery_learning_proposal`（每组一份，含 `sample_identity_count`）→ 批准后合并入 `discovery_criteria:spu:<sku>` / `discovery_criteria:category:<slug>` policy；任务前置做未归类 SKU 的 LLM 品类推断。蒸馏分页读取窗口内全部未消费样本（非单页 500 上限）。蒸馏 prompt 会引用该 scope 近期的 `discovery_proposal_rejected` 驳回反馈（被否原因不重提）。提案末尾的 **Context notes / 背景说明**（批次规模、行动构成等）仅在审批页展示，合并 policy 与发现 brief 时会剥离（与邮件风格学习一致） |
 | `mine_discovery_tags` | 评论中某原因出现 ≥ `KOL_DISCOVERY_TAG_MINE_MIN_COUNT`（默认 5） | `discovery_decision_tags` 中 `status=proposed` 的新标签 → 学习页「Discovery 决策学习」面板批准后即出现在反馈弹窗。LLM 引用的 example 必须能在源评论中验证（防虚报频次，验证失败 `examples_not_found_in_comments` 忽略） |
 
 两个 job 均在 `nightly` / `distill` 套件内；审计走 `kol_learning_job_runs`。
@@ -129,6 +149,10 @@
 
 「蒸馏 / 夜间」套件非预览执行时，也会顺带生成学习提案（与右侧按钮同逻辑）。组件：`LearningManualTriggerSection.tsx`；套件说明文案：`SUITE_OPERATOR_HINTS`（`domainLabels.ts`）。
 
-**502 / 超时：** 生成学习提案含 LLM 蒸馏，Bridge 侧常需 **1–3 分钟**。Console 默认 Bridge 读超时 60s 会误报 502；`propose-edit-policy` / `run-jobs` 已用 `KOC_BRIDGE_LEARNING_TIMEOUT_SEC`（默认 300s）。操作员见「生成中」提示，勿连点。
+**502 / 超时：** 生成学习提案含 LLM 蒸馏，Bridge 侧常需 **1–3 分钟**。Console 默认 Bridge 读超时 60s 会误报 502；`propose-edit-policy` / `run-jobs` 已用 `KOC_BRIDGE_LEARNING_TIMEOUT_SEC`（默认 300s）。**批准** `approval.style_learning_proposal`（及 outcome/discovery 学习提案）同样走 LLM 合并，Console `POST /approvals/.../approve` 已对该类 fact 使用同一学习超时（300s）。操作员见「生成中」提示，勿连点。
+
+**502（Bridge 重启中）：** 学习页大量接口同时 502、而 `failed-shortlist-captures` / `gateway-approvals` 仍 200，通常是 **kol-ops-bridge 正在重启**（`connection refused`）。等 Bridge 就绪后刷新即可。
+
+**数据为空 / 仍显示「今夜可蒸馏」：** 若 Bridge `GET /health` 的 `db_path` 指向 `profiles/.../home/.hermes/kol-ops-bridge/cal.db` 而生产样本在 `~/.hermes/kol-ops-bridge/cal.db`，说明进程 `HOME` 与 `HERMES_HOME` 不一致。`start.sh bridge` 与 `run_learning_cron.sh` 会导出 `HERMES_KOL_OPS_CAL_DB=$HERMES_HOME/kol-ops-bridge/cal.db`；手动启动 Bridge 时也应设置该变量或保证 `HERMES_HOME` 指向含数据的目录。
 
 **必须 LLM：** 编辑学习提案不再静默回退「规则聚合」。LLM 失败返回 503 并说明原因。Bridge 优先用 `~/.hermes` 解析出的 HTTP 端点（无需 Gateway agent 会话）；standalone `serve.py` 启动时会加载 `~/.hermes/.env` 与 `plugins/kol-ops-bridge/.env`。若 HTTPS 报证书错误，在 bridge venv 安装 `certifi`；若要走 `call_llm`，还需安装 `openai`。

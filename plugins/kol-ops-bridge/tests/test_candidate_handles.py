@@ -28,3 +28,33 @@ def test_list_candidate_handles_joins_identities(cal_db):
     assert items[0]["payload"] == {
         "evidence_url": "https://www.instagram.com/Creator.One/"
     }
+
+
+def test_upsert_candidate_does_not_downgrade_selected_for_outreach(cal_db):
+    """Re-ingest with discovered must not undo operator approval."""
+    campaign_id = "C-downgrade-guard"
+    cal_db.upsert_campaign_config(campaign_id=campaign_id, label="Guard")
+    identity_id = cal_db.upsert_identity(primary_handle="@approved.one", platform="instagram")
+    cal_db.upsert_candidate(
+        campaign_id=campaign_id,
+        identity_id=identity_id,
+        source="discovery:test",
+    )
+    cal_db.select_candidates_for_outreach(
+        campaign_id=campaign_id,
+        identity_ids=[identity_id],
+        selected_by="test:operator",
+    )
+    cal_db.upsert_candidate(
+        campaign_id=campaign_id,
+        identity_id=identity_id,
+        source="discovery:revisit",
+        candidate_status="discovered",
+        payload={"reason": "rediscover revisit"},
+    )
+    row = cal_db.get_candidate_for(
+        identity_id=identity_id, campaign_id=campaign_id, env="LIVE",
+    )
+    assert row is not None
+    assert row["candidate_status"] == "selected_for_outreach"
+    assert row["selected_by"] == "test:operator"

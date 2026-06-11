@@ -63,6 +63,27 @@ export HERMES_LOCAL_CHROME_LAUNCHER=/path/to/start-debug-chrome.sh
 No skill changes required. Agents call `browser_navigate` as usual; the plugin
 runs before the tool and wires the isolated tab transparently.
 
+## `browser_cdp` ownership guard
+
+The raw `browser_cdp` tool connects to the **browser-level** CDP socket and
+can address any tab via `target_id` — bypassing the pool. Concurrent runs were
+hijacking each other's tabs this way (run A ran `Runtime.evaluate` /
+`Page.navigate` inside run B's tab, discovered via `Target.getTargets`).
+
+The `pre_tool_call` hook therefore enforces per-task tab ownership on
+`browser_cdp`:
+
+| Call shape | Behaviour |
+|------------|-----------|
+| Page-scoped method (`Page.*`, `Runtime.*`, `DOM.*`, ...) without `target_id` | `target_id` auto-injected with this task's pooled tab |
+| `target_id` / `params.targetId` = this task's pooled tab | allowed |
+| `target_id` / `params.targetId` = any other tab | **blocked** with a message naming the task's own target_id |
+| Browser-level methods (`Target.getTargets`, `Storage.*`, `Browser.*`, ...) without target | allowed (read-only discovery is harmless) |
+| `Target.attachToTarget` / `activateTarget` / `closeTarget` on a foreign tab | **blocked** |
+
+The guard only protects processes that loaded this plugin version — restart
+long-lived gateways/CLIs after upgrading.
+
 First run on a fresh machine still needs IG login once inside the debug profile
 (manual, in the Chrome window launched by the script).
 

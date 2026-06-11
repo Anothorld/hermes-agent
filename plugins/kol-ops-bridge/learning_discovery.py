@@ -306,7 +306,8 @@ def distill_discovery_criteria_llm(
         "- Every bullet must cite evidence from tags/comments/snapshots.\n"
         "- Do NOT invent rules unsupported by samples.\n"
         "- Never include operator names or ids in the output.\n"
-        "- End with `### Context notes` (batch size, action mix, dominant tags).\n\n"
+        "- End with `### Context notes` (batch size, action mix, dominant tags).\n"
+        "  Context notes are for operator review only — they are NOT written into policy.\n\n"
         f"SAMPLES_JSON:\n{json.dumps(samples, indent=2, ensure_ascii=False)}"
     )
     try:
@@ -391,6 +392,41 @@ def propose_discovery_learning_approval(
             source="learning:propose:discovery_criteria",
             env=env,
         )
+        # #region agent log
+        try:
+            import json as _json
+            import time as _time
+            from pathlib import Path as _Path
+
+            _log_path = _Path("/Users/arnold/agent_prj/.cursor/debug-cfcf5c.log")
+            _log_path.parent.mkdir(parents=True, exist_ok=True)
+            with _log_path.open("a", encoding="utf-8") as _fh:
+                _fh.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "cfcf5c",
+                            "runId": "pre-fix",
+                            "hypothesisId": "H2",
+                            "location": "learning_discovery.py:propose_discovery_learning_approval",
+                            "message": "discovery_proposal_created",
+                            "data": {
+                                "env": env,
+                                "scope": scope,
+                                "group_kind": kind,
+                                "group_key": key,
+                                "batch_threshold": threshold,
+                                "sample_count": len(events),
+                                "source_event_ids_len": len(event_ids),
+                            },
+                            "timestamp": int(_time.time() * 1000),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
         proposed.append({
             "scope": scope,
             "identity_id": anchor_id,
@@ -412,9 +448,10 @@ def merge_discovery_policy_content(
 ) -> str:
     from . import learning_distill
 
+    merge_body = learning_distill.proposal_section_for_policy_merge(proposed_section)
     return learning_distill._merge_section(
         current_md,
-        proposed_section,
+        merge_body,
         marker=DISCOVERY_LEARNING_MARKER,
         mode=mode or learning_distill._merge_mode(),
     )
@@ -475,18 +512,58 @@ def build_learned_discovery_criteria(
     if not sku:
         return out
     spu_scope = pol.discovery_criteria_scope("spu", sku)
+    from . import learning_distill
+
     spu_row = pol.get_policy(conn, scope=spu_scope, env=env)
-    spu_md = ((spu_row or {}).get("content_md") or "").strip()
+    spu_md = learning_distill.strip_proposal_context_notes(
+        ((spu_row or {}).get("content_md") or "").strip(),
+    )
     category = ddl.get_category_for_sku(conn, sku=sku)
     category_md = ""
     if category:
         out["category"] = category
         cat_scope = pol.discovery_criteria_scope("category", category)
         cat_row = pol.get_policy(conn, scope=cat_scope, env=env)
-        category_md = ((cat_row or {}).get("content_md") or "").strip()
+        category_md = learning_distill.strip_proposal_context_notes(
+            ((cat_row or {}).get("content_md") or "").strip(),
+        )
     out["spu_md"] = spu_md[:max_chars]
     remaining = max(0, max_chars - len(out["spu_md"]))
     out["category_md"] = category_md[:remaining]
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        with _Path("/Users/arnold/agent_prj/.cursor/debug-8ea4a0.log").open(
+            "a", encoding="utf-8",
+        ) as _fh:
+            _fh.write(
+                _json.dumps(
+                    {
+                        "sessionId": "8ea4a0",
+                        "hypothesisId": "H1",
+                        "location": "learning_discovery.py:build_learned_discovery_criteria",
+                        "message": "discovery_criteria_built",
+                        "data": {
+                            "env": env,
+                            "sku": sku,
+                            "category": out.get("category"),
+                            "spu_scope": spu_scope,
+                            "spu_md_len": len(out["spu_md"]),
+                            "category_md_len": len(out["category_md"]),
+                            "spu_row_present": bool(spu_row),
+                        },
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+            )
+    except Exception:
+        pass
+    # #endregion
     return out
 
 

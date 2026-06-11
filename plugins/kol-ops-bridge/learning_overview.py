@@ -254,6 +254,56 @@ def build_learning_overview(
         conn, env=env, threshold=threshold,
     )
 
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        _log_path = _Path("/Users/arnold/agent_prj/.cursor/debug-cfcf5c.log")
+        _pending_samples = [
+            int((p.get("sample_count") or 0))
+            for p in pending_proposals
+        ]
+        _disc_groups = (discovery_stats or {}).get("groups") or []
+        _top_disc = max(
+            (int(g.get("fresh_samples") or 0) for g in _disc_groups),
+            default=0,
+        )
+        _log_path.parent.mkdir(parents=True, exist_ok=True)
+        with _log_path.open("a", encoding="utf-8") as _fh:
+            _fh.write(
+                _json.dumps(
+                    {
+                        "sessionId": "cfcf5c",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H1",
+                        "location": "learning_overview.py:build_learning_overview",
+                        "message": "edit_learning_backlog_snapshot",
+                        "data": {
+                            "env": env,
+                            "batch_threshold": threshold,
+                            "edited_unconsumed": len(edited),
+                            "edited_available": len(edited_available),
+                            "edited_queued_in_pending": edited_queued,
+                            "consumed_approved": len(consumed),
+                            "pending_style_proposals": len(pending_proposals),
+                            "pending_style_sample_counts": _pending_samples,
+                            "discovery_fresh_decisions": (discovery_stats or {}).get(
+                                "fresh_decisions"
+                            ),
+                            "discovery_top_group_fresh": _top_disc,
+                        },
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+
     return {
         "env": env,
         "jobs_disabled": jobs_disabled,

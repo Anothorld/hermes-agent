@@ -62,7 +62,7 @@ def cmd_apply_reject_policy(args: argparse.Namespace) -> None:
         "limit": args.limit,
     }
     print_json(client_from_args(args).request(
-        "POST", "/learning/apply-reject-policy", json=body,
+        "POST", "/learning/apply-reject-policy", body=body,
     ))
 
 
@@ -76,7 +76,7 @@ def cmd_apply_edit_policy(args: argparse.Namespace) -> None:
     if args.owner_user_id is not None:
         body["owner_user_id"] = args.owner_user_id
     print_json(client_from_args(args).request(
-        "POST", "/learning/apply-edit-policy", json=body,
+        "POST", "/learning/apply-edit-policy", body=body,
     ))
 
 
@@ -88,7 +88,7 @@ def cmd_apply_pricing_campaign(args: argparse.Namespace) -> None:
     if args.paid_ratio_override is not None:
         body["paid_ratio_override"] = args.paid_ratio_override
     print_json(client_from_args(args).request(
-        "POST", "/learning/apply-pricing-campaign", json=body,
+        "POST", "/learning/apply-pricing-campaign", body=body,
     ))
 
 
@@ -102,7 +102,7 @@ def cmd_promote_strategy(args: argparse.Namespace) -> None:
         "triggered_by": args.triggered_by,
     }
     result = client_from_args(args).request(
-        "POST", "/learning/promote-strategy", json=body,
+        "POST", "/learning/promote-strategy", body=body,
     )
     print_json(result)
     if result.get("needs_sync_skills"):
@@ -119,8 +119,23 @@ def cmd_backfill_edit_learning(args: argparse.Namespace) -> None:
         "limit": args.limit,
     }
     print_json(client_from_args(args).request(
-        "POST", "/learning/backfill-edit-learning", json=body,
+        "POST", "/learning/backfill-edit-learning", body=body,
     ))
+
+
+def _learning_client(args: argparse.Namespace):
+    from _cal_client import CALClient
+
+    timeout_raw = os.environ.get("KOC_BRIDGE_LEARNING_TIMEOUT_SEC", "600").strip()
+    try:
+        timeout = float(timeout_raw)
+    except ValueError:
+        timeout = 600.0
+    return CALClient(
+        base=getattr(args, "base", None),
+        bridge_key=getattr(args, "bridge_key", None),
+        timeout=timeout,
+    )
 
 
 def cmd_run_learning_jobs(args: argparse.Namespace) -> None:
@@ -137,8 +152,8 @@ def cmd_run_learning_jobs(args: argparse.Namespace) -> None:
         body["suite"] = args.suite
     if args.jobs:
         body["jobs"] = [j.strip() for j in args.jobs.split(",") if j.strip()]
-    print_json(client_from_args(args).request(
-        "POST", "/learning/run-scheduled-jobs", json=body,
+    print_json(_learning_client(args).request(
+        "POST", "/learning/run-scheduled-jobs", body=body,
     ))
 
 

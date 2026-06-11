@@ -229,7 +229,14 @@ start_bridge() {
   require_backend_python
   : "${KOC_BRIDGE_HOST:=127.0.0.1}"
   : "${KOC_BRIDGE_PORT:=8080}"
+  # Profile HERMES_HOME (from active_profile) is for Gmail tokens / poller
+  # state. CAL stores TEST+LIVE in one canonical root file unless the operator
+  # sets HERMES_KOL_OPS_CAL_DB explicitly — do not derive CAL from profile dir
+  # or Console will see an empty freshly-init cal.db.
+  : "${HERMES_HOME:=$HOME/.hermes}"
+  export HERMES_KOL_OPS_CAL_DB="${HERMES_KOL_OPS_CAL_DB:-$HOME/.hermes/kol-ops-bridge/cal.db}"
   log "bridge → http://$KOC_BRIDGE_HOST:$KOC_BRIDGE_PORT/api/plugins/kol-ops-bridge"
+  log "bridge cal.db → $HERMES_KOL_OPS_CAL_DB"
   local bridge_log_dir="$HOME/.hermes/kol-ops-bridge"
   local bridge_log="$bridge_log_dir/bridge.log"
   mkdir -p "$bridge_log_dir"

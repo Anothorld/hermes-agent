@@ -403,6 +403,37 @@ def test_launch_400_when_variant_whitelist_missing(monkeypatch: pytest.MonkeyPat
     assert gateway.runs_started == []
 
 
+def test_launch_409_when_sku_has_another_campaign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One product == one campaign. A second campaign_id for the same
+    sku+env is refused outright (not bypassable via force); restarting
+    the SAME campaign_id still passes the guard."""
+    conn = _seed_conn()
+    _seed_running_campaign(conn)  # SKU-1 ↔ CID-1 (closed)
+    bridge = _StubBridge()
+    gateway = _StubGateway()
+    from app.routers import campaigns as _c
+    monkeypatch.setattr(_c, "ensure_gateway_bridge_key", lambda: "stub")
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).post(
+        "/campaigns/CID-2/start?force=true", json=_launch_body(),
+    )
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "one_campaign_per_product"
+    assert detail["existing_campaign_id"] == "CID-1"
+    assert gateway.runs_started == []
+
+    # Same campaign_id passes the one-campaign guard (proceeds to the
+    # CAL upsert, which we force-fail to stop the launch deterministically).
+    bridge.upsert_should_raise = BridgeError(502, "halt")
+    r2 = TestClient(app).post("/campaigns/CID-1/start", json=_launch_body())
+    assert r2.status_code == 502, r2.text
+    assert r2.json()["detail"]["code"] == "cal_upsert_failed"
+
+
 def test_launch_upserts_commission_band_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

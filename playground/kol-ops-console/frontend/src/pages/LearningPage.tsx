@@ -353,13 +353,16 @@ export function LearningPage() {
   const editedAvailable =
     stats?.edited_available ?? stats?.edited_unconsumed ?? 0;
   const editedQueued = stats?.edited_queued_in_pending ?? 0;
+  const batchThreshold = overview?.batch_threshold ?? 5;
+  const nextBatchSize = Math.min(editedAvailable, batchThreshold);
   const batchPct = stats
     ? Math.min(
         100,
-        Math.round((editedAvailable / overview!.batch_threshold) * 100),
+        Math.round((nextBatchSize / Math.max(1, batchThreshold)) * 100),
       )
     : 0;
   const pendingCount = overview?.pending_style_proposals.length ?? 0;
+  const backlogHigh = editedAvailable > batchThreshold * 3;
 
   return (
     <div className="space-y-4">
@@ -415,18 +418,14 @@ export function LearningPage() {
             }
           />
           <StatCard
-            label="编辑批次进度"
-            value={
-              stats
-                ? `${editedAvailable} / ${overview?.batch_threshold}`
-                : '—'
-            }
+            label="待蒸馏样本积压"
+            value={stats ? `${editedAvailable} 条` : '—'}
             hint={
               editedQueued > 0
-                ? `另有 ${editedQueued} 条在待审批提案中（批准后才计入已消费）`
+                ? `单份提案取 ${batchThreshold} 条 · 另有 ${editedQueued} 条在待审批提案中`
                 : stats?.ready_for_distill
-                  ? '已达蒸馏阈值，可生成提案'
-                  : '未达阈值'
+                  ? `单份提案取 ${batchThreshold} 条 · 下一批已满，可生成提案`
+                  : `单份提案取 ${batchThreshold} 条 · 未达下一批阈值`
             }
           />
           <StatCard
@@ -445,11 +444,21 @@ export function LearningPage() {
           />
         </div>
         {stats && (
-          <div className="mt-2 h-2 overflow-hidden rounded bg-slate-100" title={`${batchPct}%`}>
+          <div
+            className="mt-2 h-2 overflow-hidden rounded bg-slate-100"
+            title={`下一批 ${nextBatchSize}/${batchThreshold}（积压 ${editedAvailable} 条）`}
+          >
             <div
               className="h-full bg-violet-500 transition-all"
               style={{ width: `${batchPct}%` }}
             />
+          </div>
+        )}
+        {backlogHigh && (
+          <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-950">
+            当前积压 <strong>{editedAvailable}</strong> 条「编辑后发送」样本，不等于单份学习提案的条数。
+            每生成/批准一份提案只消费 <strong>{batchThreshold}</strong> 条；待审批页卡片上的「编辑样本 N 条」才是该提案实际规模。
+            积压突增常见于 Gmail 批量对齐补录，或提案批准较慢（驳回的样本会回到队列）。
           </div>
         )}
         {(overview?.edit_stats_by_scope?.length ?? 0) > 0 && (
@@ -458,7 +467,7 @@ export function LearningPage() {
               <thead>
                 <tr className="border-b border-slate-200 text-slate-500">
                   <th className="py-1 pr-2 font-medium">蒸馏范围</th>
-                  <th className="py-1 pr-2 font-medium">可蒸馏 / 阈值</th>
+                  <th className="py-1 pr-2 font-medium">积压 / 单批阈值</th>
                   <th className="py-1 font-medium">状态</th>
                 </tr>
               </thead>
@@ -499,7 +508,7 @@ export function LearningPage() {
               </tbody>
             </table>
             <p className="mt-1 text-[10px] text-slate-500">
-              上方「编辑批次进度」为全库可蒸馏合计；本表按公司风格 / 各操作员分别计数。
+              左侧数字为各范围<strong>待蒸馏总积压</strong>，右侧为单份提案批次阈值（非整批样本数）。
             </p>
           </div>
         )}

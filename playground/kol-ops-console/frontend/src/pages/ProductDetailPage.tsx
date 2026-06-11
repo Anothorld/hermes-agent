@@ -88,6 +88,7 @@ type CampaignRow = {
   contacted_kol_ids: number[];
   candidate_count: number;
   pending_candidate_count: number;
+  prior_sku_approved_hidden_count?: number;
   shortlist_ready: boolean;
   shortlist_approved: boolean;
   event_count: number;
@@ -105,6 +106,7 @@ type CampaignRow = {
     discovered: number;
     pending_review: number;
     approved: number;
+    prior_sku_approved_hidden?: number;
     draft_ready: number;
     sent: number;
     replied: number;
@@ -392,6 +394,10 @@ type ShortlistCandidate = {
   nox_creator_id?: string | null;
   prior_outreach_touch?: PriorOutreachTouch | null;
   internal_touch_count?: number | null;
+  prior_sku_campaign_approval?: {
+    campaign_id: string;
+    selected_at?: string | null;
+  } | null;
 };
 
 type ShortlistPayload = {
@@ -401,8 +407,16 @@ type ShortlistPayload = {
     pending: number;
     already_approved: number;
     rejected_or_archived_hidden: number;
+    prior_sku_approved_in_pending?: number;
   };
 };
+
+function isPriorSkuDupe(c: ShortlistCandidate): boolean {
+  return (
+    !!c.prior_sku_campaign_approval
+    && c.candidate_status !== 'selected_for_outreach'
+  );
+}
 
 function ShortlistReviewPanel({
   campaignId,
@@ -429,7 +443,7 @@ function ShortlistReviewPanel({
   const [refreshing, setRefreshing] = useState(false);
   const [snapshotTs, setSnapshotTs] = useState<string | null>(null);
   const [counts, setCounts] = useState<{ pending: number; already_approved: number; rejected_or_archived_hidden: number } | null>(null);
-  const [showApproved, setShowApproved] = useState(false);
+  const [showPriorSkuDupes, setShowPriorSkuDupes] = useState(false);
   const [removingHandle, setRemovingHandle] = useState<string | null>(null);
   const [removeCandidate, setRemoveCandidate] = useState<ShortlistCandidate | null>(null);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
@@ -503,7 +517,10 @@ function ShortlistReviewPanel({
           if (Object.prototype.hasOwnProperty.call(prev, c.handle)) {
             next[c.handle] = !!prev[c.handle];
           } else {
-            next[c.handle] = c.candidate_status !== 'selected_for_outreach';
+            const skipPriorSku =
+              !!c.prior_sku_campaign_approval
+              && c.candidate_status !== 'selected_for_outreach';
+            next[c.handle] = c.candidate_status !== 'selected_for_outreach' && !skipPriorSku;
           }
         }
         return next;
@@ -542,17 +559,37 @@ function ShortlistReviewPanel({
     );
   if (candidates === null)
     return <div className="text-xs text-slate-400">Loading candidates…</div>;
-  if (candidates.length === 0)
-    return <div className="text-xs text-slate-400">Agent published an empty shortlist.</div>;
-
   const pendingCandidates = candidates.filter((c) => c.candidate_status !== 'selected_for_outreach');
-  const approvedCandidates = candidates.filter((c) => c.candidate_status === 'selected_for_outreach');
+  const actionablePendingCandidates = pendingCandidates.filter((c) => !isPriorSkuDupe(c));
+  const priorSkuDupeCandidates = pendingCandidates.filter(isPriorSkuDupe);
+  const approvedCount = counts?.already_approved ?? 0;
+
+  if (candidates.length === 0) {
+    return (
+      <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+        {approvedCount > 0 ? (
+          <>
+            当前没有待审批候选。
+            {approvedCount} 人已在 shortlist 批准，请在{' '}
+            <Link
+              to={`/kols?campaign_id=${encodeURIComponent(campaignId)}&env=${encodeURIComponent(env)}`}
+              className="font-medium text-emerald-800 hover:underline"
+            >
+              KOL 看板
+            </Link>{' '}
+            查看触达进度。
+          </>
+        ) : (
+          'Agent published an empty shortlist.'
+        )}
+      </div>
+    );
+  }
   const selectedHandles = Object.entries(picked).filter(([, v]) => v).map(([k]) => k);
-  const selectedIdentityIds = pendingCandidates
+  const selectedIdentityIds = actionablePendingCandidates
     .filter((c) => picked[c.handle] && typeof c.identity_id === 'number')
     .map((c) => c.identity_id as number);
-  const pendingCount = counts?.pending ?? pendingCandidates.length;
-  const approvedCount = counts?.already_approved ?? approvedCandidates.length;
+  const pendingCount = counts?.pending ?? actionablePendingCandidates.length;
 
   const removeFromShortlist = (c: ShortlistCandidate) => {
     if (typeof c.identity_id !== 'number') {
@@ -658,7 +695,25 @@ function ShortlistReviewPanel({
     <div className="rounded border border-emerald-200 bg-emerald-50/40 p-3">
       <div className="mb-2 flex items-center justify-between">
         <div className="text-xs font-medium text-emerald-900">
-          Shortlist review · 待审批 {pendingCount} · 已批准 {approvedCount}
+          Shortlist review · 待审批 {pendingCount}
+          {approvedCount > 0 && (
+            <>
+              {' '}
+              · 已批准 {approvedCount}（
+              <Link
+                to={`/kols?campaign_id=${encodeURIComponent(campaignId)}&env=${encodeURIComponent(env)}`}
+                className="font-normal text-emerald-800 hover:underline"
+              >
+                KOL 看板
+              </Link>
+              ）
+            </>
+          )}
+          {(counts?.prior_sku_approved_in_pending ?? priorSkuDupeCandidates.length) > 0 && (
+            <span className="ml-1 font-normal text-sky-800">
+              · 已隐藏重复 {counts?.prior_sku_approved_in_pending ?? priorSkuDupeCandidates.length}
+            </span>
+          )}
           {counts && counts.rejected_or_archived_hidden > 0 && (
             <span className="ml-1 font-normal text-slate-500">
               · 隐藏 {counts.rejected_or_archived_hidden}
@@ -675,7 +730,16 @@ function ShortlistReviewPanel({
             {refreshing ? 'Refreshing…' : 'Refresh'}
           </button>
           <button
-            onClick={() => setPicked(Object.fromEntries(candidates.map((c) => [c.handle, true])))}
+            onClick={() =>
+              setPicked(
+                Object.fromEntries(
+                  candidates.map((c) => [
+                    c.handle,
+                    c.candidate_status !== 'selected_for_outreach' && !isPriorSkuDupe(c),
+                  ]),
+                ),
+              )
+            }
             className="rounded border border-slate-300 bg-white px-2 py-0.5 text-slate-600 hover:bg-slate-50"
           >
             Select all
@@ -696,14 +760,21 @@ function ShortlistReviewPanel({
           <span className="ml-1 italic">unknown</span>
         )}
       </div>
-      {pendingCandidates.length === 0 && (
+      {actionablePendingCandidates.length === 0 && (
         <div className="mb-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
           本轮暂无待审批候选，若刚执行 rediscover 请点击 Refresh。
         </div>
       )}
+      {(counts?.prior_sku_approved_in_pending ?? priorSkuDupeCandidates.length) > 0 && (
+        <div className="mb-2 rounded border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] text-sky-900">
+          已从待审批列表隐藏 {counts?.prior_sku_approved_in_pending ?? priorSkuDupeCandidates.length} 名
+          已在同 SKU 其他活动中批准过的 KOL（避免重复审批）。
+          KOL 看板请打开对应已批准活动。
+        </div>
+      )}
       <div className="mb-1 text-[11px] font-medium text-slate-500">待审批（本轮）</div>
       <ul className="space-y-2">
-        {pendingCandidates.map((c) => (
+        {actionablePendingCandidates.map((c) => (
           <li
             key={c.handle}
             className="rounded border border-emerald-100 bg-white p-2 text-xs"
@@ -806,6 +877,14 @@ function ShortlistReviewPanel({
                       pending
                     </span>
                   )}
+                  {c.prior_sku_campaign_approval && c.candidate_status !== 'selected_for_outreach' && (
+                    <span
+                      className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-900"
+                      title={`已在活动 ${c.prior_sku_campaign_approval.campaign_id} 批准`}
+                    >
+                      已在其他活动批准
+                    </span>
+                  )}
                   {c.is_new_since_last_approval && (
                     <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-800">
                       NEW
@@ -878,45 +957,38 @@ function ShortlistReviewPanel({
           </li>
         ))}
       </ul>
-      {approvedCandidates.length > 0 && (
+      {priorSkuDupeCandidates.length > 0 && (
         <div className="mt-2">
           <button
-            onClick={() => setShowApproved((v) => !v)}
-            className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50"
+            type="button"
+            onClick={() => setShowPriorSkuDupes((v) => !v)}
+            className="rounded border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] text-sky-900 hover:bg-sky-100"
           >
-            {showApproved ? 'Hide approved' : `Show approved (${approvedCandidates.length})`}
+            {showPriorSkuDupes
+              ? '隐藏已在其他活动批准的重复项'
+              : `显示已在其他活动批准的重复项 (${priorSkuDupeCandidates.length})`}
           </button>
-          {showApproved && (
+          {showPriorSkuDupes && (
             <ul className="mt-2 space-y-2">
-              {approvedCandidates.map((c) => (
-                <li key={c.handle} className="rounded border border-slate-200 bg-slate-50 p-2 text-xs">
+              {priorSkuDupeCandidates.map((c) => (
+                <li
+                  key={`prior-${c.handle}`}
+                  className="rounded border border-sky-100 bg-sky-50/60 p-2 text-xs text-slate-600"
+                >
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium text-slate-700">@{c.handle}</span>
-                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-800">
-                      already approved
+                    <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-900">
+                      已在 {c.prior_sku_campaign_approval?.campaign_id ?? '其他活动'} 批准
                     </span>
-                    <PriorOutreachTouchBadge
-                      touch={resolvePriorOutreachTouch(c.prior_outreach_touch)}
-                    />
-                    <InternalTouchCountBadge count={c.internal_touch_count} />
-                    {c.selected_at && (
-                      <span className="text-[10px] text-slate-400">
-                        selected <TimeAgo iso={c.selected_at} prefix="@" className="ml-1" />
-                      </span>
+                    {c.prior_sku_campaign_approval?.campaign_id && (
+                      <Link
+                        to={`/kols?campaign_id=${encodeURIComponent(c.prior_sku_campaign_approval.campaign_id)}&env=${encodeURIComponent(env)}`}
+                        className="text-[10px] text-sky-800 hover:underline"
+                      >
+                        打开该活动 KOL 看板
+                      </Link>
                     )}
                   </div>
-                  <KolSocialQuickLinks
-                    facts={c.preview_facts ?? {}}
-                    identityId={c.identity_id}
-                    env={env}
-                    platform={c.platform}
-                    handle={c.handle}
-                    profileUrl={c.profile_url}
-                    linkPreviewsByUrl={c.link_previews ?? undefined}
-                    primaryLinkPreview={c.link_preview ?? undefined}
-                    socialLinks={c.social_links ?? undefined}
-                    className="mt-1.5"
-                  />
                 </li>
               ))}
             </ul>
@@ -1152,10 +1224,6 @@ function CampaignCard({
 }) {
   const [showReview, setShowReview] = useState(false);
   const [configRefreshKey, setConfigRefreshKey] = useState(0);
-  const [retryingDrafts, setRetryingDrafts] = useState(false);
-  const approvedHandles = c.kol_identity_ids
-    .map((id) => kols[String(id)]?.primary_handle)
-    .filter((handle): handle is string => Boolean(handle));
   const counts = c.outreach_counts ?? {
     discovered: c.candidate_count,
     pending_review: c.pending_candidate_count,
@@ -1172,7 +1240,6 @@ function CampaignCard({
     draft_ready: [],
     approved_idle: [],
   };
-  const noOutreachProgress = (counts.draft_ready + counts.sent + counts.replied) === 0;
   const contractReadyIds = Array.from(
     new Set(
       (outreachKols.replied ?? [])
@@ -1244,6 +1311,23 @@ function CampaignCard({
             shortlist approved
           </span>
         )}
+        {counts.approved > 0 && (
+          <Link
+            to={`/kols?campaign_id=${encodeURIComponent(c.campaign_id)}&env=${encodeURIComponent(c.env)}`}
+            className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-700 hover:bg-slate-50"
+            title="打开该活动的 KOL 看板"
+          >
+            KOL 看板 ({counts.approved})
+          </Link>
+        )}
+        {counts.approved === 0 && counts.pending_review > 0 && (
+          <span
+            className="rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-900"
+            title="本活动尚未批准任何 KOL；若已在其他活动中批准，请切换到对应活动的 KOL 看板"
+          >
+            本活动 KOL 看板为空（尚未批准）
+          </span>
+        )}
         <RediscoverControl
           campaignId={c.campaign_id}
           alreadyDiscovered={c.candidate_count}
@@ -1255,23 +1339,6 @@ function CampaignCard({
           }
           onSubmit={(n) => onRediscover(c.campaign_id, c.env, n)}
         />
-        {c.shortlist_approved && noOutreachProgress && approvedHandles.length > 0 && (
-          <button
-            onClick={async () => {
-              setRetryingDrafts(true);
-              try {
-                await onApprove(c.campaign_id, c.env, approvedHandles);
-              } finally {
-                setRetryingDrafts(false);
-              }
-            }}
-            disabled={retryingDrafts}
-            className="rounded border border-sky-300 bg-sky-50 px-2 py-0.5 text-xs text-sky-800 hover:bg-sky-100 disabled:opacity-50"
-            title="Rerun post-approval outreach draft generation for the approved candidates"
-          >
-            {retryingDrafts ? 'Retrying…' : 'Retry draft run'}
-          </button>
-        )}
       </div>
       {showReview && (
         <ShortlistReviewPanel
@@ -1341,6 +1408,9 @@ function CampaignCard({
         </div>
         <div className="text-xs text-slate-500">
           候选池：已发现 {counts.discovered} 名，待审批 {counts.pending_review} 名。
+          {(c.prior_sku_approved_hidden_count ?? counts.prior_sku_approved_hidden ?? 0) > 0 && (
+            <> 另有 {c.prior_sku_approved_hidden_count ?? counts.prior_sku_approved_hidden} 名已在其他活动批准（已隐藏）。</>
+          )}
           {counts.pending_review > 0 ? ' 请在 shortlist review 中确认本轮候选。' : ' 当前没有新的候选待审批。'}
         </div>
       </div>
@@ -1382,6 +1452,7 @@ function LaunchCampaignForm({
   env,
   product,
   canLaunch,
+  existingCampaignId,
   onLaunched,
   onError,
 }: {
@@ -1389,13 +1460,16 @@ function LaunchCampaignForm({
   env: 'TEST' | 'LIVE';
   product: Product;
   canLaunch: boolean;
+  // One product == one campaign: when the SKU already has a campaign in
+  // this env, default to it (backend rejects a second campaign_id).
+  existingCampaignId?: string | null;
   onLaunched: (runId: string | null, campaignId: string) => void;
   onError: (msg: string) => void;
 }) {
   // Sensible defaults so the operator can launch with one click; all
   // fields are still editable for tuning per-campaign.
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const defaultCampaignId = `${sku}-${today}`;
+  const defaultCampaignId = existingCampaignId || `${sku}-${today}`;
   const [campaignId, setCampaignId] = useState(defaultCampaignId);
   // SKU-shaped catalog names (e.g. "SEB800") get rejected by the backend
   // validator — leave the input blank in that case so the operator is
@@ -1439,11 +1513,11 @@ function LaunchCampaignForm({
   const discoveryDefault = Math.max(headcountTarget * 3, headcountTarget + 5);
   const discoveryEffective = discoveryTargetOverride === '' ? discoveryDefault : discoveryTargetOverride;
 
-  // Sync default campaign_id when sku changes.
+  // Sync default campaign_id when sku or the canonical campaign changes.
   useEffect(() => {
-    setCampaignId(`${sku}-${today}`);
+    setCampaignId(existingCampaignId || `${sku}-${today}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sku]);
+  }, [sku, existingCampaignId]);
 
   // Re-sync defaults when the parent reloads the product (e.g. variants edited
   // in the catalog after this form mounted).
@@ -2487,6 +2561,7 @@ export function ProductDetailPage() {
             env={envFilter}
             product={p}
             canLaunch={me?.role !== 'viewer'}
+            existingCampaignId={campaigns.campaigns[0]?.campaign_id ?? null}
             onLaunched={(runId, campaignId) => {
               toast.success(
                 `Campaign ${campaignId} 已在 ${envFilter} 启动`,
