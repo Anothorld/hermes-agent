@@ -6,6 +6,18 @@ import { dialog } from './dialogs/useDialog';
 import RejectCorrectionModal, { type RejectCorrectionModalProps } from './RejectCorrectionModal';
 import type { RejectCorrection } from '../constants/rejectTags';
 
+export type ApprovalDecisionResult = {
+  ok?: boolean;
+  decision?: string;
+  gmail_draft?: {
+    draft_id?: string;
+    thread_id?: string;
+    message_id?: string;
+  } | null;
+  handled_escalation_id?: number | null;
+  linked_escalation_id?: number | null;
+};
+
 export type ApprovalDecisionRequest = {
   identity_id: number;
   campaign_id: string;
@@ -23,7 +35,7 @@ type Props = {
   decidedBy: string;
   agentBody?: string;
   onRejected?: () => void;
-  onApproved?: () => void;
+  onApproved?: (result?: ApprovalDecisionResult) => void;
   rejectButtonLabel?: string;
   approveButtonLabel?: string;
 };
@@ -76,12 +88,16 @@ export default function ApprovalActionBar({
         if (correction.note) body.note = correction.note;
       }
       const path = `/approvals/${encodeURIComponent(factPath)}/${decision === 'approve' ? 'approve' : 'reject'}`;
-      await api.post(path, body);
-      toast.success(decision === 'approve' ? '已批准' : '已驳回');
+      const result = await api.post<ApprovalDecisionResult>(path, body);
+      if (decision === 'approve') {
+        toast.success('已批准');
+      } else {
+        toast.success('已驳回');
+      }
       if (decision === 'reject') {
         onRejected?.();
       } else {
-        onApproved?.();
+        onApproved?.(result);
       }
     } catch (ex) {
       toast.error('提交失败', errorSummary(ex));

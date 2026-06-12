@@ -13,7 +13,8 @@
 | **KOL 回信自动** | 入站 → dispatcher 正常起草 | `KOL回信自动` | negotiator / synthesizer 等 |
 | **升级恢复稿** | 入站 → 开升级 → 操作员 resume | `升级恢复稿` | `linked_escalation_id` 有值 |
 | **操作员追信** | Console followup-draft | `操作员追信` | `kol-proactive-followup` |
-| **追信占位（已废弃）** | 升级 open 期间 chase regenerate（旧行为） | `追信占位(已废弃)` | `chase_supersede` |
+| **追信换新稿** | 对方追信后系统自动替换上一版待审批稿 | `追信换新稿` | `chase_supersede` + `prior_source_message_id` |
+| **追信占位（已废弃）** | 升级 open 期间 chase regenerate（旧行为） | `追信占位(已废弃)` | `chase_supersede` 无 `prior_source_message_id` |
 
 升级 `awaiting_answer` 期间：
 
@@ -30,16 +31,46 @@
 - `suggested_question` 中 `【KOL 追信】` 块在列表/详情以 **琥珀色** 高亮
 - 操作员在答复时应覆盖 **全部** pending 来信；resume 稿以 `latest_pending_inbound_message_id` 为 Gmail 回复锚点
 
+## 升级页一体化（入站升级单页闭环）
+
+入站类升级（`source=classifier|dispatcher` + 入站锚点）的 **linked 回信稿** 在升级仍为 `awaiting_answer` 时：
+
+- **只在升级详情页** `/escalations/{id}` 的 **「③ 回信预览」** 区展示（只读预览，**不可批准**）；复用 `ApprovalContextCard`，含 **沟通历史要点**（`conversation_summary.bullets`）与对方来信卡片。提交并恢复后的 **升级恢复稿**（`require_draft` resume brief）同样须在 `persist-reply-draft` 时写入要点（单技能路径先 `summary_only` 调 `kol-reply-synthesizer`）。
+- **待审批** `/approvals` 列表**隐藏**这些行，顶部琥珀色提示链回升级页
+- 操作员填写「操作员答复」并 **提交并恢复** 后，同一页的预览区开放 **批准并创建 Gmail 草稿**
+
+标签：`draft_phase=pre_answer` → **升级回信预览**；`post_resume` → **升级恢复稿**。
+
+API：
+
+| 路径 | 说明 |
+|------|------|
+| `GET /escalations/{id}/linked-draft` | 仅 linked 稿 + `draft_phase` |
+| `GET /escalations/{id}/hub-context` | **P1 推荐** — 含 `topic_cards[]`、`workflow_step` / `workflow_steps[]` + linked 稿 |
+
+`topic_cards` 从 `approval.pending_topics` 解析（`;` 分隔）；含 `escalation {id}` / `operator decision needed` 的段标 **需你决定**，其余标 **可自动回复**。无 pending_topics 时回退为「升级触发话题」（`kol_quote` / `question_to_operator`）。
+
+`draft_phase`：`pre_answer` → 升级回信预览；`post_resume` → 升级恢复稿。
+
+多话题入站（例：一封邮件里 Matt 需升级 + Alyssa 可自动回复）仍可能同轮出现升级 + 预览稿；话题分栏 + 步骤条引导操作员先决定红色话题，再提交并批准合并回信。
+
+### P2：同页闭环（批准后不跳转）
+
+- **提交并恢复** 后 Console 在本页轮询 `hub-context`，直到出现可批准稿或 `completion`（无需去待审批）。
+- **批准回信** 后自动轮询刷新；`hub-context.completion.status=draft_approved` 时展示 **「本升级已处理完成」** 卡片（含 Gmail 草稿 ID、KOL 链接、返回队列）。
+- 完成后隐藏操作员答复表单与待批准面板；步骤条全部标为已完成。
+
 ## 操作员清单（入站升级）
 
-1. 在 **升级队列** `/escalations` 打开工单，阅读触发回信。
+**KOL 筛选**：升级队列工具栏支持按 **@handle / 邮箱** 搜索；从 KOL 详情或看板跳转时 URL 含 `identity_id`、`campaign_id`、`q`，列表自动只显示该 KOL 的升级。点「已筛选 ✕」恢复全量。
+
+1. 在 **升级队列** `/escalations` 打开工单，阅读触发回信与 **③ 回信预览**（若有）。
 2. 阅读 **请求操作员答复**（`suggested_question` / `question_to_operator`）— 文案应为 **简体中文**（来自策略规则模板、Bridge 确定性文案，或 Agent 开单时写入；KOL 追信块由系统自动追加）。
 3. 填写 **操作员答复** 与所需 facts（如 `approval.paid_ceiling_override`）。
 4. 点 **提交并恢复**（或先「让 AI 试写草稿」预览，不关闭升级）。
-4. 若 toast 提示「约 30–60 秒后请到待审批」→ 打开 **待审批** `/approvals`，找 **升级恢复稿** 标签。
-5. 批准草稿 → Gmail 草稿 → 发送。
+5. 升级处理完成后，在 **本页 ③ 回信预览** 批准草稿 → Gmail 草稿 → 发送（勿去待审批页找 linked 稿）。
 
-**勿批准** 仍带「追信占位」且升级未关的旧稿；升级已 resolved 后的占位稿建议驳回。
+**勿批准** 仍带「追信占位(已废弃)」且升级未关的旧稿；升级已 resolved 后的占位稿建议驳回。「追信换新稿」为针对最新来信的正式回复，核对正文后可批准。
 
 ## 关键文件
 
@@ -47,6 +78,8 @@
 |----|------|
 | FE 列表/详情 | `EscalationConsolePage.tsx` |
 | FE 折叠回信 / 问题高亮 | `InboundEmailStack.tsx`, `EscalationSuggestedQuestion.tsx` |
+| FE 话题分栏 / 步骤条 | `EscalationTopicCards.tsx`, `EscalationWorkflowStepper.tsx` |
+| BE hub 解析 | `backend/app/escalation_hub.py` |
 | FE 待审批标签 | `ApprovalsPage.tsx`（`draft_origin` badge） |
 | BE 升级 | `routers/escalations.py` — `_escalation_needs_reply_draft`, `draft_expected` |
 | BE 待审批 | `routers/approvals.py` — `_derive_draft_origin` |
@@ -58,11 +91,13 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/escalations` | 列表（可按 state/env 过滤） |
+| GET | `/escalations` | 列表（可按 `state` / `env` / `identity_id` / `campaign_id` 过滤；行内带 `handle`、`email`） |
 | GET | `/escalations/{id}` | 详情 + 关联入站 |
 | PATCH | `/escalations/{id}` | resume / terminate；返回 `draft_expected` + `draft_followup`（`expected` / `already_pending` / `in_flight` / `none`） |
 | POST | `/escalations/{id}/preview-draft` | 试写草稿（不 resolve） |
 | GET | `/escalations/{id}/inbound-context` | 入站上下文 + `pending_inbounds[]`（旧单自动 sync） |
+| GET | `/escalations/{id}/linked-draft` | 关联 pending `approval.reply_draft` + `draft_phase` / `can_approve` |
+| GET | `/escalations/{id}/hub-context` | 话题分栏 + 五步步骤条 + linked 稿（详情页主数据源） |
 | POST | Bridge `/escalations/{id}/sync-pending-inbounds` | 从 timeline 回填 `pending_inbounds`（Console inbound-context 自动调用） |
 
 ## #109 类 incident 复盘要点

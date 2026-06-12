@@ -104,6 +104,13 @@ concession; keep the cash number firm and low.
   `{"skipped":"deliverables_not_scoped"}`. Defense-in-depth.
 - **Idempotent on agreed.** If `goals.compensation_negotiation.status == "satisfied"`,
   abort `{"skipped":"already_agreed"}`.
+- **Defer to contract (default).** When `campaign_config.defer_terms_to_contract`
+  is true (default), `goals.deliverables_scope.status == "satisfied"`, and
+  `offer.compensation_mode` is `gifted` / `gifted_no_product` with no open
+  paid/rate dispute (`offer.kol_paid_quote`, `paid_only_stance`, etc. absent),
+  abort `{"skipped":"defer_to_contract"}` — do **not** send another email
+  re-confirming the full package; the dispatcher should route
+  `kol-contract-coordinator` next.
 - **Preserve dollar amounts exactly.** Draft text, engine notes, and any
   temporary JSON containing values like `$3000`, `$1500`, or `$800` must be
   written with Python `json.dump` or a quoted heredoc

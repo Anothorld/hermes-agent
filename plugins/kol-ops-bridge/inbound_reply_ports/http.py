@@ -46,6 +46,28 @@ class HttpBridgeAdapter:
             return list(events) if isinstance(events, list) else []
         return []
 
+    def find_events_for_inbound_match(
+        self,
+        *,
+        env: str,
+        thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        sender_email: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"env": env, "limit": limit}
+        if thread_id:
+            params["thread_id"] = thread_id
+        if in_reply_to:
+            params["in_reply_to"] = in_reply_to
+        if sender_email:
+            params["sender_email"] = sender_email
+        page = self._request("GET", "/events/inbound-match", params=params)
+        if isinstance(page, dict):
+            events = page.get("events")
+            return list(events) if isinstance(events, list) else []
+        return []
+
     def get_identity(self, identity_id: int) -> dict[str, Any] | None:
         out = self._request("GET", f"/identities/{identity_id}")
         return out if isinstance(out, dict) else None

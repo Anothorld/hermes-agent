@@ -314,6 +314,32 @@ class TestDiscoveryDistill:
             )
             assert again.get("skipped") is True
 
+    def test_distill_caps_llm_batch_when_group_is_large(self, pkg, monkeypatch):
+        monkeypatch.setenv("KOL_DISCOVERY_LEARNING_BATCH_SIZE", "10")
+        monkeypatch.setenv("KOL_DISCOVERY_LEARNING_DISTILL_MAX_SAMPLES", "25")
+        monkeypatch.setattr(
+            pkg.learning_discovery.learning_llm,
+            "invoke_learning_llm",
+            lambda prompt: "## Approved discovery learning\n- capped batch",
+        )
+        _seed_decisions(pkg, 30, sku="SEB8008")
+        with pkg.cal._connect() as conn:
+            out = pkg.learning_discovery.propose_discovery_learning_approval(
+                conn, env="LIVE", updated_by="test",
+            )
+            assert out["proposed_count"] >= 1
+            pending = pkg.learning_discovery.list_pending_discovery_proposals(
+                conn, env="LIVE",
+            )
+            spu = next(
+                p for p in pending
+                if p["value"].get("scope") == "discovery_criteria:spu:SEB8008"
+            )
+            val = spu["value"]
+            assert val["group_fresh_samples"] == 30
+            assert val["sample_count"] == 25
+            assert len(val["source_event_ids"]) == 25
+
     def test_apply_approved_merges_policy(self, pkg):
         proposal = {
             "scope": "discovery_criteria:spu:SKU1",

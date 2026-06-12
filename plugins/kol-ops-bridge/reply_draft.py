@@ -271,6 +271,81 @@ def normalize_proactive_followup_thread(
             return
 
 
+_CONVERSATION_SUMMARY_MAX_BULLETS = 10
+_CONVERSATION_SUMMARY_MAX_BULLET_LEN = 200
+
+
+def normalize_conversation_summary(
+    raw: Any,
+) -> dict[str, list[str]] | None:
+    """Normalize operator-facing thread summary bullets for persistence.
+
+    Soft validation: malformed input returns ``None`` (caller drops the field
+    rather than blocking draft persist).
+
+    Args:
+        raw: ``{"bullets": [...]}`` or a bare list of strings.
+
+    Returns:
+        ``{"bullets": [str, ...]}`` with at most 10 non-empty strings, each
+        clipped to 200 characters, or ``None`` when nothing valid remains.
+    """
+    bullets_raw: Any
+    if isinstance(raw, list):
+        bullets_raw = raw
+    elif isinstance(raw, dict):
+        bullets_raw = raw.get("bullets")
+    else:
+        return None
+    if not isinstance(bullets_raw, list):
+        return None
+    bullets: list[str] = []
+    for item in bullets_raw:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        if len(text) > _CONVERSATION_SUMMARY_MAX_BULLET_LEN:
+            text = text[:_CONVERSATION_SUMMARY_MAX_BULLET_LEN].rstrip() + "…"
+        bullets.append(text)
+        if len(bullets) >= _CONVERSATION_SUMMARY_MAX_BULLETS:
+            break
+    if not bullets:
+        return None
+    return {"bullets": bullets}
+
+
+def sanitize_reply_draft_fact_value(value: Any) -> Any:
+    """Normalize optional operator fields on an ``approval.reply_draft`` fact.
+
+    Used by ``write-facts`` / ``write-facts-multi`` (refine / escalation
+    hand-writes) as well as ``persist-reply-draft``. Malformed
+    ``conversation_summary`` is dropped rather than failing the write.
+
+    If the model mistakenly nests ``conversation_summary`` under ``draft``,
+    hoist it to the fact top level (canonical storage for the Console card).
+    """
+    if not isinstance(value, dict):
+        return value
+    out = dict(value)
+    draft = out.get("draft")
+    if isinstance(draft, dict) and "conversation_summary" in draft:
+        nested = dict(draft)
+        nested_summary = nested.pop("conversation_summary")
+        out["draft"] = nested
+        if "conversation_summary" not in out:
+            out["conversation_summary"] = nested_summary
+    raw_summary = out.get("conversation_summary")
+    if raw_summary is not None:
+        normalized = normalize_conversation_summary(raw_summary)
+        if normalized:
+            out["conversation_summary"] = normalized
+        else:
+            out.pop("conversation_summary", None)
+    return out
+
+
 def build_draft_event_payload(
     *,
     source_message_id: str,
@@ -279,6 +354,7 @@ def build_draft_event_payload(
     child_skill: str,
     merged_draft: Mapping[str, Any],
     contributing_skills: list[dict[str, Any]] | None = None,
+    conversation_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the ``kol_reply_draft_ready`` event payload."""
     payload: dict[str, Any] = {
@@ -290,6 +366,8 @@ def build_draft_event_payload(
     }
     if contributing_skills:
         payload["contributing_skills"] = list(contributing_skills)
+    if conversation_summary:
+        payload["conversation_summary"] = dict(conversation_summary)
     return payload
 
 
@@ -302,6 +380,7 @@ def build_approval_fact_value(
     merged_draft: Mapping[str, Any],
     linked_escalation_id: Any = None,
     contributing_skills: list[dict[str, Any]] | None = None,
+    conversation_summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the ``approval.reply_draft`` fact value (decision=pending)."""
     value: dict[str, Any] = {
@@ -316,6 +395,8 @@ def build_approval_fact_value(
         value["contributing_skills"] = list(contributing_skills)
     if linked_escalation_id is not None:
         value["linked_escalation_id"] = linked_escalation_id
+    if conversation_summary:
+        value["conversation_summary"] = dict(conversation_summary)
     return value
 
 
@@ -327,6 +408,8 @@ __all__ = [
     "is_initial_outreach_draft",
     "is_proactive_followup_draft",
     "normalize_proactive_followup_thread",
+    "normalize_conversation_summary",
+    "sanitize_reply_draft_fact_value",
     "build_draft_event_payload",
     "build_approval_fact_value",
     "to_html_email_body",

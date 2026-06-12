@@ -75,7 +75,9 @@ class Goal:
     def missing(self, state: State) -> list[str]:
         return [k for k in self.required_facts if not _present(state, k)]
 
-    def is_satisfied(self, state: State) -> bool:
+    def is_satisfied(self, state: State, ctx: Context | None = None) -> bool:
+        if self.name == "compensation_negotiation" and ctx is not None:
+            return _compensation_satisfied(state, ctx)
         return not self.missing(state)
 
     def can_enter(self, state: State, ctx: Context) -> bool:
@@ -105,8 +107,15 @@ def _deliverables_set(s: State, _c: Context) -> bool:
     return _present(s, "offer.deliverable_platforms")
 
 
-def _compensation_satisfied(s: State, _c: Context) -> bool:
-    return _present(s, "offer.compensation_mode") and _present(s, "offer.agreed_terms")
+def _compensation_satisfied(s: State, c: Context) -> bool:
+    if not _present(s, "offer.compensation_mode"):
+        return False
+    cfg = c.campaign_cfg or {}
+    if cfg.get("defer_terms_to_contract") and not cfg.get("strict_explicit_accept"):
+        mode = s.get("offer.compensation_mode")
+        if mode in _NON_PAYING_MODES:
+            return True
+    return _present(s, "offer.agreed_terms")
 
 
 def _contract_satisfied(s: State, c: Context) -> bool:

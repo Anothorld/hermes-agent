@@ -15,6 +15,23 @@ class InProcessBridgeAdapter:
     def list_recent_events(self, *, env: str, limit: int) -> list[dict[str, Any]]:
         return cal.list_events(env=env, limit=limit)
 
+    def find_events_for_inbound_match(
+        self,
+        *,
+        env: str,
+        thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        sender_email: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return cal.find_events_for_inbound_match(
+            env=env,
+            thread_id=thread_id,
+            in_reply_to=in_reply_to,
+            sender_email=sender_email,
+            limit=limit,
+        )
+
     def get_identity(self, identity_id: int) -> dict[str, Any] | None:
         return cal.get_identity(identity_id)
 

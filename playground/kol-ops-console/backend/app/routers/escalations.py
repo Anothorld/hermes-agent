@@ -25,6 +25,11 @@ from ..bridge_agent_contract_loader import (
     resume_cli_checklist,
     terminal_safety_rules,
 )
+from ..escalation_hub import (
+    build_completion_summary,
+    build_topic_cards,
+    build_workflow_steps,
+)
 from ..run_registry import get_inflight_run, register_run
 
 
@@ -80,11 +85,17 @@ _DRAFT_PREVIEW_INSTRUCTIONS = (
     "  brief `requested_by_user_id` when present) + `kol-creator-brief-loader`, "
     "  then `humanizer`. Follow that skill's body format contract (HTML for "
     "  outreach-style drafts; reply-thread drafts per skill).\n"
+    "- **Conversation summary:** before persist, produce Chinese\n"
+    "  `conversation_summary.bullets` (3–8 lines) for operators. When the\n"
+    "  drafting child is not `kol-reply-synthesizer`, call\n"
+    "  `kol-reply-synthesizer` with `summary_only: true`, `fragments=[]`,\n"
+    "  plus `latest_email` / `thread_history` from `get-email-conversation`\n"
+    "  or resume_context. Pass the bullets in the persist JSON.\n"
     "- Persist the draft via ``kol_bridge_tool.py persist-reply-draft``. "
     "The JSON body MUST set ``campaign_id``, ``source_message_id`` "
-    "from resume_context, and ``linked_escalation_id`` in the fact "
-    "value so the console can correlate this preview with the "
-    "escalation.\n"
+    "from resume_context, ``conversation_summary``, and "
+    "``linked_escalation_id`` in the fact value so the console can "
+    "correlate this preview with the escalation.\n"
     "- Preserve dollar amounts exactly. Never place JSON containing `$` "
     "  amounts in an unquoted heredoc or inline double-quoted shell "
     "  string; bash expands `$3000` to `000` and `$800` to `00`. Use "
@@ -128,11 +139,11 @@ def _compose_draft_preview_brief(
         "",
         "# required_output",
         ("Write exactly one approval.reply_draft fact via the bridge CLI. "
-         "Set linked_escalation_id to the escalation_id above and set "
-         "campaign_id in the JSON body to the campaign_id above (required "
-         "so the approval inherits campaign scope). Do NOT resolve the "
-         "escalation or send mail. After writing the fact, report the "
-         "fact_path back so the console can poll for it."),
+         "Set linked_escalation_id to the escalation_id above, "
+         "conversation_summary.bullets (Chinese), and campaign_id in the "
+         "persist JSON (required so the approval inherits campaign scope). "
+         "Do NOT resolve the escalation or send mail. After writing the fact, "
+         "report the fact_path back so the console can poll for it."),
         "",
         draft_preview_cli_checklist(
             escalation_id=escalation.get("id") or 0,
@@ -298,10 +309,16 @@ def _compose_resume_brief(
             "`kol-email-style-loader` (pass `--owner-user-id` from brief "
             "`requested_by_user_id` when present) + "
             "`kol-creator-brief-loader`, then `humanizer`. Persist via "
+            "Chinese `conversation_summary.bullets` (3–8 lines) for operators. "
+            "When the drafting child is not `kol-reply-synthesizer`, call "
+            "`kol-reply-synthesizer` with `summary_only: true`, `fragments=[]`, "
+            "plus `latest_email` / `thread_history` from `get-email-conversation` "
+            "or resume_context. Persist via "
             "`kol_bridge_tool.py persist-reply-draft` with "
             "source_message_id = resume_context.latest_pending_inbound_message_id "
-            "when set, else resume_context.source_message_id, and fact value "
-            "including linked_escalation_id=<escalation_id>. Do not "
+            "when set, else resume_context.source_message_id, JSON "
+            "`conversation_summary`, and fact value including "
+            "linked_escalation_id=<escalation_id>. Do not "
             "call resolve-escalation; the console already resolved "
             "this row."
         )
@@ -436,6 +453,52 @@ async def _infer_inbound_message_id_for_escalation(
         return None
     msg = inbound.get("message_id")
     return msg if isinstance(msg, str) and msg.strip() else None
+
+
+def _linked_draft_phase(
+    escalation_state: str | None,
+) -> tuple[str | None, bool, str | None]:
+    """Map escalation state → (draft_phase, can_approve, origin_label)."""
+    state = (escalation_state or "").strip()
+    if state == "awaiting_answer":
+        return (
+            "pre_answer",
+            False,
+            "升级回信预览",
+        )
+    if state in {"answered", "resuming", "resolved"}:
+        return (
+            "post_resume",
+            True,
+            "升级恢复稿",
+        )
+    return None, False, None
+
+
+async def _find_linked_pending_reply_draft(
+    bridge: BridgeClient,
+    escalation_id: int,
+    env: str,
+) -> dict[str, Any] | None:
+    """Return the normalized approval row for a pending linked reply draft."""
+    from .approvals import _to_row
+
+    try:
+        rows = await bridge.list_approvals(status="pending", env=env)
+    except BridgeError:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("fact_key") != "approval.reply_draft":
+            continue
+        value = row.get("value")
+        if not isinstance(value, dict):
+            continue
+        if value.get("linked_escalation_id") != escalation_id:
+            continue
+        return _to_row(row, {})
+    return None
 
 
 async def _has_pending_reply_draft(
@@ -622,6 +685,116 @@ def _collect_pending_inbounds(
         {**trigger, "role": "trigger", "label": "触发升级"},
         *extras,
     ]
+
+
+async def _compose_linked_draft_payload(
+    bridge: BridgeClient,
+    escalation: dict[str, Any],
+    escalation_id: int,
+    env: str,
+) -> dict[str, Any]:
+    """Shared linked-draft fields for hub-context and linked-draft routes."""
+    draft = await _find_linked_pending_reply_draft(bridge, escalation_id, env)
+    state = str(escalation.get("state") or "")
+    draft_phase, can_approve, origin_label = _linked_draft_phase(state)
+    if draft is None:
+        draft_phase = None
+        can_approve = False
+        origin_label = None
+    elif draft_phase == "pre_answer":
+        draft["draft_origin"] = "escalation_preview"
+        draft["draft_origin_label"] = origin_label
+    elif draft_phase == "post_resume":
+        draft["draft_origin"] = "escalation_resume"
+        draft["draft_origin_label"] = origin_label
+    return {
+        "escalation_id": escalation_id,
+        "escalation_state": state,
+        "env": env,
+        "identity_id": escalation.get("identity_id"),
+        "campaign_id": escalation.get("campaign_id"),
+        "draft": draft,
+        "draft_phase": draft_phase,
+        "can_approve": can_approve and draft is not None,
+        "draft_origin_label": origin_label,
+    }
+
+
+@router.get("/{escalation_id}/linked-draft")
+async def escalation_linked_draft(
+    escalation_id: int,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+    env: Optional[str] = Query(None),
+) -> dict[str, Any]:
+    """Return the pending ``approval.reply_draft`` linked to this escalation.
+
+    Used by the escalation detail hub so operators approve linked drafts on
+    the escalation page instead of the global approvals list while the
+    escalation is still ``awaiting_answer``.
+    """
+    escalation = await _find_escalation(bridge, escalation_id, env)
+    if escalation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "escalation not found")
+    e = (env or escalation.get("env") or "TEST").upper()
+    return await _compose_linked_draft_payload(bridge, escalation, escalation_id, e)
+
+
+@router.get("/{escalation_id}/hub-context")
+async def escalation_hub_context(
+    escalation_id: int,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+    env: Optional[str] = Query(None),
+) -> dict[str, Any]:
+    """Operator hub bundle: topic cards, workflow stepper, linked draft."""
+    escalation = await _find_escalation(bridge, escalation_id, env)
+    if escalation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "escalation not found")
+    e = (env or escalation.get("env") or "TEST").upper()
+    payload = await _compose_linked_draft_payload(
+        bridge, escalation, escalation_id, e,
+    )
+    facts: dict[str, Any] = {}
+    identity_id = escalation.get("identity_id")
+    campaign_id = escalation.get("campaign_id")
+    if isinstance(identity_id, int) and isinstance(campaign_id, str) and campaign_id:
+        try:
+            raw_facts = await bridge.read_facts(identity_id, campaign_id=campaign_id, env=e)
+            nested = raw_facts.get("facts") if isinstance(raw_facts, dict) else None
+            facts = nested if isinstance(nested, dict) else (
+                raw_facts if isinstance(raw_facts, dict) else {}
+            )
+        except BridgeError:
+            facts = {}
+    topic_cards = build_topic_cards(escalation, facts)
+    has_pending_draft = payload.get("draft") is not None
+    completion = build_completion_summary(
+        escalation,
+        facts,
+        has_pending_draft=has_pending_draft,
+    )
+    workflow = build_workflow_steps(
+        escalation_state=payload.get("escalation_state"),
+        has_draft=has_pending_draft,
+        draft_phase=payload.get("draft_phase"),
+        can_approve=bool(payload.get("can_approve")),
+    )
+    if completion and completion.get("status") == "draft_approved":
+        workflow = {
+            "active_step": 5,
+            "steps": [
+                {**step, "status": "done"}
+                for step in workflow["steps"]
+            ],
+        }
+    return {
+        **payload,
+        "topic_cards": topic_cards,
+        "workflow_step": workflow["active_step"],
+        "workflow_steps": workflow["steps"],
+        "completion": completion,
+    }
 
 
 @router.get("/{escalation_id}/inbound-context")

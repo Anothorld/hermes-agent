@@ -25,6 +25,7 @@ _INQUIRY_SIGNALS = frozenset({
 _POSITIVE_COMMIT_SIGNALS = frozenset({
     "interest_positive",
     "accepts_terms",
+    "continues_without_objection",
 })
 
 _PRODUCT_INQUIRY_SIGNALS = frozenset({

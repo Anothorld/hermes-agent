@@ -12,6 +12,7 @@ import { factKeyLabel } from '../components/factKeyLabel';
 import { KolArchiveDialog } from '../components/dialogs/KolArchiveDialog';
 import { UnreadDot } from '../components/UnreadDot';
 import { isRealCampaignId } from '../lib/campaignId';
+import { kolScopedListSearch } from '../lib/kolSearch';
 import { toast, useEnvStore } from '../lib/store';
 import { useUnreadStore, isUnread } from '../lib/unread';
 import { usePollingFallback } from '../hooks/usePollingFallback';
@@ -175,6 +176,22 @@ function pickSettled<T>(r: PromiseSettledResult<T>): SectionState<T> {
     return { status: 'ok', data: r.value, error: null };
   }
   return { status: 'error', data: null, error: r.reason };
+}
+
+function scopedOperatorListPath(
+  base: '/approvals' | '/escalations',
+  campaignId: string,
+  identityId: number,
+  env: 'TEST' | 'LIVE',
+  kol?: { handle?: string | null; email?: string | null },
+): string {
+  return `${base}?${kolScopedListSearch({
+    campaignId,
+    identityId,
+    env,
+    handle: kol?.handle,
+    email: kol?.email,
+  })}`;
 }
 
 export function KolDetailPage() {
@@ -442,7 +459,10 @@ export function KolDetailPage() {
 
       <div className="flex flex-wrap gap-2 text-xs">
         <Link
-          to={`/approvals?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityVal.id}&env=${env}`}
+          to={scopedOperatorListPath('/approvals', campaignId, identityVal.id, env, {
+            handle: identityVal.primary_handle,
+            email: identityVal.primary_email,
+          })}
           className={`rounded px-2 py-1 ${
             pendingApprovals > 0
               ? 'bg-rose-100 text-rose-800 hover:bg-rose-200'
@@ -456,7 +476,10 @@ export function KolDetailPage() {
           />
         </Link>
         <Link
-          to={`/escalations?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityVal.id}&env=${env}`}
+          to={scopedOperatorListPath('/escalations', campaignId, identityVal.id, env, {
+            handle: identityVal.primary_handle,
+            email: identityVal.primary_email,
+          })}
           className={`rounded px-2 py-1 ${
             escalationsList.length > 0
               ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
@@ -1161,7 +1184,9 @@ function RedraftPanel({
 
         {hasEmail && decision === 'pending' && (
           <Link
-            to={`/approvals?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityId}&env=${env}`}
+            to={scopedOperatorListPath('/approvals', campaignId, identityId, env, {
+              email: primaryEmail,
+            })}
             className="inline-flex items-center gap-1 rounded border border-sky-300 bg-sky-50 px-3 py-1.5 text-sm font-medium text-sky-800 hover:bg-sky-100"
             title="跳到 Approvals 审批已有草稿"
           >
@@ -1195,7 +1220,9 @@ function RedraftPanel({
         <p className="mt-2 text-xs text-slate-600">
           ⓘ 已经有一份草稿待审批，建议先去
           {' '}<Link
-            to={`/approvals?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityId}&env=${env}`}
+            to={scopedOperatorListPath('/approvals', campaignId, identityId, env, {
+              email: primaryEmail,
+            })}
             className="text-sky-700 underline-offset-2 hover:underline"
           >
             Approvals
@@ -1514,7 +1541,9 @@ function ProactiveFollowupPanel({
           </button>
           {isPendingApproval && (
             <Link
-              to={`/approvals?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityId}&env=${env}`}
+              to={scopedOperatorListPath('/approvals', campaignId, identityId, env, {
+              email: primaryEmail,
+            })}
               className="text-sm text-sky-700 underline-offset-2 hover:underline"
             >
               去审批待处理草稿 →
@@ -1622,7 +1651,9 @@ function ProactiveFollowupPanel({
 
       {phase.kind === 'running' && (
         <Link
-          to={`/approvals?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${identityId}&env=${env}`}
+          to={scopedOperatorListPath('/approvals', campaignId, identityId, env, {
+            email: primaryEmail,
+          })}
           className="mt-2 inline-block text-xs text-sky-700 underline-offset-2 hover:underline"
         >
           生成完成后去待审批查看 →

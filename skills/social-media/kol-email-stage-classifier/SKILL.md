@@ -178,6 +178,10 @@ Common signals, append-only — emit only when evidence is in the email body:
 - `interest_positive` / `interest_negative` / `interest_unclear`
 - `asks_deliverables` / `asks_budget` / `asks_timeline`
 - `proposes_rate` / `counter_offer` / `accepts_terms`
+- `continues_without_objection` — KOL did not explicitly say "yes" but
+  continues cooperating (timing, address, color choice, "move forward")
+  after we already proposed scope/terms in an earlier outbound; no
+  `interest_negative`, `paid_only_stance`, or rate dispute in the latest mail
 - `paid_only_stance` — KOL or rep explicitly rejects barter/gifting and
   insists on paid/cash only (including after a prior barter pitch)
 - `requests_oos_sku` / `requests_color_swap`
@@ -222,8 +226,21 @@ them when the **latest email** shows agreement, not mere questions:
 | `offer.interest_signal=confirmed` | `interest_positive` or `accepts_terms` (≥0.6); never on `interest_unclear` / `asks_*` alone |
 | `offer.deliverable_platforms`, `offer.deliverable_count_per_platform` | KOL states agreed platforms/counts, or `accepts_terms`; if they only **ask** what you need, omit (Bridge may rewrite to `*_proposed`) |
 | `offer.usage_rights_discussed=true` | Usage rights were discussed **and** agreed or clearly accepted — not on deliverables/budget questions alone |
-| `offer.agreed_terms` | `accepts_terms` — not on `proposes_rate` / `counter_offer` alone |
+| `offer.agreed_terms` | `accepts_terms` or `continues_without_objection` (when thread shows we already proposed terms and KOL continues without objection) — not on `proposes_rate` / `counter_offer` alone |
 | `offer.sku_locked`, `offer.color_or_variant_locked`, `offer.fit_confirmed` | KOL **confirmed** a variant — not on `requests_oos_sku` / `requests_color_swap` alone |
+
+### Thread continuation (implicit accept — default ON)
+
+When `thread_history` shows a **prior brand outbound** already proposed
+deliverables/compensation framework, and the **latest** KOL mail continues
+cooperating (timing, photos, address, variant, "excited", "move forward")
+**without** rejecting or opening paid/rate disputes:
+
+- Emit `continues_without_objection` (≥0.7) and/or `accepts_terms`.
+- Do **not** downgrade to `needs_more_info` solely because they did not write
+  "yes I agree".
+- Bridge may also apply `policy:implicit_accept` deterministically after your
+  write; your signals still help audit and paid-path guardrails.
 
 When the KOL is asking or vague, prefer **omitting** committed keys (or
 `offer.interest_signal=needs_more_info`). The Bridge also sanitizes

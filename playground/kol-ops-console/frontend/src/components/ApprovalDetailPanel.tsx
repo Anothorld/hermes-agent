@@ -1,4 +1,4 @@
-import ApprovalActionBar from './ApprovalActionBar';
+import ApprovalActionBar, { type ApprovalDecisionResult } from './ApprovalActionBar';
 import ApprovalContextCard from './ApprovalContextCard';
 
 /**
@@ -18,6 +18,7 @@ export default function ApprovalDetailPanel({
   showActions = true,
   approveButtonLabel,
   rejectButtonLabel,
+  replyDraftKind,
 }: {
   factPath: string;
   context: Record<string, unknown> | null;
@@ -27,10 +28,11 @@ export default function ApprovalDetailPanel({
   decidedBy: string;
   agentBody?: string;
   onRejected?: () => void;
-  onApproved?: () => void;
+  onApproved?: (result?: ApprovalDecisionResult) => void;
   showActions?: boolean;
   approveButtonLabel?: string;
   rejectButtonLabel?: string;
+  replyDraftKind?: 'initial_outreach' | 'inbound_reply' | null;
 }) {
   const draftBody =
     agentBody
@@ -46,6 +48,7 @@ export default function ApprovalDetailPanel({
         identityId={identityId}
         campaignId={campaignId}
         env={env}
+        replyDraftKind={replyDraftKind}
       />
       {showActions && (
         <ApprovalActionBar

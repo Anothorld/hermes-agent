@@ -139,11 +139,14 @@ escalation (`reason="contract_render_failed: <stderr>"`) — do
 
 #### Step I.3 — Compose the email body
 Body skeleton (style preamble from the loader still applies):
-> "Great, glad we're aligned on the terms. Attached is our standard
-> agreement reflecting what we discussed (`<one-line summary of
-> agreed terms>`). Have a look and reply with your signed copy at
-> your convenience — happy to walk through anything that needs
-> clarifying."
+> "Attached is our standard agreement reflecting what we discussed. Please
+> review and return a signed copy — **signing confirms the deliverables and
+> compensation terms listed in the attachment**. Happy to clarify anything
+> that needs a tweak."
+
+Do **not** re-list the full compensation package in prose when
+`campaign_config.defer_terms_to_contract` is true (default) and scope was
+already aligned in prior emails — the contract is the final confirmation.
 
 Write:
 ```

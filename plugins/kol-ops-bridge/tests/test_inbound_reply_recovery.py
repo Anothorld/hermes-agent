@@ -25,6 +25,23 @@ class _FakeBridge:
     def list_recent_events(self, *, env: str, limit: int) -> list[dict[str, Any]]:
         return self.events[:limit]
 
+    def find_events_for_inbound_match(
+        self,
+        *,
+        env: str,
+        thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        sender_email: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        del env, limit, in_reply_to, sender_email
+        if not thread_id:
+            return []
+        return [
+            ev for ev in self.events
+            if thread_id in ((ev.get("payload") or {}).get("thread_id") or "")
+        ]
+
     def get_identity(self, identity_id: int) -> dict[str, Any] | None:
         return self.identities.get(identity_id)
 
@@ -70,6 +87,23 @@ def test_needs_reprocess_when_retry_gateway_only(bridge_pkg):
         ],
         identities={42: {"primary_email": "kol@example.com"}},
         dispatch_status={"should_retry_gateway_only": True},
+    )
+    assert needs_reprocess_after_global_seen(_msg(), env="TEST", bridge=bridge) is True
+
+
+def test_needs_reprocess_when_inbound_event_missing(bridge_pkg):
+    bridge = _FakeBridge(
+        events=[
+            {
+                "env": "TEST",
+                "identity_id": 42,
+                "campaign_id": "C1",
+                "event_type": "outbound_sent",
+                "payload": {"message_id": "out-msg-1", "thread_id": "thread-1"},
+            }
+        ],
+        identities={42: {"primary_email": "kol@example.com"}},
+        dispatch_status={"has_inbound_event": False},
     )
     assert needs_reprocess_after_global_seen(_msg(), env="TEST", bridge=bridge) is True
 

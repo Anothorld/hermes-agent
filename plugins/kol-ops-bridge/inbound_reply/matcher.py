@@ -23,6 +23,49 @@ from .schemas import IdentityMatch
 log = logging.getLogger(__name__)
 
 _DETACHED_MATCH_WINDOW_DAYS = 14
+_MATCH_EVENT_LIMIT = 1000
+
+
+def _merge_events_by_id(*groups: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[int, dict[str, Any]] = {}
+    for group in groups:
+        for ev in group:
+            eid = ev.get("id")
+            if isinstance(eid, int):
+                merged[eid] = ev
+            else:
+                merged[id(ev)] = ev
+    return sorted(
+        merged.values(),
+        key=lambda ev: int(ev.get("id") or 0),
+        reverse=True,
+    )
+
+
+def _load_match_events(
+    msg: GmailMessage,
+    *,
+    env: str,
+    bridge: InboundBridgePort,
+    sender_email: Optional[str],
+) -> list[dict[str, Any]]:
+    try:
+        recent = bridge.list_recent_events(env=env, limit=_MATCH_EVENT_LIMIT)
+    except Exception as exc:  # noqa: BLE001
+        log.error("bridge list_recent_events failed: %s", exc)
+        raise MatchBridgeError(f"list_recent_events failed: {exc}") from exc
+    try:
+        targeted = bridge.find_events_for_inbound_match(
+            env=env,
+            thread_id=msg.thread_id or None,
+            in_reply_to=msg.in_reply_to or None,
+            sender_email=sender_email,
+            limit=50,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("bridge find_events_for_inbound_match failed: %s", exc)
+        raise MatchBridgeError(f"find_events_for_inbound_match failed: {exc}") from exc
+    return _merge_events_by_id(recent, targeted)
 
 
 def expected_identity_email(bridge: InboundBridgePort, identity_id: int) -> Optional[str]:
@@ -43,16 +86,17 @@ def match_identity(
     bridge: InboundBridgePort,
 ) -> Optional[IdentityMatch]:
     """Return enriched identity-match context for an inbound msg or None."""
+    sender_email = extract_email(msg.from_addr)
     try:
-        events_list = bridge.list_recent_events(env=env, limit=1000)
-    except Exception as exc:  # noqa: BLE001
-        log.error("bridge list_recent_events failed: %s", exc)
-        raise MatchBridgeError(f"list_recent_events failed: {exc}") from exc
+        events_list = _load_match_events(
+            msg, env=env, bridge=bridge, sender_email=sender_email,
+        )
+    except MatchBridgeError:
+        raise
 
     events: Iterable[dict[str, Any]] = events_list
     strict_hit: Optional[tuple[int, Optional[str], str, str, Optional[str]]] = None
     weak_hit: Optional[tuple[int, Optional[str], str, str, Optional[str]]] = None
-    sender_email = extract_email(msg.from_addr)
     norm_subject = normalize_subject(msg.subject)
     now = dt.datetime.now(dt.timezone.utc)
     best_detached_score = -1

@@ -211,6 +211,7 @@ def _invoke_openai_compatible(
     body = json.dumps({
         "model": resolved_model,
         "temperature": 0.2,
+        "max_tokens": _max_tokens(),
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": prompt},

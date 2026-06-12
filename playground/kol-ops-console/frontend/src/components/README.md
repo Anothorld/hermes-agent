@@ -18,12 +18,12 @@
 
 | 组件 | 模块 GUIDE |
 |------|------------|
-| `ApprovalDetailPanel`, `ApprovalContextCard`, `ApprovalActionBar`, `RejectCorrectionModal`, `DraftEditDiffPanel` | [approvals](../../../docs/features/approvals/GUIDE.md) |
+| `ApprovalDetailPanel`, `ApprovalContextCard`, `ConversationSummaryCard`, `ApprovalActionBar`, `RejectCorrectionModal`, `DraftEditDiffPanel` | [approvals](../../../docs/features/approvals/GUIDE.md) |
 | `LearningWorkflowStepper`, `LearningManualTriggerSection`, `StrategyPromotionPanel`, `OutcomePromotionPanel`, `LearningNextBatchPreview`, `LearningChannelTrends`, `PolicyMergeDiffPreview`, `DiscoveryLearningPanel`, `ProductCategoryField`, `dialogs/ShortlistDecisionFeedbackDialog`, `dialogs/KolApproveAnnotationDialog`, `dialogs/KolTransferCampaignDialog` | [learning](../../../docs/features/learning/GUIDE.md) |
 | `LaneFilterBar`, `GoalProgressBar`, `FactsEditor`, `KolProfileDashboard`, `KolSocialQuickLinks`, `KolProfilePreviewLink`, `NoxDiligencePanel`, `NoxInsightsSections`, `NoxDistributionChart`, `KolRegistryTable`, `MetricTrendSparkline`, `NoxAudienceHoverPanel`, `AudienceProfileHoverButton` | [kols](../../../docs/features/kols/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md), [gate-metrics](../../../docs/features/gate-metrics/GUIDE.md) |
 | `EditCampaignConfigPanel`, `NoxCampaignOpsPanel`, `ContractReadinessPanel`, `KolTransferCampaignDialog` | [campaigns](../../../docs/features/campaigns/GUIDE.md), [nox](../../../docs/features/nox/GUIDE.md) |
 | `CommunicationHistoryPanel` | [gmail](../../../docs/features/gmail/GUIDE.md) |
-| `InboundEmailCard`, `InboundEmailStack`, `EscalationSuggestedQuestion` | [escalations](../../../docs/features/escalations/GUIDE.md) |
+| `InboundEmailCard`, `InboundEmailStack`, `EscalationSuggestedQuestion`, `EscalationTopicCards`, `EscalationWorkflowStepper`, `EscalationCompletionPanel` | [escalations](../../../docs/features/escalations/GUIDE.md) |
 | `AgentTranscriptPanel` | [agent-gateway](../../../docs/features/agent-gateway/GUIDE.md) |
 | `factKeyLabel.ts` | [kols](../../../docs/features/kols/GUIDE.md) |
 

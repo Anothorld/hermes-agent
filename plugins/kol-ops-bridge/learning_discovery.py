@@ -43,6 +43,64 @@ def discovery_learning_batch_size() -> int:
         return 10
 
 
+def discovery_distill_max_samples() -> int:
+    """Max decision events sent to the LLM in one distill call (newest first).
+
+    Grouping still counts all fresh samples for dashboard progress (e.g. 69/10),
+    but oversized prompts (full KOL snapshots × N) can break local LLM proxies.
+    """
+    raw = os.environ.get("KOL_DISCOVERY_LEARNING_DISTILL_MAX_SAMPLES", "25").strip()
+    try:
+        return max(10, min(int(raw), 200))
+    except ValueError:
+        return 25
+
+
+def _select_discovery_distill_batch(
+    events: list[dict[str, Any]],
+    *,
+    threshold: int,
+    max_samples: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Newest-first subset for one LLM distill + proposal consumption."""
+    cap = max_samples if max_samples is not None else discovery_distill_max_samples()
+    ordered = sorted(
+        events,
+        key=lambda e: int(e.get("id") or 0),
+        reverse=True,
+    )
+    take = min(len(ordered), max(cap, threshold))
+    return ordered[:take]
+
+
+def _debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        import time as _time
+        from pathlib import Path as _Path
+
+        with _Path("/Users/arnold/agent_prj/.cursor/debug-9fa234.log").open(
+            "a", encoding="utf-8",
+        ) as _fh:
+            _fh.write(
+                json.dumps(
+                    {
+                        "sessionId": "9fa234",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+            )
+    except Exception:
+        pass
+    # #endregion
+
+
 def tag_mine_min_count() -> int:
     """Min comment occurrences before a mined reason becomes a tag proposal."""
     raw = os.environ.get("KOL_DISCOVERY_TAG_MINE_MIN_COUNT", "5").strip()
@@ -270,9 +328,11 @@ def distill_discovery_criteria_llm(
     group_kind: str,
     group_key: str,
     env: str,
+    group_total: Optional[int] = None,
 ) -> str:
     """LLM-distill one group of decision samples into criteria markdown."""
     samples = [_shape_sample(ev) for ev in events]
+    total = group_total if group_total is not None else len(samples)
     baseline = _current_criteria_baseline(conn, scope=scope, env=env)
     rejection_block = _recent_rejection_feedback_block(conn, env=env, scope=scope)
     level = "single product (SPU)" if group_kind == "spu" else "product category"
@@ -280,7 +340,7 @@ def distill_discovery_criteria_llm(
         "You analyze operator decisions on Instagram KOL shortlists "
         "(approve / remove-from-shortlist / transfer-to-other-campaign).\n"
         f"Learning level: {level} `{group_key}` (env={env}). "
-        f"Batch size: {len(samples)} decisions.\n"
+        f"Distilling newest {len(samples)} of {total} queued decisions.\n"
         "Each sample includes the operator's reason_tags, free-text comment, and a "
         "frozen KOL feature snapshot (creator type, followers, region, content "
         "pillars, Nox due-diligence facts, reels stats, agent scores).\n\n"
@@ -353,20 +413,41 @@ def propose_discovery_learning_approval(
         if find_pending_discovery_proposal(conn, env=env, scope=scope):
             skipped.append({"scope": scope, "reason": "pending_proposal_exists"})
             continue
+        batch_events = _select_discovery_distill_batch(events, threshold=threshold)
+        _debug_log(
+            hypothesis_id="H4",
+            location="learning_discovery.py:propose_discovery_learning_approval",
+            message="discovery_distill_batch_selected",
+            data={
+                "scope": scope,
+                "group_kind": kind,
+                "group_key": key,
+                "fresh_in_group": len(events),
+                "distill_batch_size": len(batch_events),
+                "batch_threshold": threshold,
+                "distill_max_samples": discovery_distill_max_samples(),
+            },
+        )
         md = distill_discovery_criteria_llm(
-            conn, events, scope=scope, group_kind=kind, group_key=key, env=env,
+            conn,
+            batch_events,
+            scope=scope,
+            group_kind=kind,
+            group_key=key,
+            env=env,
+            group_total=len(events),
         )
         from . import learning_distill
 
         anchor_id = learning_distill.resolve_learning_anchor_identity_id(
-            conn, env=env, events=events,
+            conn, env=env, events=batch_events,
         )
-        event_ids = [int(e["id"]) for e in events if e.get("id") is not None]
+        event_ids = [int(e["id"]) for e in batch_events if e.get("id") is not None]
         distinct_identity_ids = {
-            int(e["identity_id"]) for e in events if e.get("identity_id") is not None
+            int(e["identity_id"]) for e in batch_events if e.get("identity_id") is not None
         }
         action_mix = Counter(
-            str((e.get("payload") or {}).get("action") or "") for e in events
+            str((e.get("payload") or {}).get("action") or "") for e in batch_events
         )
         proposal = {
             "decision": "pending",
@@ -377,7 +458,8 @@ def propose_discovery_learning_approval(
             "title": f"Discovery learning ({kind}:{key}, {env})",
             "proposed_markdown": md,
             "source_event_ids": event_ids,
-            "sample_count": len(events),
+            "sample_count": len(batch_events),
+            "group_fresh_samples": len(events),
             "sample_identity_count": len(distinct_identity_ids),
             "action_mix": dict(action_mix),
             "batch_threshold": threshold,
@@ -392,45 +474,25 @@ def propose_discovery_learning_approval(
             source="learning:propose:discovery_criteria",
             env=env,
         )
-        # #region agent log
-        try:
-            import json as _json
-            import time as _time
-            from pathlib import Path as _Path
-
-            _log_path = _Path("/Users/arnold/agent_prj/.cursor/debug-cfcf5c.log")
-            _log_path.parent.mkdir(parents=True, exist_ok=True)
-            with _log_path.open("a", encoding="utf-8") as _fh:
-                _fh.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "cfcf5c",
-                            "runId": "pre-fix",
-                            "hypothesisId": "H2",
-                            "location": "learning_discovery.py:propose_discovery_learning_approval",
-                            "message": "discovery_proposal_created",
-                            "data": {
-                                "env": env,
-                                "scope": scope,
-                                "group_kind": kind,
-                                "group_key": key,
-                                "batch_threshold": threshold,
-                                "sample_count": len(events),
-                                "source_event_ids_len": len(event_ids),
-                            },
-                            "timestamp": int(_time.time() * 1000),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-        except Exception:
-            pass
-        # #endregion
+        _debug_log(
+            hypothesis_id="H4",
+            location="learning_discovery.py:propose_discovery_learning_approval",
+            message="discovery_proposal_created",
+            data={
+                "env": env,
+                "scope": scope,
+                "group_kind": kind,
+                "group_key": key,
+                "sample_count": len(batch_events),
+                "group_fresh_samples": len(events),
+                "source_event_ids_len": len(event_ids),
+            },
+        )
         proposed.append({
             "scope": scope,
             "identity_id": anchor_id,
-            "sample_count": len(events),
+            "sample_count": len(batch_events),
+            "group_fresh_samples": len(events),
             "source_event_ids": event_ids,
         })
     if not proposed and skipped:
@@ -813,6 +875,7 @@ __all__ = [
     "DISCOVERY_LEARNING_MARKER",
     "apply_approved_discovery_proposal",
     "build_learned_discovery_criteria",
+    "discovery_distill_max_samples",
     "discovery_learning_batch_size",
     "discovery_overview_stats",
     "distill_discovery_criteria_llm",

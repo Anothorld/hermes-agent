@@ -101,6 +101,13 @@ For `select-draftable-plan`, merge facts as:
 `persist-reply-draft` with multiple `contributing` entries: set
 `child_skill` to `kol-reply-synthesizer` (Bridge defaults this if omitted).
 
+Optional top-level `conversation_summary: {"bullets": ["…"]}` on the persist
+JSON (Chinese operator recap of `thread_history` + latest inbound; stored on
+the approval fact, not in `child_envelope.body`). For single-skill draft paths,
+call `kol-reply-synthesizer` with `summary_only: true` and `fragments=[]`
+before persist. Console `approval_refine` uses `write-facts-multi` instead;
+the Bridge soft-normalizes `conversation_summary` on that write too.
+
 `mark-reply-handled`: pass `--identity-id`, `--campaign-id`, and
 `--detected-mailbox-user-id` so labels apply on the operator inbox that
 received the reply. `kol-outreach/pending-reply` is optional in Gmail; missing label

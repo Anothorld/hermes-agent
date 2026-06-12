@@ -25,23 +25,28 @@ def test_draft_origin_escalation_resume():
     assert label == "升级恢复稿"
 
 
-def test_draft_origin_chase_supersede():
-    origin, _ = approvals_mod._derive_draft_origin(
+def test_draft_origin_chase_placeholder_legacy():
+    origin, label = approvals_mod._derive_draft_origin(
         "approval.reply_draft",
         {"chase_supersede": True, "child_skill": "kol-reply-synthesizer"},
     )
-    assert origin == "chase_supersede"
+    assert origin == "chase_placeholder"
+    assert label == "追信占位(已废弃)"
 
 
-def test_draft_origin_chase_supersede_dict():
-    origin, _ = approvals_mod._derive_draft_origin(
+def test_draft_origin_chase_followup_regenerated():
+    origin, label = approvals_mod._derive_draft_origin(
         "approval.reply_draft",
         {
-            "chase_supersede": {"prior_source_message_id": "MSG1"},
+            "chase_supersede": {
+                "prior_source_message_id": "MSG1",
+                "superseded_for_follow_up": True,
+            },
             "child_skill": "kol-reply-synthesizer",
         },
     )
-    assert origin == "chase_supersede"
+    assert origin == "chase_followup"
+    assert label == "追信换新稿"
 
 
 def test_draft_origin_proactive_followup():

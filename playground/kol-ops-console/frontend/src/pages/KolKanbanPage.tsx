@@ -21,6 +21,7 @@ import { cardStatus, STATUS_BADGE } from '../lib/kolCardStatus';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
 import { resolveKanbanColumnGoal } from '../lib/kolKanbanBucket';
+import { kolScopedListSearch } from '../lib/kolSearch';
 
 type LanesResponse = {
   campaign_id: string;
@@ -228,6 +229,20 @@ export function KolKanbanPage() {
           <span className="font-medium text-amber-700">@handle</span>
           <span>当前目标阻塞</span>
         </span>
+        <span className="text-slate-300">|</span>
+        <span className="font-medium text-slate-600">卡片操作</span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="rounded border border-rose-300 bg-rose-50 px-1 py-0.5 font-medium text-rose-800">
+            待审批
+          </span>
+          <span>仅当该 KOL 有待审条目时显示</span>
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="rounded border border-amber-300 bg-amber-50 px-1 py-0.5 font-medium text-amber-800">
+            升级
+          </span>
+          <span>仅当该 KOL 有未处理升级时显示</span>
+        </span>
       </div>
 
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
@@ -399,6 +414,8 @@ function KanbanCard({
   const missing = goalState?.missing_facts ?? [];
   const status = cardStatus(row);
   const badge = STATUS_BADGE[status];
+  const pendingApprovals = row.pending_approval_count ?? 0;
+  const openEscalations = row.open_escalation_count ?? 0;
   const approvalUnread = isUnread(row.pending_approval_latest_at, seenApproval);
   const escalationUnread = isUnread(row.open_escalation_latest_at, seenEscalation);
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -415,13 +432,21 @@ function KanbanCard({
         >
           @{row.handle}
           <UnreadDot
-            show={approvalUnread || escalationUnread}
+            show={
+              (pendingApprovals > 0 && approvalUnread) ||
+              (openEscalations > 0 && escalationUnread)
+            }
             title={
-              approvalUnread && escalationUnread
+              pendingApprovals > 0 &&
+              approvalUnread &&
+              openEscalations > 0 &&
+              escalationUnread
                 ? '有新的待审批和升级'
-                : approvalUnread
+                : pendingApprovals > 0 && approvalUnread
                 ? '有新的待审批'
-                : '有新的升级'
+                : openEscalations > 0 && escalationUnread
+                ? '有新的升级'
+                : ''
             }
           />
           <RepeatKolBadge
@@ -450,13 +475,38 @@ function KanbanCard({
             {open ? '收起' : `补 ${missing.length} 项`}
           </button>
         )}
-        <Link
-          to={`/escalations?campaign_id=${encodeURIComponent(campaignId)}&identity_id=${row.identity_id}&env=${env}`}
-          className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-medium text-amber-800 hover:bg-amber-100"
-        >
-          升级
-          <UnreadDot show={escalationUnread} title="有新的升级" />
-        </Link>
+        {pendingApprovals > 0 && (
+          <Link
+            to={`/approvals?${kolScopedListSearch({
+              campaignId,
+              identityId: row.identity_id,
+              env,
+              handle: row.handle,
+            })}`}
+            className="rounded border border-rose-300 bg-rose-50 px-1.5 py-0.5 font-medium text-rose-800 hover:bg-rose-100"
+            title={`${pendingApprovals} 条待审批`}
+          >
+            待审批
+            {pendingApprovals > 1 ? ` ${pendingApprovals}` : ''}
+            <UnreadDot show={approvalUnread} title="有新的待审批" />
+          </Link>
+        )}
+        {openEscalations > 0 && (
+          <Link
+            to={`/escalations?${kolScopedListSearch({
+              campaignId,
+              identityId: row.identity_id,
+              env,
+              handle: row.handle,
+            })}`}
+            className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-medium text-amber-800 hover:bg-amber-100"
+            title={`${openEscalations} 条未处理升级`}
+          >
+            升级
+            {openEscalations > 1 ? ` ${openEscalations}` : ''}
+            <UnreadDot show={escalationUnread} title="有新的升级" />
+          </Link>
+        )}
         <button
           type="button"
           onClick={() => setArchiveOpen(true)}

@@ -130,6 +130,21 @@ Tier 1 不再使用 `web_search` / `web_extract`。模型应：
 
 悬停卡片叠加 Nox/粉丝等 `preview_facts`；二次打开优先 CAL，减少重复抓取。
 
+## 看板卡片标注（待审批 / 升级）
+
+每张 KOL 卡片从 `GET /campaigns/{id}/lanes` 读取 **按 KOL 聚合** 的队列计数（`pending_approval_count`、`open_escalation_count`），**仅在有待处理项时** 在卡片操作区显示快捷入口：
+
+| 芯片 | 显示条件 | 跳转 |
+|------|----------|------|
+| **待审批**（玫红） | `pending_approval_count > 0` | `/approvals?campaign_id=…&identity_id=…`（带 handle 搜索） |
+| **升级**（琥珀） | `open_escalation_count > 0`（`awaiting_answer`） | `/escalations?campaign_id=…&identity_id=…` |
+
+- 多条时芯片后缀显示数量（如 `待审批 2`）。
+- `@handle` 旁红点：该 KOL 有待审/升级且 `*_latest_at` 晚于本地已读时间。
+- 右上角状态徽章（如 `Draft 待审批`）仍由 `reply_draft_state` / 意向信号等驱动，与芯片互补；无待审条目时不显示「待审批」芯片。
+
+实现：`KolKanbanPage.tsx` → `KanbanCard`。
+
 ## Lane / Goal
 
 泳道：`commerce`, `fulfillment`, `publish`, `meta`（类型见 `api.ts` `Lane`）。

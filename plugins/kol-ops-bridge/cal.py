@@ -154,6 +154,22 @@ def _bootstrap(path: Path) -> None:
         _ensure_column(conn, "campaign_config", "paid_target_budget", "REAL")
         _ensure_column(conn, "campaign_config", "paid_ratio_override", "REAL")
         _ensure_column(conn, "campaign_config", "nox_integration_json", "TEXT")
+        _ensure_column(
+            conn, "campaign_config", "implicit_accept_enabled",
+            "INTEGER NOT NULL DEFAULT 1",
+        )
+        _ensure_column(
+            conn, "campaign_config", "defer_terms_to_contract",
+            "INTEGER NOT NULL DEFAULT 1",
+        )
+        _ensure_column(
+            conn, "campaign_config", "default_compensation_mode",
+            "TEXT NOT NULL DEFAULT 'gifted'",
+        )
+        _ensure_column(
+            conn, "campaign_config", "strict_explicit_accept",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         _ensure_column(conn, "kol_relationship", "negotiation_style", "TEXT")
         _ensure_column(conn, "policy_documents", "env", "TEXT")
         for ddl in VIEWS.values():
@@ -1733,6 +1749,8 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
         "extra_notes",
         "brief_template_id", "color_variant_policy", "audit_standards_md",
         "test_mode_to", "contract_required", "status",
+        "implicit_accept_enabled", "defer_terms_to_contract",
+        "default_compensation_mode", "strict_explicit_accept",
     }
 
     def _do() -> str:
@@ -1751,7 +1769,12 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
                     sets.append(f"{json_cols[k]} = ?")
                     vals.append(_j(v))
                 elif k in scalar_allowed and v is not None:
-                    if k == "contract_required":
+                    if k in {
+                        "contract_required",
+                        "implicit_accept_enabled",
+                        "defer_terms_to_contract",
+                        "strict_explicit_accept",
+                    }:
                         v = 1 if v else 0
                     sets.append(f"{k} = ?")
                     vals.append(v)
@@ -1858,7 +1881,9 @@ def get_campaign_config(campaign_id: str, *, env: Optional[str] = None) -> Optio
     out["variant_candidates"] = _jl(out.pop("variant_candidates_json", "[]"), [])
     out["followup_intervals"] = _jl(out.pop("followup_intervals_json", "{}"), {})
     out["contract_required"] = bool(out.get("contract_required", 1))
-    return flatten_nox_into_config(out)
+    from .implicit_accept_policy import normalize_campaign_policy_cfg
+
+    return flatten_nox_into_config(normalize_campaign_policy_cfg(out))
 
 
 def batch_global_outreach_touch(
@@ -3035,6 +3060,14 @@ def write_facts(
     if namespace not in FACT_NAMESPACES:
         raise FactNamespaceError(f"unknown namespace: {namespace!r}")
     prefix = f"{namespace}."
+    facts = {
+        k: (
+            reply_draft.sanitize_reply_draft_fact_value(v)
+            if k == "approval.reply_draft"
+            else v
+        )
+        for k, v in facts.items()
+    }
     for k, v in facts.items():
         if not k.startswith(prefix):
             raise FactNamespaceError(
@@ -3187,6 +3220,17 @@ def write_facts_multi(
 
     Returns ``{namespace: rows_inserted}``.
     """
+    namespaces = {
+        ns: {
+            k: (
+                reply_draft.sanitize_reply_draft_fact_value(v)
+                if k == "approval.reply_draft"
+                else v
+            )
+            for k, v in facts.items()
+        }
+        for ns, facts in namespaces.items()
+    }
     # Pre-validate to avoid partial writes when caller passes an invalid key.
     for ns, facts in namespaces.items():
         if ns not in FACT_NAMESPACES:
@@ -3338,6 +3382,9 @@ def _recompute_goals_inner(
     ).fetchone()
     cfg: dict[str, Any] = dict(cfg_row) if cfg_row else {}
     if cfg:
+        from .implicit_accept_policy import normalize_campaign_policy_cfg
+
+        cfg = normalize_campaign_policy_cfg(cfg)
         cfg["contract_required"] = bool(cfg.get("contract_required", 1))
         cfg["sku_whitelist"] = _jl(cfg.get("sku_whitelist_json"), [])
         cfg["variant_candidates"] = _jl(cfg.get("variant_candidates_json"), [])
@@ -3355,7 +3402,7 @@ def _recompute_goals_inner(
         missing = goal.missing(state)
         if goal.is_skipped(state, ctx):
             status = "skipped"
-        elif goal.is_satisfied(state):
+        elif goal.is_satisfied(state, ctx):
             status = "satisfied"
         elif goal.can_enter(state, ctx):
             status = "active"
@@ -3684,6 +3731,97 @@ def list_events(
             return out
 
     return _safe("list_events", _do) or []
+
+
+def _rows_to_event_dicts(rows: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        payload = d.pop("payload_json", None)
+        try:
+            d["payload"] = json.loads(payload) if payload else {}
+        except (TypeError, ValueError):
+            d["payload"] = {}
+        out.append(d)
+    return out
+
+
+def find_events_for_inbound_match(
+    *,
+    env: str = "LIVE",
+    thread_id: str | None = None,
+    in_reply_to: str | None = None,
+    sender_email: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Targeted CAL lookups for inbound identity matching.
+
+    Supplements ``list_events(limit=1000)`` so long-running campaigns are not
+    dropped from the matcher window when newer traffic pushes their rows out.
+    """
+    limit = max(1, min(int(limit), 200))
+    select = (
+        "SELECT id, identity_id, campaign_id, event_type, goal, lane, "
+        "actor, ts, payload_json, env FROM kol_conversation_events "
+    )
+    merged: dict[int, dict[str, Any]] = {}
+
+    def _merge(rows: list[Any]) -> None:
+        for ev in _rows_to_event_dicts(rows):
+            eid = ev.get("id")
+            if isinstance(eid, int):
+                merged[eid] = ev
+
+    def _do() -> list[dict[str, Any]]:
+        with _connect() as conn:
+            if thread_id:
+                tid = thread_id.strip()
+                if tid:
+                    rows = conn.execute(
+                        select
+                        + """WHERE env = ? AND identity_id IS NOT NULL
+                              AND (
+                                json_extract(payload_json, '$.thread_id') = ?
+                                OR json_extract(payload_json, '$.gmail_draft.thread_id') = ?
+                                OR json_extract(payload_json, '$.draft.thread_id') = ?
+                              )
+                              ORDER BY id DESC LIMIT ?""",
+                        (env, tid, tid, tid, limit),
+                    ).fetchall()
+                    _merge(rows)
+            if in_reply_to:
+                mid = in_reply_to.strip().strip("<>")
+                if mid:
+                    rows = conn.execute(
+                        select
+                        + """WHERE env = ? AND identity_id IS NOT NULL
+                              AND (
+                                json_extract(payload_json, '$.message_id') = ?
+                                OR json_extract(payload_json, '$.source_message_id') = ?
+                              )
+                              ORDER BY id DESC LIMIT ?""",
+                        (env, mid, mid, limit),
+                    ).fetchall()
+                    _merge(rows)
+            if sender_email:
+                email = sender_email.strip().lower()
+                if email:
+                    like = f"%{email}%"
+                    rows = conn.execute(
+                        select
+                        + """WHERE env = ? AND identity_id IS NOT NULL
+                              AND (
+                                lower(coalesce(json_extract(payload_json, '$.from_addr'), '')) LIKE ?
+                                OR lower(coalesce(json_extract(payload_json, '$.to'), '')) LIKE ?
+                                OR lower(coalesce(json_extract(payload_json, '$.from'), '')) LIKE ?
+                              )
+                              ORDER BY id DESC LIMIT ?""",
+                        (env, like, like, like, limit),
+                    ).fetchall()
+                    _merge(rows)
+        return sorted(merged.values(), key=lambda ev: int(ev.get("id") or 0), reverse=True)
+
+    return _safe("find_events_for_inbound_match", _do) or []
 
 
 def get_reply_draft_row(
@@ -4416,7 +4554,8 @@ def list_escalations(
         where.append("e.campaign_id = ?")
         args.append(campaign_id)
     sql = (
-        "SELECT e.*, i.primary_handle AS primary_handle "
+        "SELECT e.*, i.primary_handle AS primary_handle, "
+        "i.primary_email AS primary_email "
         "FROM kol_escalations e "
         "LEFT JOIN kol_identity i ON i.id = e.identity_id "
         f"WHERE {' AND '.join(where)} ORDER BY e.id DESC"
@@ -4430,6 +4569,12 @@ def list_escalations(
         if isinstance(handle, str):
             handle = handle.strip().lstrip("@") or None
         d["handle"] = handle
+        email = d.get("primary_email")
+        if isinstance(email, str):
+            email = email.strip().lower() or None
+        else:
+            email = None
+        d["email"] = email
         d["resume_context"] = _jl(d.pop("resume_context_json", "{}"), {})
         d["operator_facts"] = _jl(d.pop("operator_facts_json", None), None)
         out.append(d)
@@ -4449,6 +4594,14 @@ def _approval_handle_from_row(row: Mapping[str, Any]) -> Optional[str]:
     return handle or None
 
 
+def _approval_email_from_row(row: Mapping[str, Any]) -> Optional[str]:
+    email = row.get("primary_email")
+    if not isinstance(email, str):
+        return None
+    email = email.strip().lower()
+    return email or None
+
+
 def _approval_rows_query(
     *,
     env: str,
@@ -4465,7 +4618,7 @@ def _approval_rows_query(
         args.append(campaign_id)
     sql = (
         "SELECT f.identity_id, f.campaign_id, f.fact_key, f.fact_value, "
-        "f.captured_at, i.primary_handle "
+        "f.captured_at, i.primary_handle, i.primary_email "
         "FROM kol_facts_latest f "
         "LEFT JOIN kol_identity i ON i.id = f.identity_id "
         f"WHERE {' AND '.join(where)} ORDER BY f.id DESC"
@@ -4505,6 +4658,7 @@ def list_pending_approvals(
                 "value": val,
                 "captured_at": r["captured_at"],
                 "handle": _approval_handle_from_row(r),
+                "email": _approval_email_from_row(r),
             })
     return out
 
@@ -4543,6 +4697,7 @@ def list_decided_approvals(
             "value": val,
             "captured_at": r["captured_at"],
             "handle": _approval_handle_from_row(r),
+            "email": _approval_email_from_row(r),
         })
     return out
 
@@ -4814,6 +4969,7 @@ __all__ = [
     "archive_collab",
     "check_stuck_goals",
     "db_path",
+    "find_events_for_inbound_match",
     "find_identity_by_handle",
     "get_campaign_config",
     "get_candidate_for",

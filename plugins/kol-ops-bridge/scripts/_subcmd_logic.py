@@ -225,7 +225,9 @@ def register(sub: "argparse._SubParsersAction") -> None:
         "persist-reply-draft",
         help=("POST /reply-drafts/persist — enrich a child reply envelope "
               "(to/Re:subject/thread_id) then write the draft event + "
-              "approval.reply_draft fact atomically."),
+              "approval.reply_draft fact atomically. Optional "
+              "conversation_summary.bullets (Chinese operator thread recap) "
+              "is stored on the approval fact, not in draft.body."),
     )
     add_common_args(p)
     add_env_arg(p)

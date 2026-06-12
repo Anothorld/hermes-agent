@@ -80,6 +80,72 @@ def test_write_facts_multi_rejects_invalid_namespace_atomically(cal_db):
     assert "offer.outreach_sent" not in facts
 
 
+def test_write_facts_sanitizes_reply_draft_conversation_summary(cal_db):
+    cal = cal_db
+    iid = _seed(cal)
+    cal.write_facts(
+        identity_id=iid,
+        campaign_id=CAMPAIGN,
+        namespace="approval",
+        facts={
+            "approval.reply_draft": {
+                "decision": "pending",
+                "source_message_id": "M-wf",
+                "primary_lane": "commerce",
+                "primary_goal": "compensation_negotiation",
+                "child_skill": "kol-compensation-negotiator",
+                "draft": {
+                    "subject": "Re: budget",
+                    "body": "Thanks.",
+                    "to": "kol@example.com",
+                    "thread_id": "TH1",
+                },
+                "conversation_summary": {"bullets": ["", "要点二"]},
+            },
+        },
+        source="approval:refine",
+        env="LIVE",
+    )
+    facts = cal.latest_facts_for(identity_id=iid, campaign_id=CAMPAIGN, env="LIVE")
+    assert facts["approval.reply_draft"]["conversation_summary"] == {
+        "bullets": ["要点二"],
+    }
+
+
+def test_write_facts_multi_sanitizes_reply_draft_conversation_summary(cal_db):
+    cal = cal_db
+    iid = _seed(cal)
+    cal.write_facts_multi(
+        identity_id=iid,
+        campaign_id=CAMPAIGN,
+        namespaces={
+            "approval": {
+                "approval.reply_draft": {
+                    "decision": "pending",
+                    "source_message_id": "M-refine",
+                    "primary_lane": "commerce",
+                    "primary_goal": "compensation_negotiation",
+                    "child_skill": "kol-compensation-negotiator",
+                    "draft": {
+                        "subject": "Re: budget",
+                        "body": "Thanks for your note.",
+                        "to": "kol@example.com",
+                        "thread_id": "TH1",
+                    },
+                    "conversation_summary": {
+                        "bullets": ["  要点一  ", "", 99],
+                    },
+                },
+            },
+        },
+        source="approval_refine:console",
+        env="LIVE",
+    )
+    facts = cal.latest_facts_for(identity_id=iid, campaign_id=CAMPAIGN, env="LIVE")
+    draft = facts["approval.reply_draft"]
+    assert draft["conversation_summary"] == {"bullets": ["要点一"]}
+
+
 def test_write_facts_multi_rejects_unprefixed_key(cal_db):
     cal = cal_db
     iid = _seed(cal)

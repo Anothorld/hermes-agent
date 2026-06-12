@@ -326,6 +326,7 @@ export type EscalationRow = {
   id: number;
   identity_id: number;
   handle?: string | null;
+  email?: string | null;
   // Bridge sends ``null`` for identity-scoped escalations (e.g.,
   // ``contact_email_not_found`` — no campaign context yet). Treat this
   // as ``string | null`` everywhere or risk shipping ``"null"`` into

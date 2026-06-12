@@ -31,6 +31,8 @@ def needs_reprocess_after_global_seen(
         return True
     if not isinstance(dispatch_status, dict):
         return False
+    if not dispatch_status.get("has_inbound_event"):
+        return True
     if dispatch_status.get("should_retry_gateway_only"):
         return True
     if dispatch_status.get("should_skip_poller"):

@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { goalLabel, laneLabel, policyScopeLabel } from '../constants/domainLabels';
+import ConversationSummaryCard, {
+  parseConversationSummaryBullets,
+} from './ConversationSummaryCard';
 import InboundEmailCard, { type InboundEmail } from './InboundEmailCard';
 import { PolicyMergeDiffPreview } from './PolicyMergeDiffPreview';
 
@@ -331,8 +334,8 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
     <div className="space-y-2">
       {priorChaseMsg && (
         <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          已针对<strong className="font-medium">追信</strong>更新草稿（上一版回复 msg-id:{' '}
-          <span className="font-mono">{priorChaseMsg}</span>）。请确认正文有回应对方跟进后再批准。
+          本条为<strong className="font-medium">追信换新稿</strong>（已替换上一版回复，原来信
+          msg-id: <span className="font-mono">{priorChaseMsg}</span>）。请确认正文已回应对方最新跟进后再批准。
           {orphanDiscardAction === 'deleted' && (
             <span className="mt-1 block text-amber-800">
               上一版 Gmail 草稿已自动删除，请勿在 Gmail 草稿箱里找旧稿发送。
@@ -730,12 +733,15 @@ export default function ApprovalContextCard({
   identityId,
   campaignId,
   env,
+  replyDraftKind,
 }: {
   factPath: string;
   context: Ctx | null;
   identityId: number;
   campaignId: string;
   env: string;
+  /** When set, conversation summary is shown only for inbound replies. */
+  replyDraftKind?: 'initial_outreach' | 'inbound_reply' | null;
 }) {
   if (!context) {
     return <div className="text-xs italic text-slate-500">(no context)</div>;
@@ -808,8 +814,17 @@ export default function ApprovalContextCard({
       body = <GenericApprovalView ctx={context} />;
   }
 
+  const showConversationSummary = isReplyDraft
+    && (replyDraftKind == null || replyDraftKind === 'inbound_reply');
+  const summaryBullets = showConversationSummary
+    ? parseConversationSummaryBullets(context)
+    : [];
+
   return (
     <div className="space-y-2">
+      {showConversationSummary && summaryBullets.length > 0 && (
+        <ConversationSummaryCard bullets={summaryBullets} />
+      )}
       {isReplyDraft && loadedInbound && (
         <InboundEmailCard
           inbound={inbound}

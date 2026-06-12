@@ -39,6 +39,7 @@ from . import confirmed_ingest
 from . import confirmed_fact_buffer
 from . import discovery_router
 from . import classifier_facts
+from . import implicit_accept_policy
 from . import dispatch_router
 from . import policies as _policies
 from . import pricing_engine
@@ -301,6 +302,10 @@ class CampaignConfigUpsertBody(BaseModel):
     test_mode_to: Optional[str] = None
     followup_intervals: Optional[dict[str, Any]] = None
     contract_required: Optional[bool] = None
+    implicit_accept_enabled: Optional[bool] = None
+    defer_terms_to_contract: Optional[bool] = None
+    default_compensation_mode: Optional[str] = None
+    strict_explicit_accept: Optional[bool] = None
     status: Optional[str] = None
     nox_quota_enabled: Optional[bool] = None
     nox_monthly_budget: Optional[int] = Field(default=None, ge=0, le=2000)
@@ -1055,6 +1060,26 @@ def get_recent_events(
             env=env,
             campaign_id=campaign_id,
             since_id=since_id,
+            limit=limit,
+        ),
+    }
+
+
+@router.get("/events/inbound-match")
+def get_inbound_match_events(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    thread_id: Optional[str] = Query(default=None),
+    in_reply_to: Optional[str] = Query(default=None),
+    sender_email: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Targeted event rows for inbound reply identity matching."""
+    return {
+        "events": cal.find_events_for_inbound_match(
+            env=env,
+            thread_id=thread_id,
+            in_reply_to=in_reply_to,
+            sender_email=sender_email,
             limit=limit,
         ),
     }
@@ -1832,6 +1857,7 @@ def write_facts_multi(
             )
     namespaces = body.namespaces
     classifier_adjustments: list[str] = []
+    policy_adjustments: list[str] = []
     if classifier_facts.should_sanitize_classifier_source(body.source):
         namespaces, classifier_adjustments = (
             classifier_facts.sanitize_classifier_namespaces(
@@ -1845,6 +1871,39 @@ def write_facts_multi(
                 body.source,
                 classifier_adjustments,
             )
+    if campaign_id:
+        state = cal.latest_facts_for(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=body.env,
+        )
+        cfg = cal.get_campaign_config(campaign_id, env=body.env) or {}
+        events = cal.list_events(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=body.env,
+            limit=100,
+        )
+        thread_meta = implicit_accept_policy.load_thread_meta_from_events(events)
+        namespaces, policy_adjustments, policy_audit = (
+            implicit_accept_policy.merge_policy_facts(
+                namespaces,
+                state=state,
+                signals=body.signals,
+                campaign_cfg=cfg,
+                thread_meta=thread_meta,
+                source=body.source,
+            )
+        )
+        if policy_adjustments:
+            log.info(
+                "implicit_accept_policy identity_id=%s source=%s adjustments=%s",
+                identity_id,
+                body.source,
+                policy_adjustments,
+            )
+    else:
+        policy_audit = None
     try:
         written = cal.write_facts_multi(
             identity_id=identity_id,
@@ -1856,9 +1915,22 @@ def write_facts_multi(
         )
     except cal.FactNamespaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if campaign_id and policy_audit:
+        cal.write_event(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            event_type="policy_implicit_accept_applied",
+            goal="compensation_negotiation",
+            lane="commerce",
+            actor=body.source,
+            payload=policy_audit,
+            env=body.env,
+        )
     out: dict[str, Any] = {"written": written}
     if classifier_adjustments:
         out["classifier_sanitize"] = classifier_adjustments
+    if policy_adjustments:
+        out["policy_adjustments"] = policy_adjustments
     return out
 
 
@@ -3331,6 +3403,7 @@ class PersistReplyDraftBody(BaseModel):
     latest_email: dict[str, Any]
     linked_escalation_id: Optional[int] = None
     contributing: list[dict[str, Any]] = Field(default_factory=list)
+    conversation_summary: Optional[dict[str, Any]] = None
 
 
 @router.post("/reply-drafts/persist")
@@ -3489,6 +3562,10 @@ def persist_reply_draft(
             merged["body"] = html_body
             merged["html"] = True
 
+    normalized_summary = reply_draft.normalize_conversation_summary(
+        body.conversation_summary,
+    )
+
     event_payload = reply_draft.build_draft_event_payload(
         source_message_id=body.source_message_id,
         primary_lane=body.primary_lane,
@@ -3496,6 +3573,7 @@ def persist_reply_draft(
         child_skill=child_skill,
         merged_draft=merged,
         contributing_skills=contributing_skills,
+        conversation_summary=normalized_summary,
     )
     event_id = cal.write_event(
         identity_id=body.identity_id,
@@ -3515,12 +3593,14 @@ def persist_reply_draft(
         merged_draft=merged,
         linked_escalation_id=body.linked_escalation_id,
         contributing_skills=contributing_skills,
+        conversation_summary=normalized_summary,
     )
     if superseded_prior_source:
         fact_value["chase_supersede"] = {
             "prior_source_message_id": superseded_prior_source,
             "superseded_for_follow_up": True,
         }
+    fact_value = reply_draft.sanitize_reply_draft_fact_value(fact_value)
     orphan_discard: dict[str, Any] | None = None
     if superseded_prior_source and isinstance(prior_fact, dict):
         orphan_discard = orphan_gmail_draft.discard_orphan_gmail_draft(

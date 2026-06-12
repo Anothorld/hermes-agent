@@ -110,7 +110,7 @@ playground/learning/install_learning_cron.sh
 
 | Job | 触发 | 产出 |
 |-----|------|------|
-| `apply_discovery_policy` | 某 SPU/品类组样本 ≥ `KOL_DISCOVERY_LEARNING_BATCH_SIZE`（默认 10） | pending `approval.discovery_learning_proposal`（每组一份，含 `sample_identity_count`）→ 批准后合并入 `discovery_criteria:spu:<sku>` / `discovery_criteria:category:<slug>` policy；任务前置做未归类 SKU 的 LLM 品类推断。蒸馏分页读取窗口内全部未消费样本（非单页 500 上限）。蒸馏 prompt 会引用该 scope 近期的 `discovery_proposal_rejected` 驳回反馈（被否原因不重提）。提案末尾的 **Context notes / 背景说明**（批次规模、行动构成等）仅在审批页展示，合并 policy 与发现 brief 时会剥离（与邮件风格学习一致） |
+| `apply_discovery_policy` | 某 SPU/品类组样本 ≥ `KOL_DISCOVERY_LEARNING_BATCH_SIZE`（默认 10） | pending `approval.discovery_learning_proposal`（每组一份，含 `sample_identity_count`）→ 批准后合并入 `discovery_criteria:spu:<sku>` / `discovery_criteria:category:<slug>` policy；任务前置做未归类 SKU 的 LLM 品类推断。蒸馏分页读取窗口内全部未消费样本（非单页 500 上限）。**单次 LLM 蒸馏**默认最多 `KOL_DISCOVERY_LEARNING_DISTILL_MAX_SAMPLES`（25）条最新样本，避免 69+ 条全量快照撑爆本地 LLM 代理；批准消费的是本批 `source_event_ids`，其余样本留待下一批。蒸馏 prompt 会引用该 scope 近期的 `discovery_proposal_rejected` 驳回反馈（被否原因不重提）。提案末尾的 **Context notes / 背景说明**（批次规模、行动构成等）仅在审批页展示，合并 policy 与发现 brief 时会剥离（与邮件风格学习一致） |
 | `mine_discovery_tags` | 评论中某原因出现 ≥ `KOL_DISCOVERY_TAG_MINE_MIN_COUNT`（默认 5） | `discovery_decision_tags` 中 `status=proposed` 的新标签 → 学习页「Discovery 决策学习」面板批准后即出现在反馈弹窗。LLM 引用的 example 必须能在源评论中验证（防虚报频次，验证失败 `examples_not_found_in_comments` 忽略） |
 
 两个 job 均在 `nightly` / `distill` 套件内；审计走 `kol_learning_job_runs`。

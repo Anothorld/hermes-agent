@@ -363,6 +363,13 @@ key like every other mutating route. Child `body` must be **new prose only** —
 ``On … wrote:`` / ``>`` quote blocks are stripped at persist time (bridge re-adds
 one Gmail quote on approve).
 
+Optional **`conversation_summary`** on the persist JSON body (top-level, not
+inside `child_envelope`): `{"bullets": ["…", "…"]}` — Chinese operator-facing
+thread recap for inbound reply drafts. Stored on the approval fact and
+`kol_reply_draft_ready` event; malformed input is dropped without failing persist
+(soft normalize: max 10 bullets, 200 chars each). The same normalization runs
+when Console **refine** writes `approval.reply_draft` via `write-facts-multi`.
+
 **Thread anchors on `approval.reply_draft`:** every write must carry at least
 one of `draft.thread_id`, `source_message_id`, top-level `thread_id`, or
 `in_reply_to` (CAL rejects anchor-less drafts at write time). Direct
@@ -501,6 +508,7 @@ events with a frozen KOL feature snapshot. Modules:
   into dynamic ``discovery_criteria:spu:*`` / ``discovery_criteria:category:*``
   policy scopes) and ``mine_discovery_tags`` (comment clustering → proposed
   tags). Batch gates: ``KOL_DISCOVERY_LEARNING_BATCH_SIZE`` (10),
+  ``KOL_DISCOVERY_LEARNING_DISTILL_MAX_SAMPLES`` (25, caps one LLM call),
   ``KOL_DISCOVERY_TAG_MINE_MIN_COUNT`` (5).
   Distill prompts cite recent ``discovery_proposal_rejected`` feedback for the
   same scope (rejected suggestions are not re-proposed); mined tag proposals

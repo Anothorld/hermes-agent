@@ -279,7 +279,9 @@ def resume_cli_checklist(
         "(Write /tmp/resume_event.json with identity_id, campaign_id, "
         'event_type escalation_resume_processed, actor skill:kol-escalation-resumer.)',
         "When require_draft: persist via persist-reply-draft with "
-        "linked_escalation_id; address resume_context.pending_inbounds "
+        "linked_escalation_id, conversation_summary.bullets (Chinese), "
+        "and summary_only kol-reply-synthesizer when child is not "
+        "synthesizer; address resume_context.pending_inbounds "
         "(use latest_pending_inbound_message_id as source_message_id "
         "when set); use operator_answer facts — no stall prose.",
         "Return kol-escalation-resumer JSON envelope (body null unless brief requires draft).",
@@ -307,6 +309,9 @@ def draft_preview_cli_checklist(
         f"--campaign-id {campaign_id} --env {env}{op_line}",
         f"{CLI_INVOCATION} get-policy --scope company_style",
         f"{CLI_INVOCATION} persist-reply-draft --env {env} --json @/tmp/draft.json",
+        "persist JSON must include top-level conversation_summary.bullets "
+        "(Chinese operator recap); use summary_only kol-reply-synthesizer "
+        "when drafting via a single child skill.",
         "Do NOT resolve-escalation or PATCH /escalations/{id}.",
     ])
 
@@ -331,7 +336,8 @@ def reply_dispatcher_cli_rules() -> str:
         "# bridge_cli_rules (reply-dispatcher)",
         f"Use the terminal tool with {CLI_INVOCATION} — never execute_code+subprocess for bridge.",
         "Reads: get-dispatch-context, get-reply-chase-hint, list-events (as needed).",
-        "Writes: write-facts-multi, persist-reply-draft, open-escalation, mark-reply-handled.",
+        "Writes: write-facts-multi, persist-reply-draft (+ conversation_summary), "
+        "open-escalation, mark-reply-handled.",
     ])
 
 

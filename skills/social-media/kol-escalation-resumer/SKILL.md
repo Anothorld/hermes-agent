@@ -75,8 +75,10 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
 
 **escalate_again:** `open-escalation` with `parent_escalation_id`.
 
-**Reply draft (when console brief requires it):** `persist-reply-draft` or
-`write-facts` on `approval.reply_draft` — never raw `POST /reply-drafts/persist` via curl.
+**Reply draft (when console brief requires it):** `persist-reply-draft` with
+`linked_escalation_id`, `conversation_summary.bullets` (Chinese), and
+`summary_only` `kol-reply-synthesizer` when the drafting child is not the
+synthesizer — never raw `POST /reply-drafts/persist` via curl.
 
 ### Step 4 — Envelope
 

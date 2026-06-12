@@ -4,9 +4,25 @@ import { api, EscalationRow } from '../api';
 import { parseConflictBody, startedAtMs, useInflightLock } from '../useInflightLock';
 import InboundEmailStack, { type PendingInbound } from '../components/InboundEmailStack';
 import EscalationSuggestedQuestion from '../components/EscalationSuggestedQuestion';
+import ApprovalDetailPanel from '../components/ApprovalDetailPanel';
+import ApprovalContextCard from '../components/ApprovalContextCard';
+import {
+  EscalationTopicCards,
+  type EscalationTopicCard,
+} from '../components/EscalationTopicCards';
+import {
+  EscalationWorkflowStepper,
+  type EscalationWorkflowStep,
+} from '../components/EscalationWorkflowStepper';
+import {
+  EscalationCompletionPanel,
+  type EscalationCompletion,
+} from '../components/EscalationCompletionPanel';
+import type { ApprovalDecisionResult } from '../components/ApprovalActionBar';
 import type { InboundEmail } from '../components/InboundEmailCard';
 import { FactInput } from '../components/inputs/FactInput';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
+import { KolSearchBox } from '../components/inputs/KolSearchBox';
 import { TimeAgo } from '../components/inputs/TimeAgo';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
 import { campaignIdQueryFirst, isRealCampaignId } from '../lib/campaignId';
@@ -16,6 +32,8 @@ import { errorSummary } from '../lib/errors';
 import { dialog } from '../components/dialogs/useDialog';
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
+import { useKolListScope } from '../hooks/useKolListScope';
+import { matchesKolQuery } from '../lib/kolSearch';
 import {
   escalationDisplaySummary,
   escalationRuleLabel,
@@ -28,24 +46,74 @@ type DraftFollowup = 'none' | 'expected' | 'already_pending' | 'in_flight';
 function draftFollowupHint(followup: DraftFollowup | undefined): string | null {
   switch (followup) {
     case 'expected':
-      return '约 30–60 秒后请到待审批查看升级恢复稿。';
+      return '约 30–60 秒后请在本页下方查看并批准升级恢复稿。';
     case 'already_pending':
-      return '待审批页已有链接此升级的草稿，请直接审核。';
+      return '本页下方已有链接此升级的回信稿，请直接审核。';
     case 'in_flight':
-      return '草稿正在生成中，约 30–60 秒后请到待审批查看。';
+      return '草稿正在生成中，约 30–60 秒后请在本页下方查看。';
     default:
       return null;
   }
 }
 
-type ApprovalLikeRow = {
-  identity_id: number;
-  campaign_id: string;
+type HubDraft = {
   fact_path: string;
-  status?: string | null;
-  opened_at: string;
-  linked_escalation_id?: number | null;
+  context: Record<string, unknown> | null;
+  draft_origin_label?: string | null;
 };
+
+type EscalationHubContext = {
+  escalation_id: number;
+  escalation_state: string;
+  env: string;
+  identity_id?: number | null;
+  campaign_id?: string | null;
+  draft: HubDraft | null;
+  draft_phase: 'pre_answer' | 'post_resume' | null;
+  can_approve: boolean;
+  draft_origin_label?: string | null;
+  topic_cards: EscalationTopicCard[];
+  workflow_step: number;
+  workflow_steps: EscalationWorkflowStep[];
+  completion?: EscalationCompletion | null;
+};
+
+const DRAFT_PHASE_LABEL: Record<string, string> = {
+  pre_answer: '升级回信预览（待你答复）',
+  post_resume: '升级恢复稿（可批准）',
+};
+
+function refineWorkflowStep(
+  baseStep: number,
+  steps: EscalationWorkflowStep[],
+  opts: {
+    escalationState: string | undefined;
+    answerFilled: boolean;
+    hasDraft: boolean;
+    draftPhase: string | null | undefined;
+    canApprove: boolean;
+  },
+): { activeStep: number; steps: EscalationWorkflowStep[] } {
+  let active = baseStep;
+  if (opts.escalationState === 'awaiting_answer') {
+    if (!opts.answerFilled) {
+      active = 2;
+    } else if (opts.hasDraft && opts.draftPhase === 'pre_answer') {
+      active = 3;
+    }
+  }
+  if (opts.canApprove) {
+    active = 5;
+  }
+  const refined = steps.map((s) => {
+    const n = Number(s.n);
+    let status: EscalationWorkflowStep['status'] = 'pending';
+    if (n < active) status = 'done';
+    else if (n === active) status = 'active';
+    return { ...s, status };
+  });
+  return { activeStep: active, steps: refined };
+}
 
 type RejectionTag = 'tone' | 'fact' | 'offer' | 'risk' | 'other';
 type SlaFilter = 'all' | 'at_risk' | 'breached';
@@ -84,7 +152,15 @@ export function EscalationConsolePage() {
 }
 
 function EscalationList() {
-  const env = useEnvStore((s) => s.env);
+  const {
+    env,
+    scopedIdentityId,
+    kolQuery,
+    setKolQuery,
+    clearKolScope,
+    hasKolScope,
+    scopeQueryParams,
+  } = useKolListScope();
   const [rows, setRows] = useState<EscalationRow[]>([]);
   const [sla, setSla] = useState<SlaFilter>('all');
   const [state, setState] = useState<
@@ -98,6 +174,9 @@ function EscalationList() {
     try {
       const params = new URLSearchParams({ env });
       if (state !== 'all') params.set('state', state);
+      for (const [key, value] of scopeQueryParams.entries()) {
+        params.set(key, value);
+      }
       const qs = `?${params.toString()}`;
       const fetched = await api.get<EscalationRow[]>(`/escalations${qs}`);
       setRows(fetched);
@@ -123,7 +202,7 @@ function EscalationList() {
     } catch (ex) {
       setErr(ex);
     }
-  }, [env, state, markSeen]);
+  }, [env, state, markSeen, scopeQueryParams]);
 
   const terminate = useCallback(
     async (rowId: number) => {
@@ -175,17 +254,37 @@ function EscalationList() {
 
   const visibleRows = useMemo(() => {
     return rows.filter((r) => {
+      if (!matchesKolQuery(r, kolQuery)) return false;
       if (sla === 'all') return true;
       const level = slaLevel(r.created_at);
       if (sla === 'at_risk') return level === 'at_risk' || level === 'breached';
       return level === 'breached';
     });
-  }, [rows, sla]);
+  }, [rows, sla, kolQuery]);
+
+  const scopeLabel = useMemo(() => {
+    if (!hasKolScope) return null;
+    const sample = rows[0];
+    if (sample?.handle) return `@${sample.handle}`;
+    if (scopedIdentityId != null) return `KOL #${scopedIdentityId}`;
+    return null;
+  }, [hasKolScope, rows, scopedIdentityId]);
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-lg font-semibold">升级队列</h1>
+        <KolSearchBox value={kolQuery} onChange={setKolQuery} />
+        {hasKolScope && (
+          <button
+            type="button"
+            onClick={clearKolScope}
+            className="rounded border border-sky-300 bg-sky-50 px-2 py-1 text-xs text-sky-800 hover:bg-sky-100"
+            title="显示全部 KOL 的升级"
+          >
+            已筛选{scopeLabel ? `：${scopeLabel}` : ''} ✕
+          </button>
+        )}
         <select
           value={state}
           onChange={(e) => setState(e.target.value as typeof state)}
@@ -313,7 +412,9 @@ function EscalationList() {
           {visibleRows.length === 0 && (
             <tr>
               <td colSpan={8} className="p-6 text-center text-sm text-slate-500">
-                没有 {STATE_LABELS[state]} 的升级。
+                {kolQuery.trim() || hasKolScope
+                  ? '没有符合当前 KOL 筛选的升级。'
+                  : `没有 ${STATE_LABELS[state]} 的升级。`}
               </td>
             </tr>
           )}
@@ -405,6 +506,79 @@ function isValidFactKey(k: string): boolean {
   return /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/.test(trimmed);
 }
 
+function EscalationLinkedDraftPanel({
+  hub,
+  row,
+  env,
+  onRefresh,
+  onApproved,
+}: {
+  hub: EscalationHubContext;
+  row: EscalationRow;
+  env: 'TEST' | 'LIVE';
+  onRefresh: () => void;
+  onApproved: (result?: ApprovalDecisionResult) => void;
+}) {
+  const draft = hub.draft;
+  if (!draft || !row.campaign_id || typeof row.identity_id !== 'number') {
+    return null;
+  }
+  const phaseLabel = hub.draft_phase
+    ? DRAFT_PHASE_LABEL[hub.draft_phase] ?? hub.draft_origin_label
+    : hub.draft_origin_label;
+  const stepTitle = hub.can_approve ? '⑤ 批准回信' : '③ 回信预览';
+  return (
+    <div className="rounded border border-emerald-200 bg-emerald-50/40 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold text-slate-900">{stepTitle}</h2>
+        {phaseLabel && (
+          <span className="rounded bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-900">
+            {phaseLabel}
+          </span>
+        )}
+        {hub.draft_phase && (
+          <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">
+            {hub.draft_phase}
+          </span>
+        )}
+      </div>
+      {hub.draft_phase === 'pre_answer' && row.state === 'awaiting_answer' && (
+        <p className="mt-1 text-xs text-amber-900">
+          系统已合成预览稿（只读）。请先填写上方「操作员答复」并点「提交并恢复」，
+          之后才可批准发送。
+        </p>
+      )}
+      <div className="mt-2">
+        {hub.can_approve ? (
+          <ApprovalDetailPanel
+            factPath={draft.fact_path}
+            context={draft.context}
+            identityId={row.identity_id}
+            campaignId={row.campaign_id}
+            env={env}
+            replyDraftKind="inbound_reply"
+            decidedBy="console-user"
+            approveButtonLabel="批准并创建 Gmail 草稿"
+            onApproved={(result) => {
+              onApproved(result);
+            }}
+            onRejected={onRefresh}
+          />
+        ) : (
+          <ApprovalContextCard
+            factPath={draft.fact_path}
+            context={draft.context}
+            identityId={row.identity_id}
+            campaignId={row.campaign_id}
+            env={env}
+            replyDraftKind="inbound_reply"
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function EscalationDetail({ id }: { id: number }) {
   const [searchParams] = useSearchParams();
   // URL ?env= wins on first load (deep-link); otherwise use the store.
@@ -421,7 +595,7 @@ function EscalationDetail({ id }: { id: number }) {
   const [done, setDone] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [reasonTags, setReasonTags] = useState<RejectionTag[]>([]);
-  const [relatedApprovals, setRelatedApprovals] = useState<ApprovalLikeRow[]>([]);
+  const [hubContext, setHubContext] = useState<EscalationHubContext | null>(null);
   const [lastActionAt, setLastActionAt] = useState<string | null>(null);
 
   const [pendingInbounds, setPendingInbounds] = useState<PendingInbound[]>([]);
@@ -468,25 +642,92 @@ function EscalationDetail({ id }: { id: number }) {
     };
   }, [id, env]);
 
+  const refreshHubContext = useCallback(async (): Promise<EscalationHubContext | null> => {
+    try {
+      const resp = await api.get<EscalationHubContext>(
+        `/escalations/${id}/hub-context?env=${env}`,
+      );
+      setHubContext(resp);
+      return resp;
+    } catch {
+      setHubContext(null);
+      return null;
+    }
+  }, [env, id]);
+
+  const syncHubUntilDraftReady = useCallback(async () => {
+    toast.progress(
+      '正在等待回信稿…',
+      '约 30–60 秒，就绪后会在本页出现批准按钮。',
+      { groupKey: `escalation-draft-ready-${id}` },
+    );
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await refresh();
+      const hub = await refreshHubContext();
+      if (hub?.can_approve || hub?.completion?.status === 'draft_approved') {
+        toast.success('回信稿已就绪', '请在本页下方批准。');
+        return;
+      }
+      if (hub?.draft && hub.draft_phase === 'post_resume') {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    toast.info('仍在生成', '请稍后刷新本页查看回信预览。');
+  }, [id, refresh, refreshHubContext]);
+
+  const syncHubAfterApprove = useCallback(async () => {
+    toast.progress(
+      '正在同步完成状态…',
+      '本页会自动刷新，无需跳转待审批。',
+      { groupKey: `escalation-complete-${id}` },
+    );
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await refresh();
+      const hub = await refreshHubContext();
+      if (
+        hub?.completion?.status === 'draft_approved'
+        || (hub != null && !hub.draft && hub.escalation_state === 'resolved')
+      ) {
+        toast.success('处理完成', hub?.completion?.message ?? '请到 Gmail 核对草稿后发送。');
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    toast.info('同步较慢', '请稍后刷新本页，或到 Gmail 草稿箱查看。');
+  }, [id, refresh, refreshHubContext]);
+
   useEffect(() => {
-    let alive = true;
-    api
-      .get<ApprovalLikeRow[]>(`/approvals?status=all&env=${env}`)
-      .then((items) => {
-        if (!alive) return;
-        const filtered = items
-          .filter((a) => a.linked_escalation_id === id)
-          .sort((a, b) => Date.parse(b.opened_at) - Date.parse(a.opened_at));
-        setRelatedApprovals(filtered);
-      })
-      .catch(() => {
-        if (!alive) return;
-        setRelatedApprovals([]);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [id, env, row?.state]);
+    void refreshHubContext();
+  }, [refreshHubContext, row?.state]);
+
+  useDataChannel({ onMatch: refreshHubContext });
+  usePollingFallback(refreshHubContext, 15_000);
+
+  const hubComplete = hubContext?.completion?.status === 'draft_approved';
+
+  const workflow = useMemo(() => {
+    if (!hubContext) {
+      return { activeStep: 1, steps: [] as EscalationWorkflowStep[] };
+    }
+    if (hubContext.completion?.status === 'draft_approved') {
+      return {
+        activeStep: 5,
+        steps: hubContext.workflow_steps.map((s) => ({ ...s, status: 'done' as const })),
+      };
+    }
+    return refineWorkflowStep(
+      hubContext.workflow_step,
+      hubContext.workflow_steps,
+      {
+        escalationState: row?.state,
+        answerFilled: Boolean(answer.trim()),
+        hasDraft: hubContext.draft != null,
+        draftPhase: hubContext.draft_phase,
+        canApprove: hubContext.can_approve,
+      },
+    );
+  }, [hubContext, row?.state, answer]);
 
   const requiredFacts = useMemo<string[]>(() => {
     const ctx = (row?.resume_context ?? null) as Record<string, unknown> | null;
@@ -565,7 +806,7 @@ function EscalationDetail({ id }: { id: number }) {
     } else {
       const ok = await dialog.confirm({
         title: '提交并恢复此目标？',
-        description: '影响：1) 本升级会被标记已处理；2) AI 将按你的答复和 facts 继续推进；3) 如需草稿审批，会在待审批页出现。',
+        description: '影响：1) 本升级会被标记已处理；2) AI 将按你的答复和 facts 继续推进；3) 回信稿会在本页「③ 回信预览」出现供批准。',
         confirmLabel: '提交并恢复',
         cancelLabel: '取消',
         variant: 'info',
@@ -593,12 +834,23 @@ function EscalationDetail({ id }: { id: number }) {
         decision === 'resume' ? draftFollowupHint(resp.draft_followup) : null;
       setDone(followupHint ? `${msg}。${followupHint}` : msg);
       setLastActionAt(new Date().toISOString());
-      if (followupHint) {
-        toast.success(msg, followupHint);
+      const stepHint = workflow.activeStep >= 4
+        ? '下一步：在本页「⑤ 批准回信」创建 Gmail 草稿。'
+        : null;
+      const combinedHint = [followupHint, stepHint].filter(Boolean).join(' ');
+      if (combinedHint) {
+        toast.success(msg, combinedHint);
       } else {
         toast.success(msg);
       }
       refresh();
+      void refreshHubContext();
+      if (
+        decision === 'resume'
+        && (resp.draft_followup === 'expected' || resp.draft_followup === 'in_flight')
+      ) {
+        void syncHubUntilDraftReady();
+      }
     } catch (ex) {
       setErr(ex);
       toast.error('提交失败', errorSummary(ex));
@@ -620,10 +872,10 @@ function EscalationDetail({ id }: { id: number }) {
       draftLock.acquire(resp.run_id ?? null);
       toast.progress(
         '草稿生成中…',
-        `约 30–60s 后在待审批页面可见 (run ${resp.run_id?.slice(0, 8) ?? '?'}…)`,
+        `约 30–60s 后在本页下方可见 (run ${resp.run_id?.slice(0, 8) ?? '?'}…)`,
         { groupKey: `escalation-preview-${id}` },
       );
-      setDone('草稿生成请求已发出，30–60s 后查看待审批页面。');
+      setDone('草稿生成请求已发出，30–60s 后在本页下方查看。');
       setLastActionAt(new Date().toISOString());
     } catch (ex) {
       const conflict = parseConflictBody(ex);
@@ -742,25 +994,32 @@ function EscalationDetail({ id }: { id: number }) {
             </Link>
           </div>
         )}
-        {relatedApprovals.length > 0 && (
-          <div className="mt-2 rounded border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-900">
-            <div className="font-medium">关联审批摘要</div>
-            <div className="mt-0.5">共 {relatedApprovals.length} 条（最近一条 <TimeAgo iso={relatedApprovals[0].opened_at} />）</div>
-            <div className="mt-1 flex flex-wrap gap-1">
-              {relatedApprovals.slice(0, 3).map((a) => (
-                <span key={`${a.fact_path}-${a.opened_at}`} className="rounded bg-white px-1.5 py-0.5">
-                  {a.fact_path} · {a.status ?? 'unknown'}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
         {lastActionAt && (
           <div className="mt-2 rounded bg-slate-100 px-2 py-1 text-xs text-slate-600">
             最近动作：<TimeAgo iso={lastActionAt} />
           </div>
         )}
       </div>
+
+      {workflow.steps.length > 0 && (
+        <EscalationWorkflowStepper
+          steps={workflow.steps}
+          activeStep={workflow.activeStep}
+        />
+      )}
+
+      {hubContext?.completion && row.identity_id != null && (
+        <EscalationCompletionPanel
+          completion={hubContext.completion}
+          identityId={row.identity_id}
+          campaignId={row.campaign_id}
+          handle={row.handle}
+        />
+      )}
+
+      {hubContext && hubContext.topic_cards.length > 0 && !hubComplete && (
+        <EscalationTopicCards cards={hubContext.topic_cards} />
+      )}
 
       {inboundLoaded && (
         <div className="space-y-1">
@@ -776,7 +1035,7 @@ function EscalationDetail({ id }: { id: number }) {
         </div>
       )}
 
-      {row.state !== 'awaiting_answer' ? (
+      {row.state !== 'awaiting_answer' || hubComplete ? (
         <div className="space-y-2">
           <div className="rounded border border-slate-200 bg-white p-3 text-sm text-slate-600">
             已 {row.state}。操作员答复：{' '}
@@ -787,14 +1046,28 @@ function EscalationDetail({ id }: { id: number }) {
               <div className="font-medium">下一步</div>
               <ul className="mt-1 list-disc pl-4 text-xs leading-relaxed">
                 <li>
-                  若此升级来自 KOL 入站回信，请到{' '}
-                  <Link to="/approvals" className="underline">待审批</Link>{' '}
-                  查找带「升级恢复稿」标签的草稿并批准发送。
+                  若此升级来自 KOL 入站回信，请在本页「③ 回信预览」区批准发送；
+                  若未出现新稿，等待约 60 秒后刷新本页。
                 </li>
-                <li>若 60 秒内没有出现新稿，点刷新待审批列表。</li>
-                <li>勿批准仍带「追信占位」标签的旧稿 — 那是升级期间的临时占位。</li>
+                <li>
+                  勿批准仍带「追信占位(已废弃)」标签的旧稿；「追信换新稿」才是针对最新来信的正式回复。
+                </li>
               </ul>
             </div>
+          )}
+          {!hubComplete && hubContext?.draft && row.campaign_id && typeof row.identity_id === 'number' && (
+            <EscalationLinkedDraftPanel
+              hub={hubContext}
+              row={row}
+              env={env}
+              onRefresh={() => {
+                void refreshHubContext();
+                void refresh();
+              }}
+              onApproved={() => {
+                void syncHubAfterApprove();
+              }}
+            />
           )}
         </div>
       ) : (
@@ -951,6 +1224,21 @@ function EscalationDetail({ id }: { id: number }) {
 
           {!!err && <ErrorAlert error={err} compact />}
 
+          {hubContext?.draft && row.campaign_id && typeof row.identity_id === 'number' && (
+            <EscalationLinkedDraftPanel
+              hub={hubContext}
+              row={row}
+              env={env}
+              onRefresh={() => {
+                void refreshHubContext();
+                void refresh();
+              }}
+              onApproved={() => {
+                void syncHubAfterApprove();
+              }}
+            />
+          )}
+
           {/* Restructured action zone: explicit hierarchy — primary
               (提交并恢复) on the right, secondary (生成草稿) inline link
               above, danger (终止) small + low-contrast on the left. */}
@@ -967,7 +1255,7 @@ function EscalationDetail({ id }: { id: number }) {
                   : '让 AI 先试写一封草稿'}
               </button>
               <span className="text-[11px] text-slate-500">
-                结果出现在<Link to="/approvals" className="ml-0.5 text-sky-700 hover:underline">待审批</Link>页面供审核；不会关闭本升级。
+                预览稿会出现在本页「③ 回信预览」；不会关闭本升级。
               </span>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2">

@@ -218,3 +218,47 @@ def test_persist_unknown_identity_404(cal_db):
     with pytest.raises(HTTPException) as exc:
         plugin_api.persist_reply_draft(body, x_bridge_key=None)
     assert exc.value.status_code == 404
+
+
+def test_persist_conversation_summary(cal_db):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="t-sum", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="C1", env="TEST")
+    summary = {
+        "bullets": [
+            "合作阶段：正在确认产品与交付范围",
+            "KOL 已表态：愿意合作，询问报价",
+        ],
+    }
+    out = plugin_api.persist_reply_draft(
+        _body(plugin_api, identity_id=iid, conversation_summary=summary),
+        x_bridge_key=None,
+    )
+    assert out["ok"] is True
+    facts = cal_db.latest_facts_for(identity_id=iid, campaign_id="C1", env="TEST")
+    draft_fact = facts["approval.reply_draft"]
+    assert draft_fact["conversation_summary"] == summary
+    events = [
+        e for e in cal_db.list_events(identity_id=iid, campaign_id="C1", env="TEST")
+        if e.get("event_type") == "kol_reply_draft_ready"
+    ]
+    assert len(events) >= 1
+    payload = events[0].get("payload") or {}
+    assert payload.get("conversation_summary") == summary
+
+
+def test_persist_malformed_conversation_summary_dropped(cal_db):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="t-sum-bad", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="C1", env="TEST")
+    out = plugin_api.persist_reply_draft(
+        _body(
+            plugin_api,
+            identity_id=iid,
+            conversation_summary={"bullets": ["", 42, None]},
+        ),
+        x_bridge_key=None,
+    )
+    assert out["ok"] is True
+    facts = cal_db.latest_facts_for(identity_id=iid, campaign_id="C1", env="TEST")
+    assert "conversation_summary" not in facts["approval.reply_draft"]

@@ -341,6 +341,13 @@ If **`draftable`** is empty after escalations, write
 `approval.unmatched_reply` or `approval.pending_action_*` as before and
 skip to Step 6.
 
+**Defer to contract (commerce, default).** When
+`campaign_config.defer_terms_to_contract` is true and both
+`compensation_negotiation` and `contract_signing` appear in `draftable`,
+prefer **`contract_signing` / `kol-contract-coordinator`** as the sole
+commerce fragment — skip invoking `kol-compensation-negotiator` (it should
+return `{"skipped":"defer_to_contract"}` if invoked anyway).
+
 Goal → child skill (reference):
 
 | Goal | Child skill |
@@ -411,7 +418,8 @@ only. See `references/shared/fact-ownership.md`.
 ### Step 5.6 — Synthesize one reply body
 
 Invoke `kol-reply-synthesizer` with ordered `fragments` from Step 5
-(non-gated, non-empty). Receive content-only `{body, thread_id}`.
+(non-gated, non-empty). Receive content-only `{body, thread_id,
+conversation_summary}`.
 
 **Body must be new prose only** — do not append prior thread mail (`On …
 wrote:`, `>` lines, or pasted `thread_history`). The bridge strips accidental
@@ -444,9 +452,16 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py persist-reply-draft \
     "child_skill": "kol-reply-synthesizer",
     "child_envelope": {"body": "<synthesized body>", "thread_id": "..."},
     "latest_email": <latest_email from pending_replies>,
-    "contributing": [ ... ]
+    "contributing": [ ... ],
+    "conversation_summary": {"bullets": ["...", "..."]}
   }'
 ```
+
+Pass `conversation_summary` from the synthesizer output verbatim as a
+**top-level** persist JSON field (never inside `child_envelope` or
+`draft`). Bridge stores it on the approval fact, not in `draft.body`.
+Omit only when synthesis returned no valid bullets (rare — prefer
+re-running Step 2b).
 
 If synthesis returns `no_fragments_to_synthesize`, open escalation instead.
 
@@ -463,10 +478,21 @@ on the Approvals page), the input carries `operator_refinement_prompt`
 and the full prior `approval.reply_draft` value under
 `current_value_json`. In that mode:
 
+**Console path:** the gateway brief uses `write-facts-multi` (not
+`persist-reply-draft`) per Console `_REFINE_DRAFT_INSTRUCTIONS`; still
+refresh `conversation_summary` via synthesizer (`summary_only` when
+needed). **Dispatcher-routed refine** (same `# approval_refine` header
+but this skill owns the run): use `persist-reply-draft` below.
+
 - Skip Steps 1–5.6 (no classification, no fragment fan-out).
 - If `contributing_skills` lists multiple contributors, re-run fragment
   skills + synthesizer with the refinement prompt appended; otherwise
   re-invoke the single named `child_skill` (legacy single-skill drafts).
+- **Conversation summary:** synthesizer runs must refresh
+  `conversation_summary`. When only a single child skill re-drafts (no
+  synthesizer merge), call `kol-reply-synthesizer` with `summary_only:
+  true`, `fragments=[]`, and the same `latest_email` + `thread_history`,
+  then pass the returned bullets into persist.
 - Do **not** rewrite domain facts on a refinement run — content-only.
 - Persist via `persist-reply-draft` only — never `write-facts-multi` on
   `approval.reply_draft` as before. Skip Step 6 label changes.

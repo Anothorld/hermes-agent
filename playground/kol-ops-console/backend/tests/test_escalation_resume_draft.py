@@ -108,6 +108,21 @@ def test_needs_reply_draft_dispatcher_legacy():
     assert escalations_mod._escalation_needs_reply_draft(esc) is True
 
 
+def test_linked_draft_phase_pre_answer():
+    phase, can_approve, label = escalations_mod._linked_draft_phase("awaiting_answer")
+    assert phase == "pre_answer"
+    assert can_approve is False
+    assert label == "升级回信预览"
+
+
+def test_linked_draft_phase_post_resume():
+    for state in ("answered", "resuming", "resolved"):
+        phase, can_approve, label = escalations_mod._linked_draft_phase(state)
+        assert phase == "post_resume"
+        assert can_approve is True
+        assert label == "升级恢复稿"
+
+
 def test_inbound_message_id_prefers_resume_context():
     esc = {
         "resume_context": {"source_message_id": "ctx-msg"},

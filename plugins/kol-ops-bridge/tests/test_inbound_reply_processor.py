@@ -71,6 +71,18 @@ class _FakeBridge:
             raise self.list_events_error
         return self.events[:limit]
 
+    def find_events_for_inbound_match(
+        self,
+        *,
+        env: str,
+        thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        sender_email: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        del env, limit, thread_id, in_reply_to, sender_email
+        return []
+
     def get_identity(self, identity_id: int) -> dict[str, Any] | None:
         return self.identities.get(identity_id)
 

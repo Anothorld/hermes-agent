@@ -5,9 +5,11 @@ import ApprovalContextCard from '../components/ApprovalContextCard';
 import ApprovalDetailPanel from '../components/ApprovalDetailPanel';
 import DraftEditDiffPanel from '../components/DraftEditDiffPanel';
 import { FactKeyChip } from '../components/inputs/FactKeyChip';
+import { KolSearchBox } from '../components/inputs/KolSearchBox';
 import { TimeAgo } from '../components/inputs/TimeAgo';
 import { ErrorAlert } from '../components/feedback/ErrorAlert';
-import { useEnvStore, toast } from '../lib/store';
+import { toast } from '../lib/store';
+import { matchesKolQuery } from '../lib/kolSearch';
 import { useUnreadStore } from '../lib/unread';
 import { errorSummary } from '../lib/errors';
 import { dialog } from '../components/dialogs/useDialog';
@@ -141,6 +143,7 @@ function styleLearningGroupTitle(ctx: Record<string, unknown>, factPath?: string
 }
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
+import { useKolListScope } from '../hooks/useKolListScope';
 
 // Cross-cutting approvals page. Renders all pending approval.* facts
 // surfaced by the bridge (e.g. compensation_cap_breach, reply_draft)
@@ -158,7 +161,10 @@ export type ApprovalRow = {
   opened_by: string | null;
   opened_at: string;
   linked_escalation_id?: number | null;
+  linked_escalation_state?: string | null;
+  handle_on_escalation_page?: boolean;
   handle?: string | null;
+  email?: string | null;
   draft_origin?: string | null;
   draft_origin_label?: string | null;
   reply_draft_kind?: 'initial_outreach' | 'inbound_reply' | null;
@@ -166,10 +172,22 @@ export type ApprovalRow = {
 
 const DRAFT_ORIGIN_BADGE_CLASS: Record<string, string> = {
   inbound_auto: 'bg-sky-100 text-sky-800',
-  chase_supersede: 'bg-amber-100 text-amber-900',
+  chase_followup: 'bg-amber-100 text-amber-900',
+  chase_placeholder: 'bg-slate-200 text-slate-700',
   proactive_followup: 'bg-violet-100 text-violet-900',
   escalation_resume: 'bg-emerald-100 text-emerald-900',
+  escalation_preview: 'bg-amber-100 text-amber-900',
 };
+
+function isDeferredToEscalationPage(
+  row: ApprovalRow,
+  escalationMap: Record<number, EscalationRow>,
+): boolean {
+  if (row.handle_on_escalation_page) return true;
+  const eid = row.linked_escalation_id;
+  if (eid == null || row.fact_path !== 'approval.reply_draft') return false;
+  return escalationMap[eid]?.state === 'awaiting_answer';
+}
 
 function findOpenCampaignEscalation(
   map: Record<number, EscalationRow>,
@@ -266,7 +284,15 @@ type RefinementHistoryEntry = {
 };
 
 export function ApprovalsPage() {
-  const env = useEnvStore((s) => s.env);
+  const {
+    env,
+    scopedIdentityId,
+    kolQuery,
+    setKolQuery,
+    clearKolScope,
+    hasKolScope,
+    scopeQueryParams,
+  } = useKolListScope();
   const [rows, setRows] = useState<ApprovalRow[]>([]);
   const [status, setStatus] = useState<StatusFilter>('pending');
   const [typeFilter, setTypeFilter] = useState<ApprovalTypeFilter>('all');
@@ -284,7 +310,11 @@ export function ApprovalsPage() {
   const markSeen = useUnreadStore((s) => s.markSeen);
   const refresh = useCallback(async () => {
     try {
-      const qs = `?status=${status}&env=${env}`;
+      const params = new URLSearchParams({ status, env });
+      for (const [key, value] of scopeQueryParams.entries()) {
+        params.set(key, value);
+      }
+      const qs = `?${params.toString()}`;
       const fetched = await api.get<ApprovalRow[]>(`/approvals${qs}`);
       setRows(fetched);
       setErr(null);
@@ -304,7 +334,7 @@ export function ApprovalsPage() {
     } catch (ex) {
       setErr(ex);
     }
-  }, [env, status, markSeen]);
+  }, [env, status, markSeen, scopeQueryParams]);
 
   useEffect(() => {
     refresh();
@@ -449,17 +479,32 @@ export function ApprovalsPage() {
     [refresh, env, refinementText],
   );
 
+  const deferredRows = useMemo(
+    () => rows.filter((r) => isDeferredToEscalationPage(r, escalationMap)),
+    [rows, escalationMap],
+  );
+
   const visibleRows = useMemo(() => {
     return rows.filter((r) => {
+      if (isDeferredToEscalationPage(r, escalationMap)) return false;
       if (typeFilter !== 'all' && approvalTypeOf(r) !== typeFilter) {
         return false;
       }
+      if (!matchesKolQuery(r, kolQuery)) return false;
       if (sla === 'all') return true;
       const level = slaLevel(r.opened_at);
       if (sla === 'at_risk') return level === 'at_risk' || level === 'breached';
       return level === 'breached';
     });
-  }, [rows, sla, typeFilter]);
+  }, [rows, sla, typeFilter, kolQuery, escalationMap]);
+
+  const scopeLabel = useMemo(() => {
+    if (!hasKolScope) return null;
+    const sample = rows[0];
+    if (sample?.handle) return `@${sample.handle}`;
+    if (scopedIdentityId != null) return `KOL #${scopedIdentityId}`;
+    return null;
+  }, [hasKolScope, rows, scopedIdentityId]);
 
   const grouped = useMemo(() => {
     const out: Record<string, ApprovalRow[]> = {};
@@ -537,6 +582,17 @@ export function ApprovalsPage() {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-lg font-semibold">待审批</h1>
+        <KolSearchBox value={kolQuery} onChange={setKolQuery} />
+        {hasKolScope && (
+          <button
+            type="button"
+            onClick={clearKolScope}
+            className="rounded border border-sky-300 bg-sky-50 px-2 py-1 text-xs text-sky-800 hover:bg-sky-100"
+            title="显示全部 KOL 的待审批"
+          >
+            已筛选{scopeLabel ? `：${scopeLabel}` : ''} ✕
+          </button>
+        )}
         <div className="flex flex-wrap gap-1 rounded border border-slate-200 bg-slate-50 p-0.5 text-xs">
           {TYPE_FILTER_ORDER.map((t) => (
             <button
@@ -644,9 +700,37 @@ export function ApprovalsPage() {
         </p>
       )}
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
+      {status === 'pending' && deferredRows.length > 0 && (
+        <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          <div className="font-medium">
+            {deferredRows.length} 条升级回信请在升级页处理
+          </div>
+          <p className="mt-1 text-xs leading-relaxed">
+            这些草稿关联的升级仍在等待你的答复。请先到升级页填写「操作员答复」并提交，
+            再在本页批准——避免未决定升级条件就发出回信。
+          </p>
+          <ul className="mt-2 space-y-1 text-xs">
+            {deferredRows.map((r) => (
+              <li key={rowActionKey(r)}>
+                <Link
+                  to={`/escalations/${r.linked_escalation_id}?env=${env}`}
+                  className="font-medium text-sky-800 hover:underline"
+                >
+                  升级 #{r.linked_escalation_id}
+                </Link>
+                {r.handle ? ` · @${r.handle}` : ''}
+                {r.campaign_id ? ` · ${r.campaign_id}` : ''}
+                {r.draft_origin_label ? ` · ${r.draft_origin_label}` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {Object.keys(grouped).length === 0 && (
         <div className="rounded border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
-          没有 {STATUS_LABEL[status]} 的审批。
+          {deferredRows.length > 0 && status === 'pending'
+            ? '当前筛选下没有可直接在此页处理的审批（见上方升级页入口）。'
+            : `没有 ${STATUS_LABEL[status]} 的审批。`}
         </div>
       )}
       {Object.entries(grouped).map(([key, items]) => {
@@ -890,17 +974,33 @@ function ApprovalRowItem({
           {row.draft_origin_label}
         </span>
       )}
-      {isReplyDraft && row.draft_origin === 'chase_supersede' && openCampaignEscalation && (
+      {isReplyDraft && row.draft_origin === 'chase_placeholder' && openCampaignEscalation && (
         <span className="rounded bg-rose-50 px-2 py-0.5 text-[11px] text-rose-800">
           升级 #{openCampaignEscalation.id} 待处理 — 请先答复升级，勿批准此占位稿
         </span>
       )}
       {isReplyDraft
-        && row.draft_origin === 'chase_supersede'
+        && row.draft_origin === 'chase_placeholder'
         && !openCampaignEscalation
         && status === 'pending' && (
         <span className="rounded bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">
           旧追信占位稿 — 升级已处理，建议驳回后等待正式稿
+        </span>
+      )}
+      {isReplyDraft
+        && row.draft_origin === 'chase_followup'
+        && status === 'pending'
+        && row.status === 'pending' && (
+        <span className="rounded bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900">
+          已针对最新追信更新 — 请核对正文回应跟进后再批准
+        </span>
+      )}
+      {isReplyDraft
+        && row.draft_origin === 'escalation_preview'
+        && row.linked_escalation_id != null
+        && status === 'pending' && (
+        <span className="rounded bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900">
+          请在升级 #{row.linked_escalation_id} 页处理
         </span>
       )}
       {isStyleLearning && (
@@ -935,6 +1035,7 @@ function ApprovalRowItem({
             identityId={row.identity_id}
             campaignId={row.campaign_id}
             env={env}
+            replyDraftKind={row.reply_draft_kind ?? null}
             decidedBy="console-user"
             approveButtonLabel="批准并创建 Gmail 草稿"
             onApproved={() => {
@@ -951,6 +1052,7 @@ function ApprovalRowItem({
             identityId={row.identity_id}
             campaignId={row.campaign_id}
             env={env}
+            replyDraftKind={row.reply_draft_kind ?? null}
           />
         )}
         {!useStructuredPanel && isReplyDraft && editLearning?.was_edited && (

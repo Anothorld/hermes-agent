@@ -22,6 +22,16 @@ class MatchBridgeError(BridgeRequestError):
 class InboundBridgePort(Protocol):
     def list_recent_events(self, *, env: str, limit: int) -> list[dict[str, Any]]: ...
 
+    def find_events_for_inbound_match(
+        self,
+        *,
+        env: str,
+        thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        sender_email: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]: ...
+
     def get_identity(self, identity_id: int) -> dict[str, Any] | None: ...
 
     def get_facts(

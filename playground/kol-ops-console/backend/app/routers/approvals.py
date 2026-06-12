@@ -171,7 +171,9 @@ _REFINE_DRAFT_INSTRUCTIONS = (
     "- Do NOT open a new escalation, do NOT change `decision` (must remain\n"
     "  \"pending\"), do NOT send mail, do NOT create a Gmail draft.\n"
     "- Persist the result by writing back the SAME approval.reply_draft fact\n"
-    "  via `kol_bridge_tool.py write-facts-multi`. The new value MUST:\n"
+    "  via `kol_bridge_tool.py write-facts-multi` (Console refine path — the\n"
+    "  Bridge soft-normalizes `conversation_summary` on this write). The new\n"
+    "  value MUST:\n"
     "    * preserve dollar amounts exactly. Never place JSON containing `$`\n"
     "      amounts in an unquoted heredoc or inline double-quoted shell\n"
     "      string; bash expands `$3000` to `000` and `$800` to `00`. Write\n"
@@ -186,6 +188,16 @@ _REFINE_DRAFT_INSTRUCTIONS = (
     "    * append `{prompt, at, by}` to `refinement_history` (cap at 5),\n"
     "      where `by` is the requested_by from the brief and `at` is the\n"
     "      current ISO-8601 UTC timestamp.\n"
+    "- **Conversation summary (inbound reply drafts only):** refresh\n"
+    "  `conversation_summary.bullets` (3–8 Chinese operator bullets).\n"
+    "  When re-running `kol-reply-synthesizer`, take bullets from its output.\n"
+    "  When only a single child_skill re-drafts, invoke\n"
+    "  `kol-reply-synthesizer` with `summary_only: true` and `fragments=[]`\n"
+    "  using the same `latest_email` + `thread_history`, then write the\n"
+    "  returned bullets into the fact. Skip for initial-outreach anchors\n"
+    "  (`draft:outreach_*` / `kol-cold-outreach`) and proactive follow-up\n"
+    "  (`kol-proactive-followup` / `kind=proactive_followup`). Store summary\n"
+    "  on the fact top level only — never inside `draft`.\n"
     "- After writing, re-read `approval.reply_draft` and verify that money\n"
     "  strings did not become placeholders like `000 quote` or `00 total`.\n"
     "- In TEST mode, route any draft target to campaign_config.test_mode_to."
@@ -220,8 +232,9 @@ def _compose_refine_brief(
         ("Re-invoke the child_skill named in current_value_json with the "
          "original inbound context PLUS operator_refinement_prompt, then "
          "write back the same approval.reply_draft fact with the new draft "
-         "envelope, the prior envelope moved into previous_drafts (cap 5), "
-         "and a new refinement_history entry (cap 5). Keep decision=pending. "
+         "envelope, refreshed conversation_summary.bullets (see hard rules), "
+         "the prior envelope moved into previous_drafts (cap 5), and a new "
+         "refinement_history entry (cap 5). Keep decision=pending. "
          "Do NOT send mail. Do NOT create a Gmail draft. Report the new "
          "fact_path back when done so the console can poll for it."),
     ])
@@ -229,10 +242,20 @@ def _compose_refine_brief(
 
 _DRAFT_ORIGIN_LABELS: dict[str, str] = {
     "inbound_auto": "KOL回信自动",
-    "chase_supersede": "追信占位(已废弃)",
+    "chase_followup": "追信换新稿",
+    "chase_placeholder": "追信占位(已废弃)",
     "proactive_followup": "操作员追信",
     "escalation_resume": "升级恢复稿",
+    "escalation_preview": "升级回信预览",
 }
+
+
+def _is_active_chase_supersede(chase: Any) -> bool:
+    """True when chase supersede replaced a prior draft for a new inbound."""
+    if not isinstance(chase, dict):
+        return False
+    prior = chase.get("prior_source_message_id")
+    return isinstance(prior, str) and bool(prior.strip())
 
 
 def _derive_draft_origin(
@@ -249,7 +272,9 @@ def _derive_draft_origin(
         return "proactive_followup", _DRAFT_ORIGIN_LABELS["proactive_followup"]
     chase = value.get("chase_supersede")
     if chase is True or (isinstance(chase, dict) and chase):
-        return "chase_supersede", _DRAFT_ORIGIN_LABELS["chase_supersede"]
+        if _is_active_chase_supersede(chase):
+            return "chase_followup", _DRAFT_ORIGIN_LABELS["chase_followup"]
+        return "chase_placeholder", _DRAFT_ORIGIN_LABELS["chase_placeholder"]
     if child or value.get("primary_goal"):
         return "inbound_auto", _DRAFT_ORIGIN_LABELS["inbound_auto"]
     return "inbound_auto", _DRAFT_ORIGIN_LABELS["inbound_auto"]
@@ -307,6 +332,7 @@ def _to_row(raw: dict[str, Any], handle_map: dict[int, str | None]) -> dict[str,
         "env": raw.get("env"),
         "linked_escalation_id": linked_escalation_id,
         "handle": handle if isinstance(handle, str) else None,
+        "email": raw.get("email") if isinstance(raw.get("email"), str) else None,
         "draft_origin": draft_origin,
         "draft_origin_label": draft_origin_label,
         "reply_draft_kind": reply_draft_kind,
@@ -428,7 +454,27 @@ async def list_approvals(
         )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    open_escalation_ids: set[int] = set()
+    try:
+        esc_rows = await bridge.list_escalations(
+            state="awaiting_answer",
+            env=resolved_env,
+        )
+        for esc in esc_rows:
+            if isinstance(esc, dict) and isinstance(esc.get("id"), int):
+                open_escalation_ids.add(esc["id"])
+    except BridgeError:
+        pass
     rows = [_to_row(r, {}) for r in raw if isinstance(r, dict)]
+    for row in rows:
+        linked = row.get("linked_escalation_id")
+        if not isinstance(linked, int) or linked not in open_escalation_ids:
+            continue
+        row["linked_escalation_state"] = "awaiting_answer"
+        row["handle_on_escalation_page"] = True
+        if row.get("fact_path") == REPLY_DRAFT_PATH:
+            row["draft_origin"] = "escalation_preview"
+            row["draft_origin_label"] = _DRAFT_ORIGIN_LABELS["escalation_preview"]
     rows.sort(key=lambda r: _approval_priority(r, resolved_env))
     return rows
 

@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from kol_ops_bridge_pkg.gmail_client import GmailMessage
+from kol_ops_bridge_pkg.inbound_reply.event_helpers import (
+    event_emails,
+    event_message_ids,
+    event_thread_ids,
+)
 from kol_ops_bridge_pkg.inbound_reply.matcher import match_identity
 
 
@@ -16,6 +21,33 @@ class _FakeBridge:
 
     def list_recent_events(self, *, env: str, limit: int) -> list[dict[str, Any]]:
         return self.events[:limit]
+
+    def find_events_for_inbound_match(
+        self,
+        *,
+        env: str,
+        thread_id: str | None = None,
+        in_reply_to: str | None = None,
+        sender_email: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        del env, limit
+        hits: list[dict[str, Any]] = []
+        for ev in self.events:
+            payload = ev.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            if thread_id:
+                thread_ids = event_thread_ids(payload)
+                if thread_id in thread_ids:
+                    hits.append(ev)
+                    continue
+            if in_reply_to and in_reply_to in event_message_ids(payload):
+                hits.append(ev)
+                continue
+            if sender_email and sender_email in event_emails(payload):
+                hits.append(ev)
+        return hits
 
     def get_identity(self, identity_id: int) -> dict[str, Any] | None:
         return self.identities.get(identity_id)
@@ -83,6 +115,44 @@ def test_weak_thread_id_match(bridge_pkg):
         bridge=bridge,
     )
     assert matched is not None
+    assert matched.thread_integrity == "weak"
+    assert matched.matched_by == "thread_id"
+
+
+def test_weak_thread_id_match_outside_recent_window(bridge_pkg):
+    """Thread history older than list_recent_events(limit) must still match."""
+    stale_event = {
+        "id": 1,
+        "env": "TEST",
+        "identity_id": 648,
+        "campaign_id": "SEB8008-20260525",
+        "event_type": "outbound_sent",
+        "payload": {"thread_id": "19e6770562a5bdec", "message_id": "old-out"},
+    }
+    filler = {
+        "id": 9999,
+        "env": "TEST",
+        "identity_id": 1,
+        "campaign_id": "OTHER",
+        "event_type": "outreach.sent",
+        "payload": {"thread_id": "other-thread"},
+    }
+    bridge = _FakeBridge(
+        events=[filler] + [stale_event],
+        identities={648: {"primary_email": "theblushhome@outlook.com"}},
+    )
+    matched = match_identity(
+        _msg(
+            message_id="19eb27577dd1ea31",
+            in_reply_to="",
+            thread_id="19e6770562a5bdec",
+            from_addr="Megan Allen <theblushhome@outlook.com>",
+        ),
+        env="TEST",
+        bridge=bridge,
+    )
+    assert matched is not None
+    assert matched.identity_id == 648
     assert matched.thread_integrity == "weak"
     assert matched.matched_by == "thread_id"
 

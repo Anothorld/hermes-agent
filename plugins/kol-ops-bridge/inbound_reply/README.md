@@ -15,6 +15,7 @@ Both call `inbound_reply.orchestrator.run_once()` with different `InboundDeps`.
 ## Module layout
 
 - `matcher.py` — strict / weak / detached identity match + anomaly signals
+  (merges global recent events with targeted thread / sender lookups)
 - `gating.py` — content risk and soft-control flags
 - `payload.py` — `pending_reply_payload` (thread history, chase context)
 - `processor.py` — per-message pipeline (dedup, event write, gateway)
@@ -29,7 +30,7 @@ Both call `inbound_reply.orchestrator.run_once()` with different `InboundDeps`.
 | `skipped` | yes | skip |
 | `retry` | no | re-process; `should_retry_gateway_only` skips duplicate event write |
 | orchestrator crash mid-message | prior successes saved incrementally | failed message retried |
-| global seen + gateway recovery | probe `reply_dispatch_status` | re-run when `should_retry_gateway_only` |
+| global seen + gateway recovery | probe `reply_dispatch_status` | re-run when `should_retry_gateway_only` or inbound event missing |
 | gateway retry storm | exponential backoff in `poller_state.json` | `deferred` stat until `retry_backoff_*` expires |
 
 Gateway failures return `retry` (not `dispatched`) so `should_retry_gateway_only`
