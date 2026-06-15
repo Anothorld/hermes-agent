@@ -26,6 +26,7 @@ from _cal_client import (  # noqa: E402
     print_json,
     require_keys,
 )
+from _escalation_cli_helpers import normalize_open_escalation_body  # noqa: E402
 
 
 # -------------------------------------------------------------- escalations
@@ -45,6 +46,11 @@ def cmd_get_escalation(args: argparse.Namespace) -> None:
 def cmd_open_escalation(args: argparse.Namespace) -> None:
     body = parse_json_arg(args.json)
     body.setdefault("env", args.env)
+    if args.identity_id is not None:
+        body.setdefault("identity_id", args.identity_id)
+    if args.campaign_id:
+        body.setdefault("campaign_id", args.campaign_id)
+    normalize_open_escalation_body(body)
     require_keys(body, "reason")
     print_json(client_from_args(args).request(
         "POST", "/escalations", body=body,
@@ -223,11 +229,14 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p = sub.add_parser(
         "open-escalation",
         help=("POST /escalations — open one. JSON body must contain {reason} "
-              "+ optional {identity_id, campaign_id, goal, severity, "
-              "question_to_operator, parent_escalation_id, resume_context}."),
+              "(or {rule_id} alias) + optional {identity_id, campaign_id, "
+              "goal, severity, question_to_operator, parent_escalation_id, "
+              "resume_context}. --identity-id / --campaign-id merge into JSON."),
     )
     add_common_args(p)
     add_env_arg(p)
+    p.add_argument("--identity-id", type=int)
+    p.add_argument("--campaign-id")
     p.add_argument("--json", required=True, help="JSON body or @path")
     p.set_defaults(func=cmd_open_escalation)
 

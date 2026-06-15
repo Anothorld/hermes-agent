@@ -28,6 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _cal_client import (  # noqa: E402
+    _die,
     add_common_args,
     add_env_arg,
     client_from_args,
@@ -35,6 +36,7 @@ from _cal_client import (  # noqa: E402
     print_json,
     require_keys,
 )
+from _escalation_cli_helpers import maybe_attach_linked_escalation_id  # noqa: E402
 
 
 # ----------------------------------------------------------------- handlers
@@ -93,7 +95,13 @@ def cmd_persist_reply_draft(args: argparse.Namespace) -> None:
         "primary_lane", "primary_goal", "child_skill",
         "child_envelope", "latest_email",
     )
-    print_json(client_from_args(args).request(
+    client = client_from_args(args)
+    ambiguous = maybe_attach_linked_escalation_id(client, body)
+    if ambiguous is not None:
+        _die(ambiguous["error"], hint=ambiguous.get("hint", ""), **{
+            k: v for k, v in ambiguous.items() if k not in ("error", "hint")
+        })
+    print_json(client.request(
         "POST", "/reply-drafts/persist", body=body,
     ))
 
