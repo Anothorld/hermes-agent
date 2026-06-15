@@ -83,7 +83,12 @@ also append a `【KOL 追信 · <msg_id>】` block to `question_to_operator`.
 - Legacy rows: `POST /escalations/{id}/sync-pending-inbounds` backfills from
   timeline events (Console calls this on inbound-context load).
 - While escalation is open, `persist-reply-draft` without `linked_escalation_id`
-  returns **409**; dispatcher should see `defer_escalation` in chase hint.
+  returns **409** unless the CLI auto-links the sole open `awaiting_answer`
+  escalation for that identity+campaign. Dispatcher should still honor
+  `defer_escalation` in chase hint and skip persist when defer applies.
+
+`open-escalation` accepts `--identity-id` / `--campaign-id` CLI flags (merged
+into JSON). JSON must include `reason` (or `rule_id` alias).
 
 `get-escalation` example (no `--campaign-id`):
 

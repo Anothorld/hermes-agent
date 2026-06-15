@@ -284,7 +284,7 @@ drafting** — do not invoke a child skill for that lane in Step 4/5:
 python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
   --identity-id <identity_id> --campaign-id "<campaign_id>" \
   --env <TEST|LIVE> \
-  --json '{"rule_id": "<escalation_hint.matched_rule_id>",
+  --json '{"reason": "<escalation_hint.matched_rule_id or rule_id>",
             "lane": "<lane>",
             "goal_name": "<active goal in that lane>",
             "severity": "<rule severity, default normal>",
@@ -295,6 +295,9 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py open-escalation \
                                  "source_message_id": "<latest_email.message_id>",
                                  "thread_id": "<latest_email.thread_id if present>"}}'
 ```
+
+(`reason` is required; `rule_id` alone is accepted as an alias. `--identity-id`
+/ `--campaign-id` may be CLI flags or JSON fields.)
 
 Notes:
 - Step 3.5 runs **before** Step 3.1 drafting obligations. When an escalation
