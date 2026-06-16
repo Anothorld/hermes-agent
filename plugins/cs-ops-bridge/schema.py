@@ -12,6 +12,7 @@ SESSION_STATUSES: Final[tuple[str, ...]] = (
     "processing",
     "awaiting_expert",
     "draft_ready",
+    "operator_replied",
     "reviewed",
     "failed",
     "skipped",

@@ -112,6 +112,21 @@ class EscalationResolveBody(BaseModel):
     final_state: str = "resolved"
 
 
+class HandoffBody(BaseModel):
+    phase: str
+    env: str = "LIVE"
+    customer_need: str = ""
+    actions_taken: str = ""
+    follow_up: str = ""
+    operator_hint: str = ""
+    error: str = ""
+    urgency: str = "medium"
+    feishu_thread_id: Optional[str] = None
+    classify: dict[str, Any] = Field(default_factory=dict)
+    chat_session_id: Optional[str] = None
+    skip_quickcep: bool = False
+
+
 @router.get("/health")
 def health() -> dict[str, Any]:
     return cal.health()
@@ -145,6 +160,38 @@ def list_sessions_route(
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
     return {"sessions": cal.list_sessions(env=env, status=status, q=q, limit=limit)}
+
+
+@router.post("/sessions/{quickcep_session_id}/handoff")
+def apply_session_handoff(
+    quickcep_session_id: str,
+    body: HandoffBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    from .session_handoff import apply_handoff
+
+    context = {
+        "customer_need": body.customer_need,
+        "actions_taken": body.actions_taken,
+        "follow_up": body.follow_up,
+        "operator_hint": body.operator_hint,
+        "error": body.error,
+        "urgency": body.urgency,
+        "feishu_thread_id": body.feishu_thread_id,
+        "classify": body.classify,
+    }
+    result = apply_handoff(
+        quickcep_session_id=quickcep_session_id,
+        phase=body.phase,
+        env=body.env,
+        context=context,
+        chat_session_id=body.chat_session_id,
+        skip_quickcep=body.skip_quickcep,
+    )
+    if not result.get("ok") and result.get("error") == "session not found":
+        raise HTTPException(status_code=404, detail="session not found")
+    return result
 
 
 @router.get("/sessions/{quickcep_session_id}/dispatch-context")
@@ -206,7 +253,13 @@ def write_facts(
 
 @router.post("/logic/classify-intent")
 def classify_intent_route(body: ClassifyBody) -> dict[str, Any]:
-    return classify_intent(subject=body.subject, body=body.body, metadata=body.metadata)
+    result = classify_intent(subject=body.subject, body=body.body, metadata=body.metadata)
+    from .session_handoff import inquiry_tag_for_category
+
+    tag_id = inquiry_tag_for_category(result.get("category"))
+    if tag_id:
+        result = {**result, "inquiry_tag_id": tag_id}
+    return result
 
 
 @router.get("/escalations")

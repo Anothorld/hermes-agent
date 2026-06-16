@@ -51,6 +51,32 @@ API_SERVER_PORT: 8643
 
 Facts and event payloads are sanitized on write (`pii_sanitize.py`): emails, phones, card-like numbers, and street addresses are masked before SQLite persistence.
 
+| `CS_OPS_HANDOFF_UNTRACKED_SENDS` | `false` | Apply handoff on operator send for untracked sessions |
+| `CS_OPS_HANDOFF_SKIP_QUICKCEP` | — | Skip QuickCEP tag/note writes (CAL events only) |
+
+## Session handoff (tags + internal notes)
+
+Deterministic lifecycle labeling via `session_handoff.py`:
+
+```bash
+python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py apply-handoff \
+  --env LIVE --session-id <quickcep_session_id> \
+  --phase draft_ready \
+  --customer-need "Customer wants tracking" \
+  --actions-taken "draft-save" \
+  --operator-hint "Draft ready for review"
+```
+
+Phases: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `reviewed`, `followup_while_busy`, `operator_sent`.
+
+**Operator send:** SIO `operatorSendMsg` → automatic `operator_sent` handoff (tags + post-send note).
+
+**Tag map:** `config/session_tag_map.yaml` — run `scripts/sync_session_tags.py` after creating **AI客服** tags in QuickCEP admin (`AI-处理中`, `AI-草稿待审`, `AI-待专家`, `AI-处理失败`, `AI-已结案`).
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/sessions/{id}/handoff` | key | Apply lifecycle tags + internal note |
+
 ## Console API (Phase 3)
 
 | Method | Path | Auth | Purpose |
@@ -67,6 +93,8 @@ Operator UI: `playground/povison-cs-console/` (port 8092).
 python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py health
 python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py get-dispatch-context --env LIVE --session-id <id>
 python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py classify-intent --env LIVE --subject "..." --body "..."
+python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py apply-handoff --env LIVE --session-id <id> --phase draft_ready --operator-hint "..."
+python plugins/cs-ops-bridge/scripts/sync_session_tags.py   # after QuickCEP AI tags created
 ```
 
 ## Architecture

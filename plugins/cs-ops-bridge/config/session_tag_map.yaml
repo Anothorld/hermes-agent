@@ -1,0 +1,32 @@
+# QuickCEP session tag IDs for cs-ops-bridge session_handoff.
+# Run scripts/sync_session_tags.py after creating AI tags in QuickCEP admin.
+
+ai_lifecycle:
+  # Names in QuickCEP admin (group: AI客服)
+  processing: ""       # AI-处理中
+  draft_ready: ""      # AI-草稿待审
+  awaiting_expert: ""  # AI-待专家
+  failed: ""           # AI-处理失败
+  closed: ""           # AI-已结案
+
+business:
+  escalation: "1976537149527101441"
+  urgent: "2032017796868907009"
+  awaiting_customer: "1976568929420890113"
+  verification: "1976847737997795330"
+  invalid_ticket: "1718877391766441985"
+
+# classify_intent category -> Inquiry Nature tag id (empty = skip)
+inquiry_by_category:
+  logistics: ""
+  product: ""
+  issue_standard: ""
+  refund_request: ""
+  high_value_refund: ""
+  legal_threat: ""
+  social_threat: ""
+  executive_demand: ""
+  b2b_inquiry: ""
+  vip_discount: ""
+  unclear: ""
+  forced: ""

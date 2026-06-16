@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from . import cal
 from .gateway_client import GatewayClient
+from .session_handoff import handle_operator_send, apply_handoff
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,57 @@ _sio_backoff_sec = 5.0
 
 def _quickcep_scripts_dir() -> Path:
     return Path(os.environ.get("CS_OPS_QUICKCEP_SKILL_DIR", str(_DEFAULT_SKILL_DIR)))
+
+
+def _patch_sio_monitor_for_operator_send(monitor_cls: type) -> None:
+    """Extend profile SIO monitor to invoke operator-send callbacks without editing profile files."""
+    if getattr(monitor_cls, "_cs_bridge_operator_patch", False):
+        return
+    original = monitor_cls._handle
+
+    def _patched_handle(self, name: str, payload: Any) -> None:
+        original(self, name, payload)
+        is_email = isinstance(payload, dict) and payload.get("channel") == "email"
+        if name == "operatorSendMsg" and is_email:
+            try:
+                info = self._extract(payload)
+                _on_operator_send(info)
+            except Exception as exc:
+                log.warning("operatorSendMsg handler error: %s", exc)
+
+    monitor_cls._handle = _patched_handle  # type: ignore[method-assign]
+    monitor_cls._cs_bridge_operator_patch = True  # type: ignore[attr-defined]
+
+
+def _on_operator_send(info: dict[str, Any]) -> None:
+    try:
+        result = handle_operator_send(info, env=_ENV)
+        if result.get("skipped"):
+            log.debug("operator send skipped session=%s reason=%s", info.get("chatSubSessionId"), result.get("reason"))
+        elif result.get("ok"):
+            log.info("operator send handoff ok session=%s", info.get("chatSubSessionId"))
+        else:
+            log.warning("operator send handoff partial/fail session=%s: %s", info.get("chatSubSessionId"), result)
+    except Exception as exc:
+        log.exception("operator send handoff error: %s", exc)
+
+
+def _handoff_followup_while_busy(session_id: str, message_id: str) -> None:
+    try:
+        apply_handoff(
+            quickcep_session_id=session_id,
+            phase="followup_while_busy",
+            env=_ENV,
+            context={
+                "customer_need": "客户在本轮 AI 处理中追加消息",
+                "actions_taken": f"已记录 message_id={message_id}，未重复 launch",
+                "follow_up": "当前 run 完成后处理最新上下文",
+                "operator_hint": "客户追加了消息",
+            },
+            skip_quickcep=os.environ.get("CS_OPS_HANDOFF_SKIP_QUICKCEP", "").lower() in ("1", "true"),
+        )
+    except Exception as exc:
+        log.warning("followup handoff failed session=%s: %s", session_id, exc)
 
 
 def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
@@ -52,6 +104,7 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             session_id,
             (result.get("session") or {}).get("status"),
         )
+        _handoff_followup_while_busy(session_id, message_id)
         return None
     cal.update_session_status(session_row_id=result["session"]["id"], status="processing")
     gw = GatewayClient.from_env()
@@ -68,6 +121,22 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         return None
     cal.update_session_status(session_row_id=result["session"]["id"], status="failed")
     log.error("launch failed for session %s message %s", session_id, message_id)
+    try:
+        apply_handoff(
+            quickcep_session_id=session_id,
+            phase="failed",
+            env=_ENV,
+            context={
+                "error": "gateway launch failed",
+                "actions_taken": "watcher launch returned no run_id",
+                "follow_up": "Console relaunch 或检查 gateway",
+                "operator_hint": "AI 未启动，需人工处理",
+            },
+            chat_session_id=str(info.get("chatSessionId") or "") or None,
+            skip_quickcep=os.environ.get("CS_OPS_HANDOFF_SKIP_QUICKCEP", "").lower() in ("1", "true"),
+        )
+    except Exception as exc:
+        log.warning("failed handoff after launch error session=%s: %s", session_id, exc)
     return None
 
 
@@ -81,6 +150,8 @@ def run_sio_loop() -> None:
     sys.path.insert(0, str(scripts))
     try:
         from quickcep_sio_email_monitor import QuickCEPSioMonitor, on_new_email  # type: ignore
+
+        _patch_sio_monitor_for_operator_send(QuickCEPSioMonitor)
 
         @on_new_email
         def _cb(info: dict[str, Any]) -> None:

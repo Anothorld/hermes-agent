@@ -107,8 +107,8 @@ def enqueue_session(
                    chat_session_id=COALESCE(excluded.chat_session_id, chat_session_id),
                    customer_email=COALESCE(excluded.customer_email, customer_email),
                    last_message_id=excluded.last_message_id,
-                   status=CASE WHEN cs_session.status IN ('draft_ready','skipped','failed','reviewed') THEN 'pending'
-                            ELSE cs_session.status END,
+                   status=CASE WHEN status IN ('draft_ready','operator_replied','skipped','failed','reviewed') THEN 'pending'
+                            ELSE status END,
                    updated_at=excluded.updated_at
             """,
             (quickcep_session_id, chat_session_id, customer_email, message_id, env, now, now),
@@ -174,6 +174,15 @@ def get_session(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict
             (quickcep_session_id, env),
         ).fetchone()
         return dict(row) if row else None
+
+
+def update_session_chat_id(*, session_row_id: int, chat_session_id: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE cs_session SET chat_session_id=?, updated_at=? WHERE id=?",
+            (chat_session_id, _now(), session_row_id),
+        )
+        conn.commit()
 
 
 def update_session_status(*, session_row_id: int, status: str) -> None:

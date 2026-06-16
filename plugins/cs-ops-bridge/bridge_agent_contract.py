@@ -16,10 +16,13 @@ def process_cli_checklist(*, env: str, quickcep_session_id: str) -> str:
     return f"""# bridge_cli_checklist
 1. python3 {cli} get-dispatch-context --env {env} --session-id {quickcep_session_id}
 2. python3 {cli} classify-intent --env {env} --subject "<subject>" --body "<body>"
-3. (auto_handle) product/logistics lookup skills → quickcep_cli draft-save
-4. (escalate) send_message to feishu:AI客服后援 → python3 {cli} open-escalation ...
-5. python3 {cli} write-event --env {env} --session-id {quickcep_session_id} --event-type <type> --json '{{...}}'
-6. python3 {cli} update-session-status --env {env} --session-id {quickcep_session_id} --status draft_ready|awaiting_expert|reviewed
+3. python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase processing --customer-need "<summary>" --classify-json '<classify JSON>'
+4. (auto_handle) product/logistics lookup skills → quickcep_cli draft-save
+5. (auto_handle) python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase draft_ready --actions-taken "draft-save" --operator-hint "<key point>"
+6. (escalate) send_message to feishu:AI客服后援 → python3 {cli} open-escalation ...
+7. (escalate) python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase awaiting_expert --feishu-thread-id "<thread>"
+8. (failure) python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase failed --error "<reason>"
+9. python3 {cli} update-session-status --env {env} --session-id {quickcep_session_id} --status draft_ready|awaiting_expert|failed
 """
 
 
@@ -29,8 +32,9 @@ def resume_cli_checklist(*, env: str, escalation_id: int) -> str:
 1. python3 {cli} get-escalation --env {env} --escalation-id {escalation_id}
 2. python3 {cli} get-dispatch-context --env {env} --session-id <from escalation.session>
 3. Apply operator_answer → quickcep_cli draft-save (never send-email)
-4. python3 {cli} write-event --env {env} --session-id <id> --event-type escalation_resumed --json '{{...}}'
-5. python3 {cli} update-session-status --env {env} --session-id <id> --status draft_ready
+4. python3 {cli} apply-handoff --env {env} --session-id <id> --phase draft_ready --actions-taken "escalation resume + draft-save" --operator-hint "<key point>"
+5. python3 {cli} write-event --env {env} --session-id <id> --event-type escalation_resumed --json '{{...}}'
+6. python3 {cli} update-session-status --env {env} --session-id <id> --status draft_ready
 """
 
 

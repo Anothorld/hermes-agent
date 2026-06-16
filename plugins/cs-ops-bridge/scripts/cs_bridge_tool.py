@@ -106,6 +106,32 @@ def _cmd_open_escalation(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_apply_handoff(args: argparse.Namespace) -> None:
+    classify: dict = {}
+    if args.classify_json:
+        classify = json.loads(args.classify_json)
+    print_json(
+        client_from_args(args).request(
+            "POST",
+            f"/sessions/{args.session_id}/handoff",
+            body={
+                "phase": args.phase,
+                "env": args.env,
+                "customer_need": args.customer_need or "",
+                "actions_taken": args.actions_taken or "",
+                "follow_up": args.follow_up or "",
+                "operator_hint": args.operator_hint or "",
+                "error": args.error or "",
+                "urgency": args.urgency or "medium",
+                "feishu_thread_id": args.feishu_thread_id,
+                "classify": classify,
+                "chat_session_id": args.chat_session_id,
+                "skip_quickcep": args.skip_quickcep,
+            },
+        )
+    )
+
+
 def _cmd_get_escalation(args: argparse.Namespace) -> None:
     print_json(client_from_args(args).request("GET", f"/escalations/{args.escalation_id}"))
 
@@ -165,6 +191,22 @@ def _build_parser() -> argparse.ArgumentParser:
     add_env_arg(ge)
     ge.add_argument("--escalation-id", type=int, required=True)
     ge.set_defaults(func=_cmd_get_escalation)
+
+    ah = sub.add_parser("apply-handoff")
+    add_env_arg(ah)
+    ah.add_argument("--session-id", required=True)
+    ah.add_argument("--phase", required=True)
+    ah.add_argument("--customer-need", default="")
+    ah.add_argument("--actions-taken", default="")
+    ah.add_argument("--follow-up", default="")
+    ah.add_argument("--operator-hint", default="")
+    ah.add_argument("--error", default="")
+    ah.add_argument("--urgency", default="medium")
+    ah.add_argument("--feishu-thread-id", default=None)
+    ah.add_argument("--classify-json", default="{}")
+    ah.add_argument("--chat-session-id", default=None)
+    ah.add_argument("--skip-quickcep", action="store_true")
+    ah.set_defaults(func=_cmd_apply_handoff)
 
     return p
 

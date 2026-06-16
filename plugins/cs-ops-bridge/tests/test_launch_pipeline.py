@@ -84,3 +84,37 @@ def test_launch_for_message_enqueues_and_launches(monkeypatch, tmp_path):
     assert run_id == "run-abc"
     sess = cal.get_session(quickcep_session_id="sess-100", env="LIVE")
     assert sess["status"] == "processing"
+
+
+def test_launch_failure_applies_failed_handoff(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_module("cal")
+    qw = _load_module("quickcep_watcher")
+    gw_mod = _load_module("gateway_client")
+
+    class _FailGw:
+        def start_process_run(self, **kwargs):
+            return gw_mod.LaunchOutcome(run_id=None)
+
+    handoffs: list = []
+
+    def _capture_handoff(**kwargs):
+        handoffs.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(qw, "GatewayClient", type("G", (), {"from_env": staticmethod(lambda: _FailGw())}))
+    monkeypatch.setattr(qw, "apply_handoff", _capture_handoff)
+
+    run_id = qw._launch_for_message(
+        {
+            "chatSubSessionId": "sess-fail",
+            "chatSessionId": "chat-1",
+            "id": "mid-1",
+            "email": "visitor@example.com",
+        }
+    )
+    assert run_id is None
+    sess = cal.get_session(quickcep_session_id="sess-fail", env="LIVE")
+    assert sess["status"] == "failed"
+    assert len(handoffs) == 1
+    assert handoffs[0]["phase"] == "failed"
