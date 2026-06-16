@@ -12,7 +12,7 @@ import urllib.request
 from typing import Any, Optional
 
 from . import cal
-from .gateway_client import GatewayClient
+from .escalation_resume import resume_escalation
 
 log = logging.getLogger(__name__)
 
@@ -117,22 +117,17 @@ def poll_once() -> dict[str, Any]:
             if not qsid:
                 log.warning("escalation %s missing quickcep session — skip", eid)
                 break
-            outcome = GatewayClient.from_env().start_resume_run(
+            from .escalation_resume import resume_escalation
+
+            result = resume_escalation(
                 escalation_id=int(eid),
-                quickcep_session_id=qsid,
-                env=_ENV,
                 operator_answer=text,
-            )
-            if not outcome.run_id:
-                log.error("resume launch failed for escalation %s", eid)
-                break
-            cal.resolve_escalation(
-                escalation_id=int(eid),
-                decision="resume",
                 decided_by=str(sender.get("id") or "feishu_operator"),
-                operator_answer=text,
-                final_state="resolved",
+                env=_ENV,
             )
+            if not result.get("ok"):
+                log.error("resume escalation %s failed: %s", eid, result.get("error"))
+                break
             seen[eid] = mid
             resumed += 1
             break

@@ -19,7 +19,7 @@ def process_cli_checklist(*, env: str, quickcep_session_id: str) -> str:
 3. (auto_handle) product/logistics lookup skills → quickcep_cli draft-save
 4. (escalate) send_message to feishu:AI客服后援 → python3 {cli} open-escalation ...
 5. python3 {cli} write-event --env {env} --session-id {quickcep_session_id} --event-type <type> --json '{{...}}'
-6. python3 {cli} update-session-status --env {env} --session-id {quickcep_session_id} --status draft_ready|awaiting_expert
+6. python3 {cli} update-session-status --env {env} --session-id {quickcep_session_id} --status draft_ready|awaiting_expert|reviewed
 """
 
 

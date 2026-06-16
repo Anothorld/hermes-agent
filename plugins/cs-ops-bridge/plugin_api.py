@@ -94,6 +94,17 @@ class EscalationOpenBody(BaseModel):
     env: str = "LIVE"
 
 
+class EscalationResumeBody(BaseModel):
+    operator_answer: str
+    decided_by: str = "console_operator"
+    env: str = "LIVE"
+
+
+class SessionRelaunchBody(BaseModel):
+    env: str = "LIVE"
+    message_id: Optional[str] = None
+
+
 class EscalationResolveBody(BaseModel):
     decision: str
     decided_by: str
@@ -124,6 +135,16 @@ def enqueue_session(
         message_id=body.message_id,
         env=body.env,
     )
+
+
+@router.get("/sessions")
+def list_sessions_route(
+    env: str = Query("LIVE"),
+    status: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    return {"sessions": cal.list_sessions(env=env, status=status, q=q, limit=limit)}
 
 
 @router.get("/sessions/{quickcep_session_id}/dispatch-context")
@@ -243,6 +264,55 @@ def resolve_escalation(
     if not ok:
         raise HTTPException(status_code=404, detail="escalation not found")
     return {"ok": True}
+
+
+@router.post("/escalations/{escalation_id}/resume")
+def resume_escalation_route(
+    escalation_id: int,
+    body: EscalationResumeBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    from .escalation_resume import resume_escalation
+
+    result = resume_escalation(
+        escalation_id=escalation_id,
+        operator_answer=body.operator_answer,
+        decided_by=body.decided_by,
+        env=body.env,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error") or "resume failed")
+    return result
+
+
+@router.post("/sessions/{quickcep_session_id}/relaunch")
+def relaunch_session_route(
+    quickcep_session_id: str,
+    body: SessionRelaunchBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Re-trigger gateway process run for failed or stuck sessions."""
+    _require_bridge_key(x_bridge_key)
+    from .gateway_client import GatewayClient
+
+    sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=body.env)
+    if not sess:
+        raise HTTPException(status_code=404, detail="session not found")
+    if sess["status"] in ("processing", "awaiting_expert"):
+        raise HTTPException(status_code=409, detail=f"session busy: {sess['status']}")
+    msg_id = body.message_id or sess.get("last_message_id") or "manual-relaunch"
+    cal.update_session_status(session_row_id=sess["id"], status="processing")
+    outcome = GatewayClient.from_env().start_process_run(
+        quickcep_session_id=quickcep_session_id,
+        env=body.env,
+        message_id=str(msg_id),
+        brief_extra="source: console_relaunch",
+    )
+    if not outcome.run_id:
+        cal.update_session_status(session_row_id=sess["id"], status="failed")
+        raise HTTPException(status_code=502, detail="gateway launch failed")
+    return {"ok": True, "run_id": outcome.run_id}
 
 
 @router.get("/watcher/status")

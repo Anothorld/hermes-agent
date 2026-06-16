@@ -107,7 +107,7 @@ def enqueue_session(
                    chat_session_id=COALESCE(excluded.chat_session_id, chat_session_id),
                    customer_email=COALESCE(excluded.customer_email, customer_email),
                    last_message_id=excluded.last_message_id,
-                   status=CASE WHEN cs_session.status IN ('draft_ready','skipped') THEN 'pending'
+                   status=CASE WHEN cs_session.status IN ('draft_ready','skipped','failed','reviewed') THEN 'pending'
                             ELSE cs_session.status END,
                    updated_at=excluded.updated_at
             """,
@@ -141,6 +141,30 @@ def enqueue_session(
             "should_launch": should_launch,
             "session": session,
         }
+
+
+def list_sessions(
+    *,
+    env: str = "LIVE",
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit), 200))
+    with _connect() as conn:
+        sql = """SELECT * FROM cs_session WHERE env=?"""
+        params: list[Any] = [env]
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        if q:
+            like = f"%{q.strip()}%"
+            sql += " AND (quickcep_session_id LIKE ? OR customer_email LIKE ? OR chat_session_id LIKE ?)"
+            params.extend([like, like, like])
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_session(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict[str, Any]]:
@@ -328,6 +352,14 @@ def list_escalations(*, state: Optional[str] = None, env: str = "LIVE") -> list[
         for row in rows:
             item = dict(row)
             item["resume_context"] = json.loads(item.pop("resume_context_json") or "{}")
+            sess = conn.execute(
+                "SELECT quickcep_session_id, customer_email, status FROM cs_session WHERE id=?",
+                (item["session_id"],),
+            ).fetchone()
+            if sess:
+                item["quickcep_session_id"] = sess["quickcep_session_id"]
+                item["customer_email"] = sess["customer_email"]
+                item["session_status"] = sess["status"]
             out.append(item)
         return out
 

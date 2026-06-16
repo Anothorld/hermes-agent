@@ -51,6 +51,16 @@ API_SERVER_PORT: 8643
 
 Facts and event payloads are sanitized on write (`pii_sanitize.py`): emails, phones, card-like numbers, and street addresses are masked before SQLite persistence.
 
+## Console API (Phase 3)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/sessions` | — | List/search sessions |
+| POST | `/escalations/{id}/resume` | key | Launch gateway + resolve |
+| POST | `/sessions/{id}/relaunch` | key | Retry failed/stuck session |
+
+Operator UI: `playground/povison-cs-console/` (port 8092).
+
 ## CLI
 
 ```bash

@@ -40,6 +40,7 @@ def _load_pkg() -> ModuleType:
         "quickcep_watcher",
         "feishu_escalation_poller",
         "escalation_timeout",
+        "escalation_resume",
         "plugin_api",
     ):
         spec = importlib.util.spec_from_file_location(
