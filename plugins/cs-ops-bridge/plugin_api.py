@@ -106,6 +106,11 @@ def health() -> dict[str, Any]:
     return cal.health()
 
 
+@router.get("/admin/perf-snapshot")
+def perf_snapshot(env: str = Query("LIVE")) -> dict[str, Any]:
+    return cal.perf_snapshot(env=env)
+
+
 @router.post("/sessions/enqueue")
 def enqueue_session(
     body: EnqueueBody,

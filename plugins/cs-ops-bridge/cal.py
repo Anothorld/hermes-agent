@@ -41,6 +41,34 @@ def health() -> dict[str, Any]:
     return {"ok": True, "db": str(_DB_PATH), "sessions": sessions, "open_escalations": open_esc}
 
 
+def perf_snapshot(*, env: str = "LIVE") -> dict[str, Any]:
+    """Operator-facing bridge metrics (poller lag, queue-ish counts)."""
+    with _connect() as conn:
+        by_status = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM cs_session WHERE env=? GROUP BY status",
+            (env,),
+        ).fetchall()
+        open_esc = conn.execute(
+            "SELECT COUNT(*) AS n FROM cs_escalations WHERE state='awaiting_answer' AND env=?",
+            (env,),
+        ).fetchone()["n"]
+        pending = conn.execute(
+            "SELECT COUNT(*) AS n FROM cs_session WHERE env=? AND status='pending'",
+            (env,),
+        ).fetchone()["n"]
+    pollers = {
+        name: get_poller_state(name)
+        for name in ("quickcep_watcher", "feishu_escalation_poller", "escalation_timeout")
+    }
+    return {
+        "env": env,
+        "sessions_by_status": {str(r["status"]): r["n"] for r in by_status},
+        "pending_sessions": pending,
+        "open_escalations": open_esc,
+        "pollers": pollers,
+    }
+
+
 def enqueue_session(
     *,
     quickcep_session_id: str,

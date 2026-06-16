@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 _DEFAULT_SKILL_DIR = Path.home() / ".hermes/profiles/povison-cs/skills/social-media/quickcep"
 _ENV = os.environ.get("CS_OPS_ENV", "LIVE")
 _stop_event = threading.Event()
+_sio_backoff_sec = 5.0
 
 
 def _quickcep_scripts_dir() -> Path:
@@ -71,6 +72,7 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
 
 
 def run_sio_loop() -> None:
+    global _sio_backoff_sec
     scripts = _quickcep_scripts_dir() / "scripts"
     monitor_path = scripts / "quickcep_sio_email_monitor.py"
     if not monitor_path.exists():
@@ -88,14 +90,16 @@ def run_sio_loop() -> None:
         while not _stop_event.is_set():
             try:
                 monitor.connect()
+                _sio_backoff_sec = 5.0
                 while not _stop_event.is_set():
                     if not monitor.poll_once():
                         time.sleep(5)
                         monitor.connect()
                     time.sleep(0.5)
             except Exception as exc:
-                log.warning("SIO reconnect after error: %s", exc)
-                time.sleep(10)
+                log.warning("SIO reconnect after error: %s (backoff %.0fs)", exc, _sio_backoff_sec)
+                time.sleep(_sio_backoff_sec)
+                _sio_backoff_sec = min(_sio_backoff_sec * 2, 120)
     except Exception as exc:
         log.exception("SIO watcher failed: %s", exc)
 
@@ -134,7 +138,7 @@ def run_rest_reconcile_once() -> dict[str, Any]:
         }
         if _launch_for_message(info):
             launched += 1
-    state = {"last_run": time.time(), "launched": launched, "seen": len(sessions)}
+    state = {"last_run": time.time(), "launched": launched, "seen": len(sessions), "sio_backoff_sec": _sio_backoff_sec}
     cal.set_poller_state("quickcep_watcher", state)
     return state
 
