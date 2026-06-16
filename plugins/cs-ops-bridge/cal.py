@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from .schema import ESCALATION_STATES, SESSION_STATUSES, recreate_all
+from .pii_sanitize import mask_string, sanitize_mapping, sanitize_namespaces
 
 _DB_PATH = Path(
     os.environ.get(
@@ -214,11 +215,12 @@ def write_event(
     sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
         return False
+    safe_payload = sanitize_mapping(dict(payload or {}))
     with _connect() as conn:
         conn.execute(
             """INSERT INTO cs_conversation_events(session_id, event_type, payload_json, env, created_at)
                VALUES (?,?,?,?,?)""",
-            (sess["id"], event_type, json.dumps(dict(payload or {})), env, _now()),
+            (sess["id"], event_type, json.dumps(safe_payload), env, _now()),
         )
         conn.commit()
     return True
@@ -233,10 +235,11 @@ def write_facts(
     sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
         return False
+    safe_namespaces, _ = sanitize_namespaces(namespaces)
     now = _now()
     sid = sess["id"]
     with _connect() as conn:
-        for ns, kv in namespaces.items():
+        for ns, kv in safe_namespaces.items():
             for key, val in kv.items():
                 conn.execute(
                     """INSERT INTO cs_facts(session_id, namespace, fact_key, fact_value_json, env, created_at, updated_at)
@@ -266,6 +269,7 @@ def open_escalation(
     if not sess:
         return None
     now = _now()
+    safe_resume = sanitize_mapping(dict(resume_context or {}))
     with _connect() as conn:
         cur = conn.execute(
             """INSERT INTO cs_escalations(
@@ -278,11 +282,11 @@ def open_escalation(
                 reason,
                 urgency,
                 "awaiting_answer",
-                question_to_operator,
+                mask_string(question_to_operator) if question_to_operator else None,
                 feishu_chat_id,
                 feishu_thread_id,
                 feishu_message_id,
-                json.dumps(dict(resume_context or {})),
+                json.dumps(safe_resume),
                 env,
                 now,
                 now,

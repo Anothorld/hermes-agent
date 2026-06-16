@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -60,6 +61,21 @@ def test_enqueue_dedup(monkeypatch, tmp_path):
     assert r1["should_launch"] is True
     assert r2["deduped"] is True
     assert r2["should_launch"] is False
+
+
+def test_write_facts_masks_pii(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    cal.enqueue_session(quickcep_session_id="789", message_id="m1", env="LIVE")
+    cal.write_facts(
+        quickcep_session_id="789",
+        namespaces={"customer": {"email": "secret@example.com", "phone": "415-555-9999"}},
+        env="LIVE",
+    )
+    ctx = cal.get_dispatch_context(quickcep_session_id="789", env="LIVE")
+    blob = json.dumps(ctx["facts"])
+    assert "secret@example.com" not in blob
+    assert "555-9999" not in blob
 
 
 def test_enqueue_skips_launch_when_busy(monkeypatch, tmp_path):

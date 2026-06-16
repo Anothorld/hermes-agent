@@ -47,6 +47,10 @@ API_SERVER_PORT: 8643
 - **Escalation SLA**: `escalation_timeout.py` posts Feishu thread reminders and CAL events.
 - **Agent guard**: enable plugin `cs-bridge-agent-guard` on the povison-cs gateway profile to block `send-email`.
 
+## PII
+
+Facts and event payloads are sanitized on write (`pii_sanitize.py`): emails, phones, card-like numbers, and street addresses are masked before SQLite persistence.
+
 ## CLI
 
 ```bash
