@@ -1,0 +1,8 @@
+{
+  "name": "cs-ops-bridge",
+  "label": "CS Ops Bridge",
+  "description": "Headless plugin for Povison AI customer service: QuickCEP session state, escalations, events, and watcher/resume orchestration. API-only — no UI tab.",
+  "icon": "Headphones",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}
