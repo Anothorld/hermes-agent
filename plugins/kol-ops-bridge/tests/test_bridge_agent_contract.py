@@ -85,6 +85,70 @@ def test_approval_checklist_uses_persist_initial_outreach():
     assert "write-facts-multi" not in text or "Never write" in text
 
 
+def test_approval_checklist_absolute_paths_when_repo_root_set():
+    c = _contract()
+    repo = str(PLUGIN_ROOT)
+    text = c.approval_cli_checklist(
+        campaign_id="SEB8008-20260525",
+        env="LIVE",
+        identity_ids=[820],
+        repo_root=repo,
+    )
+    cli = c.cli_invocation_abs(repo)
+    assert cli in text
+    assert "kol_bridge_tool.py" in text
+    assert "python3 -u" in cli
+    assert "python3 plugins/kol-ops-bridge" not in text
+    assert "kol-bridge-cli" not in text.split("get-campaign")[0]
+    sample_cmd = f"{cli} get-campaign --campaign-id SEB8008-20260525 --env LIVE"
+    assert c.lint_terminal_command(sample_cmd) == []
+
+
+def test_gateway_contract_block_absolute_when_repo_root_set():
+    c = _contract()
+    repo = str(PLUGIN_ROOT)
+    text = c.gateway_contract_block(repo_root=repo)
+    cli = c.cli_invocation_abs(repo)
+    assert cli in text
+    assert "python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py" not in text
+
+
+def test_blocks_python3_on_kol_bridge_cli_wrapper():
+    c = _contract()
+    bad = (
+        "python3 -u /Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli "
+        "get-campaign --campaign-id X --env LIVE"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "python3_on_kol_bridge_cli_wrapper" for h in hits)
+
+
+def test_redraft_cli_checklist_writes_only():
+    c = _contract()
+    repo = str(PLUGIN_ROOT)
+    text = c.redraft_cli_checklist(
+        campaign_id="SEB8008-20260525",
+        env="LIVE",
+        identity_id=820,
+        repo_root=repo,
+    )
+    cli = c.cli_invocation_abs(repo)
+    assert f"{cli} get-campaign" not in text
+    assert f"{cli} get-dispatch-context" not in text
+    assert "persist-initial-outreach-draft" in text
+    assert "kol_bridge_tool.py" in cli
+
+
+def test_blocks_redirect_on_get_campaign():
+    c = _contract()
+    bad = (
+        "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli "
+        "get-campaign --campaign-id X --env LIVE > /tmp/c.json"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "redirect_bridge_read_stdout" for h in hits)
+
+
 def test_lint_write_facts_reply_draft():
     c = _contract()
     bad = 'kol_bridge_tool.py write-facts-multi --json \'{"namespaces":{"approval":{"approval.reply_draft":{}}}}\''

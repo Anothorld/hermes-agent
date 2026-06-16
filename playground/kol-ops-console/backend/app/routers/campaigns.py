@@ -75,6 +75,8 @@ from ..bridge_agent_contract_loader import (
     discovery_cli_rules,
     gateway_contract_block,
     gateway_contract_for_brief,
+    redraft_cli_checklist,
+    slim_dispatch_context_for_agent,
     terminal_safety_rules,
 )
 from ..discovery_gate import (
@@ -3473,6 +3475,30 @@ class RedraftOutreachBody(BaseModel):
     discard_existing_approved_draft: bool = False
 
 
+def _format_cal_snapshot_section(
+    *,
+    campaign: dict[str, Any],
+    identity: dict[str, Any],
+    dispatch_context: dict[str, Any],
+) -> str:
+    """Embed authoritative CAL reads so the agent need not terminal-fetch."""
+    snapshot = {
+        "campaign": campaign,
+        "identity": identity,
+        "dispatch_context": dispatch_context,
+    }
+    return "\n".join([
+        "# cal_snapshot (authoritative — Console bridge read at redraft launch)",
+        (
+            "Use this block for campaign_config, identity, and dispatch context. "
+            "Do NOT re-fetch via terminal unless a required field is missing here."
+        ),
+        "```json",
+        json.dumps(snapshot, ensure_ascii=False, indent=2),
+        "```",
+    ])
+
+
 def _compose_redraft_brief(
     *,
     campaign_id: str,
@@ -3482,6 +3508,9 @@ def _compose_redraft_brief(
     actor_email: str,
     actor_user_id: int | None = None,
     test_mode_to: str | None,
+    campaign_snapshot: dict[str, Any] | None = None,
+    identity_snapshot: dict[str, Any] | None = None,
+    dispatch_context_snapshot: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         "# campaign_redraft_outreach",
@@ -3509,9 +3538,9 @@ def _compose_redraft_brief(
         "",
         "## Pipeline",
         (
-            "1. Read campaign_config + get-dispatch-context --view agent for this single "
-            "identity_id only. If the identity is not in this campaign's "
-            "selected pool, stop and report the mismatch."
+            "1. Use cal_snapshot below for campaign_config + dispatch context "
+            "for this single identity_id. If the identity is not in this "
+            "campaign's selected pool, stop and report the mismatch."
         ),
         (
             "2. If `primary_email` is missing, run `kol-email-discovery` "
@@ -3548,14 +3577,29 @@ def _compose_redraft_brief(
             "`approval.reply_draft`."
         ),
         "",
+    ])
+    if (
+        campaign_snapshot is not None
+        and identity_snapshot is not None
+        and dispatch_context_snapshot is not None
+    ):
+        lines.extend([
+            _format_cal_snapshot_section(
+                campaign=campaign_snapshot,
+                identity=identity_snapshot,
+                dispatch_context=dispatch_context_snapshot,
+            ),
+            "",
+        ])
+    lines.extend([
         gateway_contract_block(),
         "",
         terminal_safety_rules(repo_root=_REPO_ROOT),
         "",
-        approval_cli_checklist(
+        redraft_cli_checklist(
             campaign_id=campaign_id,
             env=env,
-            identity_ids=[identity_id],
+            identity_id=identity_id,
         ),
     ])
     return "\n".join(lines)
@@ -3646,7 +3690,7 @@ async def redraft_outreach(
         await assert_campaign_config_complete(bridge, campaign_id)
 
         try:
-            ident = await bridge.get_identity(identity_id)
+            ident = await bridge.get_identity(identity_id, env=env)
         except BridgeError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
         if not ident:
@@ -3711,6 +3755,21 @@ async def redraft_outreach(
 
         ensure_gateway_bridge_key()
         handle = ident.get("primary_handle") if isinstance(ident, dict) else None
+        try:
+            campaign_snapshot = await bridge.get_campaign(campaign_id, env=env)
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        try:
+            dispatch_raw = await bridge.get_dispatch_context(
+                identity_id, campaign_id, env=env,
+            )
+        except BridgeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        dispatch_snapshot = (
+            slim_dispatch_context_for_agent(dispatch_raw)
+            if isinstance(dispatch_raw, dict)
+            else dispatch_raw
+        )
         brief = _compose_redraft_brief(
             campaign_id=campaign_id,
             env=env,
@@ -3719,6 +3778,11 @@ async def redraft_outreach(
             actor_email=user["email"],
             actor_user_id=user.get("id"),
             test_mode_to=test_mode_to,
+            campaign_snapshot=campaign_snapshot if isinstance(campaign_snapshot, dict) else {},
+            identity_snapshot=ident if isinstance(ident, dict) else {},
+            dispatch_context_snapshot=(
+                dispatch_snapshot if isinstance(dispatch_snapshot, dict) else {}
+            ),
         )
         session_id = campaign_draft_session_id(env, campaign_id, identity_id)
         try:

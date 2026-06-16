@@ -22,20 +22,30 @@ def dispatch_context_cli_line(
     campaign_id: str,
     env: str,
     view: str = DISPATCH_CONTEXT_VIEW_AGENT,
+    repo_root: str | None = None,
 ) -> str:
     """Canonical ``get-dispatch-context`` invocation for agent gateway runs."""
+    cli = gateway_cli_invocation(repo_root)
     view_flag = f" --view {view}" if view else ""
     return (
-        f"{CLI_INVOCATION} get-dispatch-context --identity-id {identity_id} "
+        f"{cli} get-dispatch-context --identity-id {identity_id} "
         f"--campaign-id {campaign_id} --env {env}{view_flag}"
     )
 
 
 def cli_invocation_abs(repo_root: str) -> str:
-    """Absolute-path bridge CLI wrapper for gateway briefs (macOS-safe)."""
+    """Absolute ``python3 -u kol_bridge_tool.py`` for gateway terminal briefs."""
     from pathlib import Path
 
-    return str(Path(repo_root).expanduser().resolve() / CLI_WRAPPER_REL)
+    tool = Path(repo_root).expanduser().resolve() / CANONICAL_CLI_REL
+    return f"{CLI_PYTHON} -u {tool}"
+
+
+def gateway_cli_invocation(repo_root: str | None = None) -> str:
+    """CLI prefix for gateway terminal briefs — absolute when ``repo_root`` is set."""
+    if repo_root:
+        return cli_invocation_abs(repo_root)
+    return CLI_INVOCATION
 
 AGENT_BRIDGE_CONTRACT_LINES: tuple[str, ...] = (
     "Bridge agent hard rules (mandatory):",
@@ -181,7 +191,26 @@ _AGENT_LINT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
             r"(?:^|[;&|]\s*)python3?\s+plugins/kol-ops-bridge/scripts/kol[_-]bridge",
             re.I | re.M,
         ),
-        "Terminal cwd is often $HOME — relative plugins/... fails silently. Use absolute kol-bridge-cli path.",
+        "Terminal cwd is often $HOME — relative plugins/... fails silently. "
+        "Use absolute python3 -u .../kol_bridge_tool.py from the brief.",
+    ),
+    (
+        "python3_on_kol_bridge_cli_wrapper",
+        re.compile(
+            r"python3(?:\s+-u)?\s+[^\s;|&]*kol-bridge-cli\b",
+            re.I,
+        ),
+        "kol-bridge-cli is a bash script — run python3 -u .../kol_bridge_tool.py directly "
+        "(exact prefix is in the gateway brief).",
+    ),
+    (
+        "redirect_bridge_read_stdout",
+        re.compile(
+            r"kol[_-]bridge(?:-cli|_tool\.py)\s+get-(?:campaign|identity|dispatch-context|"
+            r"facts|escalation|email-conversation)[^\n]*>\s*",
+            re.I,
+        ),
+        "Read subcommands must print JSON to terminal stdout — do not redirect to a file.",
     ),
 )
 
@@ -256,8 +285,12 @@ def format_block_message(violations: Iterable[dict[str, str]]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def gateway_contract_block() -> str:
-    return "\n".join(AGENT_BRIDGE_CONTRACT_LINES)
+def gateway_contract_block(repo_root: str | None = None) -> str:
+    cli = gateway_cli_invocation(repo_root)
+    lines = list(AGENT_BRIDGE_CONTRACT_LINES)
+    if repo_root:
+        lines[1] = f"1. CAL reads/writes: {cli} <subcommand> --env LIVE|TEST ..."
+    return "\n".join(lines)
 
 
 def resume_cli_checklist(
@@ -268,33 +301,37 @@ def resume_cli_checklist(
     env: str,
     require_draft: bool,
     operator_user_id: int | None = None,
+    repo_root: str | None = None,
 ) -> str:
     """Ordered CLI steps for escalation resume runs (paste into gateway brief)."""
+    cli = gateway_cli_invocation(repo_root)
     op_line = ""
     if operator_user_id is not None:
         op_line = f"  --operator-user-id {operator_user_id}"
     draft_lines = []
     if require_draft:
         draft_lines = [
-            f"{CLI_INVOCATION} get-email-conversation "
+            f"{cli} get-email-conversation "
             f"--identity-id {identity_id} --campaign-id {campaign_id} --env {env}{op_line}",
-            f"{CLI_INVOCATION} get-policy --scope company_style",
-            f"{CLI_INVOCATION} persist-reply-draft --env {env} --json @/tmp/draft.json",
-            f"{CLI_INVOCATION} list-approvals --status pending --env {env}",
+            f"{cli} get-policy --scope company_style",
+            f"{cli} persist-reply-draft --env {env} --json @/tmp/draft.json",
+            f"{cli} list-approvals --status pending --env {env}",
         ]
     return "\n".join([
         "# bridge_cli_checklist (mandatory — terminal only, no execute_code for bridge)",
-        f"{CLI_INVOCATION} get-escalation --escalation-id {escalation_id} --env {env}",
+        f"{cli} get-escalation --escalation-id {escalation_id} --env {env}",
         dispatch_context_cli_line(
             identity_id=identity_id, campaign_id=campaign_id, env=env,
+            repo_root=repo_root,
         ),
-        f"{CLI_INVOCATION} write-facts-multi --identity-id {identity_id} --env {env} "
+        f"{cli} write-facts-multi --identity-id {identity_id} --env {env} "
         "--json @/tmp/resume_facts.json",
         dispatch_context_cli_line(
             identity_id=identity_id, campaign_id=campaign_id, env=env,
+            repo_root=repo_root,
         ),
         *draft_lines,
-        f"{CLI_INVOCATION} write-event --env {env} --json @/tmp/resume_event.json",
+        f"{cli} write-event --env {env} --json @/tmp/resume_event.json",
         "(Write /tmp/resume_event.json with identity_id, campaign_id, "
         'event_type escalation_resume_processed, actor skill:kol-escalation-resumer.)',
         "When require_draft: persist via persist-reply-draft with "
@@ -314,21 +351,24 @@ def draft_preview_cli_checklist(
     campaign_id: str,
     env: str,
     operator_user_id: int | None = None,
+    repo_root: str | None = None,
 ) -> str:
     """Read-only + draft write steps for escalation preview runs."""
+    cli = gateway_cli_invocation(repo_root)
     op_line = ""
     if operator_user_id is not None:
         op_line = f"  --operator-user-id {operator_user_id}"
     return "\n".join([
         "# bridge_cli_checklist (preview — read-only on escalation row)",
-        f"{CLI_INVOCATION} get-escalation --escalation-id {escalation_id} --env {env}",
+        f"{cli} get-escalation --escalation-id {escalation_id} --env {env}",
         dispatch_context_cli_line(
             identity_id=identity_id, campaign_id=campaign_id, env=env,
+            repo_root=repo_root,
         ),
-        f"{CLI_INVOCATION} get-email-conversation --identity-id {identity_id} "
+        f"{cli} get-email-conversation --identity-id {identity_id} "
         f"--campaign-id {campaign_id} --env {env}{op_line}",
-        f"{CLI_INVOCATION} get-policy --scope company_style",
-        f"{CLI_INVOCATION} persist-reply-draft --env {env} --json @/tmp/draft.json",
+        f"{cli} get-policy --scope company_style",
+        f"{cli} persist-reply-draft --env {env} --json @/tmp/draft.json",
         "persist JSON must include top-level conversation_summary.bullets "
         "(Chinese operator recap); use summary_only kol-reply-synthesizer "
         "when drafting via a single child skill.",
@@ -336,25 +376,27 @@ def draft_preview_cli_checklist(
     ])
 
 
-def discovery_cli_rules() -> str:
+def discovery_cli_rules(repo_root: str | None = None) -> str:
+    cli = gateway_cli_invocation(repo_root)
     return "\n".join([
         "# bridge_cli_rules (discovery / rediscover)",
-        f"Ingest: {CLI_INVOCATION} ingest-confirmed-candidate --campaign-id <cid> --env <env> "
+        f"Ingest: {cli} ingest-confirmed-candidate --campaign-id <cid> --env <env> "
         "--json @/tmp/ingest_<handle>.json — one handle per call immediately after qualification.",
         "Ingest JSON requires top-level source + identity + candidate (primary_handle inside identity; "
         "profile URL in identity_facts as identity.instagram_profile_url). NOT flat handle/profile_url/bio.",
         "Do NOT batch multiple handles in execute_code. Do NOT write /tmp/ingest_*.json via execute_code loops.",
         "Do NOT use ingest-confirmed-candidate in kol-cold-outreach — identity_id already exists.",
-        f"Preflight: {CLI_INVOCATION} list-outreach-cooldown-handles --env <env> --plain",
-        f"{CLI_INVOCATION} list-discovery-skip-handles --env <env> "
+        f"Preflight: {cli} list-outreach-cooldown-handles --env <env> --plain",
+        f"{cli} list-discovery-skip-handles --env <env> "
         "(JSON — parse items[*].handle + items[*].reason; do not use --plain)",
     ])
 
 
-def reply_dispatcher_cli_rules() -> str:
+def reply_dispatcher_cli_rules(repo_root: str | None = None) -> str:
+    cli = gateway_cli_invocation(repo_root)
     return "\n".join([
         "# bridge_cli_rules (reply-dispatcher)",
-        f"Use the terminal tool with {CLI_INVOCATION} — never execute_code+subprocess for bridge.",
+        f"Use the terminal tool with {cli} — never execute_code+subprocess for bridge.",
         "Reads: get-dispatch-context --view agent, get-reply-chase-hint, list-events (as needed).",
         "Writes: write-facts-multi, persist-reply-draft (+ conversation_summary), "
         "open-escalation, mark-reply-handled.",
@@ -363,12 +405,20 @@ def reply_dispatcher_cli_rules() -> str:
 
 def terminal_safety_rules(*, repo_root: str | None = None) -> str:
     """Terminal hygiene for gateway runs (avoids AGENTS.md harness injection)."""
-    cli = cli_invocation_abs(repo_root) if repo_root else CLI_WRAPPER_REL
+    cli = cli_invocation_abs(repo_root) if repo_root else CLI_INVOCATION
     return "\n".join([
         "# terminal_safety (mandatory)",
         f"Bridge CLI: {cli} <subcommand> --env <env> ...",
-        "Always invoke the absolute kol-bridge-cli wrapper — never bare `python`, never relative `plugins/...` from $HOME.",
-        "kol-bridge-cli runs python3 -u (unbuffered stdout) so pipe consumers see JSON immediately.",
+        (
+            "Copy the exact python3 -u .../kol_bridge_tool.py prefix from this brief — "
+            "never bare `python`, never relative `plugins/...` from $HOME, "
+            "never `python3` on the kol-bridge-cli bash wrapper (it is not Python)."
+        ),
+        (
+            "Read subcommands (get-campaign, get-identity, get-dispatch-context, get-facts, "
+            "get-escalation) must print JSON directly to terminal stdout — "
+            "do NOT redirect with `>` (empty stdout looks like CAL failure)."
+        ),
         "Do NOT run bare `cd .../hermes-agent` (triggers doc injection, empty stdout).",
         "Do NOT use inline shell JSON for write-event; use `cat > /tmp/event.json` then `--json @/tmp/event.json`.",
         "One subcommand per terminal call; never `python3 -c` + subprocess wrappers.",
@@ -388,27 +438,62 @@ def cold_outreach_thread_anchor(*, campaign_id: str, identity_id: int | str) -> 
     }
 
 
+def redraft_cli_checklist(
+    *,
+    campaign_id: str,
+    env: str,
+    identity_id: int | str,
+    repo_root: str | None = None,
+) -> str:
+    """Write-only CLI steps for single-KOL redraft (reads come from cal_snapshot)."""
+    cli = gateway_cli_invocation(repo_root)
+    anchors = cold_outreach_thread_anchor(campaign_id=campaign_id, identity_id=identity_id)
+    return "\n".join([
+        "# bridge_cli_checklist (redraft — writes only; reads are in cal_snapshot above)",
+        (
+            "Do NOT run get-campaign / get-identity / get-dispatch-context via terminal "
+            "when cal_snapshot is present."
+        ),
+        "If primary_email empty: delegate kol-email-discovery; on miss open-escalation contact_email_not_found.",
+        (
+            "Draft via kol-cold-outreach or kol-reengagement-outreach SKILL; "
+            f"write /tmp/outreach_{identity_id}.json."
+        ),
+        f"{cli} persist-initial-outreach-draft --env {env} "
+        f"--json @/tmp/outreach_persist_{identity_id}.json",
+        (
+            f"(persist JSON must include child_envelope with subject/body/to; "
+            f"anchors auto-set source={anchors['source_message_id']} "
+            f"thread={anchors['thread_id']})"
+        ),
+        "Never write approval.reply_draft via write-facts-multi or HTTP urllib.",
+    ])
+
+
 def approval_cli_checklist(
     *,
     campaign_id: str,
     env: str,
     identity_ids: list[int] | list[str],
+    repo_root: str | None = None,
 ) -> str:
     """Ordered CLI steps for post-shortlist approval / outreach runs."""
+    cli = gateway_cli_invocation(repo_root)
     per_kol = []
     for iid in identity_ids:
         anchors = cold_outreach_thread_anchor(campaign_id=campaign_id, identity_id=iid)
         per_kol.extend([
             f"# identity {iid}",
-            f"{CLI_INVOCATION} write-event --env {env} --json @/tmp/event_{iid}.json",
+            f"{cli} write-event --env {env} --json @/tmp/event_{iid}.json",
             "(event JSON: identity_id, campaign_id, event_type shortlist_approval_received, actor from brief)",
-            f"{CLI_INVOCATION} get-identity --identity-id {iid} --env {env}",
+            f"{cli} get-identity --identity-id {iid} --env {env}",
             dispatch_context_cli_line(
                 identity_id=iid, campaign_id=campaign_id, env=env,
+                repo_root=repo_root,
             ),
             "If primary_email empty: delegate kol-email-discovery; on miss open-escalation contact_email_not_found.",
             "Draft via kol-cold-outreach or kol-reengagement-outreach SKILL; write /tmp/outreach_{iid}.json.",
-            f"{CLI_INVOCATION} persist-initial-outreach-draft --env {env} "
+            f"{cli} persist-initial-outreach-draft --env {env} "
             f"--json @/tmp/outreach_persist_{iid}.json",
             (
                 f"(persist JSON must include child_envelope with subject/body/to; "
@@ -418,8 +503,8 @@ def approval_cli_checklist(
         ])
     return "\n".join([
         "# bridge_cli_checklist (post-approval outreach — terminal only)",
-        f"{CLI_INVOCATION} get-campaign --campaign-id {campaign_id} --env {env}",
+        f"{cli} get-campaign --campaign-id {campaign_id} --env {env}",
         *per_kol,
-        f"{CLI_INVOCATION} list-approvals --status pending --env {env}",
+        f"{cli} list-approvals --status pending --env {env}",
         "Never write approval.reply_draft via write-facts-multi or HTTP urllib.",
     ])
