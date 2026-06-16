@@ -35,7 +35,7 @@
 
 入站类升级（`source=classifier|dispatcher` + 入站锚点）的 **linked 回信稿** 在升级仍为 `awaiting_answer` 时：
 
-- **只在升级详情页** `/escalations/{id}` 的 **「③ 回信预览」** 区展示（只读预览，**不可批准**）；复用 `ApprovalContextCard`，含 **沟通历史要点**（`conversation_summary.bullets`）与对方来信卡片。提交并恢复后的 **升级恢复稿**（`require_draft` resume brief）同样须在 `persist-reply-draft` 时写入要点（单技能路径先 `summary_only` 调 `kol-reply-synthesizer`）。
+- **只在升级详情页** `/escalations/{id}` 的 **「③ 回信预览」** 区展示（只读预览，**不可批准**）；复用 `ApprovalContextCard`，含 **沟通历史要点**（`conversation_summary.bullets`）、**合同附件页面内预览**（`contract_signing` 稿）与对方来信卡片。提交并恢复后的 **升级恢复稿**（`require_draft` resume brief）同样须在 `persist-reply-draft` 时写入要点（单技能路径先 `summary_only` 调 `kol-reply-synthesizer`）。
 - **待审批** `/approvals` 列表**隐藏**这些行，顶部琥珀色提示链回升级页
 - 操作员填写「操作员答复」并 **提交并恢复** 后，同一页的预览区开放 **批准并创建 Gmail 草稿**
 

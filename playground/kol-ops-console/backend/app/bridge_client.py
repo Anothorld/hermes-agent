@@ -916,6 +916,42 @@ class BridgeClient:
         }
         return await self.resolve_escalation(escalation_id, payload)
 
+    # ------------------------------------------------------------- Contracts
+    async def get_contract_preview(
+        self,
+        *,
+        identity_id: int,
+        campaign_id: str,
+        env: str = "LIVE",
+        attachment_path: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, str] = {"campaign_id": campaign_id, "env": env}
+        if attachment_path:
+            params["attachment_path"] = attachment_path
+        return await self._req(
+            "GET",
+            f"/identities/{identity_id}/contract-preview",
+            params=params,
+        )
+
+    async def download_contract(
+        self,
+        *,
+        identity_id: int,
+        campaign_id: str,
+        env: str = "LIVE",
+        attachment_path: str | None = None,
+    ) -> httpx.Response:
+        params: dict[str, str] = {"campaign_id": campaign_id, "env": env}
+        if attachment_path:
+            params["attachment_path"] = attachment_path
+        url = f"{self._base}/identities/{identity_id}/contract-download"
+        headers = dict(self._headers)
+        r = await self._client.get(url, params=params, headers=headers, timeout=self._default_timeout)
+        if r.status_code >= 400:
+            raise BridgeError(r.status_code, r.text)
+        return r
+
     # ---------------------------------------------------------------- Admin
     async def wipe_test(self) -> dict[str, Any]:
         return await self._req("POST", "/admin/wipe-test")

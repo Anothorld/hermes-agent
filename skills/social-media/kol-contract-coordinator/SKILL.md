@@ -124,22 +124,30 @@ yield a numeric fee. Open escalation with
 remaining steps.
 
 #### Step I.2 — Render the contract docx
-Run the renderer with the JSON from I.1 piped on stdin. Output path
-lives under HERMES_HOME so it's per-profile.
+Use the toolized renderer (formal filename under ``contracts/<env>/<campaign_id>/``):
 
 ```bash
-OUT="${HERMES_HOME:-$HOME/.hermes}/kol-ops-bridge/contracts/<env>/<campaign_id>/<identity_id>_$(date +%Y%m%d).docx"
-mkdir -p "$(dirname "$OUT")"
-echo '<fields-json>' | python plugins/kol-ops-bridge/scripts/render_contract.py \
-  --template plugins/kol-ops-bridge/templates/povison_agreement.docx \
-  --output   "$OUT" \
-  --fields   -
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py render-contract \
+  --env <TEST|LIVE> \
+  --json @/tmp/contract_render.json
 ```
 
-The script prints the absolute output path to stdout; capture it as
-`contract_path`. If rendering exits non-zero, treat as
-escalation (`reason="contract_render_failed: <stderr>"`) — do
-**not** send a draft without an attachment.
+``/tmp/contract_render.json`` shape::
+
+```json
+{
+  "identity_id": 648,
+  "campaign_id": "SEB8008-20260525",
+  "env": "LIVE",
+  "fields": { "...same as Step I.1..." }
+}
+```
+
+Response includes ``path``, ``filename``, and ``display_name``. Formal pattern:
+``POVISON_Influencer_Agreement_{KOLName}_{SKU}_{YYYYMMDD}.docx``.
+Capture ``path`` as ``contract_path``. If rendering fails, escalate with
+``reason="contract_render_failed: <detail>"`` — do **not** send a draft
+without an attachment.
 
 #### Step I.3 — Compose the email body
 Body skeleton (style preamble from the loader still applies):
@@ -226,9 +234,9 @@ KOL just agreed on $1050 flat; classifier said
 `compensation_negotiation` advanced to satisfied. Coordinator
 assembles fields (full name, email, deliverables from campaign,
 `fee={amount:1050,currency:USD}`), renders the POVISON template
-into `~/.hermes/kol-ops-bridge/contracts/LIVE/TS8319/42_20260522.docx`,
+into ``POVISON_Influencer_Agreement_{Name}_{SKU}_{date}.docx``,
 drafts "Attached is our standard agreement...", returns an envelope
-with that path under `attachments`, and writes
+with that path under ``attachments``, and writes
 `offer.contract_sent=true` + `offer.contract_artifact_path=<path>`.
 
 ### Branch R — core change

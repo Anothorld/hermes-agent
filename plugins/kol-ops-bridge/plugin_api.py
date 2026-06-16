@@ -26,6 +26,7 @@ from typing import Annotated, Any, Mapping, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from fastapi import Path as FastAPIPath
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -39,6 +40,7 @@ from . import confirmed_ingest
 from . import confirmed_fact_buffer
 from . import discovery_router
 from . import classifier_facts
+from . import contract_artifacts
 from . import implicit_accept_policy
 from . import deliverables_spec
 from . import dispatch_router
@@ -2893,16 +2895,31 @@ def _create_gmail_draft_for_reply_approval(
             detail="approval.reply_draft draft.attachments must be a list of paths",
         )
     attachment_paths: list[str] = []
+    draft_facts: dict[str, Any] = {}
+    if campaign_id:
+        try:
+            draft_facts = cal.latest_facts_for(
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                env=env,
+            )
+        except Exception:  # noqa: BLE001
+            draft_facts = {}
     for item in raw_attachments:
         path_str = str(item or "").strip()
         if not path_str:
             continue
-        if not Path(path_str).is_file():
-            raise HTTPException(
-                status_code=400,
-                detail=f"draft attachment not found on disk: {path_str}",
-            )
-        attachment_paths.append(path_str)
+        try:
+            resolved = contract_artifacts.resolve_contract_path(path_str)
+            if contract_artifacts.is_legacy_contract_basename(resolved.name):
+                resolved = contract_artifacts.ensure_formal_contract_path(
+                    resolved,
+                    campaign_id=campaign_id,
+                    facts=draft_facts if isinstance(draft_facts, dict) else {},
+                )
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        attachment_paths.append(str(resolved))
     gmail = client or GmailClient()
     if not gmail.is_available():
         raise HTTPException(status_code=503, detail="gmail token or google_api.py unavailable")
@@ -3639,6 +3656,36 @@ def persist_reply_draft(
     except reply_draft.ReplyDraftError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    facts_for_attach: dict[str, Any] = {}
+    try:
+        facts_for_attach = cal.latest_facts_for(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+        )
+    except Exception:  # noqa: BLE001
+        facts_for_attach = {}
+    raw_merged_attachments = merged.get("attachments")
+    if isinstance(raw_merged_attachments, list):
+        normalized_attachments: list[str] = []
+        for item in raw_merged_attachments:
+            path_str = str(item or "").strip()
+            if not path_str:
+                continue
+            try:
+                resolved = contract_artifacts.resolve_contract_path(path_str)
+                if contract_artifacts.is_legacy_contract_basename(resolved.name):
+                    resolved = contract_artifacts.ensure_formal_contract_path(
+                        resolved,
+                        campaign_id=body.campaign_id,
+                        fields=body.child_envelope or {},
+                        facts=facts_for_attach if isinstance(facts_for_attach, dict) else {},
+                    )
+                normalized_attachments.append(str(resolved))
+            except (ValueError, FileNotFoundError):
+                normalized_attachments.append(path_str)
+        merged["attachments"] = normalized_attachments
+
     child_skill = (body.child_skill or "").strip()
     contributing_skills = list(body.contributing) if body.contributing else []
     if not child_skill:
@@ -3770,6 +3817,192 @@ def persist_reply_draft(
         "prior_source_message_id": superseded_prior_source,
         "orphan_gmail_discard": orphan_discard,
     }
+
+
+# ---------------------------------------------------------------------------
+# Contract artifacts (formal filenames + operator preview)
+# ---------------------------------------------------------------------------
+
+
+class RenderContractBody(BaseModel):
+    identity_id: int = Field(ge=1)
+    campaign_id: str = Field(min_length=1)
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+    fields: dict[str, Any]
+
+
+def _contract_template_path() -> Path:
+    return Path(__file__).resolve().parent / "templates" / "povison_agreement.docx"
+
+
+@router.post("/contracts/render")
+def render_contract_endpoint(
+    body: RenderContractBody,
+    x_bridge_key: Optional[str] = Header(default=None, alias="X-Bridge-Key"),
+) -> dict[str, Any]:
+    """Render POVISON agreement docx with a formal filename (toolized Step I.2)."""
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_identity(body.identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    template = _contract_template_path()
+    if not template.is_file():
+        raise HTTPException(status_code=500, detail=f"contract template missing: {template}")
+    facts: dict[str, Any] = {}
+    try:
+        facts = cal.latest_facts_for(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+        )
+    except Exception:  # noqa: BLE001
+        facts = {}
+    output_path = contract_artifacts.build_contract_output_path(
+        env=body.env,
+        campaign_id=body.campaign_id,
+        fields=body.fields,
+        facts=facts if isinstance(facts, dict) else None,
+    )
+    try:
+        contract_artifacts.render_contract_file(
+            template_path=template,
+            output_path=output_path,
+            fields=body.fields,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"contract_render_failed: {exc}") from exc
+    display_name = contract_artifacts.display_name_for_path(output_path)
+    return {
+        "ok": True,
+        "path": str(output_path),
+        "filename": output_path.name,
+        "display_name": display_name,
+    }
+
+
+@router.get("/identities/{identity_id}/contract-preview")
+def contract_preview(
+    identity_id: int,
+    campaign_id: Annotated[str, Depends(_campaign_id_query_required_dep)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    attachment_path: Optional[str] = Query(default=None),
+) -> dict[str, Any]:
+    """Return HTML preview + formal display name for a stored contract docx."""
+    if not cal.get_identity(identity_id):
+        raise HTTPException(status_code=404, detail="identity not found")
+    facts = cal.latest_facts_for(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+    )
+    draft = facts.get("approval.reply_draft") if isinstance(facts, dict) else None
+    draft_attachments = None
+    if isinstance(draft, dict):
+        draft_obj = draft.get("draft")
+        if isinstance(draft_obj, dict):
+            draft_attachments = draft_obj.get("attachments")
+    try:
+        if attachment_path:
+            path = contract_artifacts.resolve_contract_path(attachment_path)
+            path = contract_artifacts.ensure_formal_contract_path(
+                path,
+                campaign_id=campaign_id,
+                facts=facts if isinstance(facts, dict) else {},
+            )
+            display_name = contract_artifacts.display_name_for_path(path)
+        else:
+            path, display_name = contract_artifacts.resolve_contract_for_identity(
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                env=env,
+                facts=facts if isinstance(facts, dict) else {},
+                draft_attachments=(
+                    draft_attachments if isinstance(draft_attachments, list) else None
+                ),
+            )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        html_body = contract_artifacts.docx_to_preview_html(path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    artifact_fact = facts.get("offer.contract_artifact_path") if isinstance(facts, dict) else None
+    if str(path) != str(artifact_fact or "").strip():
+        try:
+            cal.write_facts_multi(
+                identity_id=identity_id,
+                campaign_id=campaign_id,
+                namespaces={"offer": {"offer.contract_artifact_path": str(path)}},
+                source="bridge:contract-preview",
+                env=env,
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("failed to sync contract_artifact_path after rename", exc_info=True)
+    draft_row = cal.get_reply_draft_row(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+    )
+    draft_val = draft_row.get("value") if isinstance(draft_row, dict) else None
+    if isinstance(draft_val, dict):
+        draft_obj = draft_val.get("draft")
+        if isinstance(draft_obj, dict):
+            atts = draft_obj.get("attachments")
+            if isinstance(atts, list):
+                updated = [str(path) if contract_artifacts.is_legacy_contract_basename(
+                    Path(str(a)).name,
+                ) else a for a in atts]
+                if updated != atts:
+                    draft_obj = dict(draft_obj)
+                    draft_obj["attachments"] = updated
+                    draft_val = dict(draft_val)
+                    draft_val["draft"] = draft_obj
+                    try:
+                        cal.write_facts_multi(
+                            identity_id=identity_id,
+                            campaign_id=campaign_id,
+                            namespaces={"approval": {"approval.reply_draft": draft_val}},
+                            source="bridge:contract-preview",
+                            env=env,
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.warning(
+                            "failed to sync draft attachments after rename",
+                            exc_info=True,
+                        )
+    return {
+        "identity_id": identity_id,
+        "campaign_id": campaign_id,
+        "env": env,
+        "path": str(path),
+        "filename": path.name,
+        "display_name": display_name,
+        "html": html_body,
+    }
+
+
+@router.get("/identities/{identity_id}/contract-download")
+def contract_download(
+    identity_id: int,
+    campaign_id: Annotated[str, Depends(_campaign_id_query_required_dep)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    attachment_path: Optional[str] = Query(default=None),
+) -> FileResponse:
+    """Download contract docx with formal Content-Disposition filename."""
+    preview = contract_preview(
+        identity_id=identity_id,
+        campaign_id=campaign_id,
+        env=env,
+        attachment_path=attachment_path,
+    )
+    path = Path(preview["path"])
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=str(preview["display_name"]),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ---------------------------------------------------------------------------

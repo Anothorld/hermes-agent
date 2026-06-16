@@ -10,6 +10,7 @@
 | `campaigns.py`, `candidates.py`, `campaign_transfer.py`, `reply_watcher.py` | [campaigns](../../../docs/features/campaigns/GUIDE.md) |
 | `kols.py`, `facts.py`, `goals.py`, `relationships.py` | [kols](../../../docs/features/kols/GUIDE.md) |
 | `approvals.py` | [approvals](../../../docs/features/approvals/GUIDE.md) |
+| `contracts.py` | [approvals](../../../docs/features/approvals/GUIDE.md) — 合同 docx 预览/下载 |
 | `learning.py` | [learning](../../../docs/features/learning/GUIDE.md) |
 | `escalations.py` | [escalations](../../../docs/features/escalations/GUIDE.md) |
 | `policies.py` | [policies](../../../docs/features/policies/GUIDE.md) |

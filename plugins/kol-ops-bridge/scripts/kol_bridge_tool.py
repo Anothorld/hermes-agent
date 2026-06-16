@@ -58,6 +58,7 @@ import _subcmd_identities  # noqa: E402
 import _subcmd_learning  # noqa: E402
 import _subcmd_metrics  # noqa: E402
 import _subcmd_logic  # noqa: E402
+import _subcmd_contracts  # noqa: E402
 import _subcmd_meta  # noqa: E402
 from _cal_client import (  # noqa: E402
     add_common_args,
@@ -96,6 +97,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _subcmd_learning.register(sub)
     _subcmd_metrics.register(sub)
     _subcmd_logic.register(sub)
+    _subcmd_contracts.register(sub)
     _subcmd_meta.register(sub)
     return p
 

@@ -5,6 +5,10 @@ import ConversationSummaryCard, {
   parseConversationSummaryBullets,
 } from './ConversationSummaryCard';
 import InboundEmailCard, { type InboundEmail } from './InboundEmailCard';
+import ContractAttachmentPreview, {
+  attachmentDisplayName,
+  hasDocxAttachments,
+} from './ContractAttachmentPreview';
 import { PolicyMergeDiffPreview } from './PolicyMergeDiffPreview';
 
 /**
@@ -304,7 +308,17 @@ function HtmlBodyView({ body }: { body: string }) {
   );
 }
 
-function ReplyDraftView({ ctx }: { ctx: Ctx }) {
+function ReplyDraftView({
+  ctx,
+  identityId,
+  campaignId,
+  env,
+}: {
+  ctx: Ctx;
+  identityId: number;
+  campaignId: string;
+  env: string;
+}) {
   const draft = isObj(ctx.draft) ? ctx.draft : null;
   const childSkill = asString(ctx.child_skill);
   const primaryGoal = asString(ctx.primary_goal);
@@ -323,7 +337,12 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
   const subject = asString(draft.subject);
   const body = asString(draft.body) ?? '';
   const isHtml = draft.html === true || /<\s*a\s+href=|<\s*p\s*>|<\s*br\s*\/?\s*>/i.test(body);
-  const attachments = Array.isArray(draft.attachments) ? draft.attachments : [];
+  const attachments = Array.isArray(draft.attachments)
+    ? draft.attachments.filter((a): a is string => typeof a === 'string')
+    : [];
+  const showContractPreview =
+    primaryGoal === 'contract_signing'
+    || hasDocxAttachments(attachments);
   const chaseSupersede = isObj(ctx.chase_supersede) ? ctx.chase_supersede : null;
   const priorChaseMsg = chaseSupersede ? asString(chaseSupersede.prior_source_message_id) : null;
   const orphanDiscard = chaseSupersede && isObj(chaseSupersede.orphan_gmail_discard)
@@ -375,7 +394,7 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
               <span className="text-slate-700">
                 {attachments.map((a, i) => (
                   <span key={i} className="ml-1 rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[11px]">
-                    {String(a).split('/').pop()}
+                    {attachmentDisplayName(a)}
                   </span>
                 ))}
               </span>
@@ -396,6 +415,14 @@ function ReplyDraftView({ ctx }: { ctx: Ctx }) {
           )}
         </div>
       </div>
+      {showContractPreview && (
+        <ContractAttachmentPreview
+          identityId={identityId}
+          campaignId={campaignId}
+          env={env}
+          attachmentPath={attachments[0]}
+        />
+      )}
       {sourceMessageId && (
         <div className="text-[10px] text-slate-400">
           回复自 msg-id: <span className="font-mono">{sourceMessageId}</span>
@@ -785,7 +812,14 @@ export default function ApprovalContextCard({
   let body: React.ReactNode;
   switch (factPath) {
     case 'approval.reply_draft':
-      body = <ReplyDraftView ctx={context} />;
+      body = (
+        <ReplyDraftView
+          ctx={context}
+          identityId={identityId}
+          campaignId={campaignId}
+          env={env}
+        />
+      );
       break;
     case 'approval.paid_ceiling_override':
     case 'approval.over_budget_request':

@@ -30,6 +30,7 @@ from .routers import (
     campaign_transfer,
     campaigns,
     candidates,
+    contracts,
     escalations,
     events as events_router,
     facts,
@@ -229,6 +230,7 @@ def create_app() -> FastAPI:
     app.include_router(campaign_transfer.router)
     app.include_router(escalations.router)
     app.include_router(approvals.router)
+    app.include_router(contracts.router)
     app.include_router(learning.router)
     app.include_router(link_preview.router)
     app.include_router(gateway_approvals.router)

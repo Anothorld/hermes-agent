@@ -1,1 +1,35 @@
 @import "tailwindcss";
+
+/* Word-like contract preview canvas (docx-preview injects .docx-wrapper styles). */
+.contract-docx-viewer .docx-wrapper {
+  margin-inline: auto;
+  background: #fff;
+  box-shadow: 0 4px 16px rgb(15 23 42 / 0.12);
+}
+
+.contract-docx-viewer .docx-wrapper > section.docx {
+  margin-bottom: 1rem;
+  padding: 1in;
+  box-sizing: border-box;
+}
+
+.contract-docx-preview strong {
+  font-weight: 700;
+}
+
+.contract-docx-preview em {
+  font-style: italic;
+}
+
+.contract-mammoth-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+}
+
+.contract-mammoth-preview td,
+.contract-mammoth-preview th {
+  border: 1px solid #cbd5e1;
+  padding: 0.25rem 0.5rem;
+  vertical-align: top;
+}

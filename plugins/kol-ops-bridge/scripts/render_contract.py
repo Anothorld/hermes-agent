@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -40,6 +41,50 @@ log = logging.getLogger("kol_ops_bridge.render_contract")
 
 PLACEHOLDER_RE = re.compile(r"\$\{[A-Z_][A-Z0-9_ ]*\}")
 FEE_PLACEHOLDER = "${FEE}"
+# Template placeholders are styled red in povison_agreement.docx (EE0000).
+_PLACEHOLDER_COLORS = frozenset({"EE0000", "FF0000", "C00000", "RED"})
+_DEBUG_LOG = Path("/Users/arnold/agent_prj/.cursor/debug-88a275.log")
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # region agent log
+    try:
+        payload = {
+            "sessionId": "88a275",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with _DEBUG_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # endregion
+
+
+def _run_color_val(run) -> str | None:
+    r_pr = run._element.find(qn("w:rPr"))
+    if r_pr is None:
+        return None
+    color = r_pr.find(qn("w:color"))
+    if color is None:
+        return None
+    return (color.get(qn("w:val")) or "").upper()
+
+
+def _clear_placeholder_highlight(run) -> None:
+    """Drop template placeholder red after a value is substituted."""
+    r_pr = run._element.find(qn("w:rPr"))
+    if r_pr is None:
+        return
+    color = r_pr.find(qn("w:color"))
+    if color is None:
+        return
+    val = (color.get(qn("w:val")) or "").upper()
+    if val in _PLACEHOLDER_COLORS:
+        r_pr.remove(color)
 
 
 def _flatten_fields(fields: Mapping[str, Any]) -> dict[str, str]:
@@ -86,12 +131,30 @@ def _substitute_in_paragraph(paragraph, mapping: Mapping[str, str]) -> None:
     _merge_runs_to_first(paragraph)
     if not paragraph.runs:
         return
-    text = paragraph.runs[0].text
+    run = paragraph.runs[0]
+    before_color = _run_color_val(run)
+    text = run.text
+    substituted = False
     for key, val in mapping.items():
-        text = text.replace("${" + key + "}", val)
+        needle = "${" + key + "}"
+        if needle in text:
+            text = text.replace(needle, val)
+            substituted = True
     # Wipe any stray ${...} that lacked a mapping so the contract doesn't leak placeholders.
     text = PLACEHOLDER_RE.sub("", text)
-    paragraph.runs[0].text = text
+    run.text = text
+    if substituted and before_color in _PLACEHOLDER_COLORS:
+        _clear_placeholder_highlight(run)
+        _debug_log(
+            "H1",
+            "render_contract.py:_substitute_in_paragraph",
+            "cleared placeholder red after substitution",
+            {
+                "before_color": before_color,
+                "after_color": _run_color_val(run),
+                "text_preview": text[:80],
+            },
+        )
 
 
 def _iter_all_paragraphs(doc) -> Iterable[Any]:
@@ -127,7 +190,11 @@ def _fill_deliverable_row(row: _Row, deliverable: Mapping[str, Any]) -> None:
             extra._element.getparent().remove(extra._element)
         _merge_runs_to_first(first)
         if first.runs:
-            first.runs[0].text = value
+            run = first.runs[0]
+            before_color = _run_color_val(run)
+            run.text = value
+            if before_color in _PLACEHOLDER_COLORS:
+                _clear_placeholder_highlight(run)
         else:
             first.add_run(value)
 
@@ -163,6 +230,15 @@ def _populate_deliverables(doc, deliverables: list[Mapping[str, Any]]) -> None:
 
 def render(template_path: Path, output_path: Path, fields: Mapping[str, Any]) -> Path:
     mapping = _flatten_fields(fields)
+    _debug_log(
+        "H1",
+        "render_contract.py:render",
+        "render start",
+        {
+            "product_specs_preview": str((fields.get("product") or {}).get("specs") or "")[:80],
+            "template": str(template_path),
+        },
+    )
     doc = Document(str(template_path))
 
     if not fields.get("fee"):
@@ -177,6 +253,18 @@ def render(template_path: Path, output_path: Path, fields: Mapping[str, Any]) ->
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
+    red_runs = []
+    for paragraph in _iter_all_paragraphs(doc):
+        for run in paragraph.runs:
+            color = _run_color_val(run)
+            if color in _PLACEHOLDER_COLORS and (run.text or "").strip():
+                red_runs.append({"color": color, "text": (run.text or "")[:80]})
+    _debug_log(
+        "H1",
+        "render_contract.py:render",
+        "render complete",
+        {"output": str(output_path), "remaining_red_runs": red_runs[:10], "red_run_count": len(red_runs)},
+    )
     return output_path
 
 

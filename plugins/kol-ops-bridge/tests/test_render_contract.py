@@ -143,6 +143,30 @@ def test_multiple_deliverables_expand_table(tmp_path, renderer, docx_module):
     assert table.rows[3].cells[0].text.strip() == "BTS"
 
 
+def test_substituted_product_specs_not_red(tmp_path, renderer, docx_module):
+    """Filled placeholders must not keep template placeholder red (EE0000)."""
+    fields = _full_fields()
+    fields["fee"] = None
+    out = tmp_path / "product_specs_color.docx"
+    renderer.render(_TEMPLATE, out, fields)
+    doc = docx_module.Document(str(out))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    red_specs = []
+    for paragraph in doc.paragraphs:
+        if "TS8319" not in paragraph.text:
+            continue
+        for run in paragraph.runs:
+            r_pr = run._element.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPr")
+            if r_pr is None:
+                continue
+            color = r_pr.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}color")
+            if color is not None:
+                val = (color.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") or "").upper()
+                if val in {"EE0000", "FF0000", "C00000", "RED"}:
+                    red_specs.append(run.text)
+    assert not red_specs, f"product specs still red: {red_specs!r}"
+
+
 def test_missing_optional_fields_leave_label_intact(tmp_path, renderer, docx_module):
     fields = _full_fields()
     fields["influencer"]["youtube"] = ""

@@ -435,6 +435,11 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Follow-up chase policy | `reply_chase.py`, `cal.reply_chase_hint` | `get-reply-chase-hint` | `GET /identities/{id}/reply-chase-hint` |
 | Gmail unmark for re-dispatch | `gmail_client.py` | `unmark-reply-handled` | `POST /gmail/unmark-reply-handled` |
 | Reply-draft envelope enrichment + atomic persist | `reply_draft.py` | `persist-reply-draft` | `POST /reply-drafts/persist` |
+| Contract render + formal filename + HTML preview | `contract_artifacts.py` | `render-contract`, `get-contract-preview` | `POST /contracts/render`, `GET …/contract-preview`, `GET …/contract-download` |
+
+Contract preview/render requires **`python-docx`** in the same venv that runs
+``serve.py`` (Console ``backend/requirements.txt`` includes it when using
+``start.sh``).
 | Learning exports (read-only) | `learning_store.py` | `export-*-events`, `export-fact-corrections`, … | `GET /learning/*` |
 | Learning apply (distill) | `learning_distill.py` | `apply-*-policy`, `apply-pricing-campaign` | `POST /learning/apply-*` |
 | Learning cron (autonomous) | `learning_jobs.py` | `run-learning-jobs`, `list-learning-job-runs` | `POST /learning/run-scheduled-jobs`, `GET /learning/job-runs` |
