@@ -278,9 +278,9 @@ terminal HTTP 抓取，提示改用 `browser_navigate` + Google URL。
 
 ## Bridge CLI（所有 gateway run）
 
-Console brief / instructions 注入 `bridge_agent_contract.py`：
+Console brief / instructions 注入 `bridge_agent_contract.py`（经 `bridge_agent_contract_loader`，默认带 `hermes-agent` 绝对路径）：
 
-- **`terminal_safety`**：绝对路径 `kol-bridge-cli`；禁止 bare `cd hermes-agent`、相对 `plugins/…`
+- **`terminal_safety`** + **`approval_cli_checklist`** / **`resume_cli_checklist`**：同一绝对路径 `python3 -u .../kol_bridge_tool.py`；禁止对 `kol-bridge-cli` 套 `python3`、禁止相对 `plugins/…`、禁止对 get-* 读命令使用 `>` 重定向（会导致 terminal 空 stdout）
 - **stdout 错误契约**：CLI 失败输出 JSON 到 stdout；agent 若看到空 terminal + exit 2，应解析 stdout 的 `error`/`hint`，不得改用 `execute_code`（guard 会拦）
 
 详见 `agent_prj/docs/kol-bridge-agent-tooling.md`。

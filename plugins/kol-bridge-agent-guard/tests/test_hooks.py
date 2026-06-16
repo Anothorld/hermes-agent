@@ -49,6 +49,21 @@ def test_blocks_bare_python_bridge_cli():
     assert out["action"] == "block"
 
 
+def test_allows_terminal_python3_u_kol_bridge_tool():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+                "get-escalation --escalation-id 108 --env LIVE"
+            ),
+        },
+        session_id="kol-campaign:LIVE:SEB",
+    )
+    assert out is None
+
+
 def test_allows_terminal_kol_bridge_cli_wrapper():
     h = _hooks()
     out = h.pre_tool_call(
@@ -62,6 +77,38 @@ def test_allows_terminal_kol_bridge_cli_wrapper():
         session_id="kol-campaign:LIVE:SEB",
     )
     assert out is None
+
+
+def test_blocks_redirect_bridge_read_stdout():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+                "get-campaign --campaign-id SEB8008-20260525 --env LIVE > /tmp/c.json"
+            ),
+        },
+        session_id="kol-campaign-draft:LIVE:SEB8008-20260525:820",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_blocks_python3_u_on_kol_bridge_cli_wrapper():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli "
+                "get-campaign --campaign-id SEB8008-20260525 --env LIVE"
+            ),
+        },
+        session_id="kol-campaign-draft:LIVE:SEB8008-20260525:820",
+    )
+    assert out is not None
+    assert out["action"] == "block"
 
 
 def test_blocks_browser_on_outreach_session():

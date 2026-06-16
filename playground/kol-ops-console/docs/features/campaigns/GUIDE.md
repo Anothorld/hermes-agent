@@ -149,6 +149,8 @@ KOL 详情页 **主动跟进** → `POST /campaigns/{cid}/identities/{iid}/follo
 
 KOL 详情页 **生成待审批草稿** → `POST /campaigns/{cid}/identities/{iid}/redraft-outreach`（skill `kol-cold-outreach` / `kol-reengagement-outreach`）。
 
+Console 在拉起 gateway run **之前** 通过 bridge HTTP 读取 `get_campaign`、`get_identity(env)`、`get_dispatch_context`，并以 `# cal_snapshot` JSON 块嵌入 brief（agent view 瘦身后的 dispatch-context）。Agent **不必**再用 terminal 跑 `get-campaign` / `get-identity` / `get-dispatch-context`；brief 内 `redraft_cli_checklist` 仅列 persist 等写命令。Terminal 读命令若用 `>` 重定向会导致 stdout 为空（45 字符 wrapper），属调用方式错误而非 CAL 故障。
+
 | 冲突码 | 含义 |
 |--------|------|
 | `campaign_run_in_flight` | 该 campaign 另有 agent run 在跑（approve、rediscover 等） |
