@@ -15,7 +15,7 @@ Every read/write that touches CAL must include explicit `--env`; there is no def
 
 | Purpose | CLI | HTTP |
 |---------|-----|------|
-| Dispatch bundle | `get-dispatch-context --identity-id ID --campaign-id CID --env LIVE` | `GET /identities/{id}/dispatch-context?campaign_id=&env=` |
+| Dispatch bundle | `get-dispatch-context --identity-id ID --campaign-id CID --env LIVE --view agent` | `GET /identities/{id}/dispatch-context?campaign_id=&env=` |
 | Gmail thread (resume/draft) | `get-email-conversation --identity-id ID --campaign-id CID --env LIVE [--operator-user-id UID]` | `GET /identities/{id}/email-conversation?campaign_id=&env=` |
 | Company / escalation policies | `get-policy --doc company_style` / `get-parsed-escalation-rules` | `GET /policies/{doc}` |
 | Campaign facts only | `get-facts --identity-id ID --campaign-id CID --env LIVE` | `GET /facts/{id}?campaign_id=&env=` |
@@ -23,8 +23,9 @@ Every read/write that touches CAL must include explicit `--env`; there is no def
 | Follow-up chase hint | `get-reply-chase-hint --identity-id ID --campaign-id CID --message-id MID --thread-id TH --env LIVE` | `GET /identities/{id}/reply-chase-hint?campaign_id=&message_id=&thread_id=&env=` |
 | Parsed escalation rules | `get-parsed-escalation-rules` | `GET /policies/escalation_rules/parsed` |
 
-`get-dispatch-context` returns `{goals, lanes, relationship, reusable_facts,
-campaign_config, campaign_facts, identity_facts, candidate, learning_hints}`. Use
+`get-dispatch-context --view agent` returns `{goals, relationship, reusable_facts,
+campaign_config, campaign_facts, identity_facts, candidate, learning_hints, identity}` —
+omits `lanes` (use `goals` for active work). Use
 `campaign_facts` for negotiation state (`offer.barter_attempted`,
 `offer.rate_requested`, `offer.proposed_amount`, …). `get-facts` is an
 optional narrow read when only campaign facts are needed.

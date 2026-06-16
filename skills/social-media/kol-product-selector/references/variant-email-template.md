@@ -65,7 +65,7 @@ draft `body` for auto-send.
 ## Loading candidates
 
 ```
-get-dispatch-context → campaign_config.variant_candidates
+get-dispatch-context --view agent → campaign_config.variant_candidates
 ```
 
 If empty, parse `campaign_config.extra_notes` `# product_variants` JSON.

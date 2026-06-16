@@ -1,6 +1,6 @@
 # Learning hints (runtime injection)
 
-`get-dispatch-context` returns a `learning_hints` object:
+`get-dispatch-context --view agent` returns a `learning_hints` object:
 
 ```json
 {

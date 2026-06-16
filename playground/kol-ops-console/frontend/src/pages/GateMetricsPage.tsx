@@ -11,45 +11,50 @@ import {
 } from '../components/MetricTrendSparkline';
 import { REJECT_TAG_LABELS, type RejectTag } from '../constants/rejectTags';
 
-type KolFunnel = {
-  maturity_days?: number;
-  funnel_window_days?: number | null;
+type KolDiscoverySummary = {
   discovered_total: number;
-  prior_collab_excluded: number;
-  eligible_total: number;
-  mature_eligible_total?: number;
-  mature_adopted_within_window_count?: number;
-  pending_mature_backlog_count?: number;
-  pending_immature_count?: number;
-  mature_draft_total?: number;
-  mature_replied_within_window_count?: number;
-  pending_draft_mature_no_reply_count?: number;
-  pending_draft_immature_count?: number;
+  passed_count: number;
+  pending_count: number;
+  rejected_count: number;
+  other_count?: number;
+  pass_rate: number;
   initial_outreach_draft_count: number;
   initial_outreach_reply_count: number;
+  automated_reply_excluded_count: number;
+  pending_reply_count: number;
+  initial_outreach_reply_rate: number;
+  by_status?: Record<string, number>;
 };
+
+type KolDiscoveryTrendKey =
+  | keyof Pick<
+      KolDiscoverySummary,
+      | 'discovered_total'
+      | 'passed_count'
+      | 'pending_count'
+      | 'rejected_count'
+      | 'initial_outreach_draft_count'
+      | 'initial_outreach_reply_count'
+      | 'pending_reply_count'
+    >
+  | 'pass_rate'
+  | 'initial_outreach_reply_rate';
 
 type MetricsResp = {
   env: 'TEST' | 'LIVE' | string;
   window_days: number;
-  funnel_window_days?: number | null;
   metrics: {
     first_pass_approval_rate: number;
     avg_handle_minutes: number;
-    re_escalation_rate: number;
     manual_touchpoints_per_campaign: number;
     termination_rate: number;
     live_incident_rate: number;
-    kol_candidate_adoption_rate: number;
-    initial_outreach_reply_rate: number;
   };
   audit_meta?: {
     first_pass_decisions_total?: number;
     touched_campaign_count?: number;
-    child_escalation_opens?: number;
-    escalation_opens_total?: number;
   };
-  kol_funnel: KolFunnel;
+  kol_discovery_summary: KolDiscoverySummary;
   top_rejection_tags: Array<{ tag: string; count: number }>;
 };
 
@@ -59,7 +64,9 @@ type TrendsResp = {
   env: string;
   bucket: TrendBucket;
   periods: number;
-  series: Partial<Record<keyof MetricsResp['metrics'], TrendPoint[]>>;
+  series: Partial<
+    Record<keyof MetricsResp['metrics'] | KolDiscoveryTrendKey, TrendPoint[]>
+  >;
 };
 
 const TREND_BUCKET_LABELS: Record<TrendBucket, string> = {
@@ -109,18 +116,6 @@ const METRIC_HELP: Array<{
     trendFormat: 'minutes',
   },
   {
-    key: 're_escalation_rate',
-    title: '重复升级率',
-    format: (m) => pct(m.re_escalation_rate),
-    hint: (data) => {
-      const child = data.audit_meta?.child_escalation_opens ?? 0;
-      const total = data.audit_meta?.escalation_opens_total ?? 0;
-      return `近 ${data.window_days} 天 · 子升级打开数 ÷ 全部升级打开数（${child} / ${total}）`;
-    },
-    improve: '偏高时：在升级台一次性补齐缺失事实，避免反复驳回',
-    trendFormat: 'percent',
-  },
-  {
     key: 'manual_touchpoints_per_campaign',
     title: '人工触点 / 有触达活动',
     format: (m) => m.manual_touchpoints_per_campaign.toFixed(2),
@@ -150,65 +145,78 @@ const METRIC_HELP: Array<{
   },
 ];
 
-const KOL_FUNNEL_HELP: Array<{
-  key: 'kol_candidate_adoption_rate' | 'initial_outreach_reply_rate';
+const KOL_DISCOVERY_CARDS: Array<{
+  key: keyof Pick<
+    KolDiscoverySummary,
+    'discovered_total' | 'passed_count' | 'pending_count' | 'rejected_count'
+  >;
   title: string;
-  format: (m: MetricsResp['metrics']) => string;
-  hint: (f: KolFunnel, data: MetricsResp) => string;
-  improve: string;
+  hint: string;
+  valueClass: string;
   trendFormat: TrendValueFormat;
 }> = [
   {
-    key: 'kol_candidate_adoption_rate',
-    title: 'KOL候选采纳率',
-    format: (m) => pct(m.kol_candidate_adoption_rate),
-    hint: (f, data) => {
-      const matureDays = f.maturity_days ?? 14;
-      const funnelDays = f.funnel_window_days ?? data.funnel_window_days ?? 30;
-      const matureEligible = f.mature_eligible_total ?? 0;
-      const matureAdopted = f.mature_adopted_within_window_count ?? 0;
-      const backlog = f.pending_mature_backlog_count ?? 0;
-      const immature = f.pending_immature_count ?? 0;
-      const parts = [
-        `${matureAdopted} / ${matureEligible} 在发现后 ${matureDays} 天内生成初邀草稿`,
-        `（成熟 cohort：发现 ${funnelDays}～${matureDays} 天前）`,
-      ];
-      if (backlog > 0) {
-        parts.push(`待处理积压 ${backlog} 人`);
-      }
-      if (immature > 0) {
-        parts.push(`处理中（未满 ${matureDays} 天）${immature} 人，不计入采纳率`);
-      }
-      return parts.join('；');
-    },
-    improve: '偏低时：先清积压，再检查 shortlist、邮箱发现与初邀草稿审批',
-    trendFormat: 'percent',
+    key: 'discovered_total',
+    title: '全部发现',
+    hint: 'Agent 发现过的 KOL 总数（按红人去重，含各活动来源）',
+    valueClass: 'text-slate-900',
+    trendFormat: 'decimal',
   },
   {
-    key: 'initial_outreach_reply_rate',
-    title: '初邀回信率',
-    format: (m) => pct(m.initial_outreach_reply_rate),
-    hint: (f, data) => {
-      const matureDays = f.maturity_days ?? 14;
-      const funnelDays = f.funnel_window_days ?? data.funnel_window_days ?? 30;
-      const matureDrafts = f.mature_draft_total ?? 0;
-      const matureReplies = f.mature_replied_within_window_count ?? 0;
-      const backlog = f.pending_draft_mature_no_reply_count ?? 0;
-      const immature = f.pending_draft_immature_count ?? 0;
-      const parts = [
-        `${matureReplies} / ${matureDrafts} 在初邀后 ${matureDays} 天内收到回信`,
-        `（成熟 cohort：初邀 ${funnelDays}～${matureDays} 天前）`,
-      ];
-      if (backlog > 0) {
-        parts.push(`待回信积压 ${backlog} 人`);
-      }
-      if (immature > 0) {
-        parts.push(`等待期（初邀未满 ${matureDays} 天）${immature} 人，不计入回信率`);
-      }
-      return parts.join('；');
-    },
-    improve: '偏低时：核对邮件是否已发出、邮箱是否有效、产品与红人匹配度',
-    trendFormat: 'percent',
+    key: 'passed_count',
+    title: '已通过',
+    hint: 'Shortlist 已批准（状态 selected_for_outreach）',
+    valueClass: 'text-emerald-700',
+    trendFormat: 'decimal',
+  },
+  {
+    key: 'pending_count',
+    title: '待处理',
+    hint: '尚未做出 shortlist 决定：discovered / shortlisted / needs_review 等',
+    valueClass: 'text-amber-700',
+    trendFormat: 'decimal',
+  },
+  {
+    key: 'rejected_count',
+    title: '已否决',
+    hint: 'Shortlist 已拒绝或归档（rejected / archived）',
+    valueClass: 'text-rose-700',
+    trendFormat: 'decimal',
+  },
+];
+
+const KOL_REPLY_CARDS: Array<{
+  key: keyof Pick<
+    KolDiscoverySummary,
+    | 'initial_outreach_draft_count'
+    | 'initial_outreach_reply_count'
+    | 'pending_reply_count'
+  >;
+  title: string;
+  hint: string;
+  valueClass: string;
+  trendFormat: TrendValueFormat;
+}> = [
+  {
+    key: 'initial_outreach_draft_count',
+    title: '有初邀草稿',
+    hint: '已生成初邀 Gmail 草稿的红人数量',
+    valueClass: 'text-slate-900',
+    trendFormat: 'decimal',
+  },
+  {
+    key: 'initial_outreach_reply_count',
+    title: '有回信',
+    hint: '收到红人真实回信（不含退信 DSN、Out of Office 等自动回复）',
+    valueClass: 'text-emerald-700',
+    trendFormat: 'decimal',
+  },
+  {
+    key: 'pending_reply_count',
+    title: '待回信',
+    hint: '已出初邀草稿但尚无真实回信（含仅收到自动退信/自动回复的）',
+    valueClass: 'text-amber-700',
+    trendFormat: 'decimal',
   },
 ];
 
@@ -241,13 +249,20 @@ export function GateMetricsPage() {
     refresh();
   }, [refresh]);
 
-  const emptyFunnel: KolFunnel = {
+  const emptySummary: KolDiscoverySummary = {
     discovered_total: 0,
-    prior_collab_excluded: 0,
-    eligible_total: 0,
+    passed_count: 0,
+    pending_count: 0,
+    rejected_count: 0,
+    pass_rate: 0,
     initial_outreach_draft_count: 0,
     initial_outreach_reply_count: 0,
+    automated_reply_excluded_count: 0,
+    pending_reply_count: 0,
+    initial_outreach_reply_rate: 0,
   };
+
+  const summary = data?.kol_discovery_summary ?? emptySummary;
 
   return (
     <div className="space-y-3">
@@ -257,7 +272,7 @@ export function GateMetricsPage() {
           value={days}
           onChange={(e) => setDays(Number(e.target.value))}
           className="rounded border border-slate-300 px-2 py-1 text-sm"
-          title="审批/升级类指标窗口；KOL 漏斗自动至少按 30 天成熟 cohort"
+          title="审批/升级类指标窗口"
         >
           <option value={7}>近 7 天</option>
           <option value={14}>近 14 天</option>
@@ -293,13 +308,81 @@ export function GateMetricsPage() {
         </Link>
       </div>
       <p className="text-[11px] text-slate-500">
-        汇总数字受「近 N 天」控制；趋势图按所选粒度独立统计。KOL 采纳/回信率使用 14 天成熟
-        cohort（窗口至少 30 天）。
+        下方 KOL 发现统计为 {env} 环境全量累计（不受「近 N 天」窗口影响），趋势图按所选粒度展示各时段
+        末累计值。审批/升级类指标受「近 N 天」控制。
       </p>
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
       {!data && !err && <div className="text-sm text-slate-500">加载中…</div>}
       {data && (
         <>
+          <div className="rounded border border-slate-200 bg-white p-3">
+            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <div className="text-sm font-medium text-slate-800">KOL 发现统计</div>
+              <div className="flex flex-wrap items-end gap-4 text-[11px] text-slate-500">
+                <div title="已通过 ÷ 全部发现（各时段末累计）">
+                  <div>通过率 {pct(summary.pass_rate)}</div>
+                  <MetricTrendSparkline
+                    points={trends?.series?.pass_rate}
+                    valueFormat="percent"
+                    colorClass="bg-emerald-500"
+                  />
+                </div>
+                <div
+                  title={`有回信 ÷ 有初邀草稿（已排除自动退信/自动回复 ${summary.automated_reply_excluded_count}）`}
+                >
+                  <div>
+                    初邀回信率 {pct(summary.initial_outreach_reply_rate)}（
+                    {summary.initial_outreach_reply_count} /{' '}
+                    {summary.initial_outreach_draft_count}）
+                  </div>
+                  <MetricTrendSparkline
+                    points={trends?.series?.initial_outreach_reply_rate}
+                    valueFormat="percent"
+                    colorClass="bg-sky-500"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+              {KOL_DISCOVERY_CARDS.map((def) => (
+                <div
+                  key={def.key}
+                  className="rounded border border-slate-100 bg-slate-50 px-3 py-2"
+                  title={def.hint}
+                >
+                  <div className="text-xs text-slate-500">{def.title}</div>
+                  <div className={`mt-1 text-2xl font-semibold ${def.valueClass}`}>
+                    {summary[def.key]}
+                  </div>
+                  <MetricTrendSparkline
+                    points={trends?.series?.[def.key]}
+                    valueFormat={def.trendFormat}
+                  />
+                  <div className="mt-1 text-[11px] leading-snug text-slate-600">
+                    {def.hint}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-2 border-t border-slate-100 pt-3 sm:grid-cols-3">
+              {KOL_REPLY_CARDS.map((def) => (
+                <div
+                  key={def.key}
+                  className="rounded border border-slate-100 bg-slate-50 px-3 py-2"
+                  title={def.hint}
+                >
+                  <div className="text-xs text-slate-500">{def.title}</div>
+                  <div className={`mt-1 text-xl font-semibold ${def.valueClass}`}>
+                    {summary[def.key]}
+                  </div>
+                  <MetricTrendSparkline
+                    points={trends?.series?.[def.key]}
+                    valueFormat={def.trendFormat}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
           <div className="grid grid-cols-1 gap-2 text-sm md:grid-cols-2 lg:grid-cols-3">
             {METRIC_HELP.map((def) => (
               <MetricCard
@@ -307,17 +390,6 @@ export function GateMetricsPage() {
                 title={def.title}
                 value={def.format(data.metrics)}
                 hint={def.hint(data)}
-                improve={def.improve}
-                trendPoints={trends?.series?.[def.key]}
-                trendFormat={def.trendFormat}
-              />
-            ))}
-            {KOL_FUNNEL_HELP.map((def) => (
-              <MetricCard
-                key={def.key}
-                title={def.title}
-                value={def.format(data.metrics)}
-                hint={def.hint(data.kol_funnel ?? emptyFunnel, data)}
                 improve={def.improve}
                 trendPoints={trends?.series?.[def.key]}
                 trendFormat={def.trendFormat}

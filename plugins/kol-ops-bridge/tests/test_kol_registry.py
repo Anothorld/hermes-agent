@@ -463,6 +463,242 @@ def test_registry_funnel_trend_returns_series(bridge_pkg, cal_db):
     assert any(row["value"] == 1.0 for row in adoption if row["value"] is not None)
 
 
+def test_discovery_summary_counts_by_latest_status(bridge_pkg, cal_db):
+    cal = cal_db
+    cid_a = "SUM-CAMP-A"
+    cid_b = "SUM-CAMP-B"
+    cal.upsert_campaign_config(campaign_id=cid_a, env="LIVE")
+    cal.upsert_campaign_config(campaign_id=cid_b, env="LIVE")
+
+    iid_pass = cal.upsert_identity(
+        primary_handle="@sum_pass",
+        primary_email="pass@example.com",
+        env="LIVE",
+    )
+    iid_pending = cal.upsert_identity(
+        primary_handle="@sum_pending",
+        primary_email="pending@example.com",
+        env="LIVE",
+    )
+    iid_reject = cal.upsert_identity(
+        primary_handle="@sum_reject",
+        primary_email="reject@example.com",
+        env="LIVE",
+    )
+    iid_latest = cal.upsert_identity(
+        primary_handle="@sum_latest",
+        primary_email="latest@example.com",
+        env="LIVE",
+    )
+
+    cal.upsert_candidate(
+        campaign_id=cid_a, identity_id=iid_pass, source="discovery", env="LIVE",
+    )
+    cal.set_candidate_status(
+        campaign_id=cid_a,
+        identity_ids=[iid_pass],
+        candidate_status="selected_for_outreach",
+        env="LIVE",
+    )
+
+    cal.upsert_candidate(
+        campaign_id=cid_a, identity_id=iid_pending, source="discovery", env="LIVE",
+    )
+    cal.set_candidate_status(
+        campaign_id=cid_a,
+        identity_ids=[iid_pending],
+        candidate_status="shortlisted",
+        env="LIVE",
+    )
+
+    cal.upsert_candidate(
+        campaign_id=cid_a, identity_id=iid_reject, source="discovery", env="LIVE",
+    )
+    cal.set_candidate_status(
+        campaign_id=cid_a,
+        identity_ids=[iid_reject],
+        candidate_status="rejected",
+        env="LIVE",
+    )
+
+    cal.upsert_candidate(
+        campaign_id=cid_a, identity_id=iid_latest, source="discovery", env="LIVE",
+    )
+    cal.upsert_candidate(
+        campaign_id=cid_b, identity_id=iid_latest, source="discovery", env="LIVE",
+    )
+    cal.set_candidate_status(
+        campaign_id=cid_a,
+        identity_ids=[iid_latest],
+        candidate_status="discovered",
+        env="LIVE",
+    )
+    cal.set_candidate_status(
+        campaign_id=cid_b,
+        identity_ids=[iid_latest],
+        candidate_status="selected_for_outreach",
+        env="LIVE",
+    )
+
+    out = cal.aggregate_kol_discovery_summary(env="LIVE")
+    assert out["discovered_total"] == 4
+    assert out["passed_count"] == 2
+    assert out["pending_count"] == 1
+    assert out["rejected_count"] == 1
+    assert out["pass_rate"] == pytest.approx(0.5)
+    assert out["initial_outreach_draft_count"] == 0
+    assert out["initial_outreach_reply_count"] == 0
+    assert out["initial_outreach_reply_rate"] == 0.0
+
+
+def test_discovery_summary_reply_rate(bridge_pkg, cal_db):
+    cal = cal_db
+    cid = "SUM-REPLY-CAMP"
+    cal.upsert_campaign_config(campaign_id=cid, env="LIVE")
+
+    iid_draft = cal.upsert_identity(
+        primary_handle="@sum_draft",
+        primary_email="draft@example.com",
+        env="LIVE",
+    )
+    iid_reply = cal.upsert_identity(
+        primary_handle="@sum_reply",
+        primary_email="reply@example.com",
+        env="LIVE",
+    )
+    for iid in (iid_draft, iid_reply):
+        cal.upsert_candidate(
+            campaign_id=cid, identity_id=iid, source="discovery", env="LIVE",
+        )
+    cal.write_event(
+        identity_id=iid_draft,
+        campaign_id=cid,
+        event_type="kol_initial_outreach_draft_ready",
+        goal="outreach",
+        lane="commerce",
+        actor="test",
+        env="LIVE",
+    )
+    cal.write_event(
+        identity_id=iid_reply,
+        campaign_id=cid,
+        event_type="outbound_draft_created",
+        goal="outreach",
+        lane="commerce",
+        actor="test",
+        env="LIVE",
+    )
+    cal.write_event(
+        identity_id=iid_reply,
+        campaign_id=cid,
+        event_type="kol_inbound_reply",
+        goal="",
+        lane="",
+        actor="cron",
+        env="LIVE",
+    )
+
+    out = cal.aggregate_kol_discovery_summary(env="LIVE")
+    assert out["initial_outreach_draft_count"] == 2
+    assert out["initial_outreach_reply_count"] == 1
+    assert out["pending_reply_count"] == 1
+    assert out["initial_outreach_reply_rate"] == pytest.approx(0.5)
+
+
+def test_discovery_summary_excludes_automated_replies(bridge_pkg, cal_db):
+    cal = cal_db
+    cid = "SUM-AUTO-CAMP"
+    cal.upsert_campaign_config(campaign_id=cid, env="LIVE")
+
+    iid_bounce = cal.upsert_identity(
+        primary_handle="@sum_bounce",
+        primary_email="bounce@example.com",
+        env="LIVE",
+    )
+    iid_human = cal.upsert_identity(
+        primary_handle="@sum_human",
+        primary_email="human@example.com",
+        env="LIVE",
+    )
+    for iid in (iid_bounce, iid_human):
+        cal.upsert_candidate(
+            campaign_id=cid, identity_id=iid, source="discovery", env="LIVE",
+        )
+        cal.write_event(
+            identity_id=iid,
+            campaign_id=cid,
+            event_type="kol_initial_outreach_draft_ready",
+            goal="outreach",
+            lane="commerce",
+            actor="test",
+            env="LIVE",
+        )
+    cal.write_event(
+        identity_id=iid_bounce,
+        campaign_id=cid,
+        event_type="kol_inbound_reply",
+        actor="cron",
+        payload={
+            "from_addr": "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+            "subject": "Delivery Status Notification (Failure)",
+            "body": "** Address not found **",
+        },
+        env="LIVE",
+    )
+    cal.write_event(
+        identity_id=iid_human,
+        campaign_id=cid,
+        event_type="kol_inbound_reply",
+        actor="cron",
+        payload={
+            "from_addr": "Human <human@example.com>",
+            "subject": "Re: Collab",
+            "body": "Happy to chat more about this.",
+        },
+        env="LIVE",
+    )
+
+    out = cal.aggregate_kol_discovery_summary(env="LIVE")
+    assert out["initial_outreach_draft_count"] == 2
+    assert out["initial_outreach_reply_count"] == 1
+    assert out["automated_reply_excluded_count"] == 1
+    assert out["pending_reply_count"] == 1
+    assert out["initial_outreach_reply_rate"] == pytest.approx(0.5)
+
+
+def test_discovery_summary_trend_returns_cumulative_series(bridge_pkg, cal_db):
+    cal = cal_db
+    cid = "SUM-TREND-CAMP"
+    cal.upsert_campaign_config(campaign_id=cid, env="LIVE")
+    iid = cal.upsert_identity(
+        primary_handle="@sum_trend",
+        primary_email="trend@example.com",
+        env="LIVE",
+    )
+    cal.upsert_candidate(
+        campaign_id=cid, identity_id=iid, source="discovery", env="LIVE",
+    )
+    cal.set_candidate_status(
+        campaign_id=cid,
+        identity_ids=[iid],
+        candidate_status="selected_for_outreach",
+        env="LIVE",
+    )
+    _backdate_candidate(cal, campaign_id=cid, identity_id=iid, days=40)
+
+    out = cal.aggregate_kol_discovery_summary_trend(
+        env="LIVE", bucket="month", periods=3,
+    )
+    assert out["bucket"] == "month"
+    assert len(out["series"]["discovered_total"]) == 3
+    assert all("bucket" in row and "value" in row for row in out["series"]["discovered_total"])
+    totals = [row["value"] for row in out["series"]["discovered_total"]]
+    assert totals[-1] == pytest.approx(1.0)
+    assert totals[0] <= totals[1] <= totals[2]
+    pass_rates = [row["value"] for row in out["series"]["pass_rate"]]
+    assert pass_rates[-1] == pytest.approx(1.0)
+
+
 def test_registry_source_legacy_filter_returns_empty(bridge_pkg, cal_db):
     cal = cal_db
     iid_legacy = cal.upsert_identity(

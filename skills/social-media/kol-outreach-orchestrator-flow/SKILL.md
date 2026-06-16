@@ -75,7 +75,7 @@ Legend:
 | meta | engagement_aborted, archival_done |
 
 Each goal has status ∈ `{not_started, active, paused, done, skipped, aborted}`.
-The dispatcher reads `active_goals_by_lane` from `get-dispatch-context`
+The dispatcher reads active goals from `get-dispatch-context --view agent`
 to pick which child SKILL handles the current turn (priority:
 commerce > fulfillment > publish > meta, with severity reversal — if a
 lower-priority lane has a paused/aborted blocker, it preempts).
@@ -146,7 +146,7 @@ This boundary aligns with
   goal machine in `plugins/kol-ops-bridge/goals.py` is authoritative.
   This SKILL drifts; the code does not.
 - Asking this SKILL to "decide what to do next". It can't. The
-  dispatcher reads `get-dispatch-context` and decides per-turn.
+  dispatcher reads `get-dispatch-context --view agent` and decides per-turn.
 - Bypassing the dispatcher with ad-hoc child-skill invocations on
   the inbound path. Always go through the dispatcher so facts and
   goals stay consistent.

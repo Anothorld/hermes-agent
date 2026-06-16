@@ -27,6 +27,11 @@ the dispatcher can advance to `compensation_negotiation`.
   quote a number.
 - **Stay within `campaign_config` limits.** Do not propose more
   platforms or higher counts than configured.
+- **Read stored deliverables spec (runtime, no NL parse).** When
+  describing scope, include extras from
+  `campaign_config.campaign_deliverables_json` (ad code, usage rights)
+  via `GET /campaigns/{id}/resolved-deliverables` — do not invent ad
+  code rows at reply time.
 - **Open escalation when KOL pre-asks for over-cap.** If
   `inbound_excerpt` already implies "I'd want 5 IG + 5 TT" and that
   exceeds config, escalate instead of negotiating.
@@ -139,7 +144,7 @@ Hard rules (verbatim):
 ### Step 1 — Load context
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
+  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE> --view agent
 ```
 Read:
 - `campaign_config.deliverable_platforms` — required list.

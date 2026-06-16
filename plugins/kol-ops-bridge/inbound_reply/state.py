@@ -48,6 +48,52 @@ def gateway_retry_max_sec() -> int:
     return max(gateway_retry_base_sec(), int(os.environ.get("KOL_OPS_INBOUND_GATEWAY_RETRY_MAX_SEC", "3600")))
 
 
+def gateway_only_retries_key(env: str) -> str:
+    return f"gateway_only_retries_{env}"
+
+
+def gateway_only_retry_max() -> int:
+    return max(1, int(os.environ.get("KOL_OPS_INBOUND_GATEWAY_ONLY_RETRY_MAX", "8")))
+
+
+def gateway_only_retry_count(
+    state: dict[str, Any], *, env: str, message_id: str,
+) -> int:
+    bucket = state.get(gateway_only_retries_key(env), {})
+    if not isinstance(bucket, dict):
+        return 0
+    try:
+        return int(bucket.get(message_id, 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def gateway_only_retry_exceeded(
+    state: dict[str, Any], *, env: str, message_id: str,
+) -> bool:
+    return gateway_only_retry_count(state, env=env, message_id=message_id) >= gateway_only_retry_max()
+
+
+def record_gateway_only_dispatch(
+    state: dict[str, Any], *, env: str, message_id: str,
+) -> int:
+    bucket = state.setdefault(gateway_only_retries_key(env), {})
+    if not isinstance(bucket, dict):
+        bucket = {}
+        state[gateway_only_retries_key(env)] = bucket
+    count = gateway_only_retry_count(state, env=env, message_id=message_id) + 1
+    bucket[message_id] = count
+    return count
+
+
+def clear_gateway_only_retries(
+    state: dict[str, Any], *, env: str, message_id: str,
+) -> None:
+    bucket = state.get(gateway_only_retries_key(env))
+    if isinstance(bucket, dict):
+        bucket.pop(message_id, None)
+
+
 def retry_not_before(state: dict[str, Any], *, env: str, message_id: str) -> float:
     bucket = state.get(retry_backoff_bucket_key(env), {})
     if not isinstance(bucket, dict):
@@ -78,6 +124,7 @@ def clear_retry_backoff(state: dict[str, Any], *, env: str, message_id: str) -> 
         bucket = state.get(key)
         if isinstance(bucket, dict):
             bucket.pop(message_id, None)
+    clear_gateway_only_retries(state, env=env, message_id=message_id)
 
 
 def state_path() -> Path:

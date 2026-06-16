@@ -33,6 +33,7 @@ from ..gateway_client import GatewayClient, GatewayError
 from ..bridge_agent_contract_loader import gateway_contract_block
 from ..reply_draft_kind import is_initial_outreach_reply_draft
 from ..run_registry import get_inflight_run, register_run
+from ..session_ids import campaign_draft_session_id
 
 
 def _refine_dedup_key(identity_id: int, campaign_id: str) -> str:
@@ -164,7 +165,7 @@ _REFINE_DRAFT_INSTRUCTIONS = (
     "  source_message_id when present) PLUS the operator_refinement_prompt\n"
     "  as an extra input field. For `child_skill=kol-proactive-followup`,\n"
     "  there may be no inbound event — use `draft.operator_topic`,\n"
-    "  `get-timeline`, and `get-dispatch-context` instead. The skill must\n"
+    "  `get-timeline`, and `get-dispatch-context --view agent` instead. The skill must\n"
     "  treat the refinement prompt as a hard constraint on\n"
     "  draft content (tone, additions, removals). Do NOT rewrite offer.*\n"
     "  or other domain facts; a refinement run is content-only.\n"
@@ -819,7 +820,7 @@ async def refine(
         refinement_prompt=body.refinement_prompt,
         actor_email=user["email"],
     )
-    session_id = f"kol-campaign-draft:{env}:{body.campaign_id}"
+    session_id = campaign_draft_session_id(env, body.campaign_id, body.identity_id)
     try:
 
         async def _start_refine() -> dict[str, Any]:
@@ -845,7 +846,7 @@ async def refine(
             env=env,
             run_id=run_id,
             kind="refine",
-            session_id=f"kol-campaign-draft:{env}:{body.campaign_id}",
+            session_id=campaign_draft_session_id(env, body.campaign_id, body.identity_id),
             dedup_key=dedup_key,
         )
     write_audit(

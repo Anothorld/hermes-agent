@@ -31,6 +31,7 @@ from ..escalation_hub import (
     build_workflow_steps,
 )
 from ..run_registry import get_inflight_run, register_run
+from ..session_ids import campaign_draft_session_id
 
 
 def _preview_draft_dedup_key(escalation_id: int) -> str:
@@ -1078,6 +1079,13 @@ async def preview_draft(
         )
     env = str(escalation.get("env") or body.env or _env(None)).upper()
     campaign_id = str(escalation["campaign_id"])
+    raw_identity_id = escalation.get("identity_id")
+    if raw_identity_id is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "preview-draft requires an identity-scoped escalation",
+        )
+    identity_id = int(raw_identity_id)
     # In-flight dedup: if a draft run for this escalation was started in
     # the last 5 min, refuse and return the existing run_id so the
     # frontend can surface "already generating" instead of spawning a
@@ -1113,7 +1121,7 @@ async def preview_draft(
         actor_user_id=user.get("id"),
     )
     ensure_gateway_bridge_key()
-    session_id = f"kol-campaign-draft:{env}:{campaign_id}"
+    session_id = campaign_draft_session_id(env, campaign_id, identity_id)
     try:
 
         async def _start_preview() -> dict[str, Any]:
@@ -1139,7 +1147,7 @@ async def preview_draft(
             env=env,
             run_id=run_id,
             kind="draft",
-            session_id=f"kol-campaign-draft:{env}:{campaign_id}",
+            session_id=campaign_draft_session_id(env, campaign_id, identity_id),
             dedup_key=dedup_key,
         )
     write_audit(

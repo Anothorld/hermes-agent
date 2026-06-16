@@ -38,6 +38,7 @@ def gateway_contract_snippet() -> str:
     return (
         "Bridge CAL (mandatory): "
         f"{cli} <subcommand> --env LIVE|TEST. "
+        "Dispatch reads: get-dispatch-context --view agent. "
         "Forbidden: execute_code, curl/urllib/requests to :8080, "
         "direct cal.py/DB, reading plugins/kol-ops-bridge/ for API discovery. "
         "Full contract: kol-bridge-agent-guard skill + bridge_agent_contract."

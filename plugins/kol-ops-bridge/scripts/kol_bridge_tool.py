@@ -25,6 +25,7 @@ Subcommands are registered by domain modules:
 - ``_subcmd_facts``      — facts read/write
 - ``_subcmd_governance`` — escalations + approvals + policies
 - ``_subcmd_learning``   — learning export, apply, scheduled cron jobs
+- ``_subcmd_metrics``    — KOL discovery statistics (gate-metrics / registry)
 - ``_subcmd_logic``      — toolized deterministic skill steps
   (pricing / campaign validation / lane routing / escalation
   matching / reply-draft persistence)
@@ -43,7 +44,11 @@ from typing import Optional
 # Make ``python /abs/path/kol_bridge_tool.py`` work as well as
 # ``python -m hermes-agent.plugins.kol-ops-bridge.scripts.kol_bridge_tool``
 # by adding this directory to ``sys.path`` before pulling in siblings.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PLUGIN_ROOT = os.path.dirname(_SCRIPTS_DIR)
+sys.path.insert(0, _SCRIPTS_DIR)
+if _PLUGIN_ROOT not in sys.path:
+    sys.path.insert(0, _PLUGIN_ROOT)
 
 import _cli_guardrails  # noqa: E402
 import _subcmd_campaigns  # noqa: E402
@@ -51,6 +56,7 @@ import _subcmd_facts  # noqa: E402
 import _subcmd_governance  # noqa: E402
 import _subcmd_identities  # noqa: E402
 import _subcmd_learning  # noqa: E402
+import _subcmd_metrics  # noqa: E402
 import _subcmd_logic  # noqa: E402
 import _subcmd_meta  # noqa: E402
 from _cal_client import (  # noqa: E402
@@ -58,6 +64,7 @@ from _cal_client import (  # noqa: E402
     add_env_arg,
     client_from_args,
     print_json,
+    set_json_output_mode,
 )
 
 
@@ -69,6 +76,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p = _cli_guardrails.KolBridgeToolParser(
         prog="kol_bridge_tool",
         description="Deterministic CLI for hermes kol-ops-bridge (HTTP → serve.py).",
+    )
+    p.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON with indentation (default is compact).",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -82,6 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _subcmd_facts.register(sub)
     _subcmd_governance.register(sub)
     _subcmd_learning.register(sub)
+    _subcmd_metrics.register(sub)
     _subcmd_logic.register(sub)
     _subcmd_meta.register(sub)
     return p
@@ -89,6 +102,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> None:
     args = _build_parser().parse_args(argv)
+    set_json_output_mode(pretty=bool(getattr(args, "pretty", False)))
     args.func(args)
 
 

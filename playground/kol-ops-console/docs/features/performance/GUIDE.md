@@ -16,9 +16,9 @@
 | 机制 | 配置项 | 说明 |
 |------|--------|------|
 | Run 启动队列 | `KOC_GATEWAY_LAUNCH_QUEUE_ENABLED`（默认 true） | 上限 `KOC_GATEWAY_LAUNCH_MAX_INFLIGHT=8` |
-| Email discover 串行 | 队列 `kind=email_discover` max=1 | 全局仅 1 路 `kol-email-discover:*` |
+| Email discover 串行 | 队列 `kind=email_discover` max=1 | 全局仅 1 路 `kol-email-discover:*`；worker 在 `start_run` 返回 run_id 后**仍持有 semaphore** 直至 SSE drain 结束（HTTP/202 不阻塞整段 browser run）；**队列关闭时** bypass 路径同样 serial + drain |
 | Recovery 串行 | `KOC_RECOVERY_LAUNCH_SERIAL=true` | `recovery-*` session 不 fan-out |
-| SSE 排水 | 自动 | 每次 `start_run` 成功后 `ensure_run_drained` |
+| SSE 排水 | 自动 | 非 email-discover：`ensure_run_drained` 后台排水；email-discover 由队列 worker 同步 drain（不重复） |
 | Run 状态后台对齐 | `KOC_RUN_RECONCILER_ENABLED=true` | GET 默认只读缓存 |
 | Approval watcher 降级 | `KOC_APPROVAL_WATCH_MODE=auto` | open runs >5 时 poll_aggregate |
 | Transcript SSE 上限 | `KOC_AGENT_STREAM_MAX_RUNS=10` | 每 campaign 并行 SSE 代理数 |

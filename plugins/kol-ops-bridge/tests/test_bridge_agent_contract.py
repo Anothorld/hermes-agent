@@ -50,6 +50,15 @@ def test_lint_file_tool_blocks_plugin_api():
     assert hits and hits[0]["code"] == "read_bridge_source_file"
 
 
+def test_dispatch_context_cli_line_uses_agent_view():
+    c = _contract()
+    line = c.dispatch_context_cli_line(
+        identity_id=42, campaign_id="CID-1", env="LIVE",
+    )
+    assert "--view agent" in line
+    assert "get-dispatch-context" in line
+
+
 def test_resume_checklist_includes_get_escalation():
     c = _contract()
     text = c.resume_cli_checklist(
@@ -60,7 +69,8 @@ def test_resume_checklist_includes_get_escalation():
         require_draft=False,
     )
     assert "get-escalation --escalation-id 108" in text
-    assert "persist-reply-draft" not in text
+    assert "--view agent" in text
+    assert "get-email-conversation" not in text
 
 
 def test_approval_checklist_uses_persist_initial_outreach():

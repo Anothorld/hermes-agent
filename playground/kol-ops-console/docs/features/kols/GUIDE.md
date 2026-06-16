@@ -57,7 +57,7 @@ Tier 1 不再使用 `web_search` / `web_extract`。模型应：
 | 同上但 **未传 `campaign_id`** | Gate B **完全跳过**；gateway 仅靠 browser 发现 |
 | 活动批准 `approve-shortlist` | Console 对每个缺邮箱的已批 identity 自动排队 `kol-email-discover:*`（Gate B 同步 + browser）；outreach run 不再内联调 Nox/browser |
 | 活动审批 run（`kol-campaign-outreach:*`） | 仅对已有 `primary_email` 的身份起草；`# email_discovery_queued` 中的身份报告 `pending_email_discovery`，不重复发现、不 premature escalation |
-| `kol-email-discover:*` 完成（approve 排队） | `run_state_reconciler` 检测 `completed` 后，若邮箱已写入且尚无草稿，自动拉起单 KOL `kol-campaign-draft:*`（等同 `redraft-outreach`）；audit `campaign.auto_draft_after_email_discover` |
+| `kol-email-discover:*` 完成（approve 排队） | `run_state_reconciler` 检测 `completed` 后，若邮箱已写入且尚无草稿，自动拉起单 KOL `kol-campaign-draft:{env}:{campaign_id}:{identity_id}`（等同 `redraft-outreach`）；audit `campaign.auto_draft_after_email_discover` |
 | brief 含 `gate_b_attempted: true` | Nox 已在 Console 跑过（含「API 无邮箱」）；agent 不得再调 Nox |
 
 常见「有 `nox_creator_id` 却没用 Nox 找邮箱」原因：

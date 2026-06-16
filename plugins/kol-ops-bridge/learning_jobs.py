@@ -330,45 +330,6 @@ def _execute_job(
     if job_name == JOB_APPLY_DISCOVERY_POLICY:
         threshold = learning_discovery.discovery_learning_batch_size()
         fresh = learning_discovery._fresh_decision_events(conn, env=env, limit=limit)
-        # #region agent log
-        try:
-            import json as _json
-            import time as _time
-            from pathlib import Path as _Path
-
-            groups_preview = learning_discovery._group_events(
-                conn, learning_discovery._fresh_decision_events(conn, env=env),
-            )
-            ready = [
-                f"{k}:{key}={len(evts)}"
-                for (k, key), evts in groups_preview.items()
-                if len(evts) >= threshold
-            ]
-            with _Path("/Users/arnold/agent_prj/.cursor/debug-9fa234.log").open(
-                "a", encoding="utf-8",
-            ) as _fh:
-                _fh.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "9fa234",
-                            "hypothesisId": "H1-H4",
-                            "location": "learning_jobs.py:apply_discovery_policy",
-                            "message": "discovery_job_start",
-                            "data": {
-                                "dry_run": dry_run,
-                                "fresh_decisions": len(fresh),
-                                "batch_threshold": threshold,
-                                "ready_groups": ready[:10],
-                            },
-                            "timestamp": int(_time.time() * 1000),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                )
-        except Exception:
-            pass
-        # #endregion
         if dry_run:
             groups = learning_discovery._group_events(conn, fresh)
             return {
@@ -398,37 +359,6 @@ def _execute_job(
             updated_by=_updated_by(triggered_by, job_name),
             limit=limit,
         )
-        # #region agent log
-        try:
-            import json as _json
-            import time as _time
-            from pathlib import Path as _Path
-
-            with _Path("/Users/arnold/agent_prj/.cursor/debug-9fa234.log").open(
-                "a", encoding="utf-8",
-            ) as _fh:
-                _fh.write(
-                    _json.dumps(
-                        {
-                            "sessionId": "9fa234",
-                            "hypothesisId": "H4",
-                            "location": "learning_jobs.py:apply_discovery_policy",
-                            "message": "discovery_job_finished",
-                            "data": {
-                                "skipped": result.get("skipped"),
-                                "reason": result.get("reason"),
-                                "proposed_count": result.get("proposed_count"),
-                                "error_hint": result.get("error"),
-                            },
-                            "timestamp": int(_time.time() * 1000),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                )
-        except Exception:
-            pass
-        # #endregion
         return {**result, "category_inference": category_inference}
 
     if job_name == JOB_MINE_DISCOVERY_TAGS:

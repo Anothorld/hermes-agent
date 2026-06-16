@@ -170,6 +170,10 @@ def _bootstrap(path: Path) -> None:
             conn, "campaign_config", "strict_explicit_accept",
             "INTEGER NOT NULL DEFAULT 0",
         )
+        _ensure_column(
+            conn, "campaign_config", "campaign_deliverables_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
         _ensure_column(conn, "kol_relationship", "negotiation_style", "TEXT")
         _ensure_column(conn, "policy_documents", "env", "TEXT")
         for ddl in VIEWS.values():
@@ -701,6 +705,17 @@ def _registry_fact_is_true(value: Any) -> bool:
 FUNNEL_MATURITY_DAYS: Final[int] = 14
 FUNNEL_MIN_WINDOW_DAYS: Final[int] = 30
 
+# Latest-status buckets for gate-metrics discovery summary (no maturity / prior-touch filters).
+DISCOVERY_SUMMARY_PASSED_STATUSES: Final[frozenset[str]] = frozenset(
+    {"selected_for_outreach"},
+)
+DISCOVERY_SUMMARY_PENDING_STATUSES: Final[frozenset[str]] = frozenset(
+    {"discovered", "shortlisted", "needs_review", "pool_pending_approval"},
+)
+DISCOVERY_SUMMARY_REJECTED_STATUSES: Final[frozenset[str]] = frozenset(
+    {"rejected", "archived"},
+)
+
 
 def _merge_earliest_ts(
     current: Optional[_dt.datetime],
@@ -730,6 +745,7 @@ def _batch_registry_pipeline_detail(
         iid: {
             "has_initial_outreach_draft": False,
             "has_inbound_reply": False,
+            "has_automated_inbound_reply": False,
             "first_draft_at": None,
             "first_reply_at": None,
         }
@@ -746,25 +762,40 @@ def _batch_registry_pipeline_detail(
                          WHEN event_type = 'kol_initial_outreach_draft_ready' THEN ts
                          WHEN event_type = 'outbound_draft_created' AND goal = 'outreach' THEN ts
                          ELSE NULL
-                       END) AS first_draft_ts,
-                   MAX(CASE WHEN event_type = 'kol_inbound_reply' THEN 1 ELSE 0 END)
-                       AS has_reply,
-                   MIN(CASE
-                         WHEN event_type = 'kol_inbound_reply' THEN ts
-                         ELSE NULL
-                       END) AS first_reply_ts
+                       END) AS first_draft_ts
               FROM kol_conversation_events
              WHERE env=? AND identity_id IN ({id_ph})
           GROUP BY identity_id""",
         (env, *identity_ids),
     ):
         iid = int(row["identity_id"])
-        out[iid] = {
-            "has_initial_outreach_draft": bool(row["has_initial_draft"]),
-            "has_inbound_reply": bool(row["has_reply"]),
-            "first_draft_at": _parse_metrics_trend_ts(row["first_draft_ts"]),
-            "first_reply_at": _parse_metrics_trend_ts(row["first_reply_ts"]),
-        }
+        out[iid]["has_initial_outreach_draft"] = bool(row["has_initial_draft"])
+        out[iid]["first_draft_at"] = _parse_metrics_trend_ts(row["first_draft_ts"])
+
+    try:
+        from .inbound_reply.automated import is_automated_inbound_reply_payload
+    except ImportError:
+        from inbound_reply.automated import is_automated_inbound_reply_payload  # type: ignore[no-redef]
+
+    for row in conn.execute(
+        f"""SELECT identity_id, ts, payload_json
+              FROM kol_conversation_events
+             WHERE env=? AND identity_id IN ({id_ph})
+               AND event_type = 'kol_inbound_reply'
+          ORDER BY identity_id, ts ASC, id ASC""",
+        (env, *identity_ids),
+    ):
+        iid = int(row["identity_id"])
+        payload = _jl(row["payload_json"], {}) or {}
+        reply_at = _parse_metrics_trend_ts(row["ts"])
+        if is_automated_inbound_reply_payload(payload):
+            out[iid]["has_automated_inbound_reply"] = True
+            continue
+        out[iid]["has_inbound_reply"] = True
+        out[iid]["first_reply_at"] = _merge_earliest_ts(
+            out[iid]["first_reply_at"], reply_at,
+        )
+
     for row in conn.execute(
         f"""SELECT identity_id, fact_value, captured_at
               FROM kol_facts_latest
@@ -1415,6 +1446,272 @@ def aggregate_kol_registry_funnel(
     }
 
 
+def aggregate_kol_discovery_summary(*, env: str = "LIVE") -> dict[str, Any]:
+    """Simple discovery pool counts for gate-metrics (no filters).
+
+    One row per ``identity_id`` using the most recent ``campaign_candidates``
+    row for ``env``. Counts map to operator-facing shortlist outcomes:
+
+    * **passed** — ``selected_for_outreach``
+    * **pending** — ``discovered``, ``shortlisted``, ``needs_review``,
+      ``pool_pending_approval``
+    * **rejected** — ``rejected``, ``archived``
+
+    Outreach reply metrics use the same unfiltered pool: among discovered
+    identities with an initial outreach draft, share that received any inbound
+    reply (``kol_inbound_reply`` event or equivalent pipeline flags).
+    """
+    env_norm = env.upper()
+    with _connect() as conn:
+        identity_rows = conn.execute(
+            """SELECT DISTINCT identity_id
+                 FROM campaign_candidates
+                WHERE env = ? AND identity_id IS NOT NULL""",
+            (env_norm,),
+        ).fetchall()
+        identity_ids = [int(r["identity_id"]) for r in identity_rows]
+
+        rows = conn.execute(
+            """WITH latest AS (
+                   SELECT c.identity_id,
+                          c.candidate_status,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY c.identity_id
+                              ORDER BY c.created_at DESC, c.id DESC
+                          ) AS rn
+                     FROM campaign_candidates c
+                    WHERE c.env = ?
+                      AND c.identity_id IS NOT NULL
+               )
+               SELECT candidate_status, COUNT(*) AS n
+                 FROM latest
+                WHERE rn = 1
+                GROUP BY candidate_status""",
+            (env_norm,),
+        ).fetchall()
+
+        pipeline_by_id = _batch_registry_pipeline_detail(
+            conn, identity_ids, env=env_norm,
+        )
+
+    by_status: dict[str, int] = {
+        str(r["candidate_status"]): int(r["n"]) for r in rows
+    }
+    discovered_total = sum(by_status.values())
+    passed_count = sum(by_status.get(s, 0) for s in DISCOVERY_SUMMARY_PASSED_STATUSES)
+    pending_count = sum(by_status.get(s, 0) for s in DISCOVERY_SUMMARY_PENDING_STATUSES)
+    rejected_count = sum(
+        by_status.get(s, 0) for s in DISCOVERY_SUMMARY_REJECTED_STATUSES
+    )
+    known = passed_count + pending_count + rejected_count
+    other_count = max(0, discovered_total - known)
+    pass_rate = passed_count / discovered_total if discovered_total else 0.0
+
+    initial_outreach_draft_count = 0
+    initial_outreach_reply_count = 0
+    automated_reply_excluded_count = 0
+    for pipeline in pipeline_by_id.values():
+        if not pipeline.get("has_initial_outreach_draft"):
+            continue
+        initial_outreach_draft_count += 1
+        if pipeline.get("has_inbound_reply"):
+            initial_outreach_reply_count += 1
+        elif pipeline.get("has_automated_inbound_reply"):
+            automated_reply_excluded_count += 1
+    pending_reply_count = (
+        initial_outreach_draft_count - initial_outreach_reply_count
+    )
+    initial_outreach_reply_rate = (
+        initial_outreach_reply_count / initial_outreach_draft_count
+        if initial_outreach_draft_count else 0.0
+    )
+
+    return {
+        "env": env_norm,
+        "discovered_total": discovered_total,
+        "passed_count": passed_count,
+        "pending_count": pending_count,
+        "rejected_count": rejected_count,
+        "other_count": other_count,
+        "pass_rate": pass_rate,
+        "initial_outreach_draft_count": initial_outreach_draft_count,
+        "initial_outreach_reply_count": initial_outreach_reply_count,
+        "automated_reply_excluded_count": automated_reply_excluded_count,
+        "pending_reply_count": pending_reply_count,
+        "initial_outreach_reply_rate": initial_outreach_reply_rate,
+        "by_status": by_status,
+    }
+
+
+def _metrics_trend_bucket_end(label: str, bucket: str) -> _dt.datetime:
+    """UTC end-of-period instant for a trend bucket label."""
+    if bucket == "day":
+        start = _dt.datetime.strptime(label, "%Y-%m-%d").replace(tzinfo=_dt.timezone.utc)
+        return start.replace(hour=23, minute=59, second=59, microsecond=999999)
+    if bucket == "week":
+        year_s, week_s = label.split("-W", 1)
+        iso = _dt.datetime.fromisocalendar(int(year_s), int(week_s), 1).replace(
+            tzinfo=_dt.timezone.utc,
+        )
+        end = iso + _dt.timedelta(days=6)
+        return end.replace(hour=23, minute=59, second=59, microsecond=999999)
+    if bucket == "month":
+        year_s, month_s = label.split("-", 1)
+        year, month = int(year_s), int(month_s)
+        if month == 12:
+            nxt = _dt.datetime(year + 1, 1, 1, tzinfo=_dt.timezone.utc)
+        else:
+            nxt = _dt.datetime(year, month + 1, 1, tzinfo=_dt.timezone.utc)
+        end = nxt - _dt.timedelta(days=1)
+        return end.replace(hour=23, minute=59, second=59, microsecond=999999)
+    if bucket == "year":
+        end = _dt.datetime(int(label), 12, 31, tzinfo=_dt.timezone.utc)
+        return end.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _empty_discovery_trend_slot() -> dict[str, int]:
+    return {
+        "discovered_total": 0,
+        "passed_count": 0,
+        "pending_count": 0,
+        "rejected_count": 0,
+        "initial_outreach_draft_count": 0,
+        "initial_outreach_reply_count": 0,
+        "pending_reply_count": 0,
+    }
+
+
+def _accumulate_discovery_summary_slot(
+    slot: dict[str, int],
+    *,
+    candidate_status: str,
+    pipeline: Mapping[str, Any],
+) -> None:
+    slot["discovered_total"] += 1
+    status = str(candidate_status or "")
+    if status in DISCOVERY_SUMMARY_PASSED_STATUSES:
+        slot["passed_count"] += 1
+    elif status in DISCOVERY_SUMMARY_PENDING_STATUSES:
+        slot["pending_count"] += 1
+    elif status in DISCOVERY_SUMMARY_REJECTED_STATUSES:
+        slot["rejected_count"] += 1
+    if pipeline.get("has_initial_outreach_draft"):
+        slot["initial_outreach_draft_count"] += 1
+        if pipeline.get("has_inbound_reply"):
+            slot["initial_outreach_reply_count"] += 1
+        else:
+            slot["pending_reply_count"] += 1
+
+
+def aggregate_kol_discovery_summary_trend(
+    *,
+    env: str = "LIVE",
+    bucket: str = "week",
+    periods: int | None = None,
+) -> dict[str, Any]:
+    """Cumulative KOL discovery counts at end of each time bucket.
+
+    For bucket label ``B``, counts include every identity whose
+    ``first_discovered_at`` is on or before the end of ``B``, using the
+    same latest-status and reply rules as ``aggregate_kol_discovery_summary``.
+    """
+    env_norm = env.upper()
+    bucket_norm = bucket if bucket in _METRICS_TREND_BUCKETS else "week"
+    period_count = periods if periods is not None else (
+        _METRICS_TREND_DEFAULT_PERIODS[bucket_norm]
+    )
+    period_count = max(
+        1, min(int(period_count), _METRICS_TREND_MAX_PERIODS[bucket_norm]),
+    )
+    labels = _metrics_trend_labels(bucket=bucket_norm, periods=period_count)
+    counts: dict[str, dict[str, int]] = {
+        label: _empty_discovery_trend_slot() for label in labels
+    }
+    bucket_ends = {
+        label: _metrics_trend_bucket_end(label, bucket_norm) for label in labels
+    }
+
+    with _connect() as conn:
+        rows = conn.execute(
+            """WITH first_seen AS (
+                   SELECT identity_id, MIN(created_at) AS first_at
+                     FROM campaign_candidates
+                    WHERE env = ? AND identity_id IS NOT NULL
+                    GROUP BY identity_id
+               ),
+               latest AS (
+                   SELECT c.identity_id,
+                          c.candidate_status,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY c.identity_id
+                              ORDER BY c.created_at DESC, c.id DESC
+                          ) AS rn
+                     FROM campaign_candidates c
+                    WHERE c.env = ? AND c.identity_id IS NOT NULL
+               )
+               SELECT f.identity_id,
+                      f.first_at,
+                      l.candidate_status
+                 FROM first_seen f
+                 JOIN latest l ON l.identity_id = f.identity_id AND l.rn = 1""",
+            (env_norm, env_norm),
+        ).fetchall()
+        ids = [int(r["identity_id"]) for r in rows]
+        pipeline_by_id = _batch_registry_pipeline_detail(conn, ids, env=env_norm)
+
+    for row in rows:
+        first_at = _parse_metrics_trend_ts(row["first_at"])
+        if first_at is None:
+            continue
+        if first_at.tzinfo is None:
+            first_at = first_at.replace(tzinfo=_dt.timezone.utc)
+        iid = int(row["identity_id"])
+        pipeline = pipeline_by_id.get(iid, {})
+        for label, end_at in bucket_ends.items():
+            if first_at <= end_at:
+                _accumulate_discovery_summary_slot(
+                    counts[label],
+                    candidate_status=row["candidate_status"],
+                    pipeline=pipeline,
+                )
+
+    def _count_point(label: str, key: str) -> dict[str, Any]:
+        return {"bucket": label, "value": float(counts[label][key])}
+
+    def _rate_point(label: str, num_key: str, den_key: str) -> dict[str, Any]:
+        den = counts[label][den_key]
+        num = counts[label][num_key]
+        value = (num / den) if den else None
+        return {"bucket": label, "value": value}
+
+    series: dict[str, list[dict[str, Any]]] = {}
+    count_keys = (
+        "discovered_total",
+        "passed_count",
+        "pending_count",
+        "rejected_count",
+        "initial_outreach_draft_count",
+        "initial_outreach_reply_count",
+        "pending_reply_count",
+    )
+    for key in count_keys:
+        series[key] = [_count_point(label, key) for label in labels]
+    series["pass_rate"] = [
+        _rate_point(label, "passed_count", "discovered_total") for label in labels
+    ]
+    series["initial_outreach_reply_rate"] = [
+        _rate_point(label, "initial_outreach_reply_count", "initial_outreach_draft_count")
+        for label in labels
+    ]
+    return {
+        "env": env_norm,
+        "bucket": bucket_norm,
+        "periods": period_count,
+        "series": series,
+    }
+
+
 _METRICS_TREND_BUCKETS: Final[frozenset[str]] = frozenset(
     {"day", "week", "month", "year"},
 )
@@ -1737,6 +2034,7 @@ def upsert_campaign_config(*, campaign_id: str, env: str = "LIVE", **fields: Any
     json_cols = {
         "commission_band": "commission_band_json",
         "deliverable_platforms": "deliverable_platforms_json",
+        "campaign_deliverables_json": "campaign_deliverables_json",
         "sku_whitelist": "sku_whitelist_json",
         "variant_candidates": "variant_candidates_json",
         "followup_intervals": "followup_intervals_json",
@@ -1877,6 +2175,9 @@ def get_campaign_config(campaign_id: str, *, env: Optional[str] = None) -> Optio
     out = dict(row)
     out["commission_band"] = _jl(out.pop("commission_band_json", "{}"), {})
     out["deliverable_platforms"] = _jl(out.pop("deliverable_platforms_json", "[]"), [])
+    out["campaign_deliverables_json"] = _jl(
+        out.pop("campaign_deliverables_json", "[]"), [],
+    )
     out["sku_whitelist"] = _jl(out.pop("sku_whitelist_json", "[]"), [])
     out["variant_candidates"] = _jl(out.pop("variant_candidates_json", "[]"), [])
     out["followup_intervals"] = _jl(out.pop("followup_intervals_json", "{}"), {})
@@ -3399,7 +3700,7 @@ def _recompute_goals_inner(
     now = _now()
     n = 0
     for goal in all_goals():
-        missing = goal.missing(state)
+        missing = goal.missing(state, ctx)
         if goal.is_skipped(state, ctx):
             status = "skipped"
         elif goal.is_satisfied(state, ctx):
@@ -3733,6 +4034,37 @@ def list_events(
     return _safe("list_events", _do) or []
 
 
+def list_outbound_sent_events(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    env: str = "LIVE",
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Read ``outbound_sent`` events for implicit-accept thread evidence.
+
+    Targeted query avoids truncating older brand terms when ``list_events``
+    returns only the newest traffic for a busy campaign.
+    """
+    limit = max(1, min(int(limit), 500))
+    sql = (
+        "SELECT id, identity_id, campaign_id, event_type, goal, lane, "
+        "actor, ts, payload_json, env FROM kol_conversation_events "
+        "WHERE env = ? AND identity_id = ? AND campaign_id = ? "
+        "AND event_type = 'outbound_sent' "
+        "ORDER BY id DESC LIMIT ?"
+    )
+
+    def _do() -> list[dict[str, Any]]:
+        with _connect() as conn:
+            rows = conn.execute(
+                sql, (env, int(identity_id), campaign_id, limit),
+            ).fetchall()
+            return _rows_to_event_dicts(rows)
+
+    return _safe("list_outbound_sent_events", _do) or []
+
+
 def _rows_to_event_dicts(rows: list[Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for r in rows:
@@ -3939,6 +4271,32 @@ def reply_chase_hint(
     }
 
 
+def find_inbound_reply_context(
+    *,
+    message_id: str,
+    env: str = "LIVE",
+) -> dict[str, Any] | None:
+    """Resolve identity/campaign for an inbound Gmail message id."""
+
+    def _do() -> dict[str, Any] | None:
+        with _connect() as conn:
+            row = conn.execute(
+                """SELECT identity_id, campaign_id FROM kol_conversation_events
+                    WHERE env=? AND event_type='kol_inbound_reply'
+                      AND json_extract(payload_json,'$.message_id')=?
+                    ORDER BY id DESC LIMIT 1""",
+                (env, message_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "identity_id": int(row["identity_id"]),
+            "campaign_id": row["campaign_id"],
+        }
+
+    return _safe("find_inbound_reply_context", _do)
+
+
 def reply_dispatch_status(
     *,
     identity_id: int,
@@ -3981,6 +4339,22 @@ def reply_dispatch_status(
                     LIMIT 1""",
                 (identity_id, campaign_id, env, message_id),
             ).fetchone()
+            handled = conn.execute(
+                """SELECT id FROM kol_conversation_events
+                    WHERE identity_id=? AND campaign_id=? AND env=?
+                      AND event_type='kol_reply_handled'
+                      AND json_extract(payload_json,'$.message_id')=?
+                    LIMIT 1""",
+                (identity_id, campaign_id, env, message_id),
+            ).fetchone()
+            dispatch_exhausted = conn.execute(
+                """SELECT id FROM kol_conversation_events
+                    WHERE identity_id=? AND campaign_id=? AND env=?
+                      AND event_type='kol_reply_dispatch_exhausted'
+                      AND json_extract(payload_json,'$.message_id')=?
+                    LIMIT 1""",
+                (identity_id, campaign_id, env, message_id),
+            ).fetchone()
         has_pending_draft = False
         reply_draft_val: dict[str, Any] | None = None
         if fact_row:
@@ -3993,6 +4367,8 @@ def reply_dispatch_status(
         has_draft_ready = draft_ready is not None
         has_inbound = inbound is not None
         has_mailbox_mismatch_esc = mismatch_esc is not None
+        has_reply_handled = handled is not None
+        has_dispatch_exhausted = dispatch_exhausted is not None
         chase = reply_chase.evaluate_chase(
             reply_draft_fact=reply_draft_val,
             reply_draft_captured_at=None,
@@ -4005,24 +4381,33 @@ def reply_dispatch_status(
             ),
         )
         chase_context = reply_chase.chase_context_from_evaluation(chase)
-        return {
+        result = {
             "message_id": message_id,
             "has_inbound_event": has_inbound,
             "has_draft_ready_event": has_draft_ready,
             "has_pending_reply_draft": has_pending_draft,
             "has_mailbox_mismatch_escalation": has_mailbox_mismatch_esc,
+            "has_reply_handled_event": has_reply_handled,
+            "has_dispatch_exhausted_event": has_dispatch_exhausted,
             "chase_action": chase.get("recommended_action"),
             "chase_context": chase_context,
             "should_skip_poller": bool(
-                has_draft_ready or has_pending_draft or has_mailbox_mismatch_esc
+                has_draft_ready
+                or has_pending_draft
+                or has_mailbox_mismatch_esc
+                or has_reply_handled
+                or has_dispatch_exhausted
             ),
             "should_retry_gateway_only": bool(
                 has_inbound
                 and not has_draft_ready
                 and not has_pending_draft
                 and not has_mailbox_mismatch_esc
+                and not has_reply_handled
+                and not has_dispatch_exhausted
             ),
         }
+        return result
 
     return _safe("reply_dispatch_status", _do) or {
         "message_id": message_id,
@@ -4990,6 +5375,7 @@ __all__ = [
     "list_discovered_kol_registry",
     "list_escalations",
     "list_events",
+    "list_outbound_sent_events",
     "list_pending_approvals",
     "list_decided_approvals",
     "list_approved_reply_drafts",

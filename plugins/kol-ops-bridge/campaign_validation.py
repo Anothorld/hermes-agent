@@ -100,6 +100,7 @@ def validate_campaign_config(
     cap_amount = _check_compensation(v, candidate)
     _check_platforms(v, candidate)
     _check_counts(v, candidate)
+    _check_deliverables_spec(v, candidate)
     _check_audit(v, candidate)
     _check_nox_config(v, candidate)
 
@@ -260,6 +261,19 @@ def _check_counts(v: _Verdict, c: Mapping[str, Any]) -> None:
         return
     if normalized is not None:
         v.normalized["deliverable_count_per_platform"] = normalized
+
+
+def _check_deliverables_spec(v: _Verdict, c: Mapping[str, Any]) -> None:
+    raw = c.get("campaign_deliverables_json")
+    if raw is None or _is_blank(raw):
+        return
+    from . import deliverables_spec as ds
+
+    verdict = ds.validate_spec(raw)
+    if not verdict["valid"]:
+        v.fail("campaign_deliverables_json", "; ".join(verdict["errors"][:3]))
+        return
+    v.normalized["campaign_deliverables_json"] = verdict["normalized"]
 
 
 _NOX_BOOL_KEYS = frozenset({"nox_quota_enabled", "nox_supplement_enabled", "nox_cache_enabled"})

@@ -133,7 +133,11 @@ def sanitize_classifier_namespaces(
             )
 
     # --- compensation accept ---------------------------------------------
-    if "offer.agreed_terms" in offer and "accepts_terms" not in active:
+    if (
+        "offer.agreed_terms" in offer
+        and "accepts_terms" not in active
+        and "continues_without_objection" not in active
+    ):
         offer.pop("offer.agreed_terms", None)
         adjustments.append("dropped offer.agreed_terms (no accepts_terms)")
 

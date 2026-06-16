@@ -106,7 +106,7 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 3. **`route-discovery`（scoped）** — 仅对这批 `identity_ids` 写 `identity.outreach_path` 并 `select-candidates`；**不会**把池内其余 `discovered` 候选一并提升为已批准（**不再**重复调用 `select-candidates`，避免大批量超时）；随后 best-effort 写入决策学习事件（响应体 `learning`）
 4. **缺邮箱自动排队** — 对每个 `primary_email` 为空的已批 identity，Console 同步跑 Nox Gate B（LIVE + `nox_quota_enabled`）后排队 `kol-email-discover:{env}:{id}`（与详情页「全网搜索」同路径）；Gate B 命中则跳过 browser。响应体含 `email_discovery[]`。
 5. 写 `approved` 事件 + **带重试**拉起 post-approval gateway run（`bridge_approve_timeout_sec` 默认 180s；gateway 502/503/504 自动重试 2 次）；brief 含 `# email_discovery_queued`，outreach agent 对队列中的身份 **不** 开 `contact_email_not_found` escalation，报告 `pending_email_discovery`。
-6. **邮箱发现完成后自动起草** — `run_state_reconciler` 在 `kol-email-discover:*` run 到达 `completed` 且 `primary_email` 已写入、该 identity 仍为 `selected_for_outreach`、尚无待审批草稿时，自动拉起单 KOL 的 `kol-campaign-draft:*` run（与详情页 `redraft-outreach` 同 brief/技能）。audit 记 `campaign.auto_draft_after_email_discover`。有邮箱的 KOL 仍在步骤 4 的 outreach run 中同步起草，不等待队列。
+6. **邮箱发现完成后自动起草** — `run_state_reconciler` 在 `kol-email-discover:*` run 到达 `completed` 且 `primary_email` 已写入、该 identity 仍为 `selected_for_outreach`、尚无待审批草稿时，自动拉起单 KOL 的 `kol-campaign-draft:{env}:{campaign_id}:{identity_id}` run（与详情页 `redraft-outreach` 同 brief/技能；**每 KOL 独立 session**，避免同活动多 KOL 起草共用长 transcript）。audit 记 `campaign.auto_draft_after_email_discover`。有邮箱的 KOL 仍在步骤 4 的 outreach run 中同步起草，不等待队列。
 
 若 CAL 已更新但 gateway 启动失败，audit 会记 `campaign.approve_shortlist_gateway_failed`；操作员可再次点击批准（idempotent）或联系工程。
 
@@ -158,3 +158,28 @@ KOL 详情页 **生成待审批草稿** → `POST /campaigns/{cid}/identities/{i
 | `gateway_concurrency_limit` (429) | Hermes Gateway 同时运行 run 数达上限（默认 10）。Console 会自动重试约 40s；仍失败时提示等待或在 Agent 会话面板停止不需要的任务 |
 
 实现：`gateway_client.start_run_with_retry` + `gateway_http.http_exception_from_gateway_start`。
+
+## 隐式同意与合同终局确认（2026-06）
+
+全局默认开启（少数 campaign 可设 `strict_explicit_accept=true` 关闭）：
+
+| 行为 | 操作员可见效果 |
+|------|----------------|
+| KOL 未明说 agree 但持续配合（选色、地址、timing 等） | 不再反复发「Does that work for you?」式 compensation 确认信 |
+| 双方未谈 paid | 默认 `gifted` 置换路径 |
+| 条款终局 | 发合同 = 最后一次确认；签署即代表同意附件中的 deliverables + compensation |
+
+Bridge 确定性模块：`implicit_accept_policy.py`（classifier 写入后自动应用）。
+Gmail 发出后会记录真实 `sent_body` 供策略判断。详见 `agent_prj/docs/kol-campaign-config-upsert.md` 中 policy 字段表。
+
+**Console 配置入口**：产品详情页 → 「编辑 campaign_config」→ **合作确认策略** 区块（`implicit_accept_enabled` / `defer_terms_to_contract` / `strict_explicit_accept`）。
+
+**结构化交付（Phase 2）**：启动 campaign Step C → **用自然语言描述交付内容** → **解析预览** → 确认表格后启动。写入 `campaign_deliverables_json`（含 ad code 等 extras）；未填 NL 时仍只用 platform checkbox，行为与旧版一致。合同 readiness 与 contract-coordinator 读 `GET …/resolved-deliverables` → `rows`。
+
+**Console PATCH**（`EditCampaignConfigPanel`）可改 `implicit_accept_enabled` / `defer_terms_to_contract` / `strict_explicit_accept` 与 `campaign_deliverables_json`。
+
+**运维 backfill**（历史线程缺 `offer.last_outbound_terms_proposed` 时）：
+
+```bash
+KOL_BACKFILL_DRY_RUN=1 python hermes-agent/plugins/kol-ops-bridge/scripts/backfill_outbound_terms.py
+```

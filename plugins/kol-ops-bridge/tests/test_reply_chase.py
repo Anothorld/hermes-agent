@@ -127,3 +127,30 @@ def test_escalate_thread_fork(bridge_pkg):
         event_thread_ids=set(),
     )
     assert out["recommended_action"] == "escalate_thread_fork"
+
+
+def test_regenerate_cold_outreach_first_gmail_reply(bridge_pkg):
+    """LIVE:751 pattern — approved cold-outreach draft, KOL replies on real Gmail thread."""
+    rc = bridge_pkg.reply_chase
+    fact = {
+        "decision": "approved",
+        "source_message_id": "draft:outreach_PR0037-20260609_751",
+        "gmail_draft": {"draft_id": "d1", "thread_id": "outreach_PR0037-20260609_751"},
+        "draft": {
+            "thread_id": "outreach_PR0037-20260609_751",
+            "subject": "Re: collab",
+            "body": "x",
+            "to": "designer@example.com",
+        },
+    }
+    out = rc.evaluate_chase(
+        reply_draft_fact=fact,
+        reply_draft_captured_at="2026-06-10T17:50:00+00:00",
+        inbound_message_id="19ebd5c293ec1e41",
+        inbound_thread_id="19eb2b8c1a50cc14",
+        event_thread_ids=set(),
+        now=dt.datetime(2026, 6, 12, 19, 46, tzinfo=dt.timezone.utc),
+    )
+    assert out["recommended_action"] == "regenerate"
+    assert out["prior_approved_unsent"] is True
+    assert out["chase_note"] == "cold_outreach_first_gmail_reply"

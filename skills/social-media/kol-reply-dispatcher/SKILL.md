@@ -147,7 +147,7 @@ poller from the latest ``approval.reply_draft`` fact + inbound ids:
 | `proceed_normal` | No stale draft blocking this turn |
 | `skip_same_source` | Draft already targets this inbound message |
 | `regenerate` | **Follow-up chase** — supersede stale draft for prior message |
-| `escalate_thread_fork` | Prior draft thread ≠ inbound thread with no CAL link — escalate only |
+| `escalate_thread_fork` | Prior **real Gmail** draft thread ≠ inbound thread with no CAL link — escalate only. **Not** used for cold-outreach synthetic anchors (`outreach_*` / `draft:outreach_*`) when KOL's first reply lands on a real Gmail thread (those use `regenerate`). |
 
 Optional probe (same logic): `get-reply-chase-hint --identity-id ID --campaign-id CID --message-id MID --thread-id TH --env LIVE`.
 
@@ -156,11 +156,12 @@ For each `pending_replies[i]`, fetch the bundled context:
 
 ```
 python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
+  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE> --view agent
 ```
 
-Response: `{goals, lanes, relationship, reusable_facts, campaign_config,
-campaign_facts, identity_facts, candidate, learning_hints}`. This **replaces**
+Response (`--view agent`): `{goals, relationship, reusable_facts, campaign_config,
+campaign_facts, identity_facts, candidate, learning_hints, identity}` — omits
+`lanes` (derive active work from `goals`). This **replaces**
 the legacy `get-goals` + `get-relationship` + `get-reusable-facts` +
 `get-lanes` chain — do not call those individually.
 
@@ -209,7 +210,7 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
   any key is malformed. If you hit one, abort that reply, open an
   escalation with reason `fact_namespace_violation`, log raw classifier
   output, and move on. Do **not** retry with munged keys.
-- After the write, re-fetch dispatch context with `get-dispatch-context`.
+- After the write, re-fetch dispatch context with `get-dispatch-context --view agent`.
   This is the **server's** view of which goals are now active / satisfied
   / blocked, and supersedes the classifier's `active_goals_by_lane`.
 
@@ -247,8 +248,13 @@ escalation this turn:
 
 When `recommended_action == "escalate_thread_fork"`:
 
+- Applies only when **both** prior and inbound anchors are real Gmail threads
+  with no CAL thread link — not cold-outreach synthetic anchors.
 - Open escalation `reply_thread_fork` with both thread ids in `resume_context`.
 - Do **not** auto-draft this turn.
+
+Cold-outreach first replies (`chase_note == "cold_outreach_first_gmail_reply"`)
+use `regenerate` above — proceed with Steps 4–5.6 normally.
 
 When `proceed_normal` or `skip_same_source`: no extra chase handling.
 
@@ -329,7 +335,9 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py select-draftable-plan 
   --json '{"goals": <from dispatch_context.goals as name→row map>,
             "facts": <merge reusable_facts.facts + campaign_facts>,
             "signals": <classifier signals>,
-            "meta": {}}'
+            "meta": {"campaign_config": <dispatch_context.campaign_config>},
+            "campaign_id": "<campaign_id>",
+            "env": "<env>"}'
 ```
 
 Response: `{draftable, escalate, wait, idle, primary_contributor, ...}`.
@@ -410,7 +418,7 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
 ```
 
 Group flat keys into namespaces (`offer.*` → `offer`, etc.). Re-fetch
-`get-dispatch-context` after the write.
+`get-dispatch-context --view agent` after the write.
 
 **Proposed vs committed:** deliverables-clarifier fragment mode must use
 `offer.deliverable_platforms_proposed` / `offer.deliverable_count_proposed`
@@ -591,7 +599,7 @@ skills only. **Never** use `execute_code` (including `subprocess` wrappers) or
 
 ## Pitfalls
 - The classifier's `active_goals_by_lane` is a **hint**, not the truth.
-  Always re-fetch `get-dispatch-context` after writing facts and trust the
+  Always re-fetch `get-dispatch-context --view agent` after writing facts and trust the
   server.
 - Side-topics for **wait** goals still via `approval.pending_topics` when
   no fragment was produced — never silently drop a non-draftable action.

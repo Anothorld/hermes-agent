@@ -9,6 +9,19 @@ ProcessStatus = Literal["dispatched", "skipped", "retry"]
 
 
 @dataclass(frozen=True)
+class ProcessResult:
+    """Outcome of :func:`process_message` with poller backoff hints."""
+
+    status: ProcessStatus
+    gateway_only_retry: bool = False
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.status == other
+        return NotImplemented
+
+
+@dataclass(frozen=True)
 class IdentityMatch:
     identity_id: int
     campaign_id: Optional[str]

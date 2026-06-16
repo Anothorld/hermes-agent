@@ -78,6 +78,20 @@ def test_drop_agreed_terms_without_accepts_terms(bridge_pkg):
     assert any("agreed_terms" in a for a in adj)
 
 
+def test_keep_agreed_terms_with_continues_without_objection(bridge_pkg):
+    cf = _cf(bridge_pkg)
+    ns, adj = cf.sanitize_classifier_namespaces(
+        {
+            "offer": {
+                "offer.agreed_terms": {"mode": "gifted", "source": "policy:implicit_accept"},
+            },
+        },
+        [{"name": "continues_without_objection", "confidence": 0.88}],
+    )
+    assert ns["offer"]["offer.agreed_terms"]["mode"] == "gifted"
+    assert not adj
+
+
 def test_drop_sku_locked_on_oos_inquiry(bridge_pkg):
     cf = _cf(bridge_pkg)
     ns, adj = cf.sanitize_classifier_namespaces(

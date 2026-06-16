@@ -87,6 +87,7 @@ from ..gateway_http import http_exception_from_gateway_start
 from ..variant_candidates import human_spec_text, resolve_campaign_variants
 from ..reply_draft_kind import is_initial_outreach_reply_draft as _is_initial_outreach_reply_draft
 from ..run_launch_queue import new_pending_run_id
+from ..session_ids import campaign_draft_session_id
 from ..run_registry import (
     INFLIGHT_TTL_SECONDS,
     finalize_run_id,
@@ -249,8 +250,8 @@ _APPROVAL_INSTRUCTIONS = (
     "   detect repeat shortlist clicks.\n"
     "1. Treat this run as the operator gate after candidate-pool approval.\n"
     "   Do NOT run discovery again and do NOT wait for a new inbound reply.\n"
-    "2. Read campaign_config, campaign candidates, and dispatch-context for\n"
-    "   every approved identity ID in the input. Ignore unapproved IDs.\n"
+    "2. Read campaign_config, campaign candidates, and get-dispatch-context\n"
+    "   --view agent for every approved identity ID in the input. Ignore unapproved IDs.\n"
     "3. Determine outreach path from CAL, not from prose: prefer\n"
     "   campaign_candidates.relationship_status / identity.outreach_path; if\n"
     "   absent, use relationship.total_collabs (0 => cold, >0 =>\n"
@@ -440,6 +441,14 @@ def _compose_brief(campaign_id: str, product: sqlite3.Row, body: "StartCampaignB
         lines.append(
             f"deliverable_count_per_platform: {body.deliverable_count_per_platform}"
         )
+    if body.campaign_deliverables_json:
+        import json as _json
+
+        lines.extend([
+            "",
+            "# campaign_deliverables_json (contract + scope — read-only at runtime)",
+            _json.dumps(body.campaign_deliverables_json, ensure_ascii=False, indent=2),
+        ])
     if body.audit_standards_md and body.audit_standards_md.strip():
         lines.extend(["", "# audit_standards_md", body.audit_standards_md.strip()])
     if body.compensation_mode:
@@ -544,6 +553,19 @@ def _validate_product_display_name(
 class ParseCampaignBody(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
+
+
+@router.post("/parse-deliverables")
+async def parse_deliverables_intent(
+    body: ParseCampaignBody,
+    bridge: Annotated[BridgeClient, Depends(get_bridge)],
+    _: Annotated[dict, Depends(current_user)],
+) -> dict[str, Any]:
+    """NL deliverables → structured spec preview (no DB write)."""
+    try:
+        return await bridge.parse_deliverables(body.text, env=body.env)
+    except BridgeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
 
 @router.post("/parse")
@@ -673,6 +695,13 @@ class StartCampaignBody(BaseModel):
         ge=0,
         le=100,
         description="Commission upper bound in percent (0-100).",
+    )
+    campaign_deliverables_json: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Structured deliverables rows (contract table + runtime read). "
+            "Set via Product launch NL parse preview."
+        ),
     )
 
     @model_validator(mode="after")
@@ -3480,7 +3509,7 @@ def _compose_redraft_brief(
         "",
         "## Pipeline",
         (
-            "1. Read campaign_config + dispatch-context for this single "
+            "1. Read campaign_config + get-dispatch-context --view agent for this single "
             "identity_id only. If the identity is not in this campaign's "
             "selected pool, stop and report the mismatch."
         ),
@@ -3691,7 +3720,7 @@ async def redraft_outreach(
             actor_user_id=user.get("id"),
             test_mode_to=test_mode_to,
         )
-        session_id = f"kol-campaign-draft:{env}:{campaign_id}"
+        session_id = campaign_draft_session_id(env, campaign_id, identity_id)
         try:
 
             async def _start_redraft() -> dict[str, Any]:
@@ -4026,7 +4055,7 @@ async def followup_draft(
                 else None
             ),
         )
-        session_id = f"kol-campaign-draft:{env}:{campaign_id}"
+        session_id = campaign_draft_session_id(env, campaign_id, identity_id)
         try:
 
             async def _start_followup() -> dict[str, Any]:
@@ -4141,6 +4170,7 @@ class PatchCampaignConfigBody(BaseModel):
     product_display_name: str | None = Field(default=None, min_length=2, max_length=80)
     deliverable_platforms: list[str] | None = None
     deliverable_count_per_platform: int | None = Field(default=None, ge=1, le=20)
+    campaign_deliverables_json: list[dict[str, Any]] | None = None
     audit_standards_md: str | None = Field(default=None, max_length=8_000)
     color_variant_policy: str | None = Field(default=None, max_length=2_000)
     extra_notes: str | None = Field(default=None, max_length=8_000)
@@ -4157,6 +4187,9 @@ class PatchCampaignConfigBody(BaseModel):
     nox_supplement_enabled: bool | None = None
     nox_supplement_max_calls: int | None = Field(default=None, ge=0, le=200)
     nox_cache_enabled: bool | None = None
+    implicit_accept_enabled: bool | None = None
+    defer_terms_to_contract: bool | None = None
+    strict_explicit_accept: bool | None = None
     env: str = Field(default="TEST", pattern="^(LIVE|TEST)$")
 
     @model_validator(mode="after")
@@ -4413,7 +4446,15 @@ async def contract_readiness(
     # --- campaign deliverables ---
     deliverable_platforms = camp_cfg.get("deliverable_platforms") or []
     deliverable_count = camp_cfg.get("deliverable_count_per_platform")
-    has_deliverables = bool(deliverable_platforms) and isinstance(deliverable_count, int) and deliverable_count > 0
+    resolved_rows: list[dict[str, Any]] = []
+    try:
+        resolved = await bridge.get_resolved_deliverables(campaign_id, env=env)
+        resolved_rows = resolved.get("rows") or []
+    except BridgeError:
+        resolved_rows = []
+    has_platforms = bool(deliverable_platforms) and isinstance(deliverable_count, int) and deliverable_count > 0
+    has_spec_rows = len(resolved_rows) >= 1
+    has_deliverables = has_platforms and has_spec_rows
     contract_required = bool(camp_cfg.get("contract_required", True))
 
     # --- offer (fee / compensation_mode) ---
@@ -4460,11 +4501,19 @@ async def contract_readiness(
         "campaign": {
             "deliverables": _check(
                 has_deliverables,
-                {"platforms": deliverable_platforms, "count": deliverable_count},
+                {
+                    "platforms": deliverable_platforms,
+                    "count": deliverable_count,
+                    "rows": resolved_rows,
+                },
                 label="Deliverables",
                 why=(
                     None if has_deliverables
-                    else "campaign_config 还缺 deliverable_platforms / deliverable_count_per_platform"
+                    else (
+                        "campaign_config 还缺 deliverable_platforms / deliverable_count_per_platform"
+                        if not has_platforms
+                        else "无法解析 contract deliverables 行（检查 campaign_deliverables_json 或平台配置）"
+                    )
                 ),
             ),
             "contract_required": _check(

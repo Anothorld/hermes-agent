@@ -317,7 +317,10 @@ export function LearningPage() {
         out = await pollLearningJob(out.job_id);
       }
       if (out.skipped) {
-        toast.info('已跳过', String(out.reason ?? 'unknown'));
+        toast.info(
+          '已跳过',
+          String(out.reason_label ?? out.reason ?? 'unknown'),
+        );
       } else if (out.pending) {
         toast.success('提案已创建', '请到「待审批」页批准');
       } else {

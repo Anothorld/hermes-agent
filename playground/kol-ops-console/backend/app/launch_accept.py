@@ -122,7 +122,12 @@ async def launch_or_accept(
             )
             run = result.run
             run_id = run.get("run_id") if isinstance(run, dict) else None
-            if isinstance(run_id, str) and run_id:
+            resolved_kind = kind or launch_queue._kind_from_session(session_id)
+            if (
+                isinstance(run_id, str)
+                and run_id
+                and resolved_kind != "email_discover"
+            ):
                 gateway.ensure_run_drained(run_id)
             if on_success is not None:
                 await on_success(run, result)

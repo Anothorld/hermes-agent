@@ -143,3 +143,49 @@ def test_draftable_plan_lane_filter(bridge_pkg):
     })
     assert len(out["draftable"]) == 1
     assert out["draftable"][0]["lane"] == "commerce"
+
+
+def test_defer_prefers_contract_over_compensation(bridge_pkg):
+    dr = _dr(bridge_pkg)
+    payload = {
+        "goals": {
+            "compensation_negotiation": _goal("active", "commerce"),
+            "contract_signing": _goal("active", "commerce"),
+        },
+        "facts": {},
+        "campaign_cfg": {
+            "defer_terms_to_contract": True,
+            "strict_explicit_accept": False,
+        },
+    }
+    out = dr.select_next_skill(payload)
+    assert out["primary_goal"] == "contract_signing"
+    assert out["primary_skill"] == "kol-contract-coordinator"
+    plan = dr.select_draftable_plan(payload)
+    assert plan["primary_contributor"]["goal"] == "contract_signing"
+
+
+def test_resolve_campaign_cfg_from_meta(bridge_pkg):
+    dr = _dr(bridge_pkg)
+    cfg = dr.resolve_campaign_cfg(
+        {
+            "meta": {
+                "campaign_config": {
+                    "defer_terms_to_contract": True,
+                    "strict_explicit_accept": True,
+                },
+            },
+        },
+    )
+    assert cfg["strict_explicit_accept"] is True
+
+
+def test_defer_from_campaign_id_enriched_payload(bridge_pkg):
+    """resolve_campaign_cfg prefers explicit meta over defaults."""
+    dr = _dr(bridge_pkg)
+    cfg = dr.resolve_campaign_cfg(
+        {
+            "campaign_cfg": {"defer_terms_to_contract": True, "strict_explicit_accept": False},
+        },
+    )
+    assert cfg["defer_terms_to_contract"] and not cfg["strict_explicit_accept"]

@@ -46,6 +46,8 @@ the external Web system uses to start / read / write KOL outreach state.
 | Running with no subcommand | Exit 2 + **Hint** pointing at `--help` | Add subcommand, e.g. `health`, `get-escalation` |
 | `get-escalation --campaign-id …` | Preflight **invalid_cli_args** JSON + hint | Use `--escalation-id` only; filter campaigns via `list-escalations --env LIVE` |
 | Empty terminal + exit 2 | Agent only sees **stdout** — stderr-only errors looked like blank output | Read the last stdout line for `{"error":...,"hint":...}`; all failure paths emit there |
+| Pipe / non-TTY stdout | Python block-buffers JSON until buffer full | CLI `print_json` always **flushes**; `kol-bridge-cli` uses **python3 -u**; default **compact** JSON (global `--pretty` for indentation) |
+| Dispatch reads | Full bundle repeats lanes + provenance | Agent runs: **`get-dispatch-context --view agent`** (slim goals/config/facts + embedded identity) |
 | Swallowing stderr (`2>/dev/null`) | Hides human-facing mirror only | Errors are on stdout first; keep stderr visible when debugging on a TTY |
 | Expecting direct SQLite | CLI only hits HTTP (`serve.py` must be up) | Start bridge / check `health` first |
 | Agent `execute_code` + `curl` + hardcoded `BRIDGE_KEY` | Bypasses CLI; leaks secrets | See **Agent bridge contract** below |
@@ -84,8 +86,8 @@ also append a `【KOL 追信 · <msg_id>】` block to `question_to_operator`.
   timeline events (Console calls this on inbound-context load).
 - While escalation is open, `persist-reply-draft` without `linked_escalation_id`
   returns **409** unless the CLI auto-links the sole open `awaiting_answer`
-  escalation for that identity+campaign. Dispatcher should still honor
-  `defer_escalation` in chase hint and skip persist when defer applies.
+  escalation for that identity+campaign (since 2026-06-15). Dispatcher should
+  still honor `defer_escalation` in chase hint and skip persist when defer applies.
 
 `open-escalation` accepts `--identity-id` / `--campaign-id` CLI flags (merged
 into JSON). JSON must include `reason` (or `rule_id` alias).
@@ -131,7 +133,37 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py mark-reply-handled \
   --identity-id 42 \
   --campaign-id "TS8319" \
   --detected-mailbox-user-id 1
+```
 
+`mark-reply-handled` also writes a `kol_reply_handled` CAL event (when
+`identity_id` + `campaign_id` are known or can be resolved from the inbound
+event). The Gmail inbound poller treats that event like a draft for
+idempotency — `reply_dispatch_status` sets `should_skip_poller=true` so
+handled bounces/replies are not re-dispatched in a token-burning loop.
+
+Gateway-only redispatch backoff (inbound event exists, no draft yet) is capped
+by `KOL_OPS_INBOUND_GATEWAY_ONLY_RETRY_MAX` (default `8`) in
+`poller_state.json`, with exponential backoff between ticks via
+`KOL_OPS_INBOUND_GATEWAY_RETRY_BASE_SEC`. When the cap is hit, the poller
+writes `kol_reply_dispatch_exhausted` to CAL and stops redispatching until an
+operator clears it (e.g. `unmark-reply-handled` + manual re-dispatch).
+
+**Storm cleanup:** after a retry/token incident, run
+`scripts/cleanup_inbound_reply_storm.py` (dry-run by default; ``--apply`` to
+delete zombie kol-reply sessions, write ``kol_reply_dispatch_exhausted``, and
+patch poller retry counters). Set ``HERMES_HOME`` to the orchestrator profile.
+
+`scripts/reopen_inbound_reply_dispatch.py` clears ``kol_reply_dispatch_exhausted``
+and poller retry counters for selected identities (optional ``--message-ids``),
+then triggers one gateway dispatch per inbound (``--apply``; ``--no-dispatch``
+to reopen only).
+
+**Chase policy (`reply_chase`):** cold-outreach synthetic anchors
+(`outreach_*` / `draft:outreach_*`) followed by a KOL's first reply on a real
+Gmail thread use `regenerate` (not `escalate_thread_fork`). Genuine unrelated
+Gmail thread pairs still escalate.
+
+```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py approve \
   --env LIVE \
   --fact-path approval.reply_draft \
@@ -164,6 +196,34 @@ shape is for `offer.*` negotiation facts (`offer.deliverable_count_proposed`,
 `offer.deliverable_count_per_platform`), not for `campaign_config`. If every
 platform in a map shares the same count, the API coerces it to that int; mixed
 counts are rejected. See `docs/kol-campaign-config-upsert.md`.
+
+### Implicit accept + contract-as-final-confirmation
+
+Bridge module `implicit_accept_policy.py` applies after inbound classifier
+writes (`source=email:*`). Global defaults (override per campaign):
+
+- `implicit_accept_enabled` (default on)
+- `defer_terms_to_contract` (default on) — gifted compensation may satisfy without
+  another confirmation email; `kol-compensation-negotiator` skips with
+  `defer_to_contract`; `kol-contract-coordinator` sends the contract as final terms.
+- `strict_explicit_accept=true` — opt out per campaign.
+
+Gmail reconcile persists actual `sent_body` on `outbound_sent` events and
+`offer.last_outbound_terms_proposed` for policy thread evidence. Policy reads
+`list_outbound_sent_events()`; recovery script:
+`scripts/backfill_outbound_terms.py`. Env kill-switch:
+`KOL_IMPLICIT_ACCEPT_DEFAULT=0`. Dispatch API accepts optional `campaign_cfg`
+so defer mode routes to `kol-contract-coordinator` when both commerce goals are active.
+
+### Structured deliverables (`campaign_deliverables_json`)
+
+Module `deliverables_spec.py` — intake parse (`POST /campaigns/parse-deliverables`),
+validation, `resolve_campaign_deliverables(cfg)`, and
+`GET /campaigns/{id}/resolved-deliverables` for contract assembly. Do **not**
+parse NL on the KOL reply path.
+
+Dispatch API: pass `campaign_id` + `env` (or `meta.campaign_config`) into
+`POST /logic/select-draftable-plan` so defer mode routes to contract coordinator.
 
 The wrapper requires explicit `env` for mutating calls and never imports or
 opens CAL SQLite directly.
@@ -260,6 +320,33 @@ fallback ``data/prior_touch_allowlist.json``),
 `target_spu` / `ig_url`, and batched Nox/identity facts for the console
 **红人列表** on `/metrics`.
 
+CLI (deterministic — prefer over curl):
+
+```bash
+# Full discovery pool counts (passed / pending / rejected + reply rates)
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-discovery-summary --env LIVE
+
+# Cumulative trend series (day|week|month|year)
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-discovery-summary-trend \
+  --env LIVE --bucket week --periods 12
+
+# Paginated registry table (metrics 红人列表)
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-kol-registry \
+  --env LIVE --limit 50 --offset 0
+
+# Batch fetch multiple sections in one JSON envelope
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-discovery-stats \
+  --env LIVE --sections summary,trend
+
+# Legacy mature-cohort funnel (Console gate-metrics no longer displays this)
+python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-discovery-funnel \
+  --env LIVE --days 30
+```
+
+Bridge HTTP equivalents: ``GET /kol-registry/summary``,
+``GET /kol-registry/summary/trend``, ``GET /kol-registry/funnel``,
+``GET /kol-registry/funnel/trend``.
+
 By default the bridge reads ``~/Documents/曾触达列表.xlsx`` when present
 (new spreadsheet rows apply on the next registry request; mtime-cached).
 Bundled ``data/prior_touch_allowlist.json`` is the fallback on servers
@@ -351,7 +438,7 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Learning exports (read-only) | `learning_store.py` | `export-*-events`, `export-fact-corrections`, … | `GET /learning/*` |
 | Learning apply (distill) | `learning_distill.py` | `apply-*-policy`, `apply-pricing-campaign` | `POST /learning/apply-*` |
 | Learning cron (autonomous) | `learning_jobs.py` | `run-learning-jobs`, `list-learning-job-runs` | `POST /learning/run-scheduled-jobs`, `GET /learning/job-runs` |
-| Learning LLM distill | `learning_llm.py` | *(via apply-edit-policy)* | Reuses Hermes `model.default` + `~/.hermes/.env` via `call_llm`; override with `KOL_LEARNING_LLM_*` |
+| Learning LLM distill | `learning_llm.py` | *(via apply-edit-policy)* | Uses active `HERMES_HOME` model; on failure retries root `~/.hermes` config; override with `KOL_LEARNING_LLM_*` |
 | Reject tag vocabulary | `reject_tags.py` | *(via reject body)* | `POST /approvals/.../reject` + `correction` |
 | Sent-body edit diff | `gmail_reconcile.py`, `reply_diff.py` | `reconcile_sent`, `backfill_edit_learning` | `POST /gmail/reconcile-sent`, `POST /learning/backfill-edit-learning` |
 | Gmail coordinator | `gmail_worker.py` | — | `GET /gmail/worker/status` |

@@ -8,6 +8,7 @@ import logging
 from typing import Any, Literal
 
 from ..gmail_client import GmailClient, GmailMessage, GmailUnavailable
+from .. import cal
 from ..mailbox_escalation import (
     ensure_mailbox_mismatch_escalation,
     resolve_false_positive_mailbox_mismatch,
@@ -16,12 +17,28 @@ from .deps import BridgeRequestError, InboundDeps, MatchBridgeError
 from .gateway_client import dispatcher_instructions
 from .matcher import match_identity
 from .payload import clip_text, mailbox_mismatch_signal, pending_reply_payload
-from .schemas import ProcessStatus
-from .state import register_console_run
+from .schemas import ProcessResult, ProcessStatus
+from .state import (
+    gateway_only_retry_exceeded,
+    gateway_only_retry_max,
+    load_state,
+    record_gateway_only_dispatch,
+    register_console_run,
+    save_state,
+    state_lock,
+)
 
 log = logging.getLogger(__name__)
 
 MailboxMismatchOutcome = Literal["none", "retry"]
+
+
+def _outcome(
+    status: ProcessStatus,
+    *,
+    gateway_only_retry: bool = False,
+) -> ProcessResult:
+    return ProcessResult(status=status, gateway_only_retry=gateway_only_retry)
 
 
 def _try_resolve_false_positive_mismatch(
@@ -113,7 +130,7 @@ def handle_mailbox_mismatch(
         )
     except Exception as exc:  # noqa: BLE001
         log.error("mailbox mismatch escalation failed msg=%s: %s", msg.message_id, exc)
-        return "retry"
+        return _outcome("retry")
     return "retry"
 
 
@@ -125,18 +142,18 @@ def process_message(
     deps: InboundDeps,
     mailbox_user_id: int = 0,
     mailbox_email: str = "",
-) -> ProcessStatus:
+) -> ProcessResult:
     """Return whether the message was dispatched, skipped, or should retry."""
     bridge = deps.bridge
     try:
         matched = match_identity(msg, env=env, bridge=bridge)
     except MatchBridgeError as exc:
         log.error("[retry] msg=%s identity match bridge error: %s", msg.message_id, exc)
-        return "retry"
+        return _outcome("retry")
 
     if not matched:
         log.info("[skip] msg=%s no identity match (from=%s)", msg.message_id, msg.from_addr)
-        return "skipped"
+        return _outcome("skipped")
 
     identity_id = matched.identity_id
     campaign_id = matched.campaign_id
@@ -154,7 +171,7 @@ def process_message(
         )
     except BridgeRequestError as exc:
         log.error("[retry] reply_dispatch_status failed msg=%s: %s", msg.message_id, exc)
-        return "retry"
+        return _outcome("retry")
 
     mismatch = mailbox_mismatch_signal(
         bridge,
@@ -190,18 +207,19 @@ def process_message(
                     msg.message_id,
                     exc,
                 )
-                return "retry"
+                return _outcome("retry")
         if isinstance(dispatch_status, dict) and dispatch_status.get("should_skip_poller"):
             log.info(
                 "[skip] msg=%s identity=%s poller idempotency "
-                "(draft=%s mismatch_esc=%s)",
+                "(draft=%s handled=%s mismatch_esc=%s)",
                 msg.message_id,
                 identity_id,
                 dispatch_status.get("has_pending_reply_draft")
                 or dispatch_status.get("has_draft_ready_event"),
+                dispatch_status.get("has_reply_handled_event"),
                 dispatch_status.get("has_mailbox_mismatch_escalation"),
             )
-            return "skipped"
+            return _outcome("skipped")
 
     retry_gateway_only = bool(
         isinstance(dispatch_status, dict)
@@ -254,7 +272,7 @@ def process_message(
             bridge.write_inbound_event(event_body)
         except BridgeRequestError as exc:
             log.error("[retry] bridge write_inbound_event failed for msg=%s: %s", msg.message_id, exc)
-            return "retry"
+            return _outcome("retry")
     else:
         log.info(
             "[retry-gateway] msg=%s identity=%s inbound event exists, no draft yet",
@@ -271,7 +289,38 @@ def process_message(
         mismatch=mismatch,
     )
     if mismatch_outcome == "retry" and mismatch.get("mailbox_mismatch"):
-        return "retry"
+        return _outcome("retry")
+
+    if retry_gateway_only:
+        with state_lock():
+            state = load_state()
+            if gateway_only_retry_exceeded(state, env=env, message_id=msg.message_id):
+                log.warning(
+                    "[retry-cap] msg=%s identity=%s gateway-only retries exhausted",
+                    msg.message_id,
+                    identity_id,
+                )
+                try:
+                    cal.write_event(
+                        identity_id=identity_id,
+                        campaign_id=campaign_id,
+                        event_type="kol_reply_dispatch_exhausted",
+                        actor="bridge:inbound-reply-poller",
+                        payload={
+                            "message_id": msg.message_id,
+                            "retry_cap": gateway_only_retry_max(),
+                        },
+                        env=env,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "[retry-cap] failed to write dispatch_exhausted event msg=%s: %s",
+                        msg.message_id,
+                        exc,
+                    )
+                return _outcome("skipped", gateway_only_retry=True)
+            record_gateway_only_dispatch(state, env=env, message_id=msg.message_id)
+            save_state(state)
 
     session_id = f"kol-reply:{env}:{identity_id}:{msg.message_id}"
     if retry_gateway_only:
@@ -293,7 +342,7 @@ def process_message(
         }, indent=2, ensure_ascii=False)
     except (GmailUnavailable, BridgeRequestError) as exc:
         log.error("[retry] pending_reply_payload failed msg=%s: %s", msg.message_id, exc)
-        return "retry"
+        return _outcome("retry")
 
     run_id = deps.gateway.run(
         instructions=dispatcher_instructions(),
@@ -306,7 +355,7 @@ def process_message(
             " written; will retry via should_retry_gateway_only",
             msg.message_id,
         )
-        return "retry"
+        return _outcome("retry")
 
     register_console_run(
         campaign_id=campaign_id,
@@ -324,4 +373,4 @@ def process_message(
         matched.identity_integrity,
         matched.content_risk,
     )
-    return "dispatched"
+    return _outcome("dispatched", gateway_only_retry=retry_gateway_only)

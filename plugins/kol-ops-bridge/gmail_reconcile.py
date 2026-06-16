@@ -213,6 +213,7 @@ def _process_sent_reply_row(
         operator_user_id=mailbox_user_id,
     )
     sent_message_id = str((edit_payload or {}).get("sent_message_id") or "").strip()
+    sent_body = str((edit_payload or {}).get("sent_body") or "").strip()
 
     with cal._connect() as conn:  # type: ignore[attr-defined]
         edit_already_captured = bool(
@@ -231,6 +232,15 @@ def _process_sent_reply_row(
             "thread_id": thread_id,
         }
     if write_outbound_sent:
+        outbound_payload: dict[str, Any] = {
+            "thread_id": thread_id,
+            "gmail_draft": gmail_draft,
+            "edit_learning": edit_payload,
+        }
+        if sent_body:
+            outbound_payload["sent_body"] = sent_body
+        if sent_message_id:
+            outbound_payload["sent_message_id"] = sent_message_id
         event_id = cal.write_event(
             identity_id=identity_id,
             campaign_id=campaign_id,
@@ -238,22 +248,21 @@ def _process_sent_reply_row(
             goal=goal or "outreach",
             lane=lane or "commerce",
             actor="gmail:sent-reconcile",
-            payload={
-                "thread_id": thread_id,
-                "gmail_draft": gmail_draft,
-                "edit_learning": edit_payload,
-            },
+            payload=outbound_payload,
             env=env,
         )
+        offer_facts: dict[str, Any] = {
+            "offer.outreach_sent": True,
+            "offer.outreach_sent_at": now,
+            "offer.gmail_sent_thread_id": thread_id,
+        }
+        if sent_body:
+            offer_facts["offer.last_outbound_terms_proposed"] = sent_body
         cal.write_facts(
             identity_id=identity_id,
             campaign_id=campaign_id,
             namespace="offer",
-            facts={
-                "offer.outreach_sent": True,
-                "offer.outreach_sent_at": now,
-                "offer.gmail_sent_thread_id": thread_id,
-            },
+            facts=offer_facts,
             source="gmail:sent-reconcile",
             source_event_id=event_id,
             env=env,

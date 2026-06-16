@@ -3,7 +3,7 @@ Single-identity campaign_redraft_outreach flow
 When the operator triggers a redraft for one specific identity within an existing campaign, keep the run strictly scoped to that identity_id.
 
 Observed contract from session:
-- First verify get-dispatch-context for the exact identity_id + campaign_id pair.
+- First verify `get-dispatch-context --view agent` for the exact identity_id + campaign_id pair.
 - Stop immediately if the returned candidate does not belong to that campaign context.
 - If primary_email already exists on get-identity, skip kol-email-discovery entirely.
 - Determine path from CAL relationship/reusable facts:

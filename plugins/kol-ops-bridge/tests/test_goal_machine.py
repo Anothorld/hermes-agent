@@ -115,6 +115,64 @@ def test_contract_skipped_when_not_required(cal_db):
     assert g["contract_signing"]["status"] == "skipped"
 
 
+def test_gifted_defer_satisfies_without_agreed_terms(cal_db):
+    """defer_terms_to_contract (default) lets gifted compensation satisfy without agreed_terms."""
+    cal = cal_db
+    _seed_campaign(cal)
+    iid = cal.upsert_identity(primary_handle="defer-gifted")
+    cal.write_facts(
+        identity_id=iid,
+        campaign_id=CAMPAIGN,
+        namespace="offer",
+        facts={
+            "offer.outreach_sent": True,
+            "offer.interest_signal": "confirmed",
+            "offer.sku_locked": "SKU-A",
+            "offer.color_or_variant_locked": True,
+            "offer.fit_confirmed": True,
+            "offer.deliverable_platforms": ["instagram"],
+            "offer.deliverable_count_per_platform": 1,
+            "offer.usage_rights_discussed": True,
+            "offer.compensation_mode": "gifted",
+        },
+    )
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["compensation_negotiation"]["status"] == "satisfied"
+    assert g["compensation_negotiation"]["missing_facts"] == []
+    assert g["contract_signing"]["status"] == "active"
+
+
+def test_strict_explicit_requires_agreed_terms_for_gifted(cal_db):
+    """strict_explicit_accept disables defer-without-agreed_terms path."""
+    cal = cal_db
+    _seed_campaign(cal)
+    cal.upsert_campaign_config(
+        campaign_id=CAMPAIGN,
+        strict_explicit_accept=True,
+        defer_terms_to_contract=True,
+    )
+    iid = cal.upsert_identity(primary_handle="strict-gifted")
+    cal.write_facts(
+        identity_id=iid,
+        campaign_id=CAMPAIGN,
+        namespace="offer",
+        facts={
+            "offer.outreach_sent": True,
+            "offer.interest_signal": "confirmed",
+            "offer.sku_locked": "SKU-A",
+            "offer.color_or_variant_locked": True,
+            "offer.fit_confirmed": True,
+            "offer.deliverable_platforms": ["instagram"],
+            "offer.deliverable_count_per_platform": 1,
+            "offer.usage_rights_discussed": True,
+            "offer.compensation_mode": "gifted",
+        },
+    )
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["compensation_negotiation"]["status"] == "active"
+    assert "offer.agreed_terms" in g["compensation_negotiation"]["missing_facts"]
+
+
 def test_namespace_prefix_enforced(cal_db):
     cal = cal_db
     _seed_campaign(cal)

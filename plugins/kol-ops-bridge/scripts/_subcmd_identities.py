@@ -142,10 +142,21 @@ def cmd_get_goals(args: argparse.Namespace) -> None:
 
 
 def cmd_get_dispatch_context(args: argparse.Namespace) -> None:
-    print_json(client_from_args(args).request(
+    client = client_from_args(args)
+    data = client.request(
         "GET", f"/identities/{args.identity_id}/dispatch-context",
         params={"campaign_id": args.campaign_id, "env": args.env},
-    ))
+    )
+    view = getattr(args, "view", "full") or "full"
+    if view == "agent":
+        identity = client.request(
+            "GET", f"/identities/{args.identity_id}",
+            params={"env": args.env},
+        )
+        from internal.dispatch_context_agent_view import slim_dispatch_context_for_agent
+
+        data = slim_dispatch_context_for_agent(data, identity=identity)
+    print_json(data)
 
 
 def _operator_headers(args: argparse.Namespace) -> dict[str, str] | None:
@@ -391,6 +402,15 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p)
     p.add_argument("--identity-id", type=int, required=True)
     p.add_argument("--campaign-id", required=True)
+    p.add_argument(
+        "--view",
+        choices=("full", "agent"),
+        default="full",
+        help=(
+            "Output shape: full (default) or agent (slim goals/config/facts, "
+            "embeds identity, omits lanes)."
+        ),
+    )
     p.set_defaults(func=cmd_get_dispatch_context)
 
     p = sub.add_parser(

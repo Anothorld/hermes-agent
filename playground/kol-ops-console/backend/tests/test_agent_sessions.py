@@ -103,7 +103,7 @@ def test_groups_by_session_id_newest_first() -> None:
             started_at=_ts(10), ended_at=None)
     # Session B: one closed run in CID-2.
     _insert(conn, campaign_id="CID-2", env="TEST", run_id="r-b1",
-            kind="draft", session_id="kol-campaign-draft:TEST:CID-2",
+            kind="draft", session_id="kol-campaign-draft:TEST:CID-2:99",
             started_at=_ts(40), ended_at=_ts(38))
 
     client = _build_app(conn)
@@ -114,7 +114,7 @@ def test_groups_by_session_id_newest_first() -> None:
     sessions = body["sessions"]
     assert [s["session_id"] for s in sessions] == [
         "kol-campaign:TEST:CID-1",
-        "kol-campaign-draft:TEST:CID-2",
+        "kol-campaign-draft:TEST:CID-2:99",
     ]
     a, b = sessions
     assert a["campaign_id"] == "CID-1"

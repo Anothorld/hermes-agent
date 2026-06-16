@@ -70,6 +70,11 @@ For each REQUIRED field, attempt extraction in this order:
 - `deliverable_platforms`: non-empty list, each ∈
   `{instagram, tiktok, youtube, twitter, blog}`.
 - `deliverable_count_per_platform`: dict of platform → positive int.
+- Optional `campaign_deliverables_json`: list of contract-table rows (`kind`:
+  `platform_post|ad_code|usage_rights|custom`). When present, runtime skills
+  read this instead of inferring extras from platform names. Parse at intake via
+  `POST /campaigns/parse-deliverables` or Console launch NL preview — never on
+  the KOL reply path.
 - `brief_template_id`: non-empty string referencing an existing
   template id (optional existence check via the templates endpoint;
   if endpoint absent, accept the string but flag a soft warning).

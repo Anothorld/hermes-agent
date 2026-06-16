@@ -110,7 +110,7 @@ def _edited_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def list_consumed_edit_event_ids(conn, *, env: str) -> set[int]:
-    """Event ids already tied to an approved style-learning approval."""
+    """Event ids tied to approved or auto-skipped style-learning batches."""
     rows = conn.execute(
         """SELECT fact_value FROM kol_facts_latest
             WHERE fact_namespace='approval'
@@ -124,7 +124,10 @@ def list_consumed_edit_event_ids(conn, *, env: str) -> set[int]:
             val = json.loads(row["fact_value"]) if row["fact_value"] else {}
         except (TypeError, ValueError):
             continue
-        if not isinstance(val, dict) or val.get("decision") != "approved":
+        if not isinstance(val, dict) or val.get("decision") not in (
+            "approved",
+            "auto_skipped",
+        ):
             continue
         for eid in val.get("source_event_ids") or []:
             try:
@@ -1513,6 +1516,65 @@ def propose_style_learning_approval(
     if strategy_md.strip():
         combined_md = f"{style_md.rstrip()}\n\n{strategy_md.strip()}\n"
 
+    style_actionable = bool(style_md) and is_actionable_policy_delta(style_md)
+    strategy_actionable = bool(strategy_md.strip()) and is_actionable_policy_delta(
+        strategy_md,
+    )
+    if not style_actionable and not strategy_actionable:
+        auto_record: dict[str, Any] = {
+            "decision": "auto_skipped",
+            "scope": scope,
+            "owner_user_id": owner_user_id,
+            "env": env,
+            "title": f"Edit learning ({scope} + strategy, {env})",
+            "proposed_markdown": combined_md,
+            "proposed_style_markdown": style_md,
+            "proposed_strategy_markdown": strategy_md,
+            "source_event_ids": event_ids,
+            "sample_count": len(batch),
+            "sample_identity_count": len(distinct_identity_ids),
+            "sample_campaign_count": len(distinct_campaign_ids),
+            "sample_operator_ids": distinct_operator_ids,
+            "batch_threshold": threshold,
+            "llm_used": llm_used,
+            "opened_by": updated_by,
+            "decided_by": updated_by,
+            "auto_skipped": True,
+            "style_policy_apply": {
+                "scope": scope,
+                "skipped": True,
+                "reason": "no_actionable_policy_delta",
+                "strategy_policy": {
+                    "skipped": True,
+                    "reason": "no_actionable_rules",
+                },
+            },
+        }
+        cal.write_facts(
+            identity_id=anchor_id,
+            campaign_id=None,
+            namespace="approval",
+            facts={learning_store.STYLE_LEARNING_APPROVAL_FACT: auto_record},
+            source=f"learning:auto_skip:{scope}",
+            env=env,
+        )
+        return {
+            "skipped": True,
+            "reason": "no_actionable_policy_delta",
+            "reason_label": "本批编辑未提炼出新的风格或策略规则，已自动跳过审批",
+            "approval_fact": learning_store.STYLE_LEARNING_APPROVAL_FACT,
+            "identity_id": anchor_id,
+            "scope": scope,
+            "llm_used": llm_used,
+            "sample_identity_count": len(distinct_identity_ids),
+            "sample_operator_ids": distinct_operator_ids,
+            "sample_count": len(batch),
+            "batch_threshold": threshold,
+            "remaining_edits": max(0, len(edited_available) - len(batch)),
+            "source_event_ids": event_ids,
+            "auto_skipped": True,
+        }
+
     proposal: dict[str, Any] = {
         "decision": "pending",
         "scope": scope,
@@ -1539,40 +1601,6 @@ def propose_style_learning_approval(
         source=f"learning:propose:{scope}",
         env=env,
     )
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-        from pathlib import Path as _Path
-
-        _log_path = _Path("/Users/arnold/agent_prj/.cursor/debug-cfcf5c.log")
-        _log_path.parent.mkdir(parents=True, exist_ok=True)
-        with _log_path.open("a", encoding="utf-8") as _fh:
-            _fh.write(
-                _json.dumps(
-                    {
-                        "sessionId": "cfcf5c",
-                        "runId": "pre-fix",
-                        "hypothesisId": "H3",
-                        "location": "learning_distill.py:propose_style_learning_approval",
-                        "message": "style_proposal_created",
-                        "data": {
-                            "env": env,
-                            "scope": scope,
-                            "batch_threshold": threshold,
-                            "edited_available": len(edited_available),
-                            "sample_count": len(batch),
-                            "source_event_ids_len": len(event_ids),
-                        },
-                        "timestamp": int(_time.time() * 1000),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-    except Exception:
-        pass
-    # #endregion
     return {
         "approval_fact": learning_store.STYLE_LEARNING_APPROVAL_FACT,
         "identity_id": anchor_id,

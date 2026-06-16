@@ -55,6 +55,14 @@ export type DiscoveryProgress = {
   fresh_decisions?: number;
   batch_threshold?: number;
   pending_proposals?: number;
+  last_distill_job?: {
+    run_id?: number;
+    status?: string;
+    started_at?: string;
+    finished_at?: string;
+    triggered_by?: string;
+    error_summary?: string | null;
+  } | null;
   groups?: Array<{
     group_kind: string;
     group_key: string;
@@ -198,6 +206,10 @@ export default function DiscoveryLearningPanel({
     }
   };
 
+  const lastDistillFailed =
+    progress?.last_distill_job?.status === 'error' &&
+    Boolean(progress.last_distill_job.error_summary);
+
   return (
     <section className="rounded border border-slate-200 bg-white p-3">
       <h2 className="text-sm font-medium text-slate-800">Discovery 决策学习</h2>
@@ -205,6 +217,20 @@ export default function DiscoveryLearningPanel({
         批准 / 移除 / 转移 shortlist 时填写的标签与评论会在夜间汇总成「KOL
         评判标准」（按产品与品类两条线），审批通过后自动用于下一轮 KOL 发现。
       </p>
+      {lastDistillFailed && (
+        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
+          <div className="font-medium">上次夜间蒸馏未成功</div>
+          <div className="mt-0.5">{progress?.last_distill_job?.error_summary}</div>
+          {progress?.last_distill_job?.finished_at && (
+            <div className="mt-0.5 text-amber-800">
+              时间：<TimeAgo iso={progress.last_distill_job.finished_at} />
+            </div>
+          )}
+          <div className="mt-1 text-amber-800">
+            样本已满时标签会显示「待蒸馏」；修复 LLM 后可在学习页手动运行「distill」套件。
+          </div>
+        </div>
+      )}
       {err && (
         <div className="mt-2 rounded border border-rose-300 bg-rose-50 px-2 py-1 text-[11px] text-rose-800">
           {err}
@@ -234,7 +260,9 @@ export default function DiscoveryLearningPanel({
                 {g.has_pending_proposal
                   ? ' · 待审批'
                   : g.ready_for_distill
-                    ? ' · 今夜可蒸馏'
+                    ? lastDistillFailed
+                      ? ' · 待蒸馏'
+                      : ' · 今夜可蒸馏'
                     : ''}
               </li>
             ))}

@@ -226,6 +226,25 @@ class BridgeClient:
             params["q"] = q
         return await self._req("GET", "/kol-registry", params=params)
 
+    async def get_kol_registry_summary(
+        self,
+        *,
+        env: str = "LIVE",
+    ) -> dict[str, Any]:
+        return await self._req("GET", "/kol-registry/summary", params={"env": env})
+
+    async def get_kol_registry_summary_trend(
+        self,
+        *,
+        env: str = "LIVE",
+        bucket: str = "week",
+        periods: int | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"env": env, "bucket": bucket}
+        if periods is not None:
+            params["periods"] = periods
+        return await self._req("GET", "/kol-registry/summary/trend", params=params)
+
     async def get_kol_registry_funnel(
         self,
         *,
@@ -324,6 +343,23 @@ class BridgeClient:
         return await self._req(
             "POST", "/campaigns/parse",
             json={"text": text, "env": env},
+        )
+
+    async def parse_deliverables(
+        self, text: str, env: str = "LIVE"
+    ) -> dict[str, Any]:
+        return await self._req(
+            "POST", "/campaigns/parse-deliverables",
+            json={"text": text, "env": env},
+        )
+
+    async def get_resolved_deliverables(
+        self, campaign_id: str, *, env: str = "LIVE"
+    ) -> dict[str, Any]:
+        return await self._req(
+            "GET",
+            f"/campaigns/{campaign_id}/resolved-deliverables",
+            params={"env": env},
         )
 
     async def append_campaign_facts_from_text(

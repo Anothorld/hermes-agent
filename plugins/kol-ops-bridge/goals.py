@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from .schema import GOAL_NAMES, LANES  # noqa: F401  re-export for callers
+from .implicit_accept_policy import _NON_PAYING_MODES
 
 # A "state" is a flat dict keyed by fully-qualified fact key
 # (``<namespace>.<dotted_path>``) → value. ``None`` / empty string /
@@ -72,7 +73,24 @@ class Goal:
 
     # ---- core protocol -------------------------------------------------
 
-    def missing(self, state: State) -> list[str]:
+    def missing(self, state: State, ctx: Context | None = None) -> list[str]:
+        if self.name == "compensation_negotiation" and ctx is not None:
+            if _compensation_satisfied(state, ctx):
+                return []
+            missing: list[str] = []
+            if not _present(state, "offer.compensation_mode"):
+                missing.append("offer.compensation_mode")
+            if not _present(state, "offer.agreed_terms"):
+                cfg = ctx.campaign_cfg or {}
+                mode = state.get("offer.compensation_mode")
+                defer_ok = (
+                    cfg.get("defer_terms_to_contract")
+                    and not cfg.get("strict_explicit_accept")
+                    and mode in _NON_PAYING_MODES
+                )
+                if not defer_ok:
+                    missing.append("offer.agreed_terms")
+            return missing
         return [k for k in self.required_facts if not _present(state, k)]
 
     def is_satisfied(self, state: State, ctx: Context | None = None) -> bool:
@@ -125,7 +143,6 @@ def _contract_satisfied(s: State, c: Context) -> bool:
 
 
 _PAYING_MODES = frozenset({"paid", "commission", "hybrid"})
-_NON_PAYING_MODES = frozenset({"gifted", "gifted_no_product"})
 
 
 def _payout_required(s: State, c: Context) -> bool:

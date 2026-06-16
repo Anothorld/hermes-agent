@@ -106,7 +106,7 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py ingest-confirmed-candid
 ### Not for cold outreach
 
 `kol-cold-outreach` runs **after** shortlist approval when `identity_id` already
-exists. Use `get-dispatch-context` + `persist-initial-outreach-draft` — **not**
+exists. Use `get-dispatch-context --view agent` + `persist-initial-outreach-draft` — **not**
 `ingest-confirmed-candidate`.
 
 ### Buffer fallback

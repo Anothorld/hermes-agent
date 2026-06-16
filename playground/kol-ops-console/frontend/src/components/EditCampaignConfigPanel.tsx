@@ -32,6 +32,9 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
   const [noxSupplement, setNoxSupplement] = useState<boolean | null>(null);
   const [noxSupplementMax, setNoxSupplementMax] = useState('');
   const [noxCacheTz, setNoxCacheTz] = useState('');
+  const [implicitAccept, setImplicitAccept] = useState<boolean | null>(null);
+  const [deferToContract, setDeferToContract] = useState<boolean | null>(null);
+  const [strictExplicit, setStrictExplicit] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -70,6 +73,15 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
         setNoxSupplementMax(String(cfg.nox_supplement_max_calls));
       }
       if (typeof cfg.nox_cache_timezone === 'string') setNoxCacheTz(cfg.nox_cache_timezone);
+      if (typeof cfg.implicit_accept_enabled === 'boolean') {
+        setImplicitAccept(cfg.implicit_accept_enabled);
+      }
+      if (typeof cfg.defer_terms_to_contract === 'boolean') {
+        setDeferToContract(cfg.defer_terms_to_contract);
+      }
+      if (typeof cfg.strict_explicit_accept === 'boolean') {
+        setStrictExplicit(cfg.strict_explicit_accept);
+      }
     } catch (ex) {
       setErr(errorSummary(ex));
     } finally {
@@ -175,6 +187,9 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
     if (tz) {
       payload.nox_cache_timezone = tz;
     }
+    if (implicitAccept !== null) payload.implicit_accept_enabled = implicitAccept;
+    if (deferToContract !== null) payload.defer_terms_to_contract = deferToContract;
+    if (strictExplicit !== null) payload.strict_explicit_accept = strictExplicit;
     if (Object.keys(payload).length <= 1) {
       setErr('请至少修改一个字段');
       setBusy(false);
@@ -317,6 +332,47 @@ export default function EditCampaignConfigPanel({ campaignId, env, onSaved }: Pr
                 placeholder="例如 20"
               />
             </label>
+          </div>
+          <div className="rounded border border-emerald-100 bg-emerald-50/40 p-2">
+            <div className="text-[11px] font-medium text-emerald-900">合作确认策略</div>
+            <p className="mt-1 text-[10px] text-slate-600">
+              控制 KOL 未明确说「同意」时，系统是否可视为已接受置换合作，并把最终条款留到合同签署。
+            </p>
+            <div className="mt-2 flex flex-col gap-2">
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={implicitAccept !== false}
+                  onChange={(e) => setImplicitAccept(e.target.checked)}
+                />
+                <span>
+                  允许隐式同意
+                  <span className="ml-1 text-slate-400">（默认开启；KOL 持续配合且无异议时可跳过反复确认）</span>
+                </span>
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={deferToContract !== false}
+                  onChange={(e) => setDeferToContract(e.target.checked)}
+                />
+                <span>
+                  条款终局留到合同
+                  <span className="ml-1 text-slate-400">（gifted 路径可先进入发合同，不必先写 agreed_terms）</span>
+                </span>
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={strictExplicit === true}
+                  onChange={(e) => setStrictExplicit(e.target.checked)}
+                />
+                <span>
+                  必须明确口头同意
+                  <span className="ml-1 text-slate-400">（开启后关闭隐式同意；适合高合规 campaign）</span>
+                </span>
+              </label>
+            </div>
           </div>
           <div className="rounded border border-violet-100 bg-violet-50/50 p-2">
             <div className="text-[11px] font-medium text-violet-900">NoxInfluencer 集成</div>

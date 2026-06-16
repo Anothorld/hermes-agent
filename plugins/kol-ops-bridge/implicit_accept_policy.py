@@ -11,9 +11,11 @@ Pure: no DB writes here — callers merge returned facts into ``write_facts_mult
 from __future__ import annotations
 
 import datetime as _dt
+import os
 from typing import Any, Iterable, Mapping, Optional
 
 from . import classifier_facts as cf
+from . import deliverables_spec as ds
 
 _BLOCKER_SIGNALS = frozenset({
     "interest_negative",
@@ -29,6 +31,15 @@ _CONTINUATION_SIGNALS = frozenset({
     "continues_without_objection",
     "address_provided",
 })
+
+_PAYING_MODES = frozenset({"paid", "hybrid", "commission"})
+
+_QUOTE_FACT_KEYS = (
+    "offer.kol_paid_quote",
+    "offer.kol_quoted_amount",
+)
+
+_NON_PAYING_MODES = frozenset({"gifted", "gifted_no_product", "free_product"})
 
 _BRAND_TERMS_KEYWORDS = (
     "deliverable",
@@ -47,15 +58,18 @@ _BRAND_TERMS_KEYWORDS = (
     "platform",
 )
 
-_NON_PAYING_MODES = frozenset({"gifted", "gifted_no_product", "free_product"})
-
 
 def normalize_campaign_policy_cfg(cfg: Mapping[str, Any]) -> dict[str, Any]:
     """Apply global-default policy flags to a ``campaign_config`` row."""
     out = dict(cfg)
-    out["implicit_accept_enabled"] = bool(
-        cfg.get("implicit_accept_enabled", 1),
-    )
+    env_default_on = os.environ.get("KOL_IMPLICIT_ACCEPT_DEFAULT", "1").strip().lower()
+    env_global_off = env_default_on in {"0", "false", "no", "off"}
+    if env_global_off:
+        out["implicit_accept_enabled"] = False
+    else:
+        out["implicit_accept_enabled"] = bool(
+            cfg.get("implicit_accept_enabled", 1),
+        )
     out["defer_terms_to_contract"] = bool(
         cfg.get("defer_terms_to_contract", 1),
     )
@@ -86,18 +100,31 @@ def _present(state: Mapping[str, Any], key: str) -> bool:
 def has_paid_dispute(
     state: Mapping[str, Any],
     signals: Iterable[Mapping[str, Any]],
+    *,
+    incoming_offer: Mapping[str, Any] | None = None,
 ) -> bool:
+    """True when implicit gifted accept must not run (paid negotiation path)."""
+    incoming = incoming_offer or {}
     active = cf.active_signal_names(signals)
     if active & {"paid_only_stance", "proposes_rate", "counter_offer"}:
         return True
-    if _present(state, "offer.kol_paid_quote"):
-        return True
-    if state.get("offer.compensation_mode") in {"paid", "hybrid", "commission"}:
-        if _present(state, "offer.agreed_terms"):
-            return False
-        if active & {"proposes_rate", "paid_only_stance"}:
+    for key in _QUOTE_FACT_KEYS:
+        if _present(state, key) or _present(incoming, key):
             return True
+    mode = incoming.get("offer.compensation_mode") or state.get(
+        "offer.compensation_mode",
+    )
+    if mode in _PAYING_MODES:
+        return True
     return bool(state.get("approval.over_budget_request"))
+
+
+def compensation_escalation_open(goal_snapshot: Mapping[str, Any]) -> bool:
+    """True when ``compensation_negotiation`` has a blocking escalation."""
+    comp = goal_snapshot.get("compensation_negotiation") or {}
+    if not isinstance(comp, Mapping):
+        return False
+    return bool(comp.get("blocking_escalation_id"))
 
 
 def deliverables_ready(state: Mapping[str, Any]) -> bool:
@@ -114,18 +141,38 @@ def _text_has_brand_terms(text: str) -> bool:
     return hits >= 2 or ("ad code" in lower) or ("cross-post" in lower) or ("cross post" in lower)
 
 
+def _body_matches_spec(text: str, campaign_cfg: Mapping[str, Any]) -> bool:
+    lower = text.lower()
+    for phrase in ds.spec_search_phrases(ds.resolve_campaign_deliverables(campaign_cfg)):
+        if len(phrase) >= 4 and phrase in lower:
+            return True
+    return False
+
+
 def brand_proposed_terms(
     state: Mapping[str, Any],
     thread_meta: Mapping[str, Any],
+    *,
+    campaign_cfg: Mapping[str, Any] | None = None,
 ) -> bool:
     proposed = state.get("offer.last_outbound_terms_proposed")
     if isinstance(proposed, str) and proposed.strip():
-        return True
-    if isinstance(proposed, Mapping) and proposed.get("body"):
-        return True
+        if campaign_cfg and _body_matches_spec(proposed, campaign_cfg):
+            return True
+        return _text_has_brand_terms(proposed)
+    if isinstance(proposed, Mapping):
+        body = proposed.get("body")
+        if isinstance(body, str) and body.strip():
+            if campaign_cfg and _body_matches_spec(body, campaign_cfg):
+                return True
+            return _text_has_brand_terms(body)
     bodies = thread_meta.get("outbound_bodies") or []
     for body in bodies:
-        if isinstance(body, str) and _text_has_brand_terms(body):
+        if not isinstance(body, str):
+            continue
+        if campaign_cfg and _body_matches_spec(body, campaign_cfg):
+            return True
+        if _text_has_brand_terms(body):
             return True
     return False
 
@@ -134,12 +181,14 @@ def _inquiry_only_without_brand_terms(
     active: set[str],
     state: Mapping[str, Any],
     thread_meta: Mapping[str, Any],
+    *,
+    campaign_cfg: Mapping[str, Any],
 ) -> bool:
     if not (active & {"asks_budget", "asks_deliverables"}):
         return False
     if active & (_CONTINUATION_SIGNALS | {"accepts_terms"}):
         return False
-    return not brand_proposed_terms(state, thread_meta)
+    return not brand_proposed_terms(state, thread_meta, campaign_cfg=campaign_cfg)
 
 
 def should_apply_implicit_accept(
@@ -149,22 +198,27 @@ def should_apply_implicit_accept(
     campaign_cfg: Mapping[str, Any],
     thread_meta: Mapping[str, Any],
     incoming_offer: Mapping[str, Any],
+    goal_snapshot: Mapping[str, Any] | None = None,
 ) -> bool:
     if not policy_active(campaign_cfg):
         return False
-    if has_paid_dispute(state, signals):
+    if has_paid_dispute(state, signals, incoming_offer=incoming_offer):
+        return False
+    if goal_snapshot and compensation_escalation_open(goal_snapshot):
         return False
     if state.get("offer.interest_signal") == "declined":
         return False
     if not deliverables_ready(state):
         return False
-    if not brand_proposed_terms(state, thread_meta):
+    if not brand_proposed_terms(state, thread_meta, campaign_cfg=campaign_cfg):
         return False
 
     active = cf.active_signal_names(signals)
     if active & _BLOCKER_SIGNALS:
         return False
-    if _inquiry_only_without_brand_terms(active, state, thread_meta):
+    if _inquiry_only_without_brand_terms(
+        active, state, thread_meta, campaign_cfg=campaign_cfg,
+    ):
         return False
     if not (active & _CONTINUATION_SIGNALS):
         return False
@@ -196,6 +250,9 @@ def build_implicit_agreed_terms(
             "platforms": platforms,
             "count_per_platform": count,
         }
+    spec = ds.resolve_campaign_deliverables(campaign_cfg)
+    if spec:
+        snapshot["deliverables_spec"] = spec
     if source_message_id:
         snapshot["evidence_message_ids"] = [source_message_id]
     return snapshot
@@ -232,6 +289,9 @@ def build_contract_signed_agreed_terms(
             "platforms": platforms,
             "count_per_platform": count,
         }
+    spec = ds.resolve_campaign_deliverables(campaign_cfg)
+    if spec:
+        snapshot["deliverables_spec"] = spec
     if campaign_cfg.get("product_unit_price") is not None:
         snapshot["product_value"] = campaign_cfg["product_unit_price"]
     return snapshot
@@ -272,6 +332,7 @@ def merge_policy_facts(
     campaign_cfg: Mapping[str, Any],
     thread_meta: Mapping[str, Any],
     source: str,
+    goal_snapshot: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], Optional[dict[str, Any]]]:
     """Augment classifier/skill namespaces with policy-derived offer facts.
 
@@ -295,14 +356,30 @@ def merge_policy_facts(
             campaign_cfg=cfg,
             thread_meta=thread_meta,
             incoming_offer=offer,
+            goal_snapshot=goal_snapshot,
         ):
-            if not offer.get("offer.compensation_mode") and not has_paid_dispute(state, signals):
+            existing_mode = offer.get("offer.compensation_mode") or state.get(
+                "offer.compensation_mode",
+            )
+            if (
+                not existing_mode
+                and not has_paid_dispute(state, signals, incoming_offer=offer)
+            ):
                 offer["offer.compensation_mode"] = cfg["default_compensation_mode"]
                 adjustments.append(
                     f"set offer.compensation_mode={cfg['default_compensation_mode']} "
                     "(implicit accept default)"
                 )
-            if not offer.get("offer.agreed_terms"):
+            effective_mode = (
+                offer.get("offer.compensation_mode")
+                or state.get("offer.compensation_mode")
+                or cfg["default_compensation_mode"]
+            )
+            if effective_mode in _PAYING_MODES:
+                adjustments.append(
+                    f"skipped offer.agreed_terms (paying mode={effective_mode})"
+                )
+            elif not offer.get("offer.agreed_terms"):
                 offer["offer.agreed_terms"] = build_implicit_agreed_terms(
                     state=state,
                     campaign_cfg=cfg,
@@ -337,6 +414,7 @@ __all__ = [
     "normalize_campaign_policy_cfg",
     "policy_active",
     "has_paid_dispute",
+    "compensation_escalation_open",
     "deliverables_ready",
     "brand_proposed_terms",
     "should_apply_implicit_accept",

@@ -68,6 +68,7 @@ playground/learning/install_learning_cron.sh
 - **按范围分表**（`edit_stats_by_scope`）分别统计 `company_style` 与各 `user_style` 操作员。已生成、待审批的提案会占用一批样本（`edited_queued_in_pending`），**仅批准**后才从池子消费；驳回后样本回到队列。
 - 批准合并默认 `KOL_STYLE_LEARNING_MERGE_MODE=llm_compress`（**LLM 智能合并**；失败回退 patch）；预览用 patch 近似（`preview_note`）。`### Context notes` **不会写入新批准**；**08:04 之前已写入的存量**需一次性 `POST /learning/sanitize-policy-metadata`（scope=`reply_strategy`, env=LIVE）清理。无规则段跳过（`merge_skipped`）。
 - **每条事件 = 一次「Agent 草稿→操作员终稿」的 diff**，并附带该 KOL+campaign 的会话时间线（最多 30 条）+ 当前 facts，作为 1 个 LLM 样本。
+- 若 LLM 蒸馏后 **风格与策略段落均无新规则**（仅「No new … rules」类占位），Bridge **自动跳过审批**（`decision=auto_skipped`），本批 `source_event_ids` 仍会计入已消费，不会反复生成空提案。
 - 10 条事件可能来自 10 个不同 KOL，也可能少于 10 个（同一 KOL 多次编辑各占一条）。提案卡片展示 `sample_identity_count`（涉及多少位 KOL）。
 
 ## 收敛度量（是否「越来越准」）
@@ -155,4 +156,6 @@ playground/learning/install_learning_cron.sh
 
 **数据为空 / 仍显示「今夜可蒸馏」：** 若 Bridge `GET /health` 的 `db_path` 指向 `profiles/.../home/.hermes/kol-ops-bridge/cal.db` 而生产样本在 `~/.hermes/kol-ops-bridge/cal.db`，说明进程 `HOME` 与 `HERMES_HOME` 不一致。`start.sh bridge` 与 `run_learning_cron.sh` 会导出 `HERMES_KOL_OPS_CAL_DB=$HERMES_HOME/kol-ops-bridge/cal.db`；手动启动 Bridge 时也应设置该变量或保证 `HERMES_HOME` 指向含数据的目录。
 
-**必须 LLM：** 编辑学习提案不再静默回退「规则聚合」。LLM 失败返回 503 并说明原因。Bridge 优先用 `~/.hermes` 解析出的 HTTP 端点（无需 Gateway agent 会话）；standalone `serve.py` 启动时会加载 `~/.hermes/.env` 与 `plugins/kol-ops-bridge/.env`。若 HTTPS 报证书错误，在 bridge venv 安装 `certifi`；若要走 `call_llm`，还需安装 `openai`。
+**样本已满但未生成提案：** 「今夜可蒸馏 / 待蒸馏」仅表示**未消费样本数 ≥ 批次阈值**，不保证夜间 LLM 已成功。学习页 Discovery 面板会展示 `last_distill_job`（最近一次 `apply_discovery_policy` 的 `ok` / `error` / `skipped`）；`error` 时常见原因为 Zenmux / 本地代理 **402 配额用尽** 或 **429 限流**（审计：`GET /learning/job-runs?job_name=apply_discovery_policy`，日志：`~/.hermes/logs/learning/nightly.log`）。修复模型配额后，可在学习页手动运行 **distill** 套件补跑；Bridge 会对每组单独蒸馏，单组 LLM 失败不会阻塞其他组。
+
+**必须 LLM：** 编辑学习提案不再静默回退「规则聚合」。LLM 失败返回 503 并说明原因。Bridge 优先用当前 `HERMES_HOME`（profile）解析出的 HTTP 端点；若 profile 本地代理（如 `127.0.0.1:4000`）失败，会自动回退根目录 `~/.hermes/config.yaml` 的模型。standalone `serve.py` 启动时会加载 `~/.hermes/.env` 与 `plugins/kol-ops-bridge/.env`。若 HTTPS 报证书错误，在 bridge venv 安装 `certifi`；若要走 `call_llm`，还需安装 `openai`。可用 `KOL_LEARNING_LLM_*` 覆盖。

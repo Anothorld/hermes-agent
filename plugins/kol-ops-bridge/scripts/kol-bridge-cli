@@ -3,4 +3,4 @@
 # Use this in gateway terminal commands (macOS has no bare `python` shim).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec python3 "${SCRIPT_DIR}/kol_bridge_tool.py" "$@"
+exec python3 -u "${SCRIPT_DIR}/kol_bridge_tool.py" "$@"

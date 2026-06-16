@@ -48,7 +48,7 @@ Never sends mail or creates Gmail drafts directly.
 
 ```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <id> --campaign-id <cid> --env <env>
+  --identity-id <id> --campaign-id <cid> --env <env> --view agent
 
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-timeline \
   --identity-id <id> --campaign-id <cid> --env <env> --limit 100

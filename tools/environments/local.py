@@ -309,6 +309,18 @@ def _make_run_env(env: dict) -> dict:
 
     _inject_context_hermes_home(run_env)
 
+    # Merge profile-scoped ~/.hermes/.env keys missing from the subprocess env.
+    # Terminal subprocesses do not inherit ContextVar-based session state; bridge
+    # keys loaded only into profile .env were invisible to ``terminal`` runs.
+    try:
+        from hermes_cli.config import load_env as _load_profile_env
+
+        for key, value in _load_profile_env().items():
+            if value and (key not in run_env or not run_env.get(key)):
+                run_env[key] = value
+    except Exception:
+        pass
+
     # Per-profile HOME isolation: redirect system tool configs (git, ssh, gh,
     # npm …) into {HERMES_HOME}/home/ when that directory exists.  Only the
     # subprocess sees the override — the Python process keeps the real HOME.

@@ -119,11 +119,16 @@ Tool mcp_chrome_devtools_navigate_page returned error:
    - **`kol-email-discover:*` 额外拦截**：`veedcrawl_*`（视频/Profile 补充工具，非邮箱发现）、
      `delegate_task`（子代理空参误调 veedcrawl 浪费 iteration）、`execute_code` 浏览器绕过、
      `terminal` DuckDuckGo/HTML 抓取。Tier 2 只允许内置 `browser_*`。
+3. **Draft / redraft session 隔离**（2026-06 token 优化）：单 KOL 起草/跟进/精修 run 使用
+   `kol-campaign-draft:{env}:{campaign_id}:{identity_id}`，避免同活动多 KOL 共用长 transcript。
+   Agent Dock 仍按 `kol-campaign-draft:` 前缀着色。
+4. **Bridge dispatch 读取**：gateway brief / SKILL Procedure 使用
+   `get-dispatch-context --view agent`（compact JSON；省略 lanes，嵌入 identity）。
    - **`kol-campaign:*` 发现 run 额外拦截 `delegate_task`**（2026-06-08 SEB8010）：
      模型曾把「公网搜 150 handles」整包 `delegate_task` 出去，子代理空参循环 `veedcrawl_*`
      且 LLM 挂起，父 run 同步卡在 `delegate_task` 数分钟。发现必须在**当前 run** 用
      `browser_*` + CAL 持久化；数量不足靠 Console `/rediscover` 自动重试，不靠子代理。
-3. **运维提醒**：机器重置或重做 WSL 配置后，若再 `hermes mcp add chrome_devtools`，务必指向**可达**的 CDP；
+5. **运维提醒**：机器重置或重做 WSL 配置后，若再 `hermes mcp add chrome_devtools`，务必指向**可达**的 CDP；
    本机标准浏览器路径就是内置 `browser_*` + tab-pool，不需要 chrome-devtools MCP。
 
 ## 调试 Chrome「CDP 退化」也会卡空标签页（POVISON 694 第二层）

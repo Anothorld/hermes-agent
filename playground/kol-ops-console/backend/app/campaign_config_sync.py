@@ -98,6 +98,8 @@ def build_campaign_config_upsert_body(
         upsert_body["deliverable_count_per_platform"] = (
             body.deliverable_count_per_platform
         )
+    if body.campaign_deliverables_json:
+        upsert_body["campaign_deliverables_json"] = body.campaign_deliverables_json
     if body.audit_standards_md and body.audit_standards_md.strip():
         upsert_body["audit_standards_md"] = body.audit_standards_md.strip()
     if body.compensation_mode:

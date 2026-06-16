@@ -51,6 +51,20 @@ class _QueueItem:
     future: asyncio.Future[LaunchResult] = field(compare=False)
 
 
+async def drain_email_discover_run(run: dict[str, Any]) -> None:
+    """Hold email-discover slot until gateway SSE closes."""
+    run_id = run.get("run_id") if isinstance(run, dict) else None
+    if not isinstance(run_id, str) or not run_id or run_id.startswith("pending:"):
+        return
+    from .gateway_client import GatewayClient
+
+    gw = GatewayClient()
+    try:
+        await gw.drain_run_events(run_id)
+    finally:
+        await gw.aclose()
+
+
 class RunLaunchQueue:
     """Single-process launch scheduler with per-kind concurrency caps."""
 
@@ -117,7 +131,17 @@ class RunLaunchQueue:
     ) -> LaunchResult:
         """Enqueue or run immediately depending on capacity and settings."""
         s = get_settings()
+        resolved_kind = kind or self._kind_from_session(session_id)
         if not s.gateway_launch_queue_enabled:
+            if resolved_kind == "email_discover":
+                await self._email_sem.acquire()
+                try:
+                    run = await start_fn()
+                    perf.launch_started_total += 1
+                    await drain_email_discover_run(run)
+                    return LaunchResult(run=run)
+                finally:
+                    self._email_sem.release()
             run = await start_fn()
             perf.launch_started_total += 1
             return LaunchResult(run=run)
@@ -199,6 +223,9 @@ class RunLaunchQueue:
             raise last_exc
         raise GatewayError(502, "launch queue start failed without detail")
 
+    async def _drain_email_discover_run(self, run: dict[str, Any]) -> None:
+        await drain_email_discover_run(run)
+
     async def _worker_loop(self) -> None:
         while True:
             item = await self._queue.get()
@@ -237,6 +264,11 @@ class RunLaunchQueue:
                             waited_sec=waited,
                         )
                     )
+                # Hold email-discover semaphore until SSE closes, but return
+                # run_id to callers immediately (approve/discover HTTP must not
+                # block for the full browser run).
+                if item.kind == "email_discover":
+                    await self._drain_email_discover_run(run)
             except GatewayError as exc:
                 if is_gateway_concurrency_limit(exc):
                     perf.launch_429_total += 1

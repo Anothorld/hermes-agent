@@ -56,6 +56,24 @@ def _resolve_hermes_runtime() -> Optional[dict[str, str]]:
         return None
 
 
+def _resolve_root_hermes_runtime() -> Optional[dict[str, str]]:
+    try:
+        from .internal.learning_hermes_runtime import resolve_root_openai_compatible_runtime
+
+        return resolve_root_openai_compatible_runtime()
+    except Exception as exc:
+        logger.debug("Root Hermes runtime resolve failed: %s", exc)
+        return None
+
+
+def _runtime_signature(runtime: dict[str, str]) -> dict[str, str]:
+    return {
+        "base_url": str(runtime.get("base_url") or ""),
+        "model": str(runtime.get("model") or ""),
+        "source": str(runtime.get("source") or ""),
+    }
+
+
 def invoke_learning_llm(
     prompt: str,
     *,
@@ -107,6 +125,22 @@ def invoke_learning_llm(
                     model=runtime["model"],
                 )
             except Exception as exc:
+                fallback = _resolve_root_hermes_runtime()
+                if fallback and _runtime_signature(fallback) != _runtime_signature(runtime):
+                    try:
+                        return _invoke_openai_compatible(
+                            prompt,
+                            base_url=fallback["base_url"],
+                            api_key=fallback["api_key"],
+                            model=fallback["model"],
+                        )
+                    except Exception as fallback_exc:
+                        raise LearningLlmError(
+                            "Hermes-configured LLM HTTP call failed "
+                            f"({runtime.get('base_url')} / {runtime.get('model')}): {exc}; "
+                            f"root fallback ({fallback.get('base_url')} / "
+                            f"{fallback.get('model')}) also failed: {fallback_exc}",
+                        ) from fallback_exc
                 raise LearningLlmError(
                     "Hermes-configured LLM HTTP call failed "
                     f"({runtime.get('base_url')} / {runtime.get('model')}): {exc}",

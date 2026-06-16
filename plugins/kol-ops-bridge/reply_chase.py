@@ -54,6 +54,21 @@ def _draft_thread_id(fact: Mapping[str, Any]) -> str | None:
     return thread_id
 
 
+def _cold_outreach_first_gmail_reply(
+    *,
+    prior_thread: str | None,
+    prior_source: str | None,
+    inbound_thread_id: str | None,
+) -> bool:
+    """True when KOL replied on a real Gmail thread after a cold-outreach synthetic anchor."""
+    if not inbound_thread_id or reply_draft.is_cold_outreach_anchor(inbound_thread_id):
+        return False
+    return bool(
+        reply_draft.is_cold_outreach_anchor(prior_thread)
+        or reply_draft.is_cold_outreach_anchor(prior_source)
+    )
+
+
 def _threads_linked(
     *,
     draft_thread_id: str | None,
@@ -130,6 +145,15 @@ def evaluate_chase(
     if is_approved_unsent:
         base["prior_approved_unsent"] = True
 
+    if _cold_outreach_first_gmail_reply(
+        prior_thread=prior_thread,
+        prior_source=prior_source,
+        inbound_thread_id=inbound_thread_id,
+    ):
+        base["recommended_action"] = "regenerate"
+        base["chase_note"] = "cold_outreach_first_gmail_reply"
+        return base
+
     if _threads_linked(
         draft_thread_id=prior_thread,
         inbound_thread_id=inbound_thread_id,
@@ -169,6 +193,8 @@ def chase_context_from_evaluation(evaluation: Mapping[str, Any]) -> dict[str, An
         ctx["defer_reason"] = evaluation.get("defer_reason")
     if evaluation.get("deferred_chase_action"):
         ctx["deferred_chase_action"] = evaluation.get("deferred_chase_action")
+    if evaluation.get("chase_note"):
+        ctx["chase_note"] = evaluation.get("chase_note")
     return ctx
 
 

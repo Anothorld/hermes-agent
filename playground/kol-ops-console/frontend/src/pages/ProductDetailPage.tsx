@@ -1500,8 +1500,13 @@ function LaunchCampaignForm({
     blog: false,
   });
   const [deliverableCount, setDeliverableCount] = useState<number>(1);
+  const [deliverablesNl, setDeliverablesNl] = useState('');
+  const [deliverablesSpec, setDeliverablesSpec] = useState<Array<Record<string, string>>>([]);
+  const [deliverablesParseValid, setDeliverablesParseValid] = useState<boolean | null>(null);
+  const [deliverablesParseMsg, setDeliverablesParseMsg] = useState<string | null>(null);
+  const [deliverablesParseBusy, setDeliverablesParseBusy] = useState(false);
   const [auditStandardsMd, setAuditStandardsMd] = useState<string>('');
-  const [compensationMode, setCompensationMode] = useState<'gifted' | 'paid' | 'commission' | 'hybrid'>('paid');
+  const [compensationMode, setCompensationMode] = useState<'gifted' | 'paid' | 'commission' | 'hybrid'>('gifted');
   const [commissionMinPct, setCommissionMinPct] = useState<number | ''>('');
   const [commissionMaxPct, setCommissionMaxPct] = useState<number | ''>('');
   const [busy, setBusy] = useState(false);
@@ -1609,6 +1614,64 @@ function LaunchCampaignForm({
     }
   };
   const productUrlReady = isHttpUrl(product.url);
+  const applyDeliverablesParse = (out: {
+    deliverable_platforms?: string[];
+    deliverable_count_per_platform?: number | null;
+    deliverables_spec?: Array<Record<string, string>>;
+    unparsed?: string[];
+    validation?: { valid?: boolean; errors?: string[] };
+  }) => {
+    const plats = out.deliverable_platforms ?? [];
+    if (plats.length > 0) {
+      setDeliverablePlatforms((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(next)) {
+          next[key] = plats.includes(key);
+        }
+        return next;
+      });
+    }
+    if (typeof out.deliverable_count_per_platform === 'number' && out.deliverable_count_per_platform >= 1) {
+      setDeliverableCount(out.deliverable_count_per_platform);
+    }
+    if (Array.isArray(out.deliverables_spec)) {
+      setDeliverablesSpec(out.deliverables_spec as Array<Record<string, string>>);
+    } else {
+      setDeliverablesSpec([]);
+    }
+    const valid = out.validation?.valid === true;
+    setDeliverablesParseValid(valid);
+    const notes: string[] = [];
+    if (valid) notes.push('解析成功，请核对下方表格');
+    else if (out.validation?.errors?.length) notes.push(out.validation.errors.join('；'));
+    if (out.unparsed?.length) notes.push(`未识别：${out.unparsed.join('；')}`);
+    setDeliverablesParseMsg(notes.join(' · ') || null);
+  };
+
+  const parseDeliverablesNl = async () => {
+    const text = deliverablesNl.trim();
+    if (!text) {
+      setDeliverablesParseMsg('请先输入交付描述');
+      return;
+    }
+    setDeliverablesParseBusy(true);
+    setDeliverablesParseMsg(null);
+    try {
+      const out = await api.post<{
+        deliverable_platforms?: string[];
+        deliverable_count_per_platform?: number | null;
+        deliverables_spec?: Array<Record<string, string>>;
+        unparsed?: string[];
+        validation?: { valid?: boolean; errors?: string[] };
+      }>('/campaigns/parse-deliverables', { text, env });
+      applyDeliverablesParse(out);
+    } catch (ex) {
+      setDeliverablesParseMsg(errorSummary(ex));
+    } finally {
+      setDeliverablesParseBusy(false);
+    }
+  };
+
   const platforms = Object.entries(deliverablePlatforms)
     .filter(([, v]) => v)
     .map(([k]) => k);
@@ -1636,6 +1699,9 @@ function LaunchCampaignForm({
   if (platforms.length === 0) preflightBlockers.push('deliverable_platforms 至少选择一个');
   if (!Number.isFinite(deliverableCount) || deliverableCount < 1) {
     preflightBlockers.push('deliverable_count_per_platform 至少为 1');
+  }
+  if (deliverablesNl.trim() && deliverablesParseValid !== true) {
+    preflightBlockers.push('已填写交付描述但未解析成功 — 请点击「解析预览」并确认表格');
   }
   const needsCommission = compensationMode === 'commission' || compensationMode === 'hybrid';
   if (needsCommission) {
@@ -1718,6 +1784,9 @@ function LaunchCampaignForm({
       deliverable_platforms: platforms,
       deliverable_count_per_platform: deliverableCount,
     };
+    if (deliverablesSpec.length > 0) {
+      body.campaign_deliverables_json = deliverablesSpec;
+    }
     if (testModeTo.trim()) body.test_mode_to = testModeTo.trim();
     if (discoveryTargetOverride !== '') body.discovery_target_count = discoveryTargetOverride;
     if (pickedVariantIds.length > 0) body.product_variant_ids = pickedVariantIds;
@@ -2151,6 +2220,63 @@ function LaunchCampaignForm({
             />
           </label>
         </div>
+        <label className="mt-2 flex flex-col text-xs">
+          <span className="text-slate-500">
+            用自然语言描述交付内容（可选）
+            <span className="ml-1 text-slate-400">
+              例如：1 条短视频 cross-post 到 IG/TikTok/YT Shorts，并提供各平台 ad code
+            </span>
+          </span>
+          <textarea
+            value={deliverablesNl}
+            onChange={(e) => {
+              setDeliverablesNl(e.target.value);
+              setDeliverablesParseValid(null);
+            }}
+            rows={2}
+            className="rounded border px-2 py-1"
+            placeholder="解析后会自动勾选平台并生成合同 deliverables 表"
+          />
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={deliverablesParseBusy}
+              onClick={() => void parseDeliverablesNl()}
+              className="rounded border border-slate-300 bg-white px-2 py-0.5 text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {deliverablesParseBusy ? '解析中…' : '解析预览'}
+            </button>
+            {deliverablesParseMsg && (
+              <span className={deliverablesParseMsg.includes('成功') ? 'text-emerald-700' : 'text-amber-700'}>
+                {deliverablesParseMsg}
+              </span>
+            )}
+          </div>
+        </label>
+        {deliverablesSpec.length > 0 && (
+          <div className="mt-2 overflow-x-auto rounded border border-slate-200 bg-white text-[11px]">
+            <table className="min-w-full border-collapse">
+              <thead>
+                <tr className="border-b bg-slate-50 text-left text-slate-500">
+                  <th className="px-2 py-1">类型</th>
+                  <th className="px-2 py-1">kind</th>
+                  <th className="px-2 py-1">说明</th>
+                  <th className="px-2 py-1">数量</th>
+                </tr>
+              </thead>
+              <tbody>
+                {deliverablesSpec.map((row, idx) => (
+                  <tr key={idx} className="border-b last:border-0">
+                    <td className="px-2 py-1">{row.type}</td>
+                    <td className="px-2 py-1 font-mono">{row.kind || 'platform_post'}</td>
+                    <td className="px-2 py-1">{row.description || row.platform_of_uploading || '—'}</td>
+                    <td className="px-2 py-1">{row.quantity || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
         <label className="mt-2 flex flex-col text-xs">
           <span className="text-slate-500">
             audit_standards_md

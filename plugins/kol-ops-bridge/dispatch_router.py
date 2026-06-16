@@ -206,6 +206,64 @@ def _lane_action(goal_row: Mapping[str, Any], facts: Mapping[str, Any],
             "skill": skill}
 
 
+def _defer_prefers_contract(campaign_cfg: Mapping[str, Any]) -> bool:
+    """When defer is on, contract_signing wins over compensation_negotiation."""
+    return bool(campaign_cfg.get("defer_terms_to_contract")) and not bool(
+        campaign_cfg.get("strict_explicit_accept"),
+    )
+
+
+def resolve_campaign_cfg(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve policy fields for routing from explicit cfg, meta, or defaults."""
+    explicit = payload.get("campaign_cfg")
+    if isinstance(explicit, Mapping) and explicit:
+        return dict(explicit)
+    meta = payload.get("meta") or {}
+    nested = meta.get("campaign_config") if isinstance(meta, Mapping) else None
+    if isinstance(nested, Mapping) and nested:
+        return dict(nested)
+    return {
+        "defer_terms_to_contract": True,
+        "strict_explicit_accept": False,
+        "implicit_accept_enabled": True,
+    }
+
+
+def _collapse_lane_actions(
+    all_actions: list[dict[str, Any]],
+    campaign_cfg: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Pick one action row per lane (commerce defer prefers contract_signing)."""
+    by_lane: dict[str, list[dict[str, Any]]] = {}
+    for act in all_actions:
+        lane = act.get("lane")
+        if lane in LANE_PRIORITY:
+            by_lane.setdefault(lane, []).append(act)
+
+    lane_actions: dict[str, dict[str, Any]] = {}
+    for lane in LANE_PRIORITY:
+        cands = by_lane.get(lane, [])
+        if not cands:
+            continue
+        if lane == "commerce" and _defer_prefers_contract(campaign_cfg):
+            contract = next(
+                (
+                    a
+                    for a in cands
+                    if a.get("goal") == "contract_signing" and a["action"] == "draft"
+                ),
+                None,
+            )
+            if contract:
+                lane_actions[lane] = contract
+                continue
+        for act in cands:
+            prior = lane_actions.get(lane)
+            if prior is None or (prior["action"] == "idle" and act["action"] != "idle"):
+                lane_actions[lane] = act
+    return lane_actions
+
+
 def _sort_goal_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def _key(row: dict[str, Any]) -> tuple[int, int]:
         lane = row.get("lane") or "meta"
@@ -285,6 +343,7 @@ def select_draftable_plan(payload: Mapping[str, Any]) -> dict[str, Any]:
     meta: Mapping[str, Any] = payload.get("meta") or {}
     signals = payload.get("signals") or []
     lane_filter = payload.get("lane_filter")
+    campaign_cfg = resolve_campaign_cfg(payload)
 
     all_actions = _build_goal_actions(goals, facts, meta)
     draftable = [a for a in all_actions if a["action"] == "draft"]
@@ -299,17 +358,16 @@ def select_draftable_plan(payload: Mapping[str, Any]) -> dict[str, Any]:
     severity_lanes = _severity_lanes(signals)
     reversal = bool(severity_lanes & {a.get("lane") for a in draftable} - {"commerce"})
 
-    # Collapse to one row per lane for backward-compatible lane_actions map.
-    lane_actions: dict[str, dict[str, Any]] = {}
-    for act in all_actions:
-        lane = act.get("lane")
-        if lane not in LANE_PRIORITY:
-            continue
-        prior = lane_actions.get(lane)
-        if prior is None or (prior["action"] == "idle" and act["action"] != "idle"):
-            lane_actions[lane] = act
+    lane_actions = _collapse_lane_actions(all_actions, campaign_cfg)
 
     primary_contributor = draftable[0] if draftable else None
+    if _defer_prefers_contract(campaign_cfg):
+        contract = next(
+            (a for a in draftable if a.get("goal") == "contract_signing"),
+            None,
+        )
+        if contract:
+            primary_contributor = contract
     return {
         "draftable": draftable,
         "escalate": escalate,
@@ -325,11 +383,11 @@ def select_next_skill(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Pick the primary lane/skill and demote the rest to side-topics.
 
     Args:
-        payload: ``{"goals": {<goal>: {status, lane, blocking_escalation_id,
-            human_gates?}}, "facts": {<ns.key>: val}, "signals":
-            [{name, severity, lane?}], "meta": {path?}}``. ``goals`` is the
-            server goal_state (authoritative); ``facts`` are the latest facts
-            used to resolve fact-conditional goals.
+        payload: ``{"goals": {...}, "facts": {...}, "signals": [...],
+            "meta": {...}, "campaign_cfg": {...}?}``. Optional
+            ``campaign_cfg.defer_terms_to_contract`` makes
+            ``contract_signing`` win over ``compensation_negotiation`` on
+            the commerce lane when both are draftable.
 
     Returns:
         ``{"primary_lane", "primary_goal", "primary_skill", "lane_actions",
@@ -341,16 +399,10 @@ def select_next_skill(payload: Mapping[str, Any]) -> dict[str, Any]:
     facts: Mapping[str, Any] = payload.get("facts") or {}
     meta: Mapping[str, Any] = payload.get("meta") or {}
     signals = payload.get("signals") or []
+    campaign_cfg = resolve_campaign_cfg(payload)
 
     all_actions = _build_goal_actions(goals, facts, meta)
-    lane_actions: dict[str, dict[str, Any]] = {}
-    for act in all_actions:
-        lane = act.get("lane")
-        if lane not in LANE_PRIORITY:
-            continue
-        prior = lane_actions.get(lane)
-        if prior is None or (prior["action"] == "idle" and act["action"] != "idle"):
-            lane_actions[lane] = act
+    lane_actions = _collapse_lane_actions(all_actions, campaign_cfg)
 
     severity_lanes = _severity_lanes(signals)
     draftable_lanes = [ln for ln in LANE_PRIORITY
@@ -389,6 +441,7 @@ __all__ = [
     "select_next_skill",
     "select_draftable_plan",
     "assert_disjoint",
+    "resolve_campaign_cfg",
     "FactOwnershipError",
     "GOAL_SKILL",
     "GOAL_OWNED_FACTS",

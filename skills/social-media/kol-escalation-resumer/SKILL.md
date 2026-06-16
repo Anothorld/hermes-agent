@@ -39,7 +39,7 @@ Also:
 
 ```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <id> --campaign-id <cid> --env <TEST|LIVE>
+  --identity-id <id> --campaign-id <cid> --env <TEST|LIVE> --view agent
 ```
 
 Optional Gmail context (resume drafts — **not curl**):

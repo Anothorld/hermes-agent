@@ -18,7 +18,7 @@ itself — there is no CLI `run-skill`.
   reading bridge `.py` source, reading `~/.hermes/**/.env` for keys,
   `write-facts` / `write-facts-multi` on `approval.reply_draft`.
 - **Forbidden:** `ingest-confirmed-candidate` — identity already exists after
-  shortlist approval; use `get-dispatch-context` (you receive `identity_id`) and
+  shortlist approval; use `get-dispatch-context --view agent` (you receive `identity_id`) and
   `persist-initial-outreach-draft`. Ingest JSON shape is discovery-only; see
   `instagram-kol-discovery/references/bridge-cli-json-payloads.md`.
 
@@ -28,7 +28,7 @@ itself — there is no CLI `run-skill`.
 
 ```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <id> --campaign-id <cid> --env <TEST|LIVE>
+  --identity-id <id> --campaign-id <cid> --env <TEST|LIVE> --view agent
 
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-identity \
   --identity-id <id> --env <TEST|LIVE>

@@ -1532,16 +1532,81 @@ registry.register(
     check_fn=check_skills_requirements,
     emoji="📚",
 )
+_SKILL_VIEW_SESSION_CACHE: dict[tuple[str, str, str], str] = {}
+_SKILL_VIEW_CACHE_ACTIVE_SESSION: str | None = None
+_SKILL_VIEW_CACHE_MAX_ENTRIES = 256
+
+
+def _purge_skill_view_cache_for_session(session_id: str) -> None:
+    stale = [k for k in _SKILL_VIEW_SESSION_CACHE if k[0] == session_id]
+    for key in stale:
+        del _SKILL_VIEW_SESSION_CACHE[key]
+
+
+def _rotate_skill_view_cache(session_id: str | None) -> None:
+    """Drop prior session entries when the gateway session changes."""
+    global _SKILL_VIEW_CACHE_ACTIVE_SESSION
+    if not session_id:
+        return
+    if _SKILL_VIEW_CACHE_ACTIVE_SESSION != session_id:
+        if _SKILL_VIEW_CACHE_ACTIVE_SESSION:
+            _purge_skill_view_cache_for_session(_SKILL_VIEW_CACHE_ACTIVE_SESSION)
+        _SKILL_VIEW_CACHE_ACTIVE_SESSION = session_id
+    while len(_SKILL_VIEW_SESSION_CACHE) > _SKILL_VIEW_CACHE_MAX_ENTRIES:
+        oldest = next(iter(_SKILL_VIEW_SESSION_CACHE))
+        del _SKILL_VIEW_SESSION_CACHE[oldest]
+
+
+def _resolve_skill_view_session_id(task_id: str | None) -> str | None:
+    """Best-effort session key for per-run skill_view caching."""
+    if task_id:
+        return str(task_id)
+    try:
+        from gateway.session_context import get_session_env
+
+        sid = get_session_env("HERMES_SESSION_ID", "")
+        if sid:
+            return str(sid)
+        key = get_session_env("HERMES_SESSION_KEY", "")
+        return str(key) if key else None
+    except Exception:
+        return None
+
+
+def _skill_view_cache_key(
+    name: str,
+    file_path: str | None,
+    session_id: str | None,
+) -> tuple[str, str, str] | None:
+    if not session_id:
+        return None
+    return (session_id, name, file_path or "")
+
+
 def _skill_view_with_bump(args, **kw):
     """Invoke skill_view, then bump view_count on success. Best-effort: a
     telemetry failure never breaks the tool call."""
     name = args.get("name", "")
+    file_path = args.get("file_path")
+    session_id = _resolve_skill_view_session_id(kw.get("task_id"))
+    _rotate_skill_view_cache(session_id)
+    cache_key = _skill_view_cache_key(name, file_path, session_id)
+    if cache_key and cache_key in _SKILL_VIEW_SESSION_CACHE:
+        try:
+            cached = json.loads(_SKILL_VIEW_SESSION_CACHE[cache_key])
+            if isinstance(cached, dict) and cached.get("success"):
+                cached = {**cached, "cached_in_session": True}
+                return json.dumps(cached, ensure_ascii=False)
+        except Exception:
+            pass
     result = skill_view(
-        name, file_path=args.get("file_path"), task_id=kw.get("task_id")
+        name, file_path=file_path, task_id=kw.get("task_id")
     )
     try:
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):
+            if cache_key:
+                _SKILL_VIEW_SESSION_CACHE[cache_key] = result
             # Use the resolved skill name from the payload when present —
             # qualified forms ("plugin:skill") return with the canonical name.
             resolved = parsed.get("name") or name

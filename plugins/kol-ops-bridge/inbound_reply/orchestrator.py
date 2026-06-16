@@ -11,7 +11,7 @@ from ..gmail_console import list_operator_gmail_clients
 from .deps import InboundDeps
 from .processor import process_message
 from .recovery import needs_reprocess_after_global_seen
-from .schemas import InboundTickStats, ProcessStatus
+from .schemas import InboundTickStats, ProcessResult, ProcessStatus
 from .state import (
     clear_retry_backoff,
     global_message_seen,
@@ -36,11 +36,13 @@ def _record_message_outcome(
     message_id: str,
     mailbox_user_id: int,
     status: ProcessStatus,
+    preserve_backoff: bool = False,
 ) -> None:
     """Persist seen markers immediately so a later failure cannot lose progress."""
     if status not in ("dispatched", "skipped"):
         return
-    clear_retry_backoff(state, env=env, message_id=message_id)
+    if not preserve_backoff:
+        clear_retry_backoff(state, env=env, message_id=message_id)
     seen.add(message_id)
     record_global_message_seen(
         env=env,
@@ -118,7 +120,7 @@ def run_once(
                     ):
                         continue
                 try:
-                    status = process_message(
+                    outcome = process_message(
                         full,
                         env=env,
                         client=mb.client,
@@ -137,11 +139,25 @@ def run_once(
                     record_retry_backoff(state, env=env, message_id=full.message_id)
                     continue
 
+                if isinstance(outcome, ProcessResult):
+                    status = outcome.status
+                    gateway_only_retry = outcome.gateway_only_retry
+                else:
+                    status = outcome
+                    gateway_only_retry = False
+
                 if status == "retry":
                     record_retry_backoff(state, env=env, message_id=full.message_id)
                     state[f"last_run_{env}"] = int(time.time())
                     save_state(state)
                     retry += 1
+                    continue
+
+                if status == "skipped" and gateway_only_retry:
+                    # Retry cap — do not mark globally seen; operator may re-dispatch.
+                    skipped += 1
+                    state[f"last_run_{env}"] = int(time.time())
+                    save_state(state)
                     continue
 
                 _record_message_outcome(
@@ -152,7 +168,12 @@ def run_once(
                     message_id=full.message_id,
                     mailbox_user_id=mb.user_id,
                     status=status,
+                    preserve_backoff=gateway_only_retry,
                 )
+                if gateway_only_retry and status == "dispatched":
+                    record_retry_backoff(state, env=env, message_id=full.message_id)
+                    state[f"last_run_{env}"] = int(time.time())
+                    save_state(state)
                 if status == "dispatched":
                     matched += 1
                 elif status == "skipped":

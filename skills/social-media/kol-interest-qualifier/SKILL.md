@@ -161,7 +161,7 @@ Hard rules attached to this block (include them verbatim):
 ### Step 1 — Load context
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
+  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE> --view agent
 ```
 Verify `goals.interest_qualification.status == "active"`. Else abort.
 

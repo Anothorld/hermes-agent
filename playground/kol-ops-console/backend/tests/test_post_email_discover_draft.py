@@ -138,6 +138,8 @@ async def test_auto_draft_starts_after_discover_complete(tmp_path) -> None:
     assert out["draft_run_id"] == "run-draft-1"
     assert out["identity_id"] == 42
     gateway.launch_via_queue.assert_awaited_once()
+    launch_kwargs = gateway.launch_via_queue.await_args.kwargs
+    assert launch_kwargs["session_id"] == "kol-campaign-draft:LIVE:CID-1:42"
     audit = conn.execute(
         "SELECT action FROM audit_log WHERE action=?",
         ("campaign.auto_draft_after_email_discover",),

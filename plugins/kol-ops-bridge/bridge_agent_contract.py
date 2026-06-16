@@ -13,6 +13,22 @@ CANONICAL_CLI_REL = "plugins/kol-ops-bridge/scripts/kol_bridge_tool.py"
 CLI_WRAPPER_REL = "plugins/kol-ops-bridge/scripts/kol-bridge-cli"
 CLI_PYTHON = "python3"
 CLI_INVOCATION = f"{CLI_PYTHON} {CANONICAL_CLI_REL}"
+DISPATCH_CONTEXT_VIEW_AGENT = "agent"
+
+
+def dispatch_context_cli_line(
+    *,
+    identity_id: int | str,
+    campaign_id: str,
+    env: str,
+    view: str = DISPATCH_CONTEXT_VIEW_AGENT,
+) -> str:
+    """Canonical ``get-dispatch-context`` invocation for agent gateway runs."""
+    view_flag = f" --view {view}" if view else ""
+    return (
+        f"{CLI_INVOCATION} get-dispatch-context --identity-id {identity_id} "
+        f"--campaign-id {campaign_id} --env {env}{view_flag}"
+    )
 
 
 def cli_invocation_abs(repo_root: str) -> str:
@@ -30,6 +46,7 @@ AGENT_BRIDGE_CONTRACT_LINES: tuple[str, ...] = (
     "5. NEVER search_files or read_file under plugins/kol-ops-bridge/ for API discovery.",
     "6. Use native terminal for CLI (one subcommand per call), not execute_code wrappers.",
     "7. Do NOT PATCH /escalations/{id} after Console resolve — return JSON envelope only.",
+    "8. Dispatch reads: get-dispatch-context --view agent (slim bundle; omit lanes).",
 )
 
 # (code, pattern, hint)
@@ -268,12 +285,14 @@ def resume_cli_checklist(
     return "\n".join([
         "# bridge_cli_checklist (mandatory — terminal only, no execute_code for bridge)",
         f"{CLI_INVOCATION} get-escalation --escalation-id {escalation_id} --env {env}",
-        f"{CLI_INVOCATION} get-dispatch-context --identity-id {identity_id} "
-        f"--campaign-id {campaign_id} --env {env}",
+        dispatch_context_cli_line(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        ),
         f"{CLI_INVOCATION} write-facts-multi --identity-id {identity_id} --env {env} "
         "--json @/tmp/resume_facts.json",
-        f"{CLI_INVOCATION} get-dispatch-context --identity-id {identity_id} "
-        f"--campaign-id {campaign_id} --env {env}",
+        dispatch_context_cli_line(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        ),
         *draft_lines,
         f"{CLI_INVOCATION} write-event --env {env} --json @/tmp/resume_event.json",
         "(Write /tmp/resume_event.json with identity_id, campaign_id, "
@@ -303,8 +322,9 @@ def draft_preview_cli_checklist(
     return "\n".join([
         "# bridge_cli_checklist (preview — read-only on escalation row)",
         f"{CLI_INVOCATION} get-escalation --escalation-id {escalation_id} --env {env}",
-        f"{CLI_INVOCATION} get-dispatch-context --identity-id {identity_id} "
-        f"--campaign-id {campaign_id} --env {env}",
+        dispatch_context_cli_line(
+            identity_id=identity_id, campaign_id=campaign_id, env=env,
+        ),
         f"{CLI_INVOCATION} get-email-conversation --identity-id {identity_id} "
         f"--campaign-id {campaign_id} --env {env}{op_line}",
         f"{CLI_INVOCATION} get-policy --scope company_style",
@@ -335,7 +355,7 @@ def reply_dispatcher_cli_rules() -> str:
     return "\n".join([
         "# bridge_cli_rules (reply-dispatcher)",
         f"Use the terminal tool with {CLI_INVOCATION} — never execute_code+subprocess for bridge.",
-        "Reads: get-dispatch-context, get-reply-chase-hint, list-events (as needed).",
+        "Reads: get-dispatch-context --view agent, get-reply-chase-hint, list-events (as needed).",
         "Writes: write-facts-multi, persist-reply-draft (+ conversation_summary), "
         "open-escalation, mark-reply-handled.",
     ])
@@ -348,6 +368,7 @@ def terminal_safety_rules(*, repo_root: str | None = None) -> str:
         "# terminal_safety (mandatory)",
         f"Bridge CLI: {cli} <subcommand> --env <env> ...",
         "Always invoke the absolute kol-bridge-cli wrapper — never bare `python`, never relative `plugins/...` from $HOME.",
+        "kol-bridge-cli runs python3 -u (unbuffered stdout) so pipe consumers see JSON immediately.",
         "Do NOT run bare `cd .../hermes-agent` (triggers doc injection, empty stdout).",
         "Do NOT use inline shell JSON for write-event; use `cat > /tmp/event.json` then `--json @/tmp/event.json`.",
         "One subcommand per terminal call; never `python3 -c` + subprocess wrappers.",
@@ -382,8 +403,9 @@ def approval_cli_checklist(
             f"{CLI_INVOCATION} write-event --env {env} --json @/tmp/event_{iid}.json",
             "(event JSON: identity_id, campaign_id, event_type shortlist_approval_received, actor from brief)",
             f"{CLI_INVOCATION} get-identity --identity-id {iid} --env {env}",
-            f"{CLI_INVOCATION} get-dispatch-context --identity-id {iid} "
-            f"--campaign-id {campaign_id} --env {env}",
+            dispatch_context_cli_line(
+                identity_id=iid, campaign_id=campaign_id, env=env,
+            ),
             "If primary_email empty: delegate kol-email-discovery; on miss open-escalation contact_email_not_found.",
             "Draft via kol-cold-outreach or kol-reengagement-outreach SKILL; write /tmp/outreach_{iid}.json.",
             f"{CLI_INVOCATION} persist-initial-outreach-draft --env {env} "

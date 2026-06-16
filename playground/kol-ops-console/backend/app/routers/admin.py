@@ -84,71 +84,49 @@ async def gate_metrics(
     audit_metrics = compute_gate_audit_metrics(conn, env=env_norm, days=days)
 
     try:
-        funnel = await bridge.get_kol_registry_funnel(env=env_norm, days=days)
-        re_esc = await bridge.get_escalation_re_escalation_window(
-            env=env_norm, days=days,
-        )
+        discovery = await bridge.get_kol_registry_summary(env=env_norm)
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
     return {
         "env": env_norm,
         "window_days": days,
-        "funnel_window_days": funnel.get("funnel_window_days"),
         "metrics": {
             "first_pass_approval_rate": audit_metrics["first_pass_approval_rate"],
             "avg_handle_minutes": audit_metrics["avg_handle_minutes"],
-            "re_escalation_rate": float(re_esc.get("re_escalation_rate") or 0.0),
             "manual_touchpoints_per_campaign": audit_metrics[
                 "manual_touchpoints_per_campaign"
             ],
             "termination_rate": audit_metrics["termination_rate"],
             "live_incident_rate": audit_metrics["live_reject_rate"],
-            "kol_candidate_adoption_rate": float(
-                funnel.get("kol_candidate_adoption_rate") or 0.0,
-            ),
-            "initial_outreach_reply_rate": float(
-                funnel.get("initial_outreach_reply_rate") or 0.0,
-            ),
         },
         "audit_meta": {
             "first_pass_decisions_total": audit_metrics["first_pass_decisions_total"],
             "reply_decisions_total": audit_metrics["reply_decisions_total"],
             "handle_time_samples": audit_metrics["handle_time_samples"],
             "touched_campaign_count": audit_metrics["touched_campaign_count"],
-            "child_escalation_opens": int(re_esc.get("child_escalation_opens") or 0),
-            "escalation_opens_total": int(re_esc.get("escalation_opens_total") or 0),
         },
-        "kol_funnel": {
-            "maturity_days": int(funnel.get("maturity_days") or 14),
-            "funnel_window_days": funnel.get("funnel_window_days"),
-            "discovered_total": int(funnel.get("discovered_total") or 0),
-            "prior_collab_excluded": int(funnel.get("prior_collab_excluded") or 0),
-            "eligible_total": int(funnel.get("eligible_total") or 0),
-            "mature_eligible_total": int(funnel.get("mature_eligible_total") or 0),
-            "mature_adopted_within_window_count": int(
-                funnel.get("mature_adopted_within_window_count") or 0,
-            ),
-            "pending_mature_backlog_count": int(
-                funnel.get("pending_mature_backlog_count") or 0,
-            ),
-            "pending_immature_count": int(funnel.get("pending_immature_count") or 0),
-            "mature_draft_total": int(funnel.get("mature_draft_total") or 0),
-            "mature_replied_within_window_count": int(
-                funnel.get("mature_replied_within_window_count") or 0,
-            ),
-            "pending_draft_mature_no_reply_count": int(
-                funnel.get("pending_draft_mature_no_reply_count") or 0,
-            ),
-            "pending_draft_immature_count": int(
-                funnel.get("pending_draft_immature_count") or 0,
-            ),
+        "kol_discovery_summary": {
+            "discovered_total": int(discovery.get("discovered_total") or 0),
+            "passed_count": int(discovery.get("passed_count") or 0),
+            "pending_count": int(discovery.get("pending_count") or 0),
+            "rejected_count": int(discovery.get("rejected_count") or 0),
+            "other_count": int(discovery.get("other_count") or 0),
+            "pass_rate": float(discovery.get("pass_rate") or 0.0),
             "initial_outreach_draft_count": int(
-                funnel.get("initial_outreach_draft_count") or 0,
+                discovery.get("initial_outreach_draft_count") or 0,
             ),
             "initial_outreach_reply_count": int(
-                funnel.get("initial_outreach_reply_count") or 0,
+                discovery.get("initial_outreach_reply_count") or 0,
             ),
+            "automated_reply_excluded_count": int(
+                discovery.get("automated_reply_excluded_count") or 0,
+            ),
+            "pending_reply_count": int(discovery.get("pending_reply_count") or 0),
+            "initial_outreach_reply_rate": float(
+                discovery.get("initial_outreach_reply_rate") or 0.0,
+            ),
+            "by_status": discovery.get("by_status") or {},
         },
         "top_rejection_tags": audit_metrics["top_rejection_tags"],
     }
@@ -169,19 +147,14 @@ async def gate_metrics_trends(
         audit_trends = compute_audit_metric_trends(
             conn, env=env_norm, bucket=bucket, periods=periods,
         )
-        funnel_trends = await bridge.get_kol_registry_funnel_trend(
-            env=env_norm, bucket=bucket, periods=periods,
-        )
-        re_esc_trends = await bridge.get_escalation_re_escalation_trend(
+        discovery_trends = await bridge.get_kol_registry_summary_trend(
             env=env_norm, bucket=bucket, periods=periods,
         )
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
     series: dict[str, list[dict[str, Any]]] = dict(audit_trends.get("series") or {})
-    for key, points in (funnel_trends.get("series") or {}).items():
-        series[key] = points
-    for key, points in (re_esc_trends.get("series") or {}).items():
+    for key, points in (discovery_trends.get("series") or {}).items():
         series[key] = points
 
     return {

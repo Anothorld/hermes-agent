@@ -56,7 +56,7 @@ Follow existing `[P0.3]` / `[P0.4]` blocks in prior SKILL versions.
 ### Step 1 — Load context
 ```bash
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
+  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE> --view agent
 ```
 
 Read:

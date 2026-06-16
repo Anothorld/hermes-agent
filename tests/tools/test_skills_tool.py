@@ -1267,3 +1267,44 @@ class TestSkillViewCollisionDetection:
         result = json.loads(raw)
         assert result["success"] is True
         assert "LOCAL BODY" in result["content"]
+
+
+def test_skill_view_session_cache(tmp_path, monkeypatch):
+    """Repeated skill_view in the same session returns cached_in_session."""
+    skills_dir = tmp_path / "skills"
+    _make_skill(skills_dir, "cache-skill", body="Cached skill body.")
+    monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", skills_dir)
+    skills_tool_module._SKILL_VIEW_SESSION_CACHE.clear()
+
+    from tools.skills_tool import _skill_view_with_bump
+
+    with patch("tools.skill_usage.bump_view"), patch("tools.skill_usage.bump_use"):
+        first = json.loads(
+            _skill_view_with_bump({"name": "cache-skill"}, task_id="sess-cache-1")
+        )
+        second = json.loads(
+            _skill_view_with_bump({"name": "cache-skill"}, task_id="sess-cache-1")
+        )
+
+    assert first["success"] is True
+    assert second.get("cached_in_session") is True
+    assert "Cached skill body." in second["content"]
+
+
+def test_skill_view_cache_rotates_on_session_change(tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills"
+    _make_skill(skills_dir, "cache-skill", body="Cached skill body.")
+    monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", skills_dir)
+    skills_tool_module._SKILL_VIEW_SESSION_CACHE.clear()
+    skills_tool_module._SKILL_VIEW_CACHE_ACTIVE_SESSION = None
+
+    from tools.skills_tool import _skill_view_with_bump
+
+    with patch("tools.skill_usage.bump_view"), patch("tools.skill_usage.bump_use"):
+        _skill_view_with_bump({"name": "cache-skill"}, task_id="sess-a")
+        assert len(skills_tool_module._SKILL_VIEW_SESSION_CACHE) == 1
+        _skill_view_with_bump({"name": "cache-skill"}, task_id="sess-b")
+
+    keys = list(skills_tool_module._SKILL_VIEW_SESSION_CACHE)
+    assert all(k[0] == "sess-b" for k in keys)
+    assert len(keys) == 1

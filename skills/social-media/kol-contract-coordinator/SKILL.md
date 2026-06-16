@@ -61,7 +61,7 @@ Call contract:
 ### Step 1 — Load context
 ```
 python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py get-dispatch-context \
-  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE>
+  --identity-id <identity_id> --campaign-id "<campaign_id>" --env <TEST|LIVE> --view agent
 ```
 Read:
 - `goals.compensation_negotiation.status` — must be `satisfied`
@@ -100,6 +100,10 @@ in context) for confirmed values. Do **not** invent values.
   "fee": <null when compensation_mode == "free_product"
           | {"amount":"<integer>", "currency":"USD"} when offer.agreed_terms includes a flat fee>,
   "deliverables": [                                                                    // REQUIRED, len >= 1
+    // Source of truth: GET /campaigns/{campaign_id}/resolved-deliverables?env=<env>
+    // → ``rows`` (from ``campaign_deliverables_json`` with platform fallback).
+    // Do NOT hand-build from ``deliverable_platforms`` alone when stored spec
+    // includes ad code / usage-rights extras.
     {
       "type":                  "<e.g. 'Short Video + IG Stories + RAW'>",
       "description":           "<e.g. 'Showcase product per brief'>",

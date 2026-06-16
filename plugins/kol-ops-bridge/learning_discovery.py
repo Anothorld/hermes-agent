@@ -73,34 +73,6 @@ def _select_discovery_distill_batch(
     return ordered[:take]
 
 
-def _debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
-    # #region agent log
-    try:
-        import time as _time
-        from pathlib import Path as _Path
-
-        with _Path("/Users/arnold/agent_prj/.cursor/debug-9fa234.log").open(
-            "a", encoding="utf-8",
-        ) as _fh:
-            _fh.write(
-                json.dumps(
-                    {
-                        "sessionId": "9fa234",
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(_time.time() * 1000),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n",
-            )
-    except Exception:
-        pass
-    # #endregion
-
-
 def tag_mine_min_count() -> int:
     """Min comment occurrences before a mined reason becomes a tag proposal."""
     raw = os.environ.get("KOL_DISCOVERY_TAG_MINE_MIN_COUNT", "5").strip()
@@ -414,29 +386,24 @@ def propose_discovery_learning_approval(
             skipped.append({"scope": scope, "reason": "pending_proposal_exists"})
             continue
         batch_events = _select_discovery_distill_batch(events, threshold=threshold)
-        _debug_log(
-            hypothesis_id="H4",
-            location="learning_discovery.py:propose_discovery_learning_approval",
-            message="discovery_distill_batch_selected",
-            data={
+        try:
+            md = distill_discovery_criteria_llm(
+                conn,
+                batch_events,
+                scope=scope,
+                group_kind=kind,
+                group_key=key,
+                env=env,
+                group_total=len(events),
+            )
+        except learning_llm.LearningLlmError as exc:
+            err = str(exc)
+            skipped.append({
                 "scope": scope,
-                "group_kind": kind,
-                "group_key": key,
-                "fresh_in_group": len(events),
-                "distill_batch_size": len(batch_events),
-                "batch_threshold": threshold,
-                "distill_max_samples": discovery_distill_max_samples(),
-            },
-        )
-        md = distill_discovery_criteria_llm(
-            conn,
-            batch_events,
-            scope=scope,
-            group_kind=kind,
-            group_key=key,
-            env=env,
-            group_total=len(events),
-        )
+                "reason": "llm_failed",
+                "error": err[:500],
+            })
+            continue
         from . import learning_distill
 
         anchor_id = learning_distill.resolve_learning_anchor_identity_id(
@@ -474,20 +441,6 @@ def propose_discovery_learning_approval(
             source="learning:propose:discovery_criteria",
             env=env,
         )
-        _debug_log(
-            hypothesis_id="H4",
-            location="learning_discovery.py:propose_discovery_learning_approval",
-            message="discovery_proposal_created",
-            data={
-                "env": env,
-                "scope": scope,
-                "group_kind": kind,
-                "group_key": key,
-                "sample_count": len(batch_events),
-                "group_fresh_samples": len(events),
-                "source_event_ids_len": len(event_ids),
-            },
-        )
         proposed.append({
             "scope": scope,
             "identity_id": anchor_id,
@@ -496,7 +449,9 @@ def propose_discovery_learning_approval(
             "source_event_ids": event_ids,
         })
     if not proposed and skipped:
-        return {"skipped": True, "reason": "no group ready", "groups": skipped}
+        llm_failed = [s for s in skipped if s.get("reason") == "llm_failed"]
+        reason = "llm_failed" if llm_failed else "no group ready"
+        return {"skipped": True, "reason": reason, "groups": skipped}
     return {
         "proposed_count": len(proposed),
         "proposals": proposed,
@@ -592,41 +547,21 @@ def build_learned_discovery_criteria(
     out["spu_md"] = spu_md[:max_chars]
     remaining = max(0, max_chars - len(out["spu_md"]))
     out["category_md"] = category_md[:remaining]
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-        from pathlib import Path as _Path
-
-        with _Path("/Users/arnold/agent_prj/.cursor/debug-8ea4a0.log").open(
-            "a", encoding="utf-8",
-        ) as _fh:
-            _fh.write(
-                _json.dumps(
-                    {
-                        "sessionId": "8ea4a0",
-                        "hypothesisId": "H1",
-                        "location": "learning_discovery.py:build_learned_discovery_criteria",
-                        "message": "discovery_criteria_built",
-                        "data": {
-                            "env": env,
-                            "sku": sku,
-                            "category": out.get("category"),
-                            "spu_scope": spu_scope,
-                            "spu_md_len": len(out["spu_md"]),
-                            "category_md_len": len(out["category_md"]),
-                            "spu_row_present": bool(spu_row),
-                        },
-                        "timestamp": int(_time.time() * 1000),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n",
-            )
-    except Exception:
-        pass
-    # #endregion
     return out
+
+
+def _operator_llm_error_summary(msg: str) -> str:
+    """Plain-language summary of a learning LLM failure for operators."""
+    low = (msg or "").lower()
+    if "402" in msg or "quota" in low or "quote_exceeded" in low:
+        return "LLM 订阅配额已用完，请充值或等待配额自动刷新后再试。"
+    if "overdue" in low or "non-negative balance" in low:
+        return "LLM 账户余额不足，请充值后重试。"
+    if "429" in msg:
+        return "LLM 服务繁忙（限流），夜间任务会自动重试。"
+    if msg:
+        return "LLM 调用失败，请检查模型配置或联系工程。"
+    return "LLM 调用失败。"
 
 
 def discovery_overview_stats(conn, *, env: str) -> dict[str, Any]:
@@ -636,6 +571,9 @@ def discovery_overview_stats(conn, *, env: str) -> dict[str, Any]:
     distill threshold, plus pending-proposal count — so operators can see how
     far each product is from the next learned-criteria proposal.
     """
+    from . import learning_job_store as job_store
+    from .learning_jobs import JOB_APPLY_DISCOVERY_POLICY
+
     threshold = discovery_learning_batch_size()
     fresh = _fresh_decision_events(conn, env=env)
     groups = _group_events(conn, fresh)
@@ -653,11 +591,27 @@ def discovery_overview_stats(conn, *, env: str) -> dict[str, Any]:
             "ready_for_distill": len(events) >= threshold,
             "has_pending_proposal": scope in pending_scopes,
         })
+    last_runs = job_store.list_runs(
+        conn, env=env, job_name=JOB_APPLY_DISCOVERY_POLICY, limit=1,
+    )
+    last_job: dict[str, Any] | None = None
+    if last_runs:
+        row = last_runs[0]
+        err = str(row.get("error_message") or "").strip()
+        last_job = {
+            "run_id": row.get("id"),
+            "status": row.get("status"),
+            "started_at": row.get("started_at"),
+            "finished_at": row.get("finished_at"),
+            "triggered_by": row.get("triggered_by"),
+            "error_summary": _operator_llm_error_summary(err) if err else None,
+        }
     return {
         "fresh_decisions": len(fresh),
         "batch_threshold": threshold,
         "groups": group_rows,
         "pending_proposals": len(pending),
+        "last_distill_job": last_job,
     }
 
 

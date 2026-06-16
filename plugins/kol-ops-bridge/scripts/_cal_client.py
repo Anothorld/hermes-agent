@@ -248,7 +248,22 @@ def require_keys(body: dict[str, Any], *keys: str) -> None:
 
 
 def print_json(out: Any) -> None:
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    """Emit JSON on stdout (compact by default) and flush for pipe consumers."""
+    if _JSON_PRETTY:
+        text = json.dumps(out, ensure_ascii=False, indent=2)
+    else:
+        text = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+    sys.stdout.write(text + "\n")
+    sys.stdout.flush()
+
+
+_JSON_PRETTY = False
+
+
+def set_json_output_mode(*, pretty: bool = False) -> None:
+    """Configure CLI JSON formatting (``--pretty`` on kol_bridge_tool)."""
+    global _JSON_PRETTY
+    _JSON_PRETTY = pretty
 
 
 __all__ = [
@@ -262,4 +277,5 @@ __all__ = [
     "parse_json_arg",
     "print_json",
     "require_keys",
+    "set_json_output_mode",
 ]

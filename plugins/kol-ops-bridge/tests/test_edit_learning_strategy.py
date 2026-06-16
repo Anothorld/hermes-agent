@@ -279,3 +279,119 @@ def test_apply_merges_actionable_rule_without_context_notes(cal_db, bridge_pkg):
     assert "clarify scope first" in content
     assert "Context notes" not in content
     assert "Batch size" not in content
+
+
+def test_propose_auto_skips_when_no_actionable_style_or_strategy(
+    cal_db, bridge_pkg, monkeypatch,
+):
+    distill = bridge_pkg.learning_distill
+    store = bridge_pkg.learning_store
+    cal = cal_db
+
+    iid = cal.upsert_identity(primary_handle="auto_skip_kol", env="LIVE")
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            """INSERT INTO kol_conversation_events
+               (identity_id, campaign_id, event_type, goal, lane, actor, ts, payload_json, env)
+               VALUES (?, ?, 'draft_edit_learning', 'outreach', 'commerce', 'test', datetime('now'), ?, ?)""",
+            (
+                iid,
+                "C_AUTO_SKIP",
+                '{"was_edited": true, "child_skill": "kol-reply-synthesizer", '
+                '"edit_distance": 0.12, "normalized_agent_body": "Hi", '
+                '"normalized_sent_body": "Hello"}',
+                "LIVE",
+            ),
+        )
+        conn.commit()
+
+    def _noop_distill(*_args, **_kwargs):
+        return (
+            "## Proposed style updates\n\n"
+            "- **No new style rules emerge from this batch.**\n",
+            "## Proposed strategy updates\n\n"
+            "- **No new strategy rules emerge from this batch.**\n\n"
+            "### Context notes\n\n"
+            "- Batch size: 1\n",
+            True,
+        )
+
+    monkeypatch.setattr(distill, "distill_edit_learning_llm", _noop_distill)
+
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        out = distill.propose_style_learning_approval(
+            conn,
+            env="LIVE",
+            scope="company_style",
+            updated_by="test:auto_skip",
+            limit=50,
+            batch_size=1,
+        )
+        pending = distill.find_pending_style_proposal(
+            conn, env="LIVE", scope="company_style",
+        )
+        consumed = distill.list_consumed_edit_event_ids(conn, env="LIVE")
+        facts = cal.latest_facts_for(identity_id=iid, campaign_id=None, env="LIVE")
+        record = facts.get(store.STYLE_LEARNING_APPROVAL_FACT)
+
+    assert out.get("skipped") is True
+    assert out.get("reason") == "no_actionable_policy_delta"
+    assert out.get("auto_skipped") is True
+    assert pending is None
+    assert isinstance(record, dict)
+    assert record.get("decision") == "auto_skipped"
+    source_ids = record.get("source_event_ids") or []
+    assert source_ids and all(int(eid) in consumed for eid in source_ids)
+
+
+def test_propose_still_pending_when_only_strategy_actionable(
+    cal_db, bridge_pkg, monkeypatch,
+):
+    distill = bridge_pkg.learning_distill
+    cal = cal_db
+
+    iid = cal.upsert_identity(primary_handle="partial_action_kol", env="LIVE")
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            """INSERT INTO kol_conversation_events
+               (identity_id, campaign_id, event_type, goal, lane, actor, ts, payload_json, env)
+               VALUES (?, ?, 'draft_edit_learning', 'outreach', 'commerce', 'test', datetime('now'), ?, ?)""",
+            (
+                iid,
+                "C_PARTIAL",
+                '{"was_edited": true, "child_skill": "kol-reply-synthesizer", '
+                '"edit_distance": 0.2, "normalized_agent_body": "Hi", '
+                '"normalized_sent_body": "Hello there"}',
+                "LIVE",
+            ),
+        )
+        conn.commit()
+
+    def _partial_distill(*_args, **_kwargs):
+        return (
+            "## Proposed style updates\n\n"
+            "- **No new style rules emerge from this batch.**\n",
+            "## Proposed strategy updates\n\n"
+            "## compensation_negotiation\n\n"
+            "- Ask deliverables before quoting price\n",
+            True,
+        )
+
+    monkeypatch.setattr(distill, "distill_edit_learning_llm", _partial_distill)
+
+    with cal._connect() as conn:  # type: ignore[attr-defined]
+        out = distill.propose_style_learning_approval(
+            conn,
+            env="LIVE",
+            scope="company_style",
+            updated_by="test:partial",
+            limit=50,
+            batch_size=1,
+        )
+        pending = distill.find_pending_style_proposal(
+            conn, env="LIVE", scope="company_style",
+        )
+
+    assert out.get("pending") is True
+    assert pending is not None
+    assert pending["value"]["decision"] == "pending"

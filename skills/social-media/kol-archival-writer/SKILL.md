@@ -37,7 +37,7 @@ Set when the thread showed clear negotiation behavior:
 | `unknown` | Not enough signal |
 
 This feeds `reusable_facts.facts.personalization_hint` on the next campaign via
-`get-dispatch-context`.
+dispatch context. Load with `get-dispatch-context --view agent` before archival writes.
 
 ## Pitfalls
 

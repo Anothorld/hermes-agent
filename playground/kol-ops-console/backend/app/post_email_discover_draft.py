@@ -15,6 +15,7 @@ from .bridge_runtime import BRIDGE_KEY_ENV, resolve_bridge_key
 from .campaign_config_sync import DEFAULT_REQUIRED_FIELDS
 from .gateway_client import GatewayClient, GatewayError
 from .run_registry import get_inflight_run, register_run
+from .session_ids import campaign_draft_session_id
 
 log = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ async def maybe_trigger_outreach_draft_after_email_discover(
         actor_user_id=actor_user_id,
         test_mode_to=test_mode_to,
     )
-    draft_session_id = f"kol-campaign-draft:{env}:{campaign_id}"
+    draft_session_id = campaign_draft_session_id(env, campaign_id, identity_id)
 
     async def _start_redraft() -> dict[str, Any]:
         return await gateway.start_run_with_retry(

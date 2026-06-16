@@ -66,41 +66,68 @@ def _main_model_name() -> str:
     return ""
 
 
-def resolve_openai_compatible_runtime() -> Optional[dict[str, str]]:
-    """Return base_url, api_key, model when Hermes runtime is OpenAI-compatible."""
+def _runtime_from_hermes_home(hermes_home: Path) -> Optional[dict[str, str]]:
+    """Resolve OpenAI-compatible runtime for a specific HERMES_HOME directory."""
     if not hermes_agent_available():
         return None
-    apply_hermes_dotenv()
-    from hermes_cli.runtime_provider import resolve_runtime_provider
+    saved_home = os.environ.get("HERMES_HOME")
+    try:
+        os.environ["HERMES_HOME"] = str(hermes_home)
+        apply_hermes_dotenv()
+        from hermes_cli.runtime_provider import resolve_runtime_provider
 
-    model = _main_model_name()
-    runtime = resolve_runtime_provider(
-        target_model=model or None,
-    )
-    api_mode = str(runtime.get("api_mode") or "chat_completions")
-    if api_mode not in ("chat_completions", ""):
-        return None
-    api_key = str(runtime.get("api_key") or "").strip()
-    if not api_key:
-        return None
-    base = str(runtime.get("base_url") or "").strip().rstrip("/")
-    if not base:
-        provider = str(runtime.get("provider") or "").strip().lower()
-        if provider == "openrouter":
-            from hermes_constants import OPENROUTER_BASE_URL
+        model = _main_model_name()
+        runtime = resolve_runtime_provider(
+            target_model=model or None,
+        )
+        api_mode = str(runtime.get("api_mode") or "chat_completions")
+        if api_mode not in ("chat_completions", ""):
+            return None
+        api_key = str(runtime.get("api_key") or "").strip()
+        if not api_key:
+            return None
+        base = str(runtime.get("base_url") or "").strip().rstrip("/")
+        if not base:
+            provider = str(runtime.get("provider") or "").strip().lower()
+            if provider == "openrouter":
+                from hermes_constants import OPENROUTER_BASE_URL
 
-            base = OPENROUTER_BASE_URL.rstrip("/")
+                base = OPENROUTER_BASE_URL.rstrip("/")
+            else:
+                base = "https://api.openai.com/v1"
+        resolved_model = model or str(runtime.get("model") or "").strip()
+        if not resolved_model:
+            return None
+        return {
+            "base_url": base,
+            "api_key": api_key,
+            "model": resolved_model,
+            "source": f"hermes_config:{hermes_home.name}",
+        }
+    finally:
+        if saved_home is None:
+            os.environ.pop("HERMES_HOME", None)
         else:
-            base = "https://api.openai.com/v1"
-    resolved_model = model or str(runtime.get("model") or "").strip()
-    if not resolved_model:
+            os.environ["HERMES_HOME"] = saved_home
+
+
+def resolve_openai_compatible_runtime() -> Optional[dict[str, str]]:
+    """Return base_url, api_key, model when Hermes runtime is OpenAI-compatible."""
+    active_home = Path(
+        os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")),
+    ).expanduser()
+    return _runtime_from_hermes_home(active_home)
+
+
+def resolve_root_openai_compatible_runtime() -> Optional[dict[str, str]]:
+    """Fallback runtime from root ``~/.hermes`` (not the active profile)."""
+    root_home = Path.home() / ".hermes"
+    active_home = Path(
+        os.environ.get("HERMES_HOME", str(root_home)),
+    ).expanduser()
+    if active_home.resolve() == root_home.resolve():
         return None
-    return {
-        "base_url": base,
-        "api_key": api_key,
-        "model": resolved_model,
-        "source": "hermes_config",
-    }
+    return _runtime_from_hermes_home(root_home)
 
 
 def invoke_via_hermes_call_llm(

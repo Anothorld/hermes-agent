@@ -40,6 +40,7 @@ from . import confirmed_fact_buffer
 from . import discovery_router
 from . import classifier_facts
 from . import implicit_accept_policy
+from . import deliverables_spec
 from . import dispatch_router
 from . import policies as _policies
 from . import pricing_engine
@@ -49,6 +50,7 @@ from . import discovery_decision_learning
 from . import discovery_decision_tags
 from . import learning_discovery
 from . import learning_distill
+from . import learning_llm
 from . import learning_jobs
 from . import learning_job_store
 from . import learning_outcome
@@ -283,6 +285,19 @@ class CampaignConfigUpsertBody(BaseModel):
     commission_band: Optional[dict[str, Any]] = None
     deliverable_platforms: Optional[list[str]] = None
     deliverable_count_per_platform: Optional[int] = None
+    campaign_deliverables_json: Optional[list[dict[str, Any]]] = None
+
+    @field_validator("campaign_deliverables_json", mode="before")
+    @classmethod
+    def _validate_campaign_deliverables(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        from . import deliverables_spec as ds
+
+        verdict = ds.validate_spec(value)
+        if not verdict["valid"]:
+            raise ValueError("; ".join(verdict["errors"][:5]))
+        return verdict["normalized"]
 
     @field_validator("deliverable_count_per_platform", mode="before")
     @classmethod
@@ -809,6 +824,26 @@ def list_kol_registry(
     )
 
 
+@router.get("/kol-registry/summary")
+def kol_registry_summary(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Unfiltered discovery pool counts for gate-metrics."""
+    return cal.aggregate_kol_discovery_summary(env=env)
+
+
+@router.get("/kol-registry/summary/trend")
+def kol_registry_summary_trend(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    bucket: str = Query(default="week", pattern="^(day|week|month|year)$"),
+    periods: int | None = Query(default=None, ge=1, le=90),
+) -> dict[str, Any]:
+    """Time-bucketed cumulative KOL discovery counts for gate-metrics trends."""
+    return cal.aggregate_kol_discovery_summary_trend(
+        env=env, bucket=bucket, periods=periods,
+    )
+
+
 @router.get("/kol-registry/funnel")
 def kol_registry_funnel(
     env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
@@ -1219,6 +1254,17 @@ def parse_campaign_intent(
     return _parse_campaign_text(body.text)
 
 
+@router.post("/campaigns/parse-deliverables")
+def parse_deliverables_intent(body: CampaignParseBody) -> dict[str, Any]:
+    """Natural-language deliverables → structured spec (no DB write).
+
+    Used by the Product launch page: operator describes deliverables once,
+    previews platform rows + ad code / usage extras, then confirms before
+    ``PUT /campaigns/{id}``.
+    """
+    return deliverables_spec.parse_deliverables_text(body.text)
+
+
 class FactsFromTextBody(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     appended_by: str = Field(min_length=1, max_length=120)
@@ -1360,6 +1406,27 @@ def get_campaign_config(
     if not cfg:
         raise HTTPException(status_code=404, detail="campaign not found")
     return cfg
+
+
+@router.get("/campaigns/{campaign_id}/resolved-deliverables")
+def get_resolved_deliverables(
+    campaign_id: Annotated[str, Depends(_campaign_id_path_dep)],
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Contract-ready deliverable rows from ``campaign_config`` (with fallback)."""
+    cfg = cal.get_campaign_config(campaign_id, env=env)
+    if not cfg:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    rows = deliverables_spec.build_contract_deliverables(cfg)
+    return {
+        "campaign_id": campaign_id,
+        "env": env,
+        "rows": rows,
+        "row_count": len(rows),
+        "deliverable_platforms": cfg.get("deliverable_platforms") or [],
+        "deliverable_count_per_platform": cfg.get("deliverable_count_per_platform"),
+        "has_stored_spec": bool(cfg.get("campaign_deliverables_json")),
+    }
 
 
 @router.get("/campaigns/{campaign_id}/candidates")
@@ -1878,13 +1945,19 @@ def write_facts_multi(
             env=body.env,
         )
         cfg = cal.get_campaign_config(campaign_id, env=body.env) or {}
-        events = cal.list_events(
+        goal_rows = cal.get_goal_state(
             identity_id=identity_id,
             campaign_id=campaign_id,
             env=body.env,
-            limit=100,
         )
-        thread_meta = implicit_accept_policy.load_thread_meta_from_events(events)
+        goal_snapshot = {g["goal"]: g for g in goal_rows}
+        outbound_events = cal.list_outbound_sent_events(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            env=body.env,
+            limit=200,
+        )
+        thread_meta = implicit_accept_policy.load_thread_meta_from_events(outbound_events)
         namespaces, policy_adjustments, policy_audit = (
             implicit_accept_policy.merge_policy_facts(
                 namespaces,
@@ -1893,6 +1966,7 @@ def write_facts_multi(
                 campaign_cfg=cfg,
                 thread_meta=thread_meta,
                 source=body.source,
+                goal_snapshot=goal_snapshot,
             )
         )
         if policy_adjustments:
@@ -3099,6 +3173,28 @@ def mark_reply_handled(
         )
     except GmailUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    identity_id = body.identity_id
+    campaign_id = body.campaign_id
+    if not identity_id or not campaign_id:
+        ctx = cal.find_inbound_reply_context(
+            message_id=body.message_id,
+            env=body.env,
+        )
+        if ctx:
+            identity_id = identity_id or ctx.get("identity_id")
+            campaign_id = campaign_id or ctx.get("campaign_id")
+    if identity_id and campaign_id:
+        cal.write_event(
+            identity_id=int(identity_id),
+            campaign_id=str(campaign_id),
+            event_type="kol_reply_handled",
+            actor="bridge:mark-reply-handled",
+            payload={
+                "message_id": body.message_id,
+                "handled_label": body.handled_label,
+            },
+            env=body.env,
+        )
     return {
         "ok": True,
         "env": body.env,
@@ -3106,6 +3202,7 @@ def mark_reply_handled(
         "added_label": body.handled_label,
         "removed_label": body.pending_label,
         "result": result,
+        "reply_handled_event_written": bool(identity_id and campaign_id),
     }
 
 
@@ -3333,11 +3430,32 @@ class SelectNextSkillBody(BaseModel):
     facts: dict[str, Any] = Field(default_factory=dict)
     signals: list[dict[str, Any]] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)
+    campaign_cfg: dict[str, Any] = Field(default_factory=dict)
+    campaign_id: Optional[str] = None
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+def _enrich_dispatch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach ``campaign_cfg`` from CAL when ``campaign_id`` is provided."""
+    if payload.get("campaign_cfg"):
+        return payload
+    meta = payload.get("meta") or {}
+    if isinstance(meta.get("campaign_config"), dict) and meta["campaign_config"]:
+        payload = dict(payload)
+        payload["campaign_cfg"] = meta["campaign_config"]
+        return payload
+    campaign_id = payload.get("campaign_id")
+    if campaign_id:
+        cfg = cal.get_campaign_config(campaign_id, env=payload.get("env", "LIVE"))
+        if cfg:
+            payload = dict(payload)
+            payload["campaign_cfg"] = cfg
+    return payload
 
 
 @router.post("/logic/select-next-skill")
 def select_next_skill_route(body: SelectNextSkillBody) -> dict[str, Any]:
-    return dispatch_router.select_next_skill(body.model_dump())
+    return dispatch_router.select_next_skill(_enrich_dispatch_payload(body.model_dump()))
 
 
 class SelectDraftablePlanBody(BaseModel):
@@ -3346,11 +3464,14 @@ class SelectDraftablePlanBody(BaseModel):
     signals: list[dict[str, Any]] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)
     lane_filter: Optional[str] = None
+    campaign_cfg: dict[str, Any] = Field(default_factory=dict)
+    campaign_id: Optional[str] = None
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
 
 
 @router.post("/logic/select-draftable-plan")
 def select_draftable_plan_route(body: SelectDraftablePlanBody) -> dict[str, Any]:
-    return dispatch_router.select_draftable_plan(body.model_dump())
+    return dispatch_router.select_draftable_plan(_enrich_dispatch_payload(body.model_dump()))
 
 
 class MatchEscalationRulesBody(BaseModel):
