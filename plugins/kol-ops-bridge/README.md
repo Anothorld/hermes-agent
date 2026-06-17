@@ -371,7 +371,14 @@ Key payload rules (most frequent failure modes):
 
 - JSON must be **nested** `IngestConfirmedCandidateBody`: top-level `source`,
   `identity` (`primary_handle`, not `handle`), and `candidate` (`source` required).
-  Flat `handle` / `profile_url` / `bio` objects fail with `json_missing_field`.
+  Flat `handle` / `profile_url` / `bio` objects fail with `json_missing_field`
+  (CLI now emits a `hint` field naming the missing key and example shape).
+- Use `--identity-id` (integer), never `--id`. Wrong Nox path
+  `kol-ops-bridge/scripts/nox_kol_tool.py` is rejected — use
+  `plugins/nox-kol-bridge/scripts/nox_kol_tool.py`.
+- HTTP 400 provenance errors include a hint to add
+  `<field>_source`, `<field>_discovered_at`, `<field>_discovered_url` in the
+  same `write-facts-multi` payload.
 - Treat top-level `source` and `identity.*_source` as different fields.
   - top-level `source`: workflow origin (for example `skill:instagram-kol-discovery`)
   - `identity.*_source`: strict enum only (`google_search_result`, `linktree`,
@@ -435,11 +442,25 @@ Web console. The agent calls the tool instead of re-deriving the logic.
 | Follow-up chase policy | `reply_chase.py`, `cal.reply_chase_hint` | `get-reply-chase-hint` | `GET /identities/{id}/reply-chase-hint` |
 | Gmail unmark for re-dispatch | `gmail_client.py` | `unmark-reply-handled` | `POST /gmail/unmark-reply-handled` |
 | Reply-draft envelope enrichment + atomic persist | `reply_draft.py` | `persist-reply-draft` | `POST /reply-drafts/persist` |
-| Contract render + formal filename + HTML preview | `contract_artifacts.py` | `render-contract`, `get-contract-preview` | `POST /contracts/render`, `GET …/contract-preview`, `GET …/contract-download` |
+| Contract render + formal filename + HTML preview | `contract_artifacts.py`, `contract_product.py`, `product_variants.py` | `render-contract`, `get-contract-preview` | `POST /contracts/render`, `GET …/contract-preview`, `GET …/contract-download` |
 
 Contract preview/render requires **`python-docx`** in the same venv that runs
 ``serve.py`` (Console ``backend/requirements.txt`` includes it when using
 ``start.sh``).
+
+``contract_product.enrich_contract_fields()`` runs on every ``POST /contracts/render``:
+shipping-address parse (legal name / phone / address), social URL normalization,
+sales-format product specs + variant link (merges campaign catalog with live
+``product_variants.parse_variants_from_url`` / Povison ``modelProductList`` API
+for ``merchant_sku`` + correct ``?variant=``), date long/short formatting,
+deliverables injection only when ``campaign_deliverables_json`` is set (otherwise
+template default table rows are kept), and gifted deals drop cash section 2 when
+``fee`` is null. Same parser as Console ``POST /products/parse-variants``.
+See ``skills/social-media/kol-contract-coordinator/references/contract-field-sourcing.md``.
+
+``POST /contracts/render`` also writes ``offer.contract_artifact_path`` and updates
+``approval.reply_draft.draft.attachments`` so Console preview tracks the new docx
+(without this, preview keeps serving the old path from CAL).
 | Learning exports (read-only) | `learning_store.py` | `export-*-events`, `export-fact-corrections`, … | `GET /learning/*` |
 | Learning apply (distill) | `learning_distill.py` | `apply-*-policy`, `apply-pricing-campaign` | `POST /learning/apply-*` |
 | Learning cron (autonomous) | `learning_jobs.py` | `run-learning-jobs`, `list-learning-job-runs` | `POST /learning/run-scheduled-jobs`, `GET /learning/job-runs` |
@@ -458,7 +479,12 @@ key. `persist-reply-draft` writes CAL (event + `approval.reply_draft` fact in
 one call, after enriching `to` / `Re:`-subject / `thread_id`) and requires the
 key like every other mutating route. Child `body` must be **new prose only** —
 ``On … wrote:`` / ``>`` quote blocks are stripped at persist time (bridge re-adds
-one Gmail quote on approve).
+one Gmail quote on approve). When the child envelope omits ``attachments``,
+``persist-reply-draft`` preserves prior draft attachments or falls back to
+``offer.contract_artifact_path`` for ``primary_goal=contract_signing``. On
+approve, the same fallback attaches the contract docx to the Gmail draft; if a
+prior approve created a draft without attachments, re-approve recreates it
+(instead of idempotent replay).
 
 Optional **`conversation_summary`** on the persist JSON body (top-level, not
 inside `child_envelope`): `{"bullets": ["…", "…"]}` — Chinese operator-facing

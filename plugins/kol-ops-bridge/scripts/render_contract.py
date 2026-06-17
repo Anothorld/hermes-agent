@@ -29,7 +29,6 @@ import json
 import logging
 import re
 import sys
-import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -43,25 +42,6 @@ PLACEHOLDER_RE = re.compile(r"\$\{[A-Z_][A-Z0-9_ ]*\}")
 FEE_PLACEHOLDER = "${FEE}"
 # Template placeholders are styled red in povison_agreement.docx (EE0000).
 _PLACEHOLDER_COLORS = frozenset({"EE0000", "FF0000", "C00000", "RED"})
-_DEBUG_LOG = Path("/Users/arnold/agent_prj/.cursor/debug-88a275.log")
-
-
-def _debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
-    # region agent log
-    try:
-        payload = {
-            "sessionId": "88a275",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with _DEBUG_LOG.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-    # endregion
 
 
 def _run_color_val(run) -> str | None:
@@ -99,8 +79,14 @@ def _flatten_fields(fields: Mapping[str, Any]) -> dict[str, str]:
         if amount not in (None, "", 0):
             fee_str = f"{amount}" if not currency or currency == "USD" else f"{amount} {currency}"
 
+    today = _dt.date.today()
+    date_iso = str(fields.get("date") or today.isoformat())
+    date_long = str(fields.get("date_long") or date_iso)
+    date_short = str(fields.get("date_short") or date_iso)
+
     return {
-        "DATE": str(fields.get("date") or _dt.date.today().isoformat()),
+        "DATE": date_short,
+        "DATE_LONG": date_long,
         "INFLUENCER_FULL NAME": str(influencer.get("full_name") or ""),
         "INFLUENCER_EMAIL": str(influencer.get("email") or ""),
         "INFLUENCER_PHONE NUMBER": str(influencer.get("phone") or ""),
@@ -145,16 +131,6 @@ def _substitute_in_paragraph(paragraph, mapping: Mapping[str, str]) -> None:
     run.text = text
     if substituted and before_color in _PLACEHOLDER_COLORS:
         _clear_placeholder_highlight(run)
-        _debug_log(
-            "H1",
-            "render_contract.py:_substitute_in_paragraph",
-            "cleared placeholder red after substitution",
-            {
-                "before_color": before_color,
-                "after_color": _run_color_val(run),
-                "text_preview": text[:80],
-            },
-        )
 
 
 def _iter_all_paragraphs(doc) -> Iterable[Any]:
@@ -165,12 +141,21 @@ def _iter_all_paragraphs(doc) -> Iterable[Any]:
                 yield from cell.paragraphs
 
 
-def _remove_fee_line(doc) -> None:
-    for paragraph in list(doc.paragraphs):
-        if FEE_PLACEHOLDER in paragraph.text:
-            element = paragraph._element
-            element.getparent().remove(element)
-            return
+def _remove_cash_compensation_section(doc) -> None:
+    """Drop section 2 (cash fee + payment terms) for gifted / no-fee deals."""
+    removing = False
+    to_remove = []
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+        if text.startswith("2. Cash Compensation"):
+            removing = True
+        if removing:
+            if text.startswith("V. CONTENT REQUIREMENTS"):
+                break
+            to_remove.append(paragraph)
+    for paragraph in to_remove:
+        element = paragraph._element
+        element.getparent().remove(element)
 
 
 def _fill_deliverable_row(row: _Row, deliverable: Mapping[str, Any]) -> None:
@@ -230,19 +215,10 @@ def _populate_deliverables(doc, deliverables: list[Mapping[str, Any]]) -> None:
 
 def render(template_path: Path, output_path: Path, fields: Mapping[str, Any]) -> Path:
     mapping = _flatten_fields(fields)
-    _debug_log(
-        "H1",
-        "render_contract.py:render",
-        "render start",
-        {
-            "product_specs_preview": str((fields.get("product") or {}).get("specs") or "")[:80],
-            "template": str(template_path),
-        },
-    )
     doc = Document(str(template_path))
 
     if not fields.get("fee"):
-        _remove_fee_line(doc)
+        _remove_cash_compensation_section(doc)
 
     for paragraph in _iter_all_paragraphs(doc):
         _substitute_in_paragraph(paragraph, mapping)
@@ -253,18 +229,6 @@ def render(template_path: Path, output_path: Path, fields: Mapping[str, Any]) ->
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
-    red_runs = []
-    for paragraph in _iter_all_paragraphs(doc):
-        for run in paragraph.runs:
-            color = _run_color_val(run)
-            if color in _PLACEHOLDER_COLORS and (run.text or "").strip():
-                red_runs.append({"color": color, "text": (run.text or "")[:80]})
-    _debug_log(
-        "H1",
-        "render_contract.py:render",
-        "render complete",
-        {"output": str(output_path), "remaining_red_runs": red_runs[:10], "red_run_count": len(red_runs)},
-    )
     return output_path
 
 

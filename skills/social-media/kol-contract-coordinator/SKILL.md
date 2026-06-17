@@ -19,6 +19,8 @@ template; the agent is the **renderer**, not the **author**.
   `references/shared/style-and-brief-preambles.md`
 - Reply envelope contract:
   `references/shared/reply-envelope-contract.md`
+- Contract field sourcing (sales-format alignment):
+  `references/contract-field-sourcing.md`
 
 ## Runtime Contract
 - Follow shared runtime rules in
@@ -76,52 +78,53 @@ Read:
 **Branch I — initiate:**
 
 #### Step I.1 — Assemble contract fields
-Build a JSON dict with the following shape. Pull from
-dispatch-context first; for anything missing, scan the email thread
-(via the inbound excerpts and prior outbound drafts already loaded
-in context) for confirmed values. Do **not** invent values.
+Read `references/contract-field-sourcing.md` first — it maps sales-approved
+contracts to CAL facts and lists enricher overrides.
+
+Build a JSON dict with the following shape. Pull from dispatch-context first;
+for anything missing, scan the email thread (inbound excerpts + prior outbound)
+for confirmed values. Do **not** invent values.
+
+**Legal name / phone / address:** never use IG `display_name` as the contract
+name. Prefer `fulfillment.shipping_address` (first segment = legal name; last
+numeric segment = phone; middle = street/city/postal). The render endpoint
+overwrites `influencer.full_name`, `phone`, and `address` from that fact when
+present.
+
+**Social URLs:** supply handles if that is all you have; enricher expands to
+full `https://` URLs. Use `youtube: "/"` when the creator has no YT channel.
 
 ```jsonc
 {
-  "date": "<YYYY-MM-DD today, in operator's calendar>",
+  "date": "<YYYY-MM-DD today>",
   "influencer": {
-    "full_name": "<identity.full_name>",            // REQUIRED
-    "email":     "<identity.primary_email>",        // REQUIRED
-    "phone":     "<identity.phone or '' if absent>",
-    "address":   "<identity.default_shipping_address or '' if absent>",
-    "instagram": "<identity.social_links.instagram or ''>",
-    "tiktok":    "<identity.social_links.tiktok or ''>",
-    "youtube":   "<identity.social_links.youtube or ''>"
+    "full_name": "<from fulfillment.shipping_address or escalate>",  // REQUIRED
+    "email":     "<identity.primary_email>",                        // REQUIRED
+    "phone":     "<parsed from shipping blob or ''>",
+    "address":   "<parsed from shipping blob + identity.region or ''>",
+    "instagram": "<handle or URL>",
+    "tiktok":    "<handle or URL>",
+    "youtube":   "<URL, or \"/\" when unused>"
   },
   "product": {
-    "specs": "<campaign_config.product_specs — short product name + variant + SKU>",  // REQUIRED
-    "link":  "<campaign_config.product_link>"                                          // REQUIRED
+    "specs": "<placeholder — enricher overwrites with sales format>",
+    "link":  "<placeholder — enricher overwrites from variant catalog>"
   },
-  "fee": <null when compensation_mode == "free_product"
+  "fee": <null when compensation_mode == "gifted" or "free_product"
           | {"amount":"<integer>", "currency":"USD"} when offer.agreed_terms includes a flat fee>,
-  "deliverables": [                                                                    // REQUIRED, len >= 1
-    // Source of truth: GET /campaigns/{campaign_id}/resolved-deliverables?env=<env>
-    // → ``rows`` (from ``campaign_deliverables_json`` with platform fallback).
-    // Do NOT hand-build from ``deliverable_platforms`` alone when stored spec
-    // includes ad code / usage-rights extras.
-    {
-      "type":                  "<e.g. 'Short Video + IG Stories + RAW'>",
-      "description":           "<e.g. 'Showcase product per brief'>",
-      "quantity":              "<e.g. '1 video, 3 stories, RAW footage'>",
-      "requirements":          "<e.g. '20-60s vertical, English VO/captions'>",
-      "time_of_uploading":     "<e.g. 'Within 2 weeks of receiving product'>",
-      "platform_of_uploading": "<e.g. 'IG Collab + TikTok + YT Shorts'>"
-    }
-    // append additional rows (Ad Codes, BTS, etc.) if campaign asks for them
-  ]
+  // OMIT deliverables entirely when campaign has no campaign_deliverables_json
+  // (template keeps default Video/Stories/RAW + Ad Codes rows). When stored spec
+  // exists, enricher injects rows — agent still may omit the key.
+  "deliverables": [ /* only when GET resolved-deliverables has_stored_spec */ ]
 }
 ```
 
-**Escalate (do NOT render)** when any REQUIRED field is missing or
-when `compensation_mode` is `cash` but `offer.agreed_terms` doesn't
-yield a numeric fee. Open escalation with
-`reason="contract_fields_incomplete: <field list>"` and skip the
-remaining steps.
+**Escalate (do NOT render)** when any REQUIRED field is missing, when locked
+color/variant has no catalog row and the fallback URL is a different variant
+(see field-sourcing reference), or when `compensation_mode` is `cash` but
+`offer.agreed_terms` doesn't yield a numeric fee. Open escalation with
+`reason="contract_fields_incomplete: <field list>"` or
+`reason="contract_variant_unresolved: <color>"`.
 
 #### Step I.2 — Render the contract docx
 Use the toolized renderer (formal filename under ``contracts/<env>/<campaign_id>/``):
@@ -148,6 +151,18 @@ Response includes ``path``, ``filename``, and ``display_name``. Formal pattern:
 Capture ``path`` as ``contract_path``. If rendering fails, escalate with
 ``reason="contract_render_failed: <detail>"`` — do **not** send a draft
 without an attachment.
+
+**Product link/specs:** the bridge ``POST /contracts/render`` endpoint
+overwrites ``fields.product.link`` and ``fields.product.specs`` from
+``offer.color_or_variant_locked`` + variant catalog + ``campaign_config``
+(``contract_product.py``). Do not hand-pick URLs. If the locked color has no
+catalog row, escalate — do not ship a contract with the wrong ``?variant=``.
+
+**Influencer identity / dates / deliverables:** the same endpoint overwrites
+name/phone/address/social URLs from ``fulfillment.shipping_address``, formats
+intro vs signature dates, drops agent ``deliverables`` when no stored campaign
+spec (keeps template default table), and removes cash section 2 when ``fee`` is
+null.
 
 #### Step I.3 — Compose the email body
 Body skeleton (style preamble from the loader still applies):
@@ -255,6 +270,12 @@ reply. Operator approves later via ApprovalsPage.
 `{"skipped":"contract_not_required"}`.
 
 ## Pitfalls
+- **Using IG display name as legal name.** Contract name must match shipping /
+  government name (`fulfillment.shipping_address`), not `identity.display_name`.
+- **Hand-building deliverables.** One generic row drops the template's Ad Codes
+  line. Omit `deliverables` unless `has_stored_spec` is true.
+- **Wrong variant URL when catalog is incomplete.** Escalate for catalog update
+  (variant id + SKU + URL) instead of accepting `campaign_config.product_url`.
 - **Drafting actual clause language.** Always defer to the rendered
   template; never rewrite a sentence inside it. If a field is
   unknown, escalate — leaving a `${...}` placeholder unfilled is

@@ -41,6 +41,7 @@ from . import confirmed_fact_buffer
 from . import discovery_router
 from . import classifier_facts
 from . import contract_artifacts
+from . import contract_product
 from . import implicit_accept_policy
 from . import deliverables_spec
 from . import dispatch_router
@@ -2281,15 +2282,30 @@ def _approve_or_reject(
         and isinstance(prior_draft, dict)
         and prior_draft.get("draft_id")
     ):
-        return {
-            "ok": True,
-            "decision": "approved",
-            "derived_escalation_id": None,
-            "linked_escalation_id": linked_escalation_id,
-            "handled_escalation_id": None,
-            "gmail_draft": prior_draft,
-            "idempotent_replay": True,
-        }
+        replay_facts: dict[str, Any] = {}
+        if body.campaign_id:
+            try:
+                replay_facts = cal.latest_facts_for(
+                    identity_id=body.identity_id,
+                    campaign_id=body.campaign_id,
+                    env=body.env,
+                )
+            except Exception:  # noqa: BLE001
+                replay_facts = {}
+        needs_attachment_recreate = contract_artifacts.gmail_draft_missing_contract_attachment(
+            previous_value,
+            replay_facts if isinstance(replay_facts, dict) else {},
+        )
+        if not needs_attachment_recreate:
+            return {
+                "ok": True,
+                "decision": "approved",
+                "derived_escalation_id": None,
+                "linked_escalation_id": linked_escalation_id,
+                "handled_escalation_id": None,
+                "gmail_draft": prior_draft,
+                "idempotent_replay": True,
+            }
     # Idempotent replay: style/strategy, outcome, or discovery batch already
     # merged into policy.
     if (
@@ -2354,6 +2370,30 @@ def _approve_or_reject(
             client=resolved.client,
         )
         value["gmail_draft"] = gmail_draft
+        draft_obj = value.get("draft")
+        if isinstance(draft_obj, dict):
+            approve_facts: dict[str, Any] = {}
+            if body.campaign_id:
+                try:
+                    approve_facts = cal.latest_facts_for(
+                        identity_id=body.identity_id,
+                        campaign_id=body.campaign_id,
+                        env=body.env,
+                    )
+                except Exception:  # noqa: BLE001
+                    approve_facts = {}
+            inferred = contract_artifacts.infer_draft_attachment_paths(
+                merged_or_draft=draft_obj,
+                facts=approve_facts if isinstance(approve_facts, dict) else {},
+                primary_goal=str(value.get("primary_goal") or ""),
+            )
+            if inferred and not (
+                isinstance(draft_obj.get("attachments"), list)
+                and any(str(x).strip() for x in draft_obj.get("attachments") or [])
+            ):
+                patched_draft = dict(draft_obj)
+                patched_draft["attachments"] = list(inferred)
+                value["draft"] = patched_draft
     style_policy_apply: Optional[dict[str, Any]] = None
     if (
         decision == "approved"
@@ -2905,10 +2945,17 @@ def _create_gmail_draft_for_reply_approval(
             )
         except Exception:  # noqa: BLE001
             draft_facts = {}
-    for item in raw_attachments:
-        path_str = str(item or "").strip()
-        if not path_str:
-            continue
+    inferred_attachments = contract_artifacts.infer_draft_attachment_paths(
+        merged_or_draft=draft,
+        facts=draft_facts if isinstance(draft_facts, dict) else {},
+        primary_goal=str(approval_value.get("primary_goal") or ""),
+    )
+    attachment_candidates = (
+        inferred_attachments
+        if not any(str(item or "").strip() for item in raw_attachments)
+        else [str(item).strip() for item in raw_attachments if str(item or "").strip()]
+    )
+    for path_str in attachment_candidates:
         try:
             resolved = contract_artifacts.resolve_contract_path(path_str)
             if contract_artifacts.is_legacy_contract_basename(resolved.name):
@@ -3665,6 +3712,14 @@ def persist_reply_draft(
         )
     except Exception:  # noqa: BLE001
         facts_for_attach = {}
+    inferred_attachments = contract_artifacts.infer_draft_attachment_paths(
+        merged_or_draft=merged,
+        facts=facts_for_attach if isinstance(facts_for_attach, dict) else {},
+        prior_approval=prior_fact if isinstance(prior_fact, dict) else None,
+        primary_goal=body.primary_goal,
+    )
+    if inferred_attachments and not isinstance(merged.get("attachments"), list):
+        merged["attachments"] = list(inferred_attachments)
     raw_merged_attachments = merged.get("attachments")
     if isinstance(raw_merged_attachments, list):
         normalized_attachments: list[str] = []
@@ -3856,21 +3911,47 @@ def render_contract_endpoint(
         )
     except Exception:  # noqa: BLE001
         facts = {}
+    campaign_cfg: dict[str, Any] = {}
+    try:
+        raw_cfg = cal.get_campaign_config(body.campaign_id, env=body.env)
+        if isinstance(raw_cfg, dict):
+            campaign_cfg = raw_cfg
+    except Exception:  # noqa: BLE001
+        campaign_cfg = {}
+    render_fields = contract_product.enrich_contract_fields(
+        body.fields,
+        facts=facts if isinstance(facts, dict) else {},
+        campaign_cfg=campaign_cfg,
+    )
     output_path = contract_artifacts.build_contract_output_path(
         env=body.env,
         campaign_id=body.campaign_id,
-        fields=body.fields,
+        fields=render_fields,
         facts=facts if isinstance(facts, dict) else None,
     )
     try:
         contract_artifacts.render_contract_file(
             template_path=template,
             output_path=output_path,
-            fields=body.fields,
+            fields=render_fields,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"contract_render_failed: {exc}") from exc
     display_name = contract_artifacts.display_name_for_path(output_path)
+    sync_namespaces = contract_artifacts.build_render_sync_namespaces(
+        output_path,
+        facts if isinstance(facts, dict) else {},
+    )
+    try:
+        cal.write_facts_multi(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            namespaces=sync_namespaces,
+            source="bridge:contracts/render",
+            env=body.env,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to sync contract refs after render", exc_info=True)
     return {
         "ok": True,
         "path": str(output_path),

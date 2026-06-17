@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import html
 import os
@@ -12,6 +13,8 @@ from typing import Any, Mapping, Optional
 
 _LEGACY_BASENAME_RE = re.compile(r"^\d+_\d{8}\.docx$", re.IGNORECASE)
 _UNSAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Agent dispatch-context redaction placeholder — must never be persisted to CAL.
+REDACTED_AGENT_BODY = "[redacted — use get-email-conversation for full thread]"
 
 
 def contracts_root(*, hermes_home: Path | None = None) -> Path:
@@ -321,6 +324,96 @@ def render_contract_file(
     return mod.render(template_path, output_path, fields)
 
 
+REDACTED_AGENT_BODY = "[redacted — use get-email-conversation for full thread]"
+
+
+def patch_reply_draft_attachment(
+    approval_value: Mapping[str, Any],
+    path: str | Path,
+) -> dict[str, Any]:
+    """Return a shallow copy of ``approval.reply_draft`` with one attachment path."""
+    out = dict(approval_value)
+    draft = dict(out.get("draft") or {})
+    draft["attachments"] = [str(path)]
+    out["draft"] = draft
+    return out
+
+
+def build_render_sync_namespaces(
+    path: Path,
+    facts: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Namespaces to sync after ``POST /contracts/render``."""
+    path_str = str(path)
+    namespaces: dict[str, dict[str, Any]] = {
+        "offer": {"offer.contract_artifact_path": path_str},
+    }
+    reply = facts.get("approval.reply_draft")
+    if not isinstance(reply, dict):
+        return namespaces
+    draft = reply.get("draft")
+    if not isinstance(draft, dict):
+        return namespaces
+    body = draft.get("body")
+    if isinstance(body, str) and body.strip() == REDACTED_AGENT_BODY:
+        return namespaces
+    namespaces["approval"] = {
+        "approval.reply_draft": patch_reply_draft_attachment(reply, path_str),
+    }
+    return namespaces
+
+
+def infer_draft_attachment_paths(
+    *,
+    merged_or_draft: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    prior_approval: Mapping[str, Any] | None = None,
+    primary_goal: str | None = None,
+) -> list[str]:
+    """Resolve attachment paths when the child envelope omitted them.
+
+    Order: explicit draft attachments → prior pending draft attachments →
+    ``offer.contract_artifact_path`` for contract-signing replies.
+    """
+    raw = merged_or_draft.get("attachments")
+    if isinstance(raw, list):
+        explicit = [str(item).strip() for item in raw if str(item or "").strip()]
+        if explicit:
+            return explicit
+    if isinstance(prior_approval, dict):
+        prior_draft = prior_approval.get("draft")
+        if isinstance(prior_draft, dict):
+            prior_raw = prior_draft.get("attachments")
+            if isinstance(prior_raw, list):
+                preserved = [
+                    str(item).strip() for item in prior_raw if str(item or "").strip()
+                ]
+                if preserved:
+                    return preserved
+    goal = str(primary_goal or "").strip()
+    artifact = facts.get("offer.contract_artifact_path")
+    if goal == "contract_signing" and isinstance(artifact, str) and artifact.strip():
+        return [artifact.strip()]
+    return []
+
+
+def gmail_draft_missing_contract_attachment(
+    previous_value: Mapping[str, Any],
+    facts: Mapping[str, Any],
+) -> bool:
+    """True when an approved contract reply has no draft attachments but an artifact exists."""
+    if str(previous_value.get("primary_goal") or "") != "contract_signing":
+        return False
+    draft = previous_value.get("draft")
+    if not isinstance(draft, dict):
+        return False
+    explicit = draft.get("attachments")
+    if isinstance(explicit, list) and any(str(item or "").strip() for item in explicit):
+        return False
+    artifact = facts.get("offer.contract_artifact_path")
+    return isinstance(artifact, str) and bool(artifact.strip())
+
+
 def resolve_contract_for_identity(
     *,
     identity_id: int,
@@ -348,3 +441,45 @@ def resolve_contract_for_identity(
         facts=facts,
     )
     return formal, display_name_for_path(formal)
+
+
+def build_render_sync_namespaces(
+    output_path: Path,
+    facts: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """CAL namespaces to point artifact + reply draft at a freshly rendered docx."""
+    path_str = str(output_path)
+    namespaces: dict[str, dict[str, Any]] = {
+        "offer": {"offer.contract_artifact_path": path_str},
+    }
+    draft = facts.get("approval.reply_draft")
+    if not isinstance(draft, dict):
+        return namespaces
+    draft_obj = draft.get("draft")
+    if not isinstance(draft_obj, dict):
+        return namespaces
+    body = str(draft_obj.get("body") or "").strip()
+    if body == REDACTED_AGENT_BODY:
+        return namespaces
+    attachments = draft_obj.get("attachments")
+    if not isinstance(attachments, list) or not attachments:
+        return namespaces
+    namespaces["approval"] = {
+        "approval.reply_draft": patch_reply_draft_attachment(draft, path_str),
+    }
+    return namespaces
+
+
+def patch_reply_draft_attachment(
+    draft: Mapping[str, Any],
+    attachment_path: str,
+) -> dict[str, Any]:
+    """Return a copy of ``approval.reply_draft`` with only ``draft.attachments`` updated."""
+    out = copy.deepcopy(dict(draft))
+    draft_obj = out.get("draft")
+    if not isinstance(draft_obj, dict):
+        return out
+    updated = dict(draft_obj)
+    updated["attachments"] = [attachment_path]
+    out["draft"] = updated
+    return out

@@ -94,15 +94,18 @@ def test_renders_with_fee(tmp_path, renderer, docx_module):
     assert "Reel" in table.rows[1].cells[0].text
 
 
-def test_renders_without_fee_drops_flat_fee_line(tmp_path, renderer, docx_module):
+def test_renders_without_fee_drops_cash_section(tmp_path, renderer, docx_module):
     fields = _full_fields()
     fields["fee"] = None
+    fields["date_long"] = "June 16, 2026"
+    fields["date_short"] = "6/16/2026"
     out = tmp_path / "no_fee.docx"
     renderer.render(_TEMPLATE, out, fields)
     doc = docx_module.Document(str(out))
     assert not any("flat fee" in p.text for p in doc.paragraphs)
-    # surrounding section header and payment-terms line are intentionally kept
-    assert any("Cash Compensation" in p.text for p in doc.paragraphs)
+    assert not any("Cash Compensation" in p.text for p in doc.paragraphs)
+    assert any("June 16, 2026" in p.text for p in doc.paragraphs)
+    assert any("Date: 6/16/2026" in p.text for p in doc.paragraphs)
 
 
 def test_multiple_deliverables_expand_table(tmp_path, renderer, docx_module):
