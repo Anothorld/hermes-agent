@@ -111,6 +111,25 @@ def test_blocks_python3_u_on_kol_bridge_cli_wrapper():
     assert out["action"] == "block"
 
 
+def test_blocks_wrong_nox_tool_path_on_terminal():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/"
+                "scripts/nox_kol_tool.py contacts --env LIVE"
+            ),
+        },
+        task_id="kol-email-discover:LIVE:501:pending:abc",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    payload = json.loads(out["message"])
+    assert payload["code"] == "wrong_nox_tool_path"
+    assert "nox-kol-bridge" in payload["hint"]
+
+
 def test_blocks_browser_on_outreach_session():
     h = _hooks()
     out = h.pre_tool_call(

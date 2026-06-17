@@ -150,7 +150,15 @@ class CALClient:
                 payload = resp.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
-            _die("http_error", status=exc.code, detail=detail, path=path)
+            fields: dict[str, Any] = {
+                "status": exc.code,
+                "detail": detail,
+                "path": path,
+            }
+            hint = _http_error_hint(detail)
+            if hint:
+                fields["hint"] = hint
+            _die("http_error", **fields)
         except urllib.error.URLError as exc:
             _die("bridge_unreachable", detail=str(exc.reason), base=self.base)
         if not payload:
@@ -162,6 +170,43 @@ class CALClient:
 
 
 # ----------------------------------------------------------------- helpers
+_JSON_FIELD_HINTS: dict[str, str] = {
+    "identity_id": (
+        "Integer CAL identity from get-dispatch-context or brief "
+        "(flag --identity-id <id>; never --id)."
+    ),
+    "campaign_id": "Campaign id string from brief (e.g. SEB8010-20260608).",
+    "child_skill": (
+        "Skill name in JSON (e.g. kol-cold-outreach). Required for "
+        "persist-initial-outreach-draft / persist-reply-draft payloads."
+    ),
+    "child_envelope": (
+        "Draft object {subject, body, to, html?, kind?}. "
+        "See kol-cold-outreach SKILL §3 persist example."
+    ),
+    "primary_handle": (
+        "Instagram handle without @ (ingest-confirmed-candidate only)."
+    ),
+    "namespaces": (
+        'Dict of namespace → facts, e.g. {"identity": {"identity.email_source": "ig_bio", ...}}.'
+    ),
+    "source_message_id": "Gmail message id or stable draft: anchor from dispatch context.",
+    "primary_lane": "Usually commerce.",
+    "primary_goal": "Goal from dispatch context (e.g. outreach, compensation_negotiation).",
+    "latest_email": "Thread anchor {thread_id, message_id, subject}.",
+}
+
+
+def _http_error_hint(detail: str) -> Optional[str]:
+    if "requires provenance keys" in detail:
+        return (
+            "Include provenance triple in the same write-facts-multi payload: "
+            "<field>_source, <field>_discovered_at, <field>_discovered_url "
+            "(see kol-email-discovery SKILL Step 5a side-effect table)."
+        )
+    return None
+
+
 def _die(error: str, **fields: Any) -> "Any":  # noqa: ANN401 — raises
     """Print a stable JSON error and exit non-zero.
 
@@ -244,7 +289,11 @@ def parse_json_arg(val: Optional[str], *, required: bool = True) -> dict[str, An
 def require_keys(body: dict[str, Any], *keys: str) -> None:
     for k in keys:
         if k not in body:
-            _die("json_missing_field", field=k)
+            hint = _JSON_FIELD_HINTS.get(k)
+            if hint:
+                _die("json_missing_field", field=k, hint=hint)
+            else:
+                _die("json_missing_field", field=k)
 
 
 def print_json(out: Any) -> None:

@@ -766,42 +766,6 @@ async def _trigger_rediscover_internal(
     )
     if learned_section:
         brief_text = f"{brief_text}\n{learned_section}"
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-        from pathlib import Path as _Path
-
-        with _Path("/Users/arnold/agent_prj/.cursor/debug-8ea4a0.log").open(
-            "a", encoding="utf-8",
-        ) as _fh:
-            _fh.write(
-                _json.dumps(
-                    {
-                        "sessionId": "8ea4a0",
-                        "hypothesisId": "H2",
-                        "location": "discovery_gate.py:_trigger_rediscover_internal",
-                        "message": "rediscover_brief_before_gateway",
-                        "data": {
-                            "campaign_id": campaign_id,
-                            "env": env,
-                            "sku": product["sku"],
-                            "is_auto_retry": is_auto_retry,
-                            "learned_section_len": len(learned_section or ""),
-                            "brief_len": len(brief_text),
-                            "brief_has_learned_header": (
-                                "# learned_discovery_criteria" in brief_text
-                            ),
-                        },
-                        "timestamp": int(_time.time() * 1000),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n",
-            )
-    except Exception:
-        pass
-    # #endregion
 
     ensure_gateway_bridge_key()
     session_id = f"kol-campaign:{env}:{campaign_id}"
@@ -815,13 +779,15 @@ async def _trigger_rediscover_internal(
 
     baseline_now = _count_visible_candidates(candidates_snapshot)
     now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
-    use_async = (
-        not is_auto_retry
-        and get_settings().launch_http_202
+    # Auto-retry must use the same async-accept + callback wiring as
+    # operator /rediscover when the launch queue is busy; gating callbacks
+    # on ``not is_auto_retry`` left campaigns stuck on ``pending:*`` ids.
+    will_async_accept = (
+        get_settings().launch_http_202
         and queue_would_block(session_id=session_id)
     )
     pending_run_id: str | None = (
-        new_pending_run_id() if use_async else None
+        new_pending_run_id() if will_async_accept else None
     )
     prev_row = conn.execute(
         "SELECT run_id, status FROM product_campaigns "
@@ -911,8 +877,8 @@ async def _trigger_rediscover_internal(
             _start_rediscover,
             session_id=session_id,
             dedup_key=dedup_key,
-            on_success=_on_rediscover_success if use_async else None,
-            on_error=_on_rediscover_error if use_async else None,
+            on_success=_on_rediscover_success if will_async_accept else None,
+            on_error=_on_rediscover_error if will_async_accept else None,
             job_meta={
                 "campaign_id": campaign_id,
                 "env": env,

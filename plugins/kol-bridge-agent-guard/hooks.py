@@ -118,6 +118,26 @@ def _email_discover_workaround_message(kind: str) -> str:
     )
 
 
+def _nox_tool_invocation() -> str:
+    try:
+        contract = _load_contract()
+        return str(getattr(contract, "NOX_TOOL_INVOCATION", "")).strip() or (
+            "python3 plugins/nox-kol-bridge/scripts/nox_kol_tool.py"
+        )
+    except Exception:
+        return "python3 plugins/nox-kol-bridge/scripts/nox_kol_tool.py"
+
+
+def _browser_blocked_message() -> str:
+    nox = _nox_tool_invocation()
+    return (
+        "Browser tools are disabled for post-approval outreach, reply dispatch, "
+        "and Nox contact batch sessions. Use kol_bridge_tool.py or "
+        f"{nox} (Nox contacts --gate pre_outreach_confirm when nox_quota_enabled). "
+        "Do not use browser_* for email lookup on outreach/reply/draft runs."
+    )
+
+
 def _campaign_discovery_workaround_message(kind: str) -> str:
     return (
         f"{kind} is disabled for kol-campaign discovery runs. Execute Instagram "
@@ -193,7 +213,7 @@ def pre_tool_call(
                 "mcp_chrome_devtools_* is disabled for all KOL gateway sessions "
                 f"({sid or 'kol-*'}). The remote CDP endpoint is unreliable; use "
                 "built-in browser_* (discovery / kol-email-discovery Tier 2 only) "
-                "or kol-bridge-cli / nox_kol_tool.py for email enrichment. "
+                f"or {_nox_tool_invocation()} for email enrichment. "
                 "Do not fall back to MCP after a connection error."
             ),
         }
@@ -239,12 +259,7 @@ def pre_tool_call(
     if _is_browser_tool(tool_name) and _browser_blocked_session(session_id, task_id):
         return {
             "action": "block",
-            "message": (
-                "Browser tools are disabled for post-approval outreach, reply dispatch, "
-                "and Nox contact batch sessions. Use kol-bridge-cli / nox_kol_tool.py "
-                "(Nox contacts --gate pre_outreach_confirm when nox_quota_enabled). "
-                "Do not use browser_* for email lookup on outreach/reply runs."
-            ),
+            "message": _browser_blocked_message(),
         }
 
     try:

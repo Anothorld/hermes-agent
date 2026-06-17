@@ -290,9 +290,16 @@ def _main_model_from_hermes() -> Optional[str]:
 
 
 def strip_markdown_fences(text: str) -> str:
-    """Remove optional ``` fences from model output."""
+    """Remove optional ``` fences and bare language tags from model output."""
     raw = text.strip()
-    fence = re.search(r"```(?:markdown)?\s*([\s\S]*?)```", raw)
+    fence = re.search(r"```(?:json|markdown)?\s*([\s\S]*?)```", raw, re.IGNORECASE)
     if fence:
         return fence.group(1).strip()
+    # GLM and similar models sometimes emit `json` on its own line before `{...}`.
+    if re.match(r"^json\s*$", raw, re.IGNORECASE):
+        return ""
+    if re.match(r"^json\s+[\[{]", raw, re.IGNORECASE):
+        return raw.split(None, 1)[1].strip()
+    if re.match(r"^json\s*\r?\n", raw, re.IGNORECASE):
+        return raw.split("\n", 1)[1].strip()
     return raw

@@ -35,6 +35,36 @@ def test_preflight_rejects_get_escalation_campaign_id():
     assert exc.value.code == 2
 
 
+def test_preflight_rejects_bare_id_flag():
+    g = _load_guardrails()
+    with pytest.raises(SystemExit) as exc:
+        g.preflight_argv(["get-identity", "--id", "806", "--env", "LIVE"])
+    assert exc.value.code == 2
+
+
+def test_preflight_rejects_wrong_nox_path():
+    g = _load_guardrails()
+    with pytest.raises(SystemExit) as exc:
+        g.preflight_argv(
+            [
+                "python3",
+                "plugins/kol-ops-bridge/scripts/nox_kol_tool.py",
+                "contacts",
+                "--env",
+                "LIVE",
+            ],
+        )
+    assert exc.value.code == 2
+
+
+def test_lint_detects_wrong_nox_path():
+    g = _load_guardrails()
+    hits = g.lint_agent_bridge_snippet(
+        "python3 plugins/kol-ops-bridge/scripts/nox_kol_tool.py contacts",
+    )
+    assert any(h["code"] == "wrong_nox_tool_path" for h in hits)
+
+
 def test_cli_missing_subcommand_includes_hint(capsys):
     proc = subprocess.run(
         [sys.executable, str(CLI)],

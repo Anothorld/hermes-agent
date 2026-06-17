@@ -57,6 +57,7 @@
 | 机制 | 说明 |
 |------|------|
 | **数量门控** | 发现/rediscover run 结束后，比较 CAL 可见候选人数与 `product_campaigns.target_floor`；不足且 `retry_count < 5` 时自动再跑 rediscover |
+| **async 占位符** | 队列繁忙时 `/rediscover` 与 **auto-retry** 共用 `launch_or_accept`（202 + `pending:*`）；后台 launch 成功后必须把 placeholder 换成真实 `run_id`。`run_state_reconciler` 若发现 registry 中 `pending:*` 已结束，会将活动置为 `closed` 并把 `run_id` 还原为 registry 里最近一条非 pending 的 run |
 | **diagnostics_history** | 每轮终态答案解析为 JSON 追加到 `product_campaigns.diagnostics_history`（`attempted_angles`、`next_round_focus`、`pending_ingests` 等） |
 | **pending_ingests** | 已 qualify 但未 `ingest-confirmed-candidate` 的 handle；下一轮 brief 生成 `# resume_directives` + **STEP_0**（先入库再浏览） |
 | **解析兜底** | 若 agent 未输出 YAML `pending_ingests:`，Console 从「Qualified but unpersisted」等段落启发式抽取（cap 5） |

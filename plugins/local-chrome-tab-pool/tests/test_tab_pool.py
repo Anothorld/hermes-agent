@@ -59,6 +59,51 @@ def test_normalize_task_id_strips_sidecar_suffix(tab_pool):
     assert tab_pool.normalize_task_id(None) == "default"
 
 
+def test_release_invokes_http_close_target(tab_pool, monkeypatch):
+    closed = []
+
+    def fake_close(url, *, timeout=5.0):
+        closed.append(url)
+
+    monkeypatch.setattr(tab_pool, "_http_close_target", fake_close)
+    tab_pool._task_tabs["task-a"] = {
+        "target_id": "TAB99",
+        "cdp_url": "ws://127.0.0.1/devtools/page/TAB99",
+    }
+    assert tab_pool.release("task-a") is True
+    assert any("/json/close/TAB99" in u for u in closed)
+
+
+def test_http_close_target_accepts_empty_body(tab_pool, monkeypatch):
+    class _Resp:
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(tab_pool.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    tab_pool._http_close_target("http://127.0.0.1:9222/json/close/ABC", timeout=1.0)
+
+
+def test_http_close_target_accepts_plain_text_body(tab_pool, monkeypatch):
+    class _Resp:
+        def read(self):
+            return b"Target is closing"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(tab_pool.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    tab_pool._http_close_target("http://127.0.0.1:9222/json/close/ABC", timeout=1.0)
+
+
 def test_acquire_creates_tab(tab_pool, monkeypatch):
     calls = []
 
@@ -118,14 +163,16 @@ def test_release_closes_tab(tab_pool, monkeypatch):
                 "id": "TAB9",
                 "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/TAB9",
             }
-        if "/json/close/TAB9" in url:
-            closed.append(url)
-            return {"success": True}
         if url.endswith("/json/version"):
             return {"webSocketDebuggerUrl": "ws://x"}
         raise AssertionError(url)
 
+    def fake_close(url, *, timeout=5.0):
+        if "/json/close/TAB9" in url:
+            closed.append(url)
+
     monkeypatch.setattr(tab_pool, "_http_json", fake_http_json)
+    monkeypatch.setattr(tab_pool, "_http_close_target", fake_close)
     monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
     monkeypatch.setattr(tab_pool, "cdp_ws_healthy", lambda timeout=3.0: True)
 
@@ -142,13 +189,11 @@ def test_release_normalizes_sidecar_task_id(tab_pool, monkeypatch):
     }
     closed = []
 
-    def fake_http_json(url, *, method="GET", timeout=10.0):
+    def fake_close(url, *, timeout=5.0):
         if "/json/close/T1" in url:
             closed.append(url)
-            return {"success": True}
-        raise AssertionError(url)
 
-    monkeypatch.setattr(tab_pool, "_http_json", fake_http_json)
+    monkeypatch.setattr(tab_pool, "_http_close_target", fake_close)
     assert tab_pool.release("task-y::local") is True
     assert closed
 

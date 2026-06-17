@@ -904,41 +904,6 @@ async def start(
     )
     if learned_section:
         brief_text = f"{brief_text}\n{learned_section}"
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-        from pathlib import Path as _Path
-
-        with _Path("/Users/arnold/agent_prj/.cursor/debug-8ea4a0.log").open(
-            "a", encoding="utf-8",
-        ) as _fh:
-            _fh.write(
-                _json.dumps(
-                    {
-                        "sessionId": "8ea4a0",
-                        "hypothesisId": "H2",
-                        "location": "campaigns.py:launch_campaign",
-                        "message": "launch_brief_before_gateway",
-                        "data": {
-                            "campaign_id": campaign_id,
-                            "env": body.env,
-                            "sku": product["sku"],
-                            "learned_section_len": len(learned_section or ""),
-                            "brief_len": len(brief_text),
-                            "brief_has_learned_header": (
-                                "# learned_discovery_criteria" in brief_text
-                            ),
-                        },
-                        "timestamp": int(_time.time() * 1000),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n",
-            )
-    except Exception:
-        pass
-    # #endregion
     prior_sku_handles = await prior_sku_approved_handles(
         conn,
         bridge,

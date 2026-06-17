@@ -61,7 +61,7 @@ tried or skipped.
 | Layer | Tools |
 |-------|-------|
 | CAL | `kol_bridge_tool.py` (`get-identity`, `upsert-identity`, `write-facts-multi`) |
-| Nox Gate B | `nox_kol_tool.py contacts --gate pre_outreach_confirm` |
+| Nox Gate B | `python3 plugins/nox-kol-bridge/scripts/nox_kol_tool.py contacts --gate pre_outreach_confirm` |
 | Browser Tier 1 + 2 | `browser_navigate`, `browser_snapshot`, `browser_get_images`, `browser_click`, `vision_analyze` on **local debug Chrome** (auto-started by `local-chrome-tab-pool`) |
 
 ### Forbidden tools (hard)
@@ -376,6 +376,13 @@ Brief has `campaign_config_file`, Nox returns email → persist with
 - Tier 1 Google = `browser_navigate` to `google.com/search?q=...` +
   `browser_snapshot` — never `web_search` / terminal HTTP.
 - Never `veedcrawl_*`, `delegate_task`, or MCP Chrome for email lookup.
+- **Nox path:** `plugins/nox-kol-bridge/scripts/nox_kol_tool.py` only —
+  `kol-ops-bridge/scripts/nox_kol_tool.py` does not exist.
+- **Bridge CLI flags:** always `--identity-id <int>` (never `--id`).
+  Use `get-identity --identity-id …` before `write-facts-multi`.
+- **Provenance triple required** when writing any `identity.*_url` or email
+  fact in `write-facts-multi`: include `<key>_source`, `<key>_discovered_at`,
+  `<key>_discovered_url` in the same payload (Step 5a side-effect table).
 - Never guess addresses; never persist agency while IG bio / link-in-bio /
   personal `/contact` remain untried within budget.
 - Never accept Google snippets without opening and verifying the source page.

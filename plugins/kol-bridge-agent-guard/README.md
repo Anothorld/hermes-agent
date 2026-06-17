@@ -13,6 +13,9 @@ bypassing the deterministic KOL bridge CLI.
 | `mcp_chrome_devtools_*` | **All** `kol-*` sessions (discovery, email-discover, outreach, reply, …) — remote CDP is disabled; use `browser_*` or Nox/bridge CLI |
 | `browser_*` | Post-approval only: `kol-campaign-outreach:`, `kol-campaign-draft:`, `kol-nox-contacts-batch:`, `kol-reply:` — use Nox + bridge CLI, not browser crawl |
 
+Block messages include the canonical Nox path:
+`python3 plugins/nox-kol-bridge/scripts/nox_kol_tool.py` (not under `kol-ops-bridge/`).
+
 Allowed:
 
 - `terminal` running absolute path to **`kol-bridge-cli`** (one subcommand per call).

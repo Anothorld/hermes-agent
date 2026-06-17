@@ -76,6 +76,67 @@ async def reconcile_run_states(
         )
 
         run_id = r["run_id"]
+        if run_id and str(run_id).startswith("pending:"):
+            reg = conn.execute(
+                "SELECT ended_at FROM product_campaign_runs WHERE run_id=?",
+                (str(run_id),),
+            ).fetchone()
+            stale = reg is None or bool(reg["ended_at"])
+            if stale and r["status"] in {"running", "closed"}:
+                stale_reason = (
+                    "pending_registry_ended"
+                    if reg is not None and reg["ended_at"]
+                    else "pending_registry_missing"
+                )
+                last_real = conn.execute(
+                    """SELECT run_id FROM product_campaign_runs
+                       WHERE campaign_id=? AND env=?
+                         AND run_id NOT LIKE 'pending:%'
+                       ORDER BY started_at DESC LIMIT 1""",
+                    (campaign_id, env),
+                ).fetchone()
+                restored_run_id = (
+                    str(last_real["run_id"]) if last_real else None
+                )
+                updates[campaign_id] = {
+                    "run_state": "stale_pending",
+                    "run_error": stale_reason,
+                }
+                if r["status"] == "running":
+                    conn.execute(
+                        """UPDATE product_campaigns
+                           SET status='closed', gate_run_id=NULL, run_id=?,
+                               floor_unmet_reason=COALESCE(
+                                   floor_unmet_reason,
+                                   ?
+                               )
+                           WHERE campaign_id=? AND env=? AND run_id=?""",
+                        (
+                            restored_run_id,
+                            f"Async launch placeholder expired ({stale_reason})",
+                            campaign_id,
+                            env,
+                            str(run_id),
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE product_campaigns
+                           SET gate_run_id=NULL, run_id=?
+                           WHERE campaign_id=? AND env=? AND run_id=?""",
+                        (
+                            restored_run_id,
+                            campaign_id,
+                            env,
+                            str(run_id),
+                        ),
+                    )
+                dirty = True
+                _run_state_cache[(campaign_id, env)] = dict(
+                    updates[campaign_id],
+                )
+                continue
+
         if (
             r["status"] == "running"
             and run_id

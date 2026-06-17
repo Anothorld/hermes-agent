@@ -138,6 +138,20 @@ def _http_json(
     return json.loads(body.decode("utf-8"))
 
 
+def _http_close_target(url: str, *, timeout: float = 5.0) -> None:
+    """Close a CDP target; Chrome often returns empty or non-JSON bodies on success."""
+    request = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read()
+    if not body or not body.strip():
+        return
+    try:
+        json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError:
+        # HTTP 200 with plain text (e.g. "Target is closing") — treat as success.
+        return
+
+
 def probe_chrome() -> bool:
     """Return True when debug Chrome exposes ``/json/version``."""
     try:
@@ -198,7 +212,7 @@ def _close_target_id(target_id: str) -> None:
     if not target_id:
         return
     try:
-        _http_json(
+        _http_close_target(
             f"{_base_http_url()}/json/close/{target_id}",
             timeout=5.0,
         )
@@ -389,7 +403,7 @@ def release(task_id: str) -> bool:
         return False
 
     try:
-        _http_json(
+        _http_close_target(
             f"{_base_http_url()}/json/close/{target_id}",
             timeout=5.0,
         )

@@ -147,4 +147,13 @@ async def launch_or_accept(
             raise
 
     await run_in_background(job_id, _runner)
-    return True, _accepted_body(job_id=job_id, session_id=session_id)
+    meta_pending = (job_meta or {}).get("pending_run_id")
+    return True, _accepted_body(
+        job_id=job_id,
+        session_id=session_id,
+        pending_run_id=(
+            str(meta_pending)
+            if isinstance(meta_pending, str) and meta_pending
+            else None
+        ),
+    )

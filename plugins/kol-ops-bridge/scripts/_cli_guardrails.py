@@ -19,6 +19,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
 from bridge_agent_contract import (  # noqa: E402
     AGENT_BRIDGE_CONTRACT_LINES,
     CANONICAL_CLI_REL,
+    NOX_TOOL_REL,
     lint_agent_bridge_snippet,
 )
 
@@ -98,6 +99,29 @@ def preflight_argv(argv: list[str]) -> None:
             rejected_flag="--escalation-id",
         )
 
+    if "--id" in argv and "--identity-id" not in argv:
+        _die_cli(
+            "invalid_cli_args",
+            hint=(
+                "Use --identity-id <integer CAL id>, not --id. "
+                f"Example: python {CANONICAL_CLI_REL} get-identity "
+                "--identity-id 806 --env LIVE"
+            ),
+            rejected_flag="--id",
+        )
+
+    joined = " ".join(argv)
+    if "kol-ops-bridge/scripts/nox_kol" in joined:
+        _die_cli(
+            "invalid_cli_args",
+            hint=(
+                f"Nox CLI lives under nox-kol-bridge, not kol-ops-bridge. "
+                f"Use: python {NOX_TOOL_REL} contacts --help"
+            ),
+            rejected_path="kol-ops-bridge/scripts/nox_kol_tool.py",
+            canonical_nox_cli=NOX_TOOL_REL,
+        )
+
     if cmd == "write-event":
         has_id_flag = "--identity-id" in argv
         has_json = "--json" in argv
@@ -150,6 +174,27 @@ def hint_for_argparse_error(message: str, argv: list[str]) -> Optional[str]:
     if "invalid choice" in message and cmd is None:
         return (
             f"Unknown subcommand. Run: python {CANONICAL_CLI_REL} --help"
+        )
+
+    if "the following arguments are required: --identity-id" in message:
+        return (
+            f"Add --identity-id <integer> from dispatch brief. "
+            f"Example: python {CANONICAL_CLI_REL} get-identity "
+            "--identity-id 806 --env LIVE"
+        )
+
+    if "the following arguments are required: --campaign-id" in message:
+        return (
+            f"Add --campaign-id from brief (e.g. SEB8010-20260608). "
+            f"Example: python {CANONICAL_CLI_REL} get-dispatch-context "
+            "--identity-id <id> --campaign-id <cid> --env LIVE --view agent"
+        )
+
+    if "unrecognized arguments" in message and "--identity-id" in message:
+        return (
+            "Pass --identity-id as a flag, not a positional arg. "
+            f"Example: python {CANONICAL_CLI_REL} write-facts-multi "
+            "--identity-id 806 --env LIVE --json @/tmp/facts.json"
         )
 
     return None
