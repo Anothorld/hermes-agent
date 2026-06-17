@@ -73,8 +73,10 @@ from ..nox_quota import (
 from ..bridge_agent_contract_loader import (
     approval_cli_checklist,
     discovery_cli_rules,
+    format_hindsight_recall_seed,
     gateway_contract_block,
     gateway_contract_for_brief,
+    memory_layers_brief_block,
     redraft_cli_checklist,
     slim_dispatch_context_for_agent,
     terminal_safety_rules,
@@ -232,6 +234,7 @@ _APPROVAL_INSTRUCTIONS = (
     "\n"
     "## Runtime contract (MEMORIZE before any tool call)\n"
     f"{gateway_contract_block()}\n"
+    f"{memory_layers_brief_block()}\n"
     f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
@@ -355,6 +358,42 @@ _APPROVAL_INSTRUCTIONS = (
     "       get-facts\", \"argparse rejected subcommand X\", etc.) into\n"
     "       简体中文 `question_to_operator`. NEVER fall back to\n"
     "       `initial_outreach_draft_missing` for this case.\n"
+)
+
+_REDraft_OUTREACH_INSTRUCTIONS = (
+    "You are regenerating the initial outreach draft for ONE KOL in an "
+    "already-approved campaign.\n"
+    "\n"
+    "## Runtime contract (MEMORIZE before any tool call)\n"
+    f"{gateway_contract_block()}\n"
+    f"{memory_layers_brief_block()}\n"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
+    f"- Repo root for file tools is {_REPO_ROOT}.\n"
+    "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
+    "- Use the **terminal** tool for `kol_bridge_tool.py` (not execute_code+subprocess).\n"
+    "- \"Invoke skill X\" means read the SKILL.md and execute its Procedure "
+    "yourself — there is no CLI skill runner.\n"
+    "\n"
+    "## Pipeline (single identity only — do NOT skip)\n"
+    "1. Scope to the one `identity_id` in the input brief. Ignore all other "
+    "identities in this campaign.\n"
+    "2. Use `cal_snapshot` in the brief when present; otherwise "
+    "`get-dispatch-context --view agent` + `get-campaign` for this identity.\n"
+    "3. If `primary_email` is missing, run `kol-email-discovery` first; on "
+    "miss, open `contact_email_not_found` and stop. Never invent an email.\n"
+    "4. Determine outreach path from CAL (relationship.total_collabs / "
+    "outreach_path). Invoke `kol-cold-outreach` (cold) or "
+    "`kol-reengagement-outreach` (repeat). Build prompt header: "
+    "`kol-email-style-loader` + `kol-creator-brief-loader`, then `humanizer`.\n"
+    "5. Persist ONLY via `persist-initial-outreach-draft` (HTML body, POVISON 683). "
+    "NEVER write-facts on `approval.reply_draft`.\n"
+    "6. Do NOT create Gmail drafts or send mail in this run.\n"
+    "7. Summarize outcome for this one identity only.\n"
+    "\n"
+    "## Failure handling\n"
+    "- Same escalation rules as post-approval outreach: distinguish "
+    "`initial_outreach_draft_missing` vs `child_skill_invocation_failed`.\n"
+    "- In TEST mode, route draft `to` to campaign_config.test_mode_to.\n"
 )
 
 
@@ -2997,8 +3036,19 @@ def _compose_approval_brief(
         f"approved_by_user_id: {actor_user_id if actor_user_id is not None else ''}",
         f"test_mode_to: {test_mode_to or ''}",
         "",
-        "# selected_kols",
     ]
+    for row in selected_rows:
+        lines.extend([
+            format_hindsight_recall_seed(
+                campaign_id=campaign_id,
+                identity_id=row["identity_id"],
+                handle=row.get("handle"),
+            ),
+            "",
+        ])
+    lines.extend([
+        "# selected_kols",
+    ])
     for row in selected_rows:
         lines.append(
             f"- identity_id: {row['identity_id']}\n"
@@ -3012,10 +3062,7 @@ def _compose_approval_brief(
         "Do NOT run discovery again. Read the selected candidates from CAL using",
         "the deterministic CLI and prepare outreach drafts only for the approved",
         "identity IDs above.",
-        "",
-        gateway_contract_block(),
-        "",
-        terminal_safety_rules(repo_root=_REPO_ROOT),
+        "Bridge runtime contract is in system instructions — do not duplicate here.",
         "",
     ])
     if email_discovery_queued:
@@ -3520,6 +3567,12 @@ def _compose_redraft_brief(
         f"requested_by_user_id: {actor_user_id if actor_user_id is not None else ''}",
         f"test_mode_to: {test_mode_to or ''}",
         "",
+        format_hindsight_recall_seed(
+            campaign_id=campaign_id,
+            identity_id=identity_id,
+            handle=handle,
+        ),
+        "",
         "# scope",
         f"- identity_id: {identity_id}",
     ]
@@ -3592,10 +3645,6 @@ def _compose_redraft_brief(
             "",
         ])
     lines.extend([
-        gateway_contract_block(),
-        "",
-        terminal_safety_rules(repo_root=_REPO_ROOT),
-        "",
         redraft_cli_checklist(
             campaign_id=campaign_id,
             env=env,
@@ -3790,7 +3839,7 @@ async def redraft_outreach(
             async def _start_redraft() -> dict[str, Any]:
                 return await gateway.start_run_with_retry(
                     input=brief,
-                    instructions=_APPROVAL_INSTRUCTIONS,
+                    instructions=_REDraft_OUTREACH_INSTRUCTIONS,
                     session_id=session_id,
                 )
 
@@ -4492,6 +4541,21 @@ async def contract_readiness(
         (v for v in variants if str(v.get("id")) == str(variant_locked)),
         None,
     )
+    if variant_match is None and variant_locked:
+        lock_l = str(variant_locked).strip().lower()
+        for v in variants:
+            label = str(v.get("label") or "").strip().lower()
+            if label and label == lock_l:
+                variant_match = v
+                break
+        if variant_match is None:
+            for v in variants:
+                label = str(v.get("label") or "").lower()
+                attrs = v.get("attributes") if isinstance(v.get("attributes"), dict) else {}
+                hay = f"{label} {' '.join(str(x).lower() for x in attrs.values())}"
+                if lock_l in hay or hay in lock_l:
+                    variant_match = v
+                    break
     product_link = None
     if variant_match and variant_match.get("url"):
         product_link = variant_match["url"]

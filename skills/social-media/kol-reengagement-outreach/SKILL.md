@@ -15,7 +15,8 @@ Before drafting, load dispatch context and read:
 - `reusable_facts.facts.personalization_hint` — 1–2 sentences from prior collabs
   (`last_outcome`, `preferred_mode`, `negotiation_style`).
 - `learning_hints` — operator reject patterns (see
-  `kol-reply-dispatcher/references/shared/learning-hints.md`).
+  `kol-reply-dispatcher/references/shared/learning-hints.md`). Tactics in
+  learning_hints beat Hindsight recall; both are advisory below HARD rules.
 
 Weave hints naturally; do not repeat rejected phrasing.
 

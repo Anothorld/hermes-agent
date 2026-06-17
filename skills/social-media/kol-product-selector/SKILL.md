@@ -40,7 +40,9 @@ Read `learning_hints` per
 `reply_strategy` / `reply_learning` / `company_style` for `product_selection`
 as advisory wording only. **Priority on conflict:** fact ownership > pricing
 engine output > escalation gates > this skill's HARD rules (SKU whitelist, no
-price talk, no internal ids) > learning hints. When
+price talk, no internal ids) > learning hints >
+`references/learned/product_selection.md` (if promoted) > CAL
+`personalization_hint` > Hindsight recall (episodic) > MEMORY.md. When
 `references/learned/product_selection.md` exists, treat it as an
 auto-promoted, advisory playbook under the same priority. Before drafting, if
 `references/learned/product_selection.md` exists, read it via `skill_view`.

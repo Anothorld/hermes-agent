@@ -21,6 +21,20 @@ itself — there is no CLI `run-skill`.
   shortlist approval; use `get-dispatch-context --view agent` (you receive `identity_id`) and
   `persist-initial-outreach-draft`. Ingest JSON shape is discovery-only; see
   `instagram-kol-discovery/references/bridge-cli-json-payloads.md`.
+- **Forbidden on `kol-campaign-draft:` / outreach runs:** all `browser_*` tools.
+  Email enrichment belongs in `kol-email-discover:*` runs only. Do not call
+  `browser_navigate` to look up contact pages during draft generation.
+- **Nox CLI path (when quota applies):**
+  `python3 plugins/nox-kol-bridge/scripts/nox_kol_tool.py` — **not**
+  `kol-ops-bridge/scripts/nox_kol_tool.py` (that file does not exist).
+
+## Memory layers (read with dispatch context)
+
+When `learning_hints` or Hindsight prefetch are present, follow the full
+priority ladder in
+`../kol-reply-dispatcher/references/shared/learning-hints.md` (CAL
+`learning_hints` > promoted learned refs > `personalization_hint` >
+Hindsight > MEMORY.md). Do not store tactics in Hindsight retain.
 
 ## Procedure
 

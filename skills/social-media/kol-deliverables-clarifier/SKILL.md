@@ -53,11 +53,13 @@ the dispatcher can advance to `compensation_negotiation`.
 ## Learning hints (advisory)
 
 Read `learning_hints` per
-`../kol-reply-dispatcher/references/shared/learning-hints.md`. Apply
+`references/shared/learning-hints.md`. Apply
 `reply_strategy` / `reply_learning` / `company_style` for `deliverables_scope`
 as advisory wording/sequencing only. **Priority on conflict:** fact ownership
 > pricing engine output > escalation gates > this skill's HARD rules
-(`*_proposed` keys only, no price) > learning hints. When
+(`*_proposed` keys only, no price) > learning hints >
+`references/learned/deliverables_scope.md` (if promoted) > CAL
+`personalization_hint` > Hindsight recall (episodic) > MEMORY.md. When
 `references/learned/deliverables_scope.md` exists, treat it as an
 auto-promoted, advisory playbook under the same priority. Before drafting, if
 `references/learned/deliverables_scope.md` exists, read it via `skill_view`.

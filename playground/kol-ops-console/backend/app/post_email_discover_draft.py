@@ -12,6 +12,7 @@ import sqlite3
 from .audit import write_audit
 from .bridge_client import BridgeClient, BridgeError
 from .bridge_runtime import BRIDGE_KEY_ENV, resolve_bridge_key
+from .bridge_agent_contract_loader import slim_dispatch_context_for_agent
 from .campaign_config_sync import DEFAULT_REQUIRED_FIELDS
 from .gateway_client import GatewayClient, GatewayError
 from .run_registry import get_inflight_run, register_run
@@ -227,8 +228,32 @@ async def maybe_trigger_outreach_draft_after_email_discover(
     handle = ident.get("primary_handle")
     handle_str = handle if isinstance(handle, str) else None
 
+    try:
+        campaign_snapshot = await bridge.get_campaign(campaign_id, env=env)
+    except BridgeError as exc:
+        log.warning(
+            "post_email_discover_draft: get_campaign failed for %s: %s",
+            campaign_id, exc,
+        )
+        return None
+    try:
+        dispatch_raw = await bridge.get_dispatch_context(
+            identity_id, campaign_id, env=env,
+        )
+    except BridgeError as exc:
+        log.warning(
+            "post_email_discover_draft: get_dispatch_context failed for %s: %s",
+            identity_id, exc,
+        )
+        return None
+    dispatch_snapshot = (
+        slim_dispatch_context_for_agent(dispatch_raw)
+        if isinstance(dispatch_raw, dict)
+        else dispatch_raw
+    )
+
     from .routers.campaigns import (  # noqa: PLC0415 — avoid import cycle at load
-        _APPROVAL_INSTRUCTIONS,
+        _REDraft_OUTREACH_INSTRUCTIONS,
         _compose_redraft_brief,
     )
 
@@ -240,13 +265,20 @@ async def maybe_trigger_outreach_draft_after_email_discover(
         actor_email=actor_email,
         actor_user_id=actor_user_id,
         test_mode_to=test_mode_to,
+        campaign_snapshot=(
+            campaign_snapshot if isinstance(campaign_snapshot, dict) else {}
+        ),
+        identity_snapshot=ident if isinstance(ident, dict) else {},
+        dispatch_context_snapshot=(
+            dispatch_snapshot if isinstance(dispatch_snapshot, dict) else {}
+        ),
     )
     draft_session_id = campaign_draft_session_id(env, campaign_id, identity_id)
 
     async def _start_redraft() -> dict[str, Any]:
         return await gateway.start_run_with_retry(
             input=brief,
-            instructions=_APPROVAL_INSTRUCTIONS,
+            instructions=_REDraft_OUTREACH_INSTRUCTIONS,
             session_id=draft_session_id,
         )
 

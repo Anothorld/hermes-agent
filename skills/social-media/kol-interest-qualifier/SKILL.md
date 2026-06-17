@@ -67,8 +67,10 @@ Read `learning_hints` per
 `reply_strategy` / `reply_learning` / `company_style` for
 `interest_qualification` as advisory wording/sequencing only. **Priority on
 conflict:** fact ownership > pricing engine output > escalation gates > this
-skill's HARD rules > learning hints. Hints never add facts or change the goal
-state. When `references/learned/interest_qualification.md` exists, treat it as
+skill's HARD rules > learning hints >
+`references/learned/interest_qualification.md` (if promoted) > CAL
+`personalization_hint` > Hindsight recall (episodic) > MEMORY.md. Hints never
+add facts or change the goal state. When `references/learned/interest_qualification.md` exists, treat it as
 an auto-promoted, advisory playbook under the same priority. Before drafting, if
 `references/learned/interest_qualification.md` exists, read it via `skill_view`.
 

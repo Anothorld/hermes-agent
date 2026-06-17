@@ -166,7 +166,9 @@ the legacy `get-goals` + `get-relationship` + `get-reusable-facts` +
 `get-lanes` chain — do not call those individually.
 
 Pass `learning_hints` and `reusable_facts.facts.personalization_hint` through
-to every drafting child skill (see `references/shared/learning-hints.md`).
+to every drafting child skill (see `references/shared/learning-hints.md` for
+the full memory-layer priority: learning_hints > learned refs >
+personalization_hint > Hindsight > MEMORY.md).
 
 Use `campaign_facts` for per-campaign negotiation state (`offer.barter_attempted`,
 `offer.rate_requested`, `offer.proposed_amount`, …). Optional narrow read:

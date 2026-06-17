@@ -154,3 +154,24 @@ def test_lint_write_facts_reply_draft():
     bad = 'kol_bridge_tool.py write-facts-multi --json \'{"namespaces":{"approval":{"approval.reply_draft":{}}}}\''
     hits = c.lint_agent_bridge_snippet(bad)
     assert any(h["code"] == "write_facts_reply_draft" for h in hits)
+
+
+def test_memory_layers_brief_block():
+    c = _contract()
+    text = c.memory_layers_brief_block()
+    assert "Memory layers" in text
+    assert "learning_hints" in text
+    assert "Hindsight" in text
+
+
+def test_format_hindsight_recall_seed():
+    c = _contract()
+    text = c.format_hindsight_recall_seed(
+        campaign_id="C-1",
+        identity_id=99,
+        handle="@kol",
+    )
+    assert "# hindsight_recall_seed" in text
+    assert "campaign_id: C-1" in text
+    assert "identity_id: 99" in text
+    assert "handle: @kol" in text

@@ -35,6 +35,14 @@ def gateway_contract_block() -> str:
     return _contract_module().gateway_contract_block(repo_root=_REPO_ROOT)
 
 
+def memory_layers_brief_block() -> str:
+    return _contract_module().memory_layers_brief_block()
+
+
+def format_hindsight_recall_seed(**kwargs: Any) -> str:
+    return _contract_module().format_hindsight_recall_seed(**kwargs)
+
+
 def gateway_contract_snippet() -> str:
     """Compact bridge rules for discovery briefs (saves ~1k tokens vs full block)."""
     cli = _contract_module().gateway_cli_invocation(_REPO_ROOT)

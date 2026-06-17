@@ -73,7 +73,8 @@ Abort with structured error if no `thread_id` and no email to send to.
 >>> include: kol-email-style-loader
 
 Apply `learning_hints` per
-`../kol-reply-dispatcher/references/shared/learning-hints.md` (advisory only).
+`../kol-reply-dispatcher/references/shared/learning-hints.md` (advisory only;
+Hindsight recall is below learning_hints — see memory layers there).
 
 Prepend `[P0.3] Conversation history` from timeline (oldest → newest) when
 `thread_history` is provided; same rules as interest-qualifier (no re-ask

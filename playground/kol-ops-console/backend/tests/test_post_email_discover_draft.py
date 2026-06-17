@@ -107,8 +107,16 @@ class _StubBridge:
     ) -> dict[str, Any]:
         return {"facts": self.facts}
 
-    async def get_campaign(self, campaign_id: str) -> dict[str, Any]:
+    async def get_campaign(self, campaign_id: str, *, env: str = "LIVE") -> dict[str, Any]:
         return self.config
+
+    async def get_dispatch_context(
+        self, identity_id: int, campaign_id: str, env: str = "LIVE",
+    ) -> dict[str, Any]:
+        return {
+            "learning_hints": {"hints": [], "active_goals": []},
+            "campaign_config": self.config,
+        }
 
 
 @pytest.mark.asyncio

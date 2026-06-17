@@ -52,6 +52,7 @@ persistence — this skill outputs **body content only**.
 
 - Learning hints (reject few-shot from dispatch context):
   `../kol-reply-dispatcher/references/shared/learning-hints.md`
+  (full memory-layer priority including Hindsight — advisory only)
 
 ## Email Style Preamble (mandatory)
 >>> include: kol-email-style-loader

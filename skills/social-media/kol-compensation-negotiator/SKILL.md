@@ -140,8 +140,11 @@ Read `learning_hints` per
 `reply_strategy` / `reply_learning` / `company_style` for
 `compensation_negotiation` as advisory wording/sequencing only. **Priority on
 conflict:** fact ownership > pricing engine output > escalation gates > the
-HARD negotiation policy above > learning hints. Never let a hint trigger a
-proactive paid offer, change a pricing-engine number, or bypass a gate. When
+HARD negotiation policy above > learning hints >
+`references/learned/compensation_negotiation.md` (if promoted) > CAL
+`personalization_hint` > Hindsight recall (episodic) > MEMORY.md. Never let a
+hint trigger a proactive paid offer, change a pricing-engine number, or bypass
+a gate. When
 `references/learned/compensation_negotiation.md` exists, treat it as an
 auto-promoted, advisory playbook under the same priority. Before drafting, if
 that file exists under this skill directory, read it via `skill_view`.

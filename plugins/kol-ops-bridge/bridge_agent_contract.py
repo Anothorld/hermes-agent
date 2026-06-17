@@ -10,9 +10,11 @@ import re
 from typing import Iterable
 
 CANONICAL_CLI_REL = "plugins/kol-ops-bridge/scripts/kol_bridge_tool.py"
+NOX_TOOL_REL = "plugins/nox-kol-bridge/scripts/nox_kol_tool.py"
 CLI_WRAPPER_REL = "plugins/kol-ops-bridge/scripts/kol-bridge-cli"
 CLI_PYTHON = "python3"
 CLI_INVOCATION = f"{CLI_PYTHON} {CANONICAL_CLI_REL}"
+NOX_TOOL_INVOCATION = f"{CLI_PYTHON} {NOX_TOOL_REL}"
 DISPATCH_CONTEXT_VIEW_AGENT = "agent"
 
 
@@ -47,6 +49,45 @@ def gateway_cli_invocation(repo_root: str | None = None) -> str:
         return cli_invocation_abs(repo_root)
     return CLI_INVOCATION
 
+MEMORY_LAYERS_BRIEF_LINES: tuple[str, ...] = (
+    "## Memory layers (four-store model)",
+    "Email tactics and approved playbooks: cal_snapshot.dispatch_context.learning_hints (authoritative).",
+    "Promoted playbooks: skill references/learned/<goal>.md when present.",
+    "Repeat-KOL relationship: reusable_facts.facts.personalization_hint in dispatch context.",
+    "Episodic cross-session context: Hindsight prefetch + hindsight_recall (advisory only).",
+    "Profile meta: MEMORY.md / USER.md — not for tactics or policies.",
+    "Priority on conflict: fact ownership > pricing engine > escalation/HARD rules > "
+    "learning_hints > references/learned > personalization_hint > Hindsight > MEMORY.md.",
+    "Do NOT hindsight_retain email templates or negotiation tactics — Console learning owns those.",
+)
+
+
+def memory_layers_brief_block() -> str:
+    """Static gateway brief section for Hindsight + CAL memory boundaries."""
+    return "\n".join(MEMORY_LAYERS_BRIEF_LINES)
+
+
+def format_hindsight_recall_seed(
+    *,
+    campaign_id: str,
+    identity_id: int | str,
+    handle: str | None = None,
+) -> str:
+    """Per-KOL seed block so Hindsight auto_recall gets handle + campaign IDs."""
+    lines = [
+        "# hindsight_recall_seed",
+        f"campaign_id: {campaign_id}",
+        f"identity_id: {identity_id}",
+    ]
+    if handle:
+        lines.append(f"handle: {handle}")
+    lines.extend([
+        "Use the IDs above when calling hindsight_recall for prior episodic context.",
+        "Email tactics: learning_hints in cal_snapshot only (authoritative).",
+    ])
+    return "\n".join(lines)
+
+
 AGENT_BRIDGE_CONTRACT_LINES: tuple[str, ...] = (
     "Bridge agent hard rules (mandatory):",
     f"1. CAL reads/writes: {CLI_INVOCATION} <subcommand> --env LIVE|TEST ...",
@@ -57,6 +98,8 @@ AGENT_BRIDGE_CONTRACT_LINES: tuple[str, ...] = (
     "6. Use native terminal for CLI (one subcommand per call), not execute_code wrappers.",
     "7. Do NOT PATCH /escalations/{id} after Console resolve — return JSON envelope only.",
     "8. Dispatch reads: get-dispatch-context --view agent (slim bundle; omit lanes).",
+    f"9. Nox API: {NOX_TOOL_INVOCATION} contacts|creator-search|... "
+    f"(never kol-ops-bridge/scripts/nox_kol_tool.py — that path does not exist).",
 )
 
 # (code, pattern, hint)
@@ -193,6 +236,11 @@ _AGENT_LINT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         ),
         "Terminal cwd is often $HOME — relative plugins/... fails silently. "
         "Use absolute python3 -u .../kol_bridge_tool.py from the brief.",
+    ),
+    (
+        "wrong_nox_tool_path",
+        re.compile(r"kol-ops-bridge/scripts/nox_kol", re.I),
+        f"Wrong Nox CLI path. Use {NOX_TOOL_INVOCATION} (nox-kol-bridge plugin).",
     ),
     (
         "python3_on_kol_bridge_cli_wrapper",

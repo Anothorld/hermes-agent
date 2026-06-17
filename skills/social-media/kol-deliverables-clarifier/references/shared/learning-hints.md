@@ -40,8 +40,8 @@ Those flow through the Console learning pipeline → CAL policy → `learning_hi
 ## How child skills must use it
 
 1. After loading dispatch context, read `learning_hints.hints`.
-2. Treat each hint as a **negative few-shot** — patterns the operator already
-   rejected or corrected.
+2. Treat `reject_event` and `reply_learning` hints as **negative few-shot** —
+   patterns the operator already rejected or corrected.
 3. Do **not** repeat phrasing called out in `note`, `suggested_fix`, or policy
    bullets for the same `goal` / `child_skill`.
 4. `reply_strategy` hints are **tactical** (sequencing, when to discuss price,

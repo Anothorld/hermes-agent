@@ -30,7 +30,10 @@ from ..campaign_id_norm import CampaignIdNormaliserMixin
 from ..config import get_settings
 from ..deps import current_user, get_bridge, get_conn, get_gateway, require_role
 from ..gateway_client import GatewayClient, GatewayError
-from ..bridge_agent_contract_loader import gateway_contract_block
+from ..bridge_agent_contract_loader import (
+    gateway_contract_block,
+    terminal_safety_rules,
+)
 from ..reply_draft_kind import is_initial_outreach_reply_draft
 from ..run_registry import get_inflight_run, register_run
 from ..session_ids import campaign_draft_session_id
@@ -153,6 +156,8 @@ class RefineBody(CampaignIdNormaliserMixin):
 _REFINE_DRAFT_INSTRUCTIONS = (
     "You are REFINING an existing pending approval.reply_draft based on an "
     "operator's natural-language guidance. Hard rules:\n"
+    f"{gateway_contract_block()}\n"
+    f"{terminal_safety_rules(repo_root=_REPO_ROOT)}\n"
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- Read the current fact value via\n"
     "  `kol_bridge_tool.py get-facts --identity-id <id> --campaign-id <cid> "
