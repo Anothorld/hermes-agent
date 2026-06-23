@@ -12,12 +12,28 @@ extraction in a single LLM pass — never split across goals/stages.
 
 ## Runtime Contract
 - **No side effects.** Never write CAL, never POST to the Bridge, never draft.
-- **No tool calls** that mutate state. The skill only reads its inputs and
-  returns JSON.
+- **Final message = deliverable (HARD).** When invoked via `delegate_task`, only
+  your **last** assistant message is returned to the parent as `summary`.
+  That final message MUST be **only** raw classifier JSON — never a prose
+  “What I did” summary, even if the sub-agent system prompt asks for one.
+- **No filesystem artifacts (HARD).** Never `write_file`, never shell redirects,
+  never `/tmp/classification_result.json` or any on-disk copy.
+- **Minimal tooling.** When invoked via `delegate_task`, all inputs are already
+  in the task prompt — classify immediately. Do **not** spend turns on `find`,
+  `ls`, or `cat` to locate this SKILL.md. Use `skill_view` only when a rule in
+  `references/failure-examples.md` is genuinely needed.
+- **No mutating tool calls.** Prefer zero tool calls. Read-only tools only when
+  strictly necessary.
 - Consult `references/failure-examples.md` before changing extraction rules;
   run `playground/classifier_eval/run_eval.py` after edits.
-- Output is **machine-consumed**; downstream `kol-reply-dispatcher` parses it.
-  Stable JSON shape over chatty prose.
+- Output is **machine-consumed**; downstream `kol-reply-dispatcher` parses the
+  `delegate_task` return text — not files on disk. Stable JSON shape over chatty
+  prose.
+- **Output template (Hermes):** canonical JSON skeleton lives at
+  `templates/classifier-output.json`. On load, `skill_view` exposes it under
+  `linked_files.templates`. Before classifying, read:
+  `skill_view(name="kol-email-stage-classifier", file_path="templates/classifier-output.json")`
+  and emit a populated copy (same keys/order; fill values only).
 - Confidence required on every signal; ambiguity must be reported, not
   resolved.
 
@@ -300,7 +316,14 @@ translate at runtime.
 
 ## Minimal canonical output (format anchor)
 
-Use this as the minimum shape contract (JSON object only):
+**Prefer the bundled template file** (discovered by Hermes `skill_view`):
+
+```
+skill_view(name="kol-email-stage-classifier", file_path="templates/classifier-output.json")
+```
+
+The template is the authoritative shape. Below is the same contract inline for
+offline reading:
 
 ```json
 {
@@ -355,9 +378,21 @@ Use this as the minimum shape contract (JSON object only):
   belongs to the dispatcher / negotiator, not here.
 - Drafted prose / Markdown / a reply email — forbidden; classifier output is
   pure JSON.
+- Wrote JSON to disk (`write_file`, `cat > /tmp/...`, heredoc) — forbidden;
+  the dispatcher never reads these paths and the handoff breaks.
+- Final message was a human summary instead of raw JSON — parent cannot parse;
+  dispatcher will re-delegate with a corrective prompt (not an operator ticket).
+- Spent multiple tool turns locating SKILL.md when inputs were already in the
+  task prompt — wastes sub-agent budget and delays `write-facts-multi`.
 - Skipped fact extraction in a non-active lane when the email contains
   fulfillment/publish info — multi-namespace extraction is mandatory in one
   pass.
 - Ignored `thread_history` and emitted an `ambiguity` for something the
   KOL plainly answered two turns ago. The history is part of context for
   exactly this reason — read it before declaring ambiguity.
+
+## Pitfalls
+- `/tmp/classification_result.json` is **not** part of this pipeline — do not
+  create it even if it "helps debugging".
+- When unsure between tool calls and direct reasoning, **reason directly** from
+  the supplied email + goal_state; this skill is side-effect-free by design.

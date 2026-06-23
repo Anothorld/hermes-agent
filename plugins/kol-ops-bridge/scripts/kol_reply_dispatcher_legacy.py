@@ -769,26 +769,34 @@ def _match_identity(
 
 
 # ---------------------------------------------------------------- main loop
-_DISPATCHER_INSTRUCTIONS = (
-    "You are running the `kol-reply-dispatcher` skill. Read the supplied "
-    "pending_replies array and dispatch context, classify the inbound reply, "
-    "persist classifier facts via the bridge CLI, then follow the skill's "
-    "multi-goal flow: `select-draftable-plan` → parallel fragment-mode child "
-    "skills (one per draftable goal) → merge disjoint `proposed_facts` with a "
-    "single `write-facts-multi` → `kol-reply-synthesizer` → "
-    "`persist-reply-draft` with `contributing` list. Open escalations for "
-    "human-gate goals and fragment `gate:true` results; do not send mail. "
-    "Respect each reply's `anomaly_signals` soft-control flags "
-    "(especially allow_autoflow / gate_budget / gate_contract / gate_payout). "
-    "For idempotency labels, use only `kol_bridge_tool.py mark-reply-handled`; "
-    "do not call Gmail label APIs or custom scripts directly. "
-    f"MANDATORY bridge CLI: python3 {_BRIDGE_CLI_ABS} <subcommand> --env <env> ... "
-    "Always use python3 (never bare `python`). Use this absolute path from any cwd. "
-    "Routing/facts/drafts: use only kol_bridge_tool.py subcommands documented in "
-    "kol-reply-dispatcher/references/shared/bridge-http-api-endpoints.md — "
-    "never import kol-ops-bridge Python modules or use execute_code "
-    "for Bridge HTTP."
-)
+def _dispatcher_instructions() -> str:
+    """Reuse production gateway brief (handoff block + conversation_summary)."""
+    try:
+        import importlib.util
+
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "_gateway_client_for_legacy",
+            root / "inbound_reply" / "gateway_client.py",
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("gateway_client spec failed")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod.dispatcher_instructions()
+    except Exception as exc:
+        log.warning("fallback legacy dispatcher instructions: %s", exc)
+        return (
+            "You are running the `kol-reply-dispatcher` skill. Read the supplied "
+            "pending_replies array and dispatch context, classify the inbound reply, "
+            "persist classifier facts via the bridge CLI, then follow the skill's "
+            "multi-goal flow. MANDATORY bridge CLI: "
+            f"python3 {_BRIDGE_CLI_ABS} <subcommand> --env <env> ..."
+        )
+
+
+_DISPATCHER_INSTRUCTIONS = _dispatcher_instructions()
 
 
 def _clip_text(text: str, limit: int = 12000) -> str:

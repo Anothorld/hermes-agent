@@ -18,8 +18,10 @@ Both call `inbound_reply.orchestrator.run_once()` with different `InboundDeps`.
   (merges global recent events with targeted thread / sender lookups)
 - `gating.py` — content risk and soft-control flags
 - `payload.py` — `pending_reply_payload` (thread history, chase context)
+- `gateway_client.py` — gateway run launcher; `dispatcher_instructions()` injects
+  `classifier_handoff_brief_block()` (Step 2→2.5→3 templates + retry policy)
 - `processor.py` — per-message pipeline (dedup, event write, gateway)
-- `state.py` — flock lock, local seen set, Console global dedup
+- `state.py` — flock lock (reentrant within one thread for nested `process_message` calls), local seen set, Console global dedup
 - `orchestrator.py` — one tick over all mailboxes
 
 ## Failure / retry semantics
@@ -57,7 +59,7 @@ not permanently dropped from the poller loop.
 |----------|---------|---------|
 | `HERMES_HOME` | `~/.hermes` | `poller_state.json` / flock lock path |
 | `KOL_OPS_BRIDGE_STATE_DIR` | `~/.hermes/kol-ops-bridge` | `inbound_poller.json`, `gmail_worker.json` |
-| `KOC_DB_PATH` | `$HERMES_HOME/kol-ops-console/app.db` | Console DB for cross-process dedup |
+| `KOC_DB_PATH` | `~/.hermes/kol-ops-console/app.db` | Console DB for cross-process dedup + Agent Dock run registry |
 | `KOL_OPS_GMAIL_INBOUND_AUTO_START` | `0` | Auto-enable inbound poller on bridge boot |
 | `KOL_OPS_BRIDGE_DISABLE_GMAIL_INBOUND_POLLER` | unset | Disable inbound ticks (`running=false` in status) |
 | `KOL_OPS_GMAIL_WORKER_PARALLEL` | `0` | Run inbound + SENT loops in parallel (escape hatch) |
@@ -75,7 +77,8 @@ not permanently dropped from the poller loop.
 
 Set `KOL_OPS_INBOUND_REPLY_LEGACY_SCRIPT=1` before starting the bridge or CLI.
 The monolith lives at `scripts/kol_reply_dispatcher_legacy.py` (parity fixes
-applied for facts unwrap, gateway retry, and incremental seen saves).
+applied for facts unwrap, gateway retry, incremental seen saves, and
+`classifier_handoff_brief_block()` in gateway instructions).
 
 ## Tests
 

@@ -1,0 +1,12 @@
+{
+  "campaign_id": "<campaign_id from pending_replies[i]>",
+  "source": "email:<latest_email.message_id>",
+  "signals": [],
+  "namespaces": {
+    "identity": {},
+    "offer": {},
+    "fulfillment": {},
+    "payout": {},
+    "approval": {}
+  }
+}

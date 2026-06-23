@@ -174,18 +174,127 @@ Use `campaign_facts` for per-campaign negotiation state (`offer.barter_attempted
 `offer.rate_requested`, `offer.proposed_amount`, …). Optional narrow read:
 `get-facts --identity-id ID --campaign-id CID --env LIVE`.
 
-### Step 2 — Run the classifier
-Invoke `kol-email-stage-classifier` with `latest_email`, `thread_history`
-(verbatim from Step 0), `anomaly_signals` (from Step 0b),
-`current_goal_state` (from Step 1's `goals`),
-`campaign_facts` (from Step 1's `campaign_facts`),
-`campaign_config_summary`, and (if applicable) `relationship_summary`
-(from Step 1's `relationship` + `reusable_facts` + `campaign_config`).
-The classifier returns the JSON shape defined in its SKILL.md.
-**Do not paraphrase or modify** its output.
+### Step 2 — Run the classifier (parse once, retry on technical failure only)
+
+**Load templates first (once per reply):**
+
+```
+skill_view(name="kol-reply-dispatcher", file_path="templates/classifier-handoff-checklist.md")
+skill_view(name="kol-email-stage-classifier", file_path="templates/classifier-output.json")
+```
+
+**Success rule (HARD):** after a **successful parse**, invoke Step 2.5 → Step 3
+immediately and **never** re-run Step 2 for the same inbound `message_id`.
+
+**Handoff architecture (read before invoking):**
+
+- `delegate_task` returns only `results[i].summary` (= sub-agent **final**
+  assistant message). Intermediate turns (including JSON emitted mid-run) are
+  **invisible** to the parent.
+- Hermes sub-agent default prompt asks for a prose “What I did” summary — that
+  **conflicts** with classifier JSON. You must override it (see below) or use
+  inline mode.
+- Never read `/tmp/classification_result.json` or other sub-agent files.
+
+Inputs for classification: `latest_email`, `thread_history` (verbatim Step 0),
+`anomaly_signals` (Step 0b), `current_goal_state` (Step 1 `goals`),
+`campaign_facts`, `campaign_config_summary`, and optional `relationship_summary`.
+
+#### Path A — Inline classifier (**preferred for handoff reliability**)
+
+1. Use `templates/classifier-output.json` as the shape anchor (via `skill_view`).
+2. Apply inputs; emit **only** the populated JSON in your **next** assistant
+   message (raw JSON, no markdown fence, no summary).
+3. Parse that message → `classifier_result` → Step 2.5.
+
+Use Path A by default. Path B only when the combined thread payload is too large
+for a single parent turn **and** you accept higher handoff risk.
+
+#### Path B — `delegate_task` (secondary)
+
+Load and fill `kol-email-stage-classifier/templates/delegate-task-context.md`
+(via `skill_view`), substituting input JSON blobs, **or** paste the override
+block below into task `context`:
+
+```
+OVERRIDE SUBAGENT DEFAULT: Ignore instructions to write a prose summary,
+list files, or describe "What I did". Your FINAL message — the only text
+returned to the parent — MUST be ONLY the raw classifier JSON object.
+No markdown fence. No heredoc files. No tool calls unless strictly necessary.
+Classify immediately; do not search for SKILL.md on disk.
+```
+
+End `context` with:
+
+> Return **only** the classifier JSON object as your **final** message.
+
+**Parse `delegate_task` result:**
+
+1. Read `results[0].summary` (not tool trace, not child session logs).
+2. `json.loads(summary)` or extract outermost `{...}` if minor prose wraps it.
+3. Validate: `facts_extracted` (object) and `signals` (array) present.
+4. On success → `classifier_result` → Step 2.5.
+
+#### Technical handoff failure (NOT operator escalation)
+
+Unparseable output, prose-only summary, or missing required keys → **never**
+`open-escalation`.
+
+| Attempt | Action |
+|---------|--------|
+| 1 | Path A inline (if Path B was tried first, switch to Path A). |
+| 2 | Path B re-delegate with corrective prefix citing exact failure (`prose summary`, `invalid JSON`, `missing facts_extracted`). |
+| 3 | Path A inline again with full inputs restated (last attempt). |
+| All failed | **Defer**: no `mark-reply-handled`; log `classifier_handoff_exhausted` + `message_id`; continue other replies. Next cron retries. |
+
+Cap: at most **3** classifier invocations per reply (any mix of Path A/B). Do not add a fourth attempt.
+
+**Forbidden:**
+
+- Re-invoke Step 2 after a **successful parse** (caused 3× classifier + delayed
+  `write-facts-multi` in production).
+- `open-escalation` for format / parse failures.
+
+See `docs/kol-reply-classifier-dispatcher-handoff.md`.
+
+### Step 2.5 — Validate & map handoff (deterministic, before Bridge write)
+
+Preserve the **full** parsed object as `classifier_result` — Steps 3.25, 3.5,
+and 4 still need `risk_controls`, `escalation_hint`, `active_goals_by_lane`,
+etc.; do not drop fields after parse.
+
+**Map** `classifier_result.facts_extracted` → Bridge `namespaces` (copy keys
+verbatim; omit empty namespace objects):
+
+| `facts_extracted` key | `write-facts-multi` namespace |
+|-----------------------|-------------------------------|
+| `identity` | `namespaces.identity` |
+| `offer` | `namespaces.offer` |
+| `fulfillment` | `namespaces.fulfillment` |
+| `payout` | `namespaces.payout` |
+| `approval` | `namespaces.approval` |
+
+**Preview sanitize** (no DB write):
+
+```
+python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py sanitize-classifier-facts \
+  --json '{"namespaces": <mapped namespaces>, "signals": <classifier_result.signals>}'
+```
+
+Use the returned `namespaces` (and note `adjustments`) for Step 3. If preview
+fails or keys lack dotted prefixes → treat as **technical** failure: one
+corrective Step 2 retry (namespace reminder in prompt), then defer — do **not**
+open `fact_namespace_violation` until Step 3 `write-facts-multi` actually
+returns `FactNamespaceError`.
 
 ### Step 3 — Persist extracted facts (one call across all namespaces)
-Write every non-empty namespace from `facts_extracted` in a single call:
+
+**Must follow Step 2.5 immediately** — same dispatcher turn, before fragment
+child skills or a second classifier attempt.
+
+Write sanitized namespaces from Step 2.5 in a single call. Shape reference:
+`skill_view(name="kol-reply-dispatcher", file_path="templates/write-facts-multi-body.json")`.
+Use `classifier_result.signals` verbatim:
 
 ```
 python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
@@ -197,6 +306,7 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
               "offer":       {"offer.<key>": <val>, ...},
               "identity":    {"identity.<key>": <val>, ...},
               "fulfillment": {"fulfillment.<key>": <val>, ...},
+              "payout":      {"payout.<key>": <val>, ...},
               "approval":    {"approval.<key>": <val>, ...}
             }}'
 ```
@@ -209,9 +319,11 @@ python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
 - Empty namespaces may be omitted; the Bridge no-ops them.
 - Each fact key MUST be dotted-prefix; the Bridge enforces this with
   `FactNamespaceError` and **rejects the whole call** before any insert if
-  any key is malformed. If you hit one, abort that reply, open an
-  escalation with reason `fact_namespace_violation`, log raw classifier
-  output, and move on. Do **not** retry with munged keys.
+  any key is malformed. If Step 3 returns `FactNamespaceError` after Step 2.5
+  preview passed, treat as **technical**: one corrective Step 2 retry with
+  namespace rules quoted; if still failing, defer (`classifier_handoff_exhausted`)
+  — only escalate `fact_namespace_violation` when the classifier output is
+  structurally valid but semantically requires human judgment (not a prefix typo).
 - After the write, re-fetch dispatch context with `get-dispatch-context --view agent`.
   This is the **server's** view of which goals are now active / satisfied
   / blocked, and supersedes the classifier's `active_goals_by_lane`.
@@ -262,7 +374,7 @@ When `proceed_normal` or `skip_same_source`: no extra chase handling.
 
 ### Step 3.25 — Soft-control anomaly gating (mandatory)
 
-Read effective controls from classifier output `risk_controls` (fallback to
+Read effective controls from **`classifier_result.risk_controls`** (fallback to
 Step 0b `anomaly_signals.risk_controls` when missing):
 
 1. If `allow_autoflow == false`:
@@ -336,7 +448,7 @@ After Step 3 re-fetch, call the deterministic plan endpoint:
 python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py select-draftable-plan \
   --json '{"goals": <from dispatch_context.goals as name→row map>,
             "facts": <merge reusable_facts.facts + campaign_facts>,
-            "signals": <classifier signals>,
+            "signals": <classifier_result.signals>,
             "meta": {"campaign_config": <dispatch_context.campaign_config>},
             "campaign_id": "<campaign_id>",
             "env": "<env>"}'
@@ -571,9 +683,24 @@ draftable goals in both fulfillment and commerce; severity signals still
 apply — fulfillment fragments may rank first in `contributing` order.
 Gated commerce goals go to `escalate` list instead of synthesis.
 
-### Failure — namespace violation
-Classifier emits malformed keys. Step 3 hits `FactNamespaceError`. Open
-escalation `fact_namespace_violation`, skip drafting.
+### Failure — namespace violation (technical)
+Classifier emits malformed keys (missing dotted prefix). Step 2.5 preview or
+Step 3 returns `FactNamespaceError`. One corrective Step 2 retry with namespace
+rules quoted; if still failing, defer (`classifier_handoff_exhausted`) — **no**
+operator escalation for prefix/shape errors. Escalate `fact_namespace_violation`
+only when output is structurally valid but requires human judgment (not a typo).
+
+### Failure — classifier handoff (re-run loop)
+Sub-agent returns valid JSON via `delegate_task`, but dispatcher re-runs
+Step 2 twice instead of Step 3. Facts arrive minutes late or not at all.
+**Fix:** parse delegate result once → Step 3 immediately; never read
+`/tmp/classification_result.json`.
+
+### Failure — classifier handoff (internal retry)
+Sub-agent returns prose-only summary. Dispatcher re-`delegate_task` with
+corrective prompt (up to 3×), then inline fallback — **no** operator
+escalation. If all attempts fail, defer reply to next cron
+(`classifier_handoff_exhausted`).
 
 ### Failure — fragment fact conflict
 Two fragment skills propose the same fact key. Open
@@ -591,15 +718,32 @@ Two fragment skills propose the same fact key. Open
 | `skill_view` file not found | Use only files listed in `available_files` or `bridge-http-api-endpoints.md`. |
 | `mark-reply-handled` **503** on handled label | Escalate `gmail_label_error`. Pending-reply missing is OK (Bridge skips it). |
 | `anomaly_signals.mailbox_mismatch` | Open escalation `inbound_mailbox_mismatch` before drafting; include both mailbox emails. |
-| `FactNamespaceError` on write | Escalate `fact_namespace_violation`; do not munge keys. |
+| `FactNamespaceError` on write (prefix / key shape) | Corrective Step 2 retry; defer if exhausted — do not munge keys; not operator escalation. |
+| Namespace conflict requiring human judgment (valid keys, ambiguous semantics) | Escalate `fact_namespace_violation`; skip drafting. |
 | Fragment `assert_disjoint` conflict | Escalate `fragment_fact_conflict`. |
+| Classifier returns prose / unparseable JSON | **Internal retry** (Path A inline preferred; ≤3 total); **no** `open-escalation`. |
+| `sanitize-classifier-facts` preview shows bad prefixes | Corrective Step 2 retry; defer if exhausted — not operator escalation. |
+| Step 3 `FactNamespaceError` after successful preview | One corrective Step 2 retry; defer if exhausted. |
+| Classifier handoff exhausted after retries | Defer reply (no `mark-reply-handled`); log `classifier_handoff_exhausted`. |
+| Tempted to read `/tmp/classification_result.json` | **Forbidden** — parse inline JSON or `results[0].summary` only. |
+| Step 2 parse succeeded but Step 3 not run same turn | **Bug** — Step 2.5 → `write-facts-multi` before fragment work. |
 
 Allowed tools for deterministic steps: native **`terminal`** with one
-`kol_bridge_tool.py` subcommand per call, plus `delegate_task` for fragment child
-skills only. **Never** use `execute_code` (including `subprocess` wrappers) or
-`curl`/HTTP to call the bridge; never read `kol-ops-bridge` Python source.
+`kol_bridge_tool.py` subcommand per call (including `sanitize-classifier-facts`
+in Step 2.5), plus `delegate_task` for classifier (Step 2 Path B, optional) and
+fragment child skills (Step 5). **Never** use `execute_code` or `curl`/HTTP to
+call the bridge; never read `kol-ops-bridge` Python source.
 
 ## Pitfalls
+- **`delegate_task` only returns the final message.** JSON in an earlier turn
+  is lost — never emit prose as your last message when using Path B.
+- **Prefer Path A (inline)** for handoff reliability; Path B needs the OVERRIDE
+  block or the parent receives a prose summary instead of JSON.
+- **Re-run Step 2 only on parse failure.** After success → Step 2.5 → Step 3.
+- **Classifier format errors are internal, not escalations.** Prose / invalid
+  JSON → corrective retry → defer; never operator tickets for handoff format.
+- **`/tmp/classification_result.json` is not consumed** by dispatcher or Bridge.
+- Step 2.5 → Step 3 must run in the **same turn** as a successful parse.
 - The classifier's `active_goals_by_lane` is a **hint**, not the truth.
   Always re-fetch `get-dispatch-context --view agent` after writing facts and trust the
   server.

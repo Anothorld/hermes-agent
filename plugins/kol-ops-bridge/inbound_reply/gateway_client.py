@@ -14,11 +14,32 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 
 
+def _classifier_handoff_brief_block() -> str:
+    """Load handoff brief; supports package import and direct module load."""
+    try:
+        from ..bridge_agent_contract import classifier_handoff_brief_block
+
+        return classifier_handoff_brief_block()
+    except ImportError:
+        import importlib.util
+
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "_bridge_agent_contract_for_gateway",
+            root / "bridge_agent_contract.py",
+        )
+        if spec is None or spec.loader is None:
+            return ""
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.classifier_handoff_brief_block()
+
+
 def dispatcher_instructions() -> str:
     bridge_cli = (
         Path(__file__).resolve().parents[1] / "scripts" / "kol_bridge_tool.py"
     )
-    return (
+    base = (
         "You are running the `kol-reply-dispatcher` skill. Read the supplied "
         "pending_replies array and dispatch context, classify the inbound reply, "
         "persist classifier facts via the bridge CLI, then follow the skill's "
@@ -40,6 +61,7 @@ def dispatcher_instructions() -> str:
         "never import kol-ops-bridge Python modules or use execute_code "
         "for Bridge HTTP."
     )
+    return f"{base}\n\n{_classifier_handoff_brief_block()}"
 
 
 @dataclass

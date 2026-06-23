@@ -67,6 +67,22 @@ def memory_layers_brief_block() -> str:
     return "\n".join(MEMORY_LAYERS_BRIEF_LINES)
 
 
+CLASSIFIER_HANDOFF_BRIEF_LINES: tuple[str, ...] = (
+    "## Classifier handoff (Step 2→2.5→3 — mandatory, no operator escalation for format errors)",
+    "Load: skill_view kol-reply-dispatcher templates/classifier-handoff-checklist.md",
+    " and kol-email-stage-classifier templates/classifier-output.json.",
+    "Path A (preferred): inline classify → raw JSON only → parse → Step 2.5 sanitize-classifier-facts → Step 3 write-facts-multi same turn.",
+    "Path B: delegate_task only with kol-email-stage-classifier/templates/delegate-task-context.md override; parse results[0].summary only.",
+    "Technical parse failure: retry ≤3 (inline preferred), then defer — never open-escalation for JSON format.",
+    "After successful parse: never re-run Step 2; never read /tmp/classification_result.json.",
+)
+
+
+def classifier_handoff_brief_block() -> str:
+    """Gateway brief snippet for kol-reply Step 2→3 handoff reliability."""
+    return "\n".join(CLASSIFIER_HANDOFF_BRIEF_LINES)
+
+
 def format_hindsight_recall_seed(
     *,
     campaign_id: str,

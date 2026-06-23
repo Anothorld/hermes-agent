@@ -1,0 +1,41 @@
+{
+  "active_goals_by_lane": {
+    "commerce": null,
+    "fulfillment": null,
+    "publish": null,
+    "meta": null
+  },
+  "facts_extracted": {
+    "identity": {},
+    "offer": {},
+    "fulfillment": {},
+    "payout": {},
+    "approval": {}
+  },
+  "signals": [],
+  "ambiguity": "",
+  "thread_integrity": {
+    "status": "strict",
+    "matched_by": "in_reply_to",
+    "notes": []
+  },
+  "identity_integrity": {
+    "status": "matched",
+    "sender_email": null,
+    "expected_email": null,
+    "reasons": []
+  },
+  "risk_controls": {
+    "allow_autoflow": true,
+    "gate_budget": false,
+    "gate_contract": false,
+    "gate_payout": false
+  },
+  "escalation_hint": {
+    "should_consider": false,
+    "reason": "",
+    "matched_rule_id": "",
+    "suggested_question": "",
+    "required_facts_to_resume": []
+  }
+}
