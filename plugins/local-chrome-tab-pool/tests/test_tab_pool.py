@@ -314,3 +314,41 @@ def test_cdp_ws_healthy_false_when_socket_unreachable(tab_pool, monkeypatch):
         },
     )
     assert tab_pool.cdp_ws_healthy(timeout=0.5) is False
+
+
+def test_maybe_probe_cdp_health_restarts_when_degraded(tab_pool, monkeypatch):
+    state = {"healthy": False, "recover_calls": 0}
+
+    monkeypatch.setattr(tab_pool, "is_enabled", lambda: True)
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(
+        tab_pool,
+        "cdp_ws_healthy",
+        lambda timeout=3.0: state["healthy"],
+    )
+
+    def fake_recover(task_id=None):
+        state["recover_calls"] += 1
+        state["healthy"] = True
+
+    monkeypatch.setattr(tab_pool, "recover_degraded_chrome", fake_recover)
+    tab_pool._last_cdp_probe_at = 0.0
+
+    assert tab_pool.maybe_probe_cdp_health(force=True) is True
+    assert state["recover_calls"] == 1
+
+
+def test_recover_degraded_chrome_clears_task_tab(tab_pool, monkeypatch):
+    closed: list[str] = []
+
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: closed.append(tid))
+    monkeypatch.setattr(tab_pool, "ensure_chrome_running", lambda: None)
+    tab_pool._task_tabs["task-a"] = {
+        "target_id": "TAB-A",
+        "cdp_url": "ws://127.0.0.1/devtools/page/TAB-A",
+    }
+
+    tab_pool.recover_degraded_chrome("task-a")
+
+    assert "task-a" not in tab_pool._task_tabs
+    assert closed == ["TAB-A"]

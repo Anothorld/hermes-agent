@@ -107,6 +107,42 @@ def test_pre_tool_call_blocks_when_session_already_claimed(hooks_env, monkeypatc
     assert result["action"] == "block"
 
 
+def test_session_info_wrapper_prefers_tab_pool_over_browser_cdp(
+    hooks_env, monkeypatch,
+):
+    """Regression: BROWSER_CDP_URL must not bypass per-task page tabs."""
+    hooks = hooks_env
+    monkeypatch.setenv(
+        "BROWSER_CDP_URL",
+        "http://127.0.0.1:9222",
+    )
+    monkeypatch.setattr(
+        hooks.tab_pool,
+        "acquire",
+        lambda task_id: {
+            "target_id": f"PAGE-{task_id}",
+            "cdp_url": f"ws://127.0.0.1:9222/devtools/page/PAGE-{task_id}",
+        },
+    )
+
+    from tools import browser_tool
+
+    browser_tool._active_sessions.clear()
+    browser_tool._session_last_activity.clear()
+    browser_tool._tab_pool_session_info_wrapped = False
+    hooks._SESSION_INFO_WRAPPED = False
+    hooks.install_session_info_wrapper()
+
+    info_a = browser_tool._get_session_info("kol-campaign:LIVE:CAMP-A")
+    info_b = browser_tool._get_session_info("kol-campaign:LIVE:CAMP-B")
+
+    assert info_a["features"]["tab_pool"] is True
+    assert info_b["features"]["tab_pool"] is True
+    assert "/devtools/page/" in info_a["cdp_url"]
+    assert "/devtools/page/" in info_b["cdp_url"]
+    assert info_a["cdp_url"] != info_b["cdp_url"]
+
+
 def test_cleanup_wrapper_releases_only_bare_task(hooks_env, monkeypatch):
     hooks = hooks_env
     monkeypatch.setattr(hooks.tab_pool, "is_enabled", lambda: True)

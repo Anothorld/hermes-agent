@@ -16,6 +16,7 @@ import os
 import socket
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,9 +27,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PORT = 9222
 _AUTOLAUNCH_TIMEOUT_S = 25.0
+_CDP_PROBE_INTERVAL_S = float(os.environ.get("LOCAL_CHROME_CDP_PROBE_INTERVAL_S", "120"))
 
 _lock = threading.Lock()
 _autolaunch_lock = threading.Lock()
+_cdp_probe_lock = threading.Lock()
+_last_cdp_probe_at: float = 0.0
 _task_tabs: Dict[str, Dict[str, str]] = {}
 
 
@@ -296,6 +300,54 @@ def ensure_chrome_running() -> None:
             )
 
 
+def maybe_probe_cdp_health(*, force: bool = False) -> bool:
+    """Return True when the CDP WebSocket is healthy (restart if degraded).
+
+    When ``LOCAL_CHROME_TAB_POOL`` is enabled, long agent runs probe at most
+    once per ``LOCAL_CHROME_CDP_PROBE_INTERVAL_S`` (default 120s). A failed
+    probe triggers :func:`recover_degraded_chrome`.
+    """
+    global _last_cdp_probe_at
+    if not is_enabled():
+        return True
+
+    now = time.time()
+    with _cdp_probe_lock:
+        if not force and (now - _last_cdp_probe_at) < _CDP_PROBE_INTERVAL_S:
+            return True
+        _last_cdp_probe_at = now
+
+    http_up = probe_chrome()
+    ws_ok = cdp_ws_healthy() if http_up else False
+    if ws_ok:
+        return True
+
+    recover_degraded_chrome()
+    return cdp_ws_healthy()
+
+
+def recover_degraded_chrome(task_id: Optional[str] = None) -> None:
+    """Force-restart debug Chrome and drop stale pooled tab metadata.
+
+    Args:
+        task_id: When set, only evict the normalized task's cached tab entry.
+            When omitted, clears the entire pool (used after proactive probes).
+    """
+    with _lock:
+        if task_id:
+            key = normalize_task_id(task_id)
+            removed = _task_tabs.pop(key, None)
+            stale = {key: removed} if removed else {}
+        else:
+            stale = dict(_task_tabs)
+            _task_tabs.clear()
+
+    for info in stale.values():
+        _close_target_id(str(info.get("target_id") or ""))
+
+    ensure_chrome_running()
+
+
 def _create_tab() -> Dict[str, str]:
     """Open a new about:blank tab and return its CDP metadata."""
     ensure_chrome_running()
@@ -364,6 +416,9 @@ def acquire(task_id: str) -> Dict[str, str]:
         Dict with ``cdp_url`` (page-level websocket) and ``target_id``.
     """
     key = normalize_task_id(task_id)
+
+    # Proactive WS health check — clears stale tabs when Chrome degraded.
+    maybe_probe_cdp_health(force=False)
 
     with _lock:
         cached = _task_tabs.get(key)

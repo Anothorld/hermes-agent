@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 _BROWSER_TOOL_PREFIX = "browser_"
 _CLEANUP_WRAPPED = False
+_SESSION_INFO_WRAPPED = False
 
 HookResult = Optional[Union[None, Dict[str, str]]]
 
@@ -169,6 +170,46 @@ def _seed_browser_session(task_id: str, tab_info: Dict[str, str]) -> bool:
     return seeded
 
 
+def _ensure_tab_pool_browser_session(task_id: str) -> Optional[Dict[str, Any]]:
+    """Acquire a pooled tab and seed ``browser_tool._active_sessions``.
+
+    Returns the tab-pool session dict when ready, else ``None``.
+    """
+    if not tab_pool.is_enabled():
+        return None
+
+    tid = tab_pool.normalize_task_id(task_id)
+    if tid.endswith("::local"):
+        return None
+
+    from tools import browser_tool
+
+    browser_tool._start_browser_cleanup_thread()
+    browser_tool._update_session_activity(tid)
+
+    with browser_tool._cleanup_lock:
+        existing = browser_tool._active_sessions.get(tid)
+        if existing is not None and existing.get("features", {}).get("tab_pool"):
+            return existing
+
+    try:
+        tab_info = tab_pool.acquire(tid)
+    except Exception as exc:
+        logger.warning(
+            "Tab pool could not acquire a tab for task=%s: %s", tid, exc
+        )
+        return None
+
+    if not _seed_browser_session(tid, tab_info):
+        return None
+
+    with browser_tool._cleanup_lock:
+        session = dict(browser_tool._active_sessions[tid])
+
+    browser_tool._ensure_cdp_supervisor(tid)
+    return session
+
+
 def _maybe_release(task_id: str) -> None:
     if not task_id:
         return
@@ -189,7 +230,7 @@ def pre_tool_call(
     session_id: str = "",
     tool_call_id: str = "",
 ) -> HookResult:
-    del session_id, tool_call_id
+    del tool_call_id
 
     if tool_name == "cleanup_browser":
         return None
@@ -201,9 +242,12 @@ def pre_tool_call(
         return None
 
     tid = tab_pool.normalize_task_id(task_id)
+    if tid.endswith("::local"):
+        return None
+
     try:
-        tab_info = tab_pool.acquire(tid)
-        if not _seed_browser_session(tid, tab_info):
+        session = _ensure_tab_pool_browser_session(task_id)
+        if session is None:
             return {
                 "action": "block",
                 "message": (
@@ -212,8 +256,14 @@ def pre_tool_call(
                     "Call cleanup_browser for this task or set LOCAL_CHROME_TAB_POOL=0."
                 ),
             }
+        tab_info = {
+            "target_id": (session.get("features") or {}).get("target_id"),
+            "cdp_url": session.get("cdp_url"),
+        }
         if tool_name == "browser_cdp" and isinstance(args, dict):
-            guard_result = _guard_browser_cdp(args, tab_info["target_id"], tid)
+            guard_result = _guard_browser_cdp(
+                args, str(tab_info.get("target_id") or ""), tid
+            )
             if guard_result is not None:
                 return guard_result
     except Exception as exc:
@@ -227,6 +277,49 @@ def pre_tool_call(
             ),
         }
     return None
+
+
+def install_session_info_wrapper() -> None:
+    """Wrap ``_get_session_info`` so tab pool wins over ``BROWSER_CDP_URL``.
+
+    Gateway runs were creating browser-level CDP sessions from
+    ``BROWSER_CDP_URL`` inside ``browser_tool._get_session_info`` before
+    (or without) the ``pre_tool_call`` hook seeding a per-task page tab,
+    causing concurrent discovery runs to fight over one active tab.
+    """
+    global _SESSION_INFO_WRAPPED
+    if _SESSION_INFO_WRAPPED:
+        return
+
+    try:
+        from tools import browser_tool
+    except ImportError:
+        logger.debug("Tab pool: browser_tool unavailable; skip session wrapper")
+        return
+
+    if getattr(browser_tool, "_tab_pool_session_info_wrapped", False):
+        _SESSION_INFO_WRAPPED = True
+        return
+
+    original = browser_tool._get_session_info
+
+    def _get_session_info(
+        task_id: Optional[str] = None,
+        *,
+        session_options: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        key = (task_id or "default").strip() or "default"
+        pooled = _ensure_tab_pool_browser_session(key)
+        if pooled is not None:
+            return pooled
+        return original(task_id, session_options=session_options)
+
+    browser_tool._get_session_info = _get_session_info  # type: ignore[method-assign]
+    browser_tool._tab_pool_session_info_wrapped = True
+    _SESSION_INFO_WRAPPED = True
+    logger.info(
+        "Tab pool: wrapped browser_tool._get_session_info for per-task page CDP"
+    )
 
 
 def install_cleanup_wrapper() -> None:

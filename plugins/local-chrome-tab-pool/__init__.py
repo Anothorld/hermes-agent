@@ -29,5 +29,6 @@ def _load_hooks():
 def register(ctx) -> None:
     """Register Hermes lifecycle hooks."""
     hooks = _load_hooks()
+    hooks.install_session_info_wrapper()
     ctx.register_hook("pre_tool_call", hooks.pre_tool_call)
     hooks.install_cleanup_wrapper()

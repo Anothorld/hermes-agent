@@ -22,6 +22,11 @@ The `local-chrome-tab-pool` plugin (enabled by default):
    tab's page-level CDP URL.
 3. On `cleanup_browser` or inactivity reaper, closes only that tab.
 
+When `BROWSER_CDP_URL` is set (including `http://127.0.0.1:9222` from
+`start-debug-chrome.sh`), the plugin wraps `browser_tool._get_session_info`
+so each task still receives a **page-level** CDP URL instead of sharing the
+browser-level socket's active tab.
+
 Login cookies and IG session stay shared because all tabs live in the same profile
 (`~/.hermes/local-chrome-debug-profile` by default).
 
@@ -32,7 +37,7 @@ Login cookies and IG session stay shared because all tabs live in the same profi
 | `local-chrome` (CDP, no cloud provider) — KOL default | Yes |
 | Concurrent agent runs, same gateway | Yes — one tab per bare `task_id` |
 | `BROWSER_CDP_URL=http://127.0.0.1:9222` (HTTP discovery from `start-debug-chrome.sh`) | Yes — pool opens page tabs on that Chrome |
-| `BROWSER_CDP_URL=ws://…/devtools/browser/…` (browser-level WebSocket) | No — legacy shared active-tab mode |
+| `BROWSER_CDP_URL=ws://…/devtools/browser/…` (browser-level WebSocket) | Yes — pool opens page tabs via HTTP `PUT /json/new`; set `LOCAL_CHROME_FORCE_SHARED_CDP=1` only for legacy shared active-tab mode |
 | Cloud provider + hybrid `::local` sidecar (private URLs) | No — sidecar stays headless |
 | `LOCAL_CHROME_TAB_POOL=0` | Disabled — legacy shared CDP connection |
 
@@ -58,10 +63,28 @@ export DEBUG_CHROME_PROFILE_DIR=$HOME/.hermes/local-chrome-debug-profile
 export HERMES_LOCAL_CHROME_LAUNCHER=/path/to/start-debug-chrome.sh
 ```
 
+## Cloud fallback
+
+When `browser.cloud_provider` is configured but `create_session()` fails or times
+out, `browser_tool` falls back to local debug Chrome **per task** (CDP URL stored
+in `_active_sessions` only). It does **not** set global `BROWSER_CDP_URL`, so
+tab-pool per-page isolation stays intact for concurrent runs.
+
+Autostart uses `DEBUG_CHROME_SKIP_ENV=1` (same as the pool launcher) so
+`start-debug-chrome.sh` does not write a browser-level ws into the shell env.
+
 ## Agent behaviour
 
 No skill changes required. Agents call `browser_navigate` as usual; the plugin
 runs before the tool and wires the isolated tab transparently.
+
+## `_get_session_info` wrapper
+
+When `BROWSER_CDP_URL` is present, `browser_tool._get_session_info` would
+otherwise resolve it to a **browser-level** WebSocket and attach every task
+to the same active tab. The plugin wraps that function at load time so each
+`task_id` still receives its own page-level CDP URL before any browser command
+runs — even if `pre_tool_call` hooks are skipped on a code path.
 
 ## `browser_cdp` ownership guard
 
@@ -103,7 +126,7 @@ listening on the debug port.
 | Path | Role |
 |------|------|
 | `plugins/local-chrome-tab-pool/internal/tab_pool.py` | Canonical tab pool logic |
-| `plugins/local-chrome-tab-pool/hooks.py` | Hermes `pre_tool_call` + cleanup wrapper |
+| `plugins/local-chrome-tab-pool/hooks.py` | Hermes `pre_tool_call`, `_get_session_info` wrapper, cleanup wrapper |
 | `playground/local-chrome-debug/start-debug-chrome.sh` | Chrome launcher |
 | `playground/local-chrome-debug/tab_pool.py` | Backward-compatible re-export |
 
