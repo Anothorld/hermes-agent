@@ -84,7 +84,10 @@ class FirecrawlBrowserProvider(BrowserProvider):
         session_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, object]:
         del session_options  # Firecrawl has no profile concept today.
-        ttl = int(os.environ.get("FIRECRAWL_BROWSER_TTL", "300"))
+        try:
+            ttl = int(os.environ.get("FIRECRAWL_BROWSER_TTL", "300"))
+        except (ValueError, TypeError):
+            ttl = 300
 
         body: Dict[str, object] = {"ttl": ttl}
 

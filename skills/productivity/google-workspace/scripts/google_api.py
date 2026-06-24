@@ -142,7 +142,11 @@ def _run_gws(parts: list[str], *, params: dict | None = None, body: dict | None 
 
 
 def _headers_dict(msg: dict) -> dict[str, str]:
-    return {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    return {
+        h["name"].lower(): h["value"]
+        for h in msg.get("payload", {}).get("headers", [])
+        if h.get("name")
+    }
 
 
 def _threading_headers_from_message_headers(headers: dict[str, str]) -> tuple[str | None, str | None]:
@@ -359,10 +363,10 @@ def gmail_search(args):
                 {
                     "id": msg["id"],
                     "threadId": msg["threadId"],
-                    "from": headers.get("From", ""),
-                    "to": headers.get("To", ""),
-                    "subject": headers.get("Subject", ""),
-                    "date": headers.get("Date", ""),
+                    "from": headers.get("from", ""),
+                    "to": headers.get("to", ""),
+                    "subject": headers.get("subject", ""),
+                    "date": headers.get("date", ""),
                     "snippet": msg.get("snippet", ""),
                     "labels": msg.get("labelIds", []),
                 }
@@ -389,10 +393,10 @@ def gmail_search(args):
         output.append({
             "id": msg["id"],
             "threadId": msg["threadId"],
-            "from": headers.get("From", ""),
-            "to": headers.get("To", ""),
-            "subject": headers.get("Subject", ""),
-            "date": headers.get("Date", ""),
+            "from": headers.get("from", ""),
+            "to": headers.get("to", ""),
+            "subject": headers.get("subject", ""),
+            "date": headers.get("date", ""),
             "snippet": msg.get("snippet", ""),
             "labels": msg.get("labelIds", []),
         })
@@ -425,10 +429,10 @@ def gmail_get(args):
         result = {
             "id": msg["id"],
             "threadId": msg["threadId"],
-            "from": headers.get("From", ""),
-            "to": headers.get("To", ""),
-            "subject": headers.get("Subject", ""),
-            "date": headers.get("Date", ""),
+            "from": headers.get("from", ""),
+            "to": headers.get("to", ""),
+            "subject": headers.get("subject", ""),
+            "date": headers.get("date", ""),
             "labels": msg.get("labelIds", []),
             "body": body_plain or body_html,
             "body_plain": body_plain,
@@ -448,10 +452,10 @@ def gmail_get(args):
     result = {
         "id": msg["id"],
         "threadId": msg["threadId"],
-        "from": headers.get("From", ""),
-        "to": headers.get("To", ""),
-        "subject": headers.get("Subject", ""),
-        "date": headers.get("Date", ""),
+        "from": headers.get("from", ""),
+        "to": headers.get("to", ""),
+        "subject": headers.get("subject", ""),
+        "date": headers.get("date", ""),
         "labels": msg.get("labelIds", []),
         "body": body_plain or body_html,
         "body_plain": body_plain,
@@ -670,18 +674,18 @@ def gmail_reply(args):
         )
         headers = _headers_dict(original)
 
-        subject = headers.get("Subject", "")
+        subject = headers.get("subject", "")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
 
         message = MIMEText(args.body)
-        message["to"] = headers.get("From", "")
-        message["subject"] = subject
+        message["To"] = headers.get("from", "")
+        message["Subject"] = subject
         if args.from_header:
-            message["from"] = args.from_header
-        if headers.get("Message-ID"):
-            message["In-Reply-To"] = headers["Message-ID"]
-            message["References"] = headers["Message-ID"]
+            message["From"] = args.from_header
+        if headers.get("message-id"):
+            message["In-Reply-To"] = headers["message-id"]
+            message["References"] = headers["message-id"]
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         result = _run_gws(
@@ -699,18 +703,18 @@ def gmail_reply(args):
     ).execute()
     headers = _headers_dict(original)
 
-    subject = headers.get("Subject", "")
+    subject = headers.get("subject", "")
     if not subject.startswith("Re:"):
         subject = f"Re: {subject}"
 
     message = MIMEText(args.body)
-    message["to"] = headers.get("From", "")
-    message["subject"] = subject
+    message["To"] = headers.get("from", "")
+    message["Subject"] = subject
     if args.from_header:
-        message["from"] = args.from_header
-    if headers.get("Message-ID"):
-        message["In-Reply-To"] = headers["Message-ID"]
-        message["References"] = headers["Message-ID"]
+        message["From"] = args.from_header
+    if headers.get("message-id"):
+        message["In-Reply-To"] = headers["message-id"]
+        message["References"] = headers["message-id"]
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     body = {"raw": raw, "threadId": original["threadId"]}

@@ -10,7 +10,7 @@ Headless agent-browser Chromium is intentionally not in the fallback path;
 sites with bot detection require the real-Chrome route.
 """
 import logging
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
