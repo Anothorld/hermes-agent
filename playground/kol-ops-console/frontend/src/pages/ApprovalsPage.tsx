@@ -144,6 +144,12 @@ function styleLearningGroupTitle(ctx: Record<string, unknown>, factPath?: string
 import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
 import { useKolListScope } from '../hooks/useKolListScope';
+import { QueueSortSelect } from '../components/inputs/QueueSortSelect';
+import {
+  queueSortQueryParams,
+  sortByIsoTime,
+  type QueueSortMode,
+} from '../lib/queueSort';
 
 // Cross-cutting approvals page. Renders all pending approval.* facts
 // surfaced by the bridge (e.g. compensation_cap_breach, reply_draft)
@@ -297,6 +303,7 @@ export function ApprovalsPage() {
   const [status, setStatus] = useState<StatusFilter>('pending');
   const [typeFilter, setTypeFilter] = useState<ApprovalTypeFilter>('all');
   const [sla, setSla] = useState<SlaFilter>('all');
+  const [sortMode, setSortMode] = useState<QueueSortMode>('priority');
   const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [refining, setRefining] = useState<string | null>(null);
@@ -311,6 +318,9 @@ export function ApprovalsPage() {
   const refresh = useCallback(async () => {
     try {
       const params = new URLSearchParams({ status, env });
+      const { sort, order } = queueSortQueryParams(sortMode);
+      params.set('sort', sort);
+      params.set('order', order);
       for (const [key, value] of scopeQueryParams.entries()) {
         params.set(key, value);
       }
@@ -334,7 +344,7 @@ export function ApprovalsPage() {
     } catch (ex) {
       setErr(ex);
     }
-  }, [env, status, markSeen, scopeQueryParams]);
+  }, [env, status, sortMode, markSeen, scopeQueryParams]);
 
   useEffect(() => {
     refresh();
@@ -485,7 +495,7 @@ export function ApprovalsPage() {
   );
 
   const visibleRows = useMemo(() => {
-    return rows.filter((r) => {
+    const filtered = rows.filter((r) => {
       if (isDeferredToEscalationPage(r, escalationMap)) return false;
       if (typeFilter !== 'all' && approvalTypeOf(r) !== typeFilter) {
         return false;
@@ -496,7 +506,8 @@ export function ApprovalsPage() {
       if (sla === 'at_risk') return level === 'at_risk' || level === 'breached';
       return level === 'breached';
     });
-  }, [rows, sla, typeFilter, kolQuery, escalationMap]);
+    return sortByIsoTime(filtered, sortMode, (r) => r.opened_at);
+  }, [rows, sla, typeFilter, kolQuery, escalationMap, sortMode]);
 
   const scopeLabel = useMemo(() => {
     if (!hasKolScope) return null;
@@ -629,6 +640,7 @@ export function ApprovalsPage() {
             <option key={s} value={s}>{`SLA ${SLA_LABEL[s]}`}</option>
           ))}
         </select>
+        <QueueSortSelect value={sortMode} onChange={setSortMode} />
         <button
           onClick={refresh}
           className="rounded border border-slate-300 px-2 py-1 text-sm hover:bg-slate-50"

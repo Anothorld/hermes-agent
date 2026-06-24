@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 _REPO_ROOT = str(Path(__file__).resolve().parents[5])
 
 from ..audit import write_audit
+from ..queue_list_sort import sort_queue_rows, validate_queue_sort
 from ..bridge_client import BridgeClient, BridgeError
 from ..bridge_runtime import ensure_gateway_bridge_key
 from ..campaign_config_sync import assert_campaign_config_complete
@@ -542,8 +543,11 @@ async def list_escalations(
     env: Optional[str] = Query(None),
     identity_id: Optional[int] = Query(None, ge=1),
     campaign_id: Optional[str] = Query(None),
+    sort: str = Query("priority"),
+    order: str = Query("asc"),
 ) -> list[dict]:
     resolved_env = _env(env)
+    validate_queue_sort(sort, order)
     try:
         rows = await bridge.list_escalations(
             state=state,
@@ -554,7 +558,13 @@ async def list_escalations(
     except BridgeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     normalized = [_normalize_escalation_row(r) for r in rows if isinstance(r, dict)]
-    normalized.sort(key=lambda r: _escalation_priority(r, resolved_env))
+    sort_queue_rows(
+        normalized,
+        sort=sort,
+        order=order,
+        time_field="created_at",
+        priority_key=lambda r: _escalation_priority(r, resolved_env),
+    )
     return normalized
 
 

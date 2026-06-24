@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import cal
 from .classify_intent import classify_intent
@@ -87,6 +87,11 @@ class EscalationOpenBody(BaseModel):
     reason: str
     urgency: str = "medium"
     question_to_operator: Optional[str] = None
+    customer_email: Optional[str] = None
+    email_summary: Optional[str] = None
+    email_quote: Optional[str] = None
+    escalation_message: Optional[str] = None
+    auto_send_feishu: bool = True
     feishu_chat_id: Optional[str] = None
     feishu_thread_id: Optional[str] = None
     feishu_message_id: Optional[str] = None
@@ -126,10 +131,66 @@ class HandoffBody(BaseModel):
     chat_session_id: Optional[str] = None
     skip_quickcep: bool = False
 
+    @field_validator("phase")
+    @classmethod
+    def _validate_handoff_phase(cls, value: str) -> str:
+        from .session_handoff import HANDOFF_PHASES, normalize_handoff_phase
+
+        phase = normalize_handoff_phase(value)
+        if phase not in HANDOFF_PHASES:
+            allowed = ", ".join(sorted(HANDOFF_PHASES))
+            raise ValueError(f"invalid handoff phase {value!r}; allowed: {allowed}")
+        return phase
+
 
 @router.get("/health")
 def health() -> dict[str, Any]:
     return cal.health()
+
+
+@router.get("/feishu-probe")
+def feishu_probe() -> dict[str, Any]:
+    """Report configured Feishu bot identity and whether it can post to the escalation chat."""
+    from .feishu_client import (
+        escalation_chat_id,
+        feishu_credentials_present,
+        send_group_text,
+        tenant_access_token,
+    )
+    import json
+    import urllib.error
+    import urllib.request
+
+    chat_id = escalation_chat_id()
+    out: dict[str, Any] = {
+        "credentials_present": feishu_credentials_present(),
+        "escalation_chat_id": chat_id,
+        "app_id": (os.environ.get("FEISHU_APP_ID") or "")[:8] + "…" if os.environ.get("FEISHU_APP_ID") else None,
+    }
+    token = tenant_access_token()
+    if not token:
+        out["bot"] = None
+        out["send_test"] = {"ok": False, "error": "missing or invalid FEISHU credentials"}
+        return out
+    try:
+        req = urllib.request.Request(
+            "https://open.feishu.cn/open-apis/bot/v3/info/",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            bot_payload = json.loads(resp.read().decode())
+        bot = bot_payload.get("bot") or {}
+        out["bot"] = {"app_name": bot.get("app_name"), "activate_status": bot.get("activate_status")}
+    except urllib.error.HTTPError as exc:
+        out["bot"] = {"error": f"HTTP {exc.code}"}
+    if chat_id:
+        probe = send_group_text(chat_id=chat_id, text="[cs-ops-bridge feishu-probe] safe to ignore", token=token)
+        out["send_test"] = {
+            "ok": probe.ok,
+            "message_id": probe.message_id,
+            "error": probe.error,
+        }
+    return out
 
 
 @router.get("/admin/perf-snapshot")
@@ -181,14 +242,17 @@ def apply_session_handoff(
         "feishu_thread_id": body.feishu_thread_id,
         "classify": body.classify,
     }
-    result = apply_handoff(
-        quickcep_session_id=quickcep_session_id,
-        phase=body.phase,
-        env=body.env,
-        context=context,
-        chat_session_id=body.chat_session_id,
-        skip_quickcep=body.skip_quickcep,
-    )
+    try:
+        result = apply_handoff(
+            quickcep_session_id=quickcep_session_id,
+            phase=body.phase,
+            env=body.env,
+            context=context,
+            chat_session_id=body.chat_session_id,
+            skip_quickcep=body.skip_quickcep,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result.get("ok") and result.get("error") == "session not found":
         raise HTTPException(status_code=404, detail="session not found")
     return result
@@ -199,9 +263,12 @@ def get_dispatch_context(
     quickcep_session_id: str,
     env: str = Query("LIVE"),
 ) -> dict[str, Any]:
+    from .bridge_agent_contract import agent_tool_paths
+
     ctx = cal.get_dispatch_context(quickcep_session_id=quickcep_session_id, env=env)
     if not ctx:
         raise HTTPException(status_code=404, detail="session not found")
+    ctx["agent_tool_paths"] = agent_tool_paths()
     return ctx
 
 
@@ -297,7 +364,55 @@ def open_escalation(
     )
     if eid is None:
         raise HTTPException(status_code=404, detail="session not found")
-    return {"escalation_id": eid}
+
+    feishu_result: dict[str, Any] = {"skipped": True}
+    should_send = body.auto_send_feishu and not (body.feishu_message_id and body.feishu_thread_id)
+    if should_send:
+        from . import feishu_notify
+
+        try:
+            feishu_notify.validate_feishu_notify_inputs(
+                auto_send_feishu=True,
+                escalation_message=body.escalation_message,
+                customer_email=body.customer_email,
+                email_summary=body.email_summary,
+                email_quote=body.email_quote,
+                quickcep_session_id=body.quickcep_session_id,
+                env=body.env,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        send = feishu_notify.notify_escalation_opened(
+            escalation_id=eid,
+            quickcep_session_id=body.quickcep_session_id,
+            reason=body.reason,
+            urgency=body.urgency,
+            question_to_operator=body.question_to_operator,
+            customer_email=body.customer_email,
+            email_summary=body.email_summary,
+            email_quote=body.email_quote,
+            escalation_message=body.escalation_message,
+            feishu_chat_id=body.feishu_chat_id,
+            env=body.env,
+            auto_send_feishu=True,
+        )
+        feishu_result = {
+            "ok": send.ok,
+            "message_id": send.message_id,
+            "thread_id": send.thread_id,
+            "chat_id": send.chat_id,
+            "error": send.error,
+        }
+        if send.ok:
+            cal.update_escalation_feishu(
+                escalation_id=eid,
+                feishu_chat_id=send.chat_id,
+                feishu_thread_id=send.thread_id,
+                feishu_message_id=send.message_id,
+            )
+
+    return {"escalation_id": eid, "feishu": feishu_result}
 
 
 @router.patch("/escalations/{escalation_id}")
@@ -307,16 +422,20 @@ def resolve_escalation(
     x_bridge_key: Annotated[Optional[str], Header()] = None,
 ) -> dict[str, Any]:
     _require_bridge_key(x_bridge_key)
-    ok = cal.resolve_escalation(
+    from .escalation_resolve import resolve_escalation_operational
+
+    result = resolve_escalation_operational(
         escalation_id=escalation_id,
         decision=body.decision,
         decided_by=body.decided_by,
         operator_answer=body.operator_answer,
         final_state=body.final_state,
     )
-    if not ok:
-        raise HTTPException(status_code=404, detail="escalation not found")
-    return {"ok": True}
+    if not result.get("ok"):
+        detail = result.get("error") or "resolve failed"
+        status = 404 if detail == "escalation not found" else 409
+        raise HTTPException(status_code=status, detail=detail)
+    return result
 
 
 @router.post("/escalations/{escalation_id}/resume")
@@ -347,12 +466,16 @@ def relaunch_session_route(
 ) -> dict[str, Any]:
     """Re-trigger gateway process run for failed or stuck sessions."""
     _require_bridge_key(x_bridge_key)
+    from .email_channel import session_is_email
     from .gateway_client import GatewayClient
+
+    if not session_is_email(quickcep_session_id):
+        raise HTTPException(status_code=409, detail="non_email_channel")
 
     sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=body.env)
     if not sess:
         raise HTTPException(status_code=404, detail="session not found")
-    if sess["status"] in ("processing", "awaiting_expert"):
+    if sess["status"] == "awaiting_expert":
         raise HTTPException(status_code=409, detail=f"session busy: {sess['status']}")
     msg_id = body.message_id or sess.get("last_message_id") or "manual-relaunch"
     cal.update_session_status(session_row_id=sess["id"], status="processing")
@@ -374,6 +497,7 @@ def watcher_status() -> dict[str, Any]:
         "quickcep": cal.get_poller_state("quickcep_watcher"),
         "feishu": cal.get_poller_state("feishu_escalation_poller"),
         "escalation_timeout": cal.get_poller_state("escalation_timeout"),
+        "processing_stale": cal.get_poller_state("processing_stale"),
     }
 
 
@@ -382,8 +506,9 @@ async def watcher_run_once(
     x_bridge_key: Annotated[Optional[str], Header()] = None,
 ) -> dict[str, Any]:
     _require_bridge_key(x_bridge_key)
-    from . import quickcep_watcher, feishu_escalation_poller
+    from . import quickcep_watcher, feishu_escalation_poller, processing_stale
 
     rest = quickcep_watcher.run_rest_reconcile_once()
     feishu = feishu_escalation_poller.poll_once()
-    return {"rest_reconcile": rest, "feishu_poll": feishu}
+    stale = processing_stale.check_processing_stale_once()
+    return {"rest_reconcile": rest, "feishu_poll": feishu, "processing_stale": stale}

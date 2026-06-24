@@ -148,6 +148,49 @@ All candidates must meet:
 
 Before applying the follower threshold, normalize any locale-specific shorthand to an absolute count. Treat `K/k = 1,000`, `M = 1,000,000`, `B = 1,000,000,000`, `万/w = 10,000`, and `亿 = 100,000,000`. Example: `73.8万` = `738,000`, so it PASSES the `≥ 100k` gate; `4.6万` = `46,000`, so it fails.
 
+**Borderline followers (100k–110k) — no “需进一步评估”.** When normalized followers are **≥ 100k and < 110k**, you MUST either:
+- **Ingest immediately** via `ingest-confirmed-candidate` if all other gates pass (region, Reels activity, not skip/cooldown, not self-sell furniture), OR
+- **Discard with an explicit reason** logged in your answer and list the handle under `pending_ingests` / `floor_unmet_reason` — never end the run with “需进一步评估”, “pending verification”, or “worth a look” without ingest or a written discard reason.
+
+Handles **below 100k** after normalization are hard discards — do not queue them for “later review”.
+
+## Run bootstrap (STEP −1 — gateway-enforced)
+
+Before **any** `browser_navigate`, `browser_snapshot`, or `veedcrawl_*` call, run these three bridge CLI commands for **this session's** `--env` and `--campaign-id` (the guard blocks browser tools until all three complete):
+
+```bash
+python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+  list-candidates --env <TEST|LIVE> --campaign-id <campaign_id>
+
+python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+  list-discovery-skip-handles --env <TEST|LIVE>
+
+python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+  list-outreach-cooldown-handles --env <TEST|LIVE> --plain
+```
+
+In your **next assistant message after bootstrap**, print exclusion stats:
+- CAL candidate count (from `list-candidates`)
+- skip-handle count (from `list-discovery-skip-handles` `items` length)
+- cooldown handle count (lines from `--plain`)
+
+**Campaign binding (hard):** never pass a different `--campaign-id` than the session (e.g. session `kol-campaign:LIVE:SEB8010-…` must not call `list-candidates` for `POVISON-TS-8319-…`). The gateway guard rejects mismatches.
+
+## Reels / snapshot render failures (degraded qualification)
+
+When IG Reels or profile snapshots fail to render (empty grid, login wall, `browser_snapshot` timeout, click failed on Reels tab):
+
+1. **Try once:** `browser_navigate` profile → `/reels/` URL → `browser_snapshot` (or `veedcrawl_metadata` when enabled).
+2. **Degraded path (Nox enabled):** if brief has `nox_discovery_enabled: true`, call `nox_kol_tool.py diligence-pack --gate discovery_qualify --dimensions audience,performance` and persist Nox facts. You may ingest when Nox performance + audience pass **even if** browser Reels ER is missing — note `qualification_mode: nox_degraded` in `candidate.payload.reason`.
+3. **Still blocked:** add handle to `pending_ingests` with reason `reels_render_failed`, then either switch surface or open operator visibility:
+   ```bash
+   python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-event --env <env> --json @/tmp/discovery_reels_block.json
+   ```
+   (`event_type`: `discovery_qualification_blocked`, payload: `{campaign_id, handle, reason: reels_render_failed, attempted_urls[]}`).
+4. Set `floor_unmet_reason` to mention Reels/snapshot infrastructure if this blocked multiple qualifies in the run — do **not** silently stop after browsing only.
+
+Do not mark a handle “qualified” in prose without ingest or an explicit discard/degraded-ingest path above.
+
 ## Nox audience screen (optional)
 When the gateway brief includes `nox_discovery_enabled: true` and
 `campaign_config_file:` (LIVE + `nox_quota_enabled`), run the **audience
@@ -161,9 +204,10 @@ Full procedure, CLI, persistence, and discard rules:
 `references/nox-audience-screen.md`.
 
 Summary:
-1. Once per run: `quota-snapshot` (stop Nox on auth/quota exhaustion).
+1. Once per run: `python3 plugins/nox-kol-bridge/scripts/nox_kol_tool.py quota-snapshot --env <env>`
+   (Nox CLI only — **never** on `kol_bridge_tool.py`).
 2. Per handle: check CAL `identity.nox_cache_month` + `identity.nox_top_region`
-   first; on miss call `diligence-pack --gate discovery_qualify --dimensions audience`.
+   first; on miss call `nox_kol_tool.py diligence-pack --gate discovery_qualify --dimensions audience`.
 3. **Always persist** Nox facts via `upsert-identity` + `write-facts-multi`
    (even when discarding) so the monthly cache and CAL stay aligned.
 4. On audience discard, log `nox_audience_discard: @handle — <reason>` and skip Reels.
@@ -239,6 +283,7 @@ Maintain a prioritized queue and cover at least **2 discovery surfaces** unless 
   - From **buyer-moment hashtag Reels** (cross-vertical signal — the single most effective break-out lever): pick 2-3 high-engagement Reels under buyer-moment hashtags whose AUTHOR is NOT a qualified home/design KOL (could be a comedy duo, couple vlog, foodie, pet creator — anyone). The criterion is that the AUDIENCE overlaps with our buyer, not that the creator sits in our niche. Mine their commenters the same way (≥ 100k filter still applies). Audience overlap predicts branded-content fit better than creator vertical.
 - **Following / Suggested / Similar**: expand from qualified profiles, applying ≥ 100k and NA checks before enqueueing. **Cross-vertical jump rule:** in every 3-hop expansion chain, AT LEAST ONE hop must land on a creator whose primary vertical differs from the seed's vertical (verify via their last 10-15 Reels content theme, not just bio). Prefer hops that follow a visible cross-vertical collab (a home creator collab'd with a foodie → enqueue the foodie). Pure same-vertical chains beyond hop 2 are not allowed; if IG's similar-accounts panel only surfaces same-vertical handles for two hops in a row, abandon the chain and switch surface — that's the algorithm telling you the bubble is closed.
 - **Public web (Google / TikTok / Reddit) — co-primary surface, not just fallback**: required, NOT only when IG search blocks. IG's similar-accounts engine is structurally same-vertical, so this is the primary lever for surfacing creators that IG won't recommend to you. Run NA-scoped queries against the buyer-moment and cross-vertical seeds — e.g. `"first apartment tour" instagram reels`, `"streamer setup" creator NA 100k`, `site:tiktok.com cozy bookshelf US`, `reddit r/InteriorDesign favorite non-designer home creators`. MUST be invoked when (a) IG seed search returns < 5 distinct vertical sources after 2 hashtags, OR (b) the running persisted-candidate pool is ≥ 70% concentrated in one vertical (designer / interior / home-decor). Cross-verify each surfaced handle on IG before qualifying. Treat this surface as cheap insurance against the bubble — invoke it early, not only after IG breaks.
+  **Google queries use local Chrome only** (see § Public web via browser Google below) — never `web_search`, `web_extract`, terminal `curl`/`requests`, or Serper/`python3 -c` HTTP one-liners.
 - **Reference expansion**: if user supplies winners, inspect 5-10 Reels, extract the conversion mechanism, then expand through following/similar/commenters even outside home vertical.
 
 ### Veedcrawl supplement (optional — does NOT replace browser discovery)
@@ -435,7 +480,9 @@ Minimum evidence when reachable:
 - sample at least **2 discovery surfaces**;
 - measure 10-15 recent Reels per qualified creator;
 - run `browser_navigate` to every candidate's profile URL (`https://www.instagram.com/<handle>/`) at least once in this run — this is the hard registration gate the orchestrator skill enforces before allowing `shortlist_ready`;
-- use screenshots (`browser_snapshot` / `browser_vision`) and extract numbers via `browser_console(expression="...")` from the rendered page;
+- after IG profile `browser_navigate`, read `ig_readiness` / `ig_followers_hint` on the tool result first — when `ig_readiness.has_followers=true` or `ig_profile_readable` is present, the page **is** loaded for CDP even if `element_count`/`snapshot` look empty; do **not** report "无法获取 Instagram 页面信息" in that case;
+- after `browser_click` into a profile, the click result may already include `ig_readiness` + snapshot — read that before calling a separate `browser_snapshot`; if snapshot is still empty on an IG profile URL, retry `browser_snapshot` once (tool waits for profile text automatically);
+- use screenshots (`browser_snapshot` / `browser_vision`) and extract numbers via `browser_console(expression="...")` from the rendered page when you need extra fields beyond `ig_followers_hint`;
 - when `veedcrawl_metadata` is in your toolset, prefer it for per-Reel view/like/date facts (read `response` from the envelope); on `persisted: false` or missing fields, fall back to `browser_navigate` on the Reel URL plus `browser_console`/`browser_vision`. Do not abort the run because veedcrawl is unavailable;
 - use `veedcrawl_extract` when showcase scoring still lacks semantic signal after metadata + browser covers/captions (on-demand during Reel review, ≤10/run). Also honor explicit operator requests for paid extraction.
 
@@ -445,7 +492,16 @@ Minimum evidence when reachable:
 - Only abandon a candidate as unjudgeable when **zero** Reel covers render after that one retry AND captions/alt-text are also empty. In that case skip the candidate and move on — do NOT escalate to `mode_gate_blocked` or count this as a surface failure.
 - Do not penalize a creator's Showcase Score for a partial grid; score from the covers you can see and note "partial grid" in evidence if it affected sample size.
 
-**Anti-fabrication rule (hard).** Every handle you place into the orchestrator's `shortlist_ready` `candidates` array MUST be a handle that you actually visited via `browser_navigate("https://www.instagram.com/<handle>/")` earlier in the same run, with on-page evidence supporting the numbers you write into `audience_fit`, `engagement_quality`, `niche_match`, and `reason`. Generic-sounding placeholders (`home_style_lover`, `minimalist_home`, `cozy_living_xx`, `test_kol_*`) are red flags; if you cannot point to the corresponding `browser_navigate` call, omit the handle. It is better to return fewer real candidates (or invoke the orchestrator's zero-results escape hatch after at least 3 distinct surface visits) than to invent any.
+**Anti-fabrication rule (hard).** Every handle you persist via **`ingest-confirmed-candidate`**
+MUST be a handle that you actually visited via `browser_navigate("https://www.instagram.com/<handle>/")`
+earlier in the same run, with on-page evidence supporting the numbers you write into
+`match_score`, `showcase_score`, `final_fit`, `audience_fit`, and `reason`.
+Generic-sounding placeholders (`home_style_lover`, `minimalist_home`, `cozy_living_xx`, `test_kol_*`)
+are red flags; if you cannot point to the corresponding `browser_navigate` call, omit the handle.
+
+**Operator review:** Console shortlist reads **`list-candidates` / CAL `payload`** — not a
+`shortlist_ready` event file. Always persist via ingest; include review scores in
+`candidate.payload` (see shape above).
 
 **Confirmed-candidate ingest (hard).** After you confirm one qualified handle,
 persist it immediately through the deterministic Bridge endpoint — do NOT
@@ -479,7 +535,12 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py ingest-confirmed-candid
     "payload": {
       "evidence_url": "https://www.instagram.com/<handle>/",
       "followers": "220K",
-      "reason": "..."
+      "reason": "...",
+      "match_score": 85,
+      "showcase_score": 78,
+      "final_fit": 82,
+      "audience_fit": 80,
+      "discovery_score": 82
     }
   },
   "identity_facts": {
@@ -538,6 +599,10 @@ Rules:
     `google_search_result`, `linktree`, `ig_bio`, `facebook_about`,
     `fb_creator_profile`, `personal_site`, `media_kit`, `agency_page`,
     `ig_profile_and_reels`, `ig_reel_pick`, `llm_summary`.
+- **`identity_facts` keys MUST use the dotted `identity.` prefix** (e.g.
+  `identity.instagram_profile_url`, `identity.nox_audience_authenticity`).
+  Flat keys like `instagram_profile_url` are auto-normalized server-side but
+  may drop unknown fields — always emit dotted keys in `/tmp/ingest_*.json`.
 - Every `identity.*_url` value must be an absolute `http(s)` URL.
 - `identity.linktree_url` accepts only:
   `linktr.ee`, `beacons.ai`, `bio.link`, `lnk.bio`, `solo.to`, `linkin.bio`.
@@ -547,6 +612,11 @@ Rules:
   format, remove/fix that field and retry the same handle immediately;
   do not keep guessing alternate string formats across multiple retries.
 - If ingest returns validation errors, fix payload and retry the same handle before moving on.
+- **Creator brief bundle (all-or-nothing).** If you include any of the 6
+  creator-brief keys in `identity_facts`, the bridge requires **all 6**
+  non-empty values in the same payload; partial bundles return 422. Omit
+  the entire brief bundle when generation fails (profile URL ingest still
+  succeeds).
 
 **IG profile URL persistence (included in ingest payload).** Every handle that survives qualification has by definition been visited at `https://www.instagram.com/<handle>/`. Include profile URL + creator brief facts in the same `identity_facts` object passed to `ingest-confirmed-candidate` (legacy separate `upsert-identity` → `write-facts-multi` → `add-candidate` chain is deprecated for this skill).
 
@@ -586,9 +656,10 @@ Identity facts for non-email contact signals — write these in the same `write-
 
 These are the same keys `kol-email-discovery` writes, so the two skills don't diverge. Apply the same "do NOT overwrite a non-empty existing value" rule, and attach the provenance triple (`<key>_source = "ig_bio"`, `_discovered_at`, `_discovered_url`).
 
-**Creator brief persistence (free side effect of `add-candidate`).** Downstream outreach drafters (`kol-cold-outreach`, `kol-reengagement-outreach`) personalize the opening by reading a small "creator brief" off the identity facts. You have already navigated this candidate's profile + multiple Reels to qualify them, so you have the raw material already — **emit it as 6 identity-level facts in the same `write-facts-multi` call** that writes `identity.instagram_profile_url` above. Do not open extra pages for this; do not extend the page-load budget.
-
-For each qualified candidate, merge these keys into the same `write-facts-multi` payload (under the `identity` namespace, alongside the IG profile URL fields):
+**Creator brief persistence (in ingest `identity_facts`).** Downstream outreach drafters
+read creator brief keys from identity facts. Include all 6 keys in the same
+`identity_facts` object passed to **`ingest-confirmed-candidate`** (not a separate
+legacy `write-facts-multi` after `add-candidate`).
 
 | Fact key | Value shape | Source it from |
 |---|---|---|
@@ -687,6 +758,30 @@ First tool call of the run, before any IG URL:
 3. If `country != "US"` → stop immediately and return `mode_gate_blocked: non-US exit (got <country>)`. Do not navigate to instagram.com.
 4. If `country == "US"` → log the org/IP in the run report and proceed.
 
+### Public web via browser Google (mandatory co-primary surface)
+
+Use built-in `browser_*` on local debug Chrome for **all** Google/public-web discovery.
+Do **not** use `web_search`, `web_extract`, terminal HTTP (`curl`, `wget`, `requests`,
+`urllib`), Serper API scripts, or truncated `python3 -c "import requests..."` one-liners —
+they fail silently or get blocked by guard; they are not part of this workflow.
+
+For each public-web query:
+
+1. URL-encode the query string (spaces → `+` or `%20`).
+2. `browser_navigate("https://www.google.com/search?q=<encoded_query>")`
+3. `browser_snapshot` — read titles/snippets for IG `@handle`s or creator names.
+4. Open promising creator-owned result URLs with `browser_navigate` + `browser_snapshot`.
+5. Cross-verify on IG: `browser_navigate("https://www.instagram.com/<handle>/")` and read
+   `ig_readiness` / `ig_followers_hint` before qualification.
+
+Example encoded navigations:
+
+- `https://www.google.com/search?q=first+apartment+tour+instagram+reels+US+creator+100k`
+- `https://www.google.com/search?q=home+cinema+cozy+living+room+instagram+influencer+NA`
+- `https://www.google.com/search?q=site%3Atiktok.com+cozy+bookshelf+US+creator`
+
+Log each query in `attempted_angles` as `browser_google:"<query text>"`.
+
 ### Conservative rules (main-account protection)
 The agent operates the user's Instagram session in debug Chrome. Treat every
 action as visible to IG's risk system.
@@ -720,6 +815,7 @@ action as visible to IG's risk system.
 - Do not let designer / interior-stylist creators exceed the **active upper bound** (driver default from the Vertical diversity floor table, or `designer_share_target[1]` if brief overrides). Designers are good — concentration is the failure mode, not their presence. If you're already at upper bound and about to add another designer before any cross-vertical candidate has cleared qualification, STOP and run a buyer-moment hashtag pass plus a public-web cross-vertical query first. Inversely: do NOT fall below the **active lower bound** either — that signals over-correction and a lost design-authority leg. Note the bounds differ sharply by driver (E: 50–80% designers; D: only 10–35%); pulling the right range from the table is part of the floor check, not a footnote.
 - Do not skip the buyer-moment or cross-vertical seed buckets when generating hashtags. They are mandatory quotas, not "when relevant" suggestions. Three same-vertical hashtags in a row is a sign you skipped the quota and need to back up.
 - Do not treat public web (Google / TikTok / Reddit) search as a fallback that only fires when IG breaks. It is the primary break-out lever — IG's similar-accounts engine cannot show you creators it doesn't already cluster with home.
+- Do not use `web_search`, Serper API, or terminal `python3 -c "import requests..."` for Google discovery — use `browser_navigate` to `google.com/search?q=...` per § Public web via browser Google.
 - Do not chain 3 same-vertical lateral hops just because each individual hop met the follower / region threshold. The cross-vertical jump rule requires at least one vertical-switch per 3-hop chain; pure same-niche chains reinforce the bubble even when every individual candidate is qualified.
 - Do not let visual similarity outrank buyer intent for functional, technical, family-practical, or use-case products.
 - Do not shortlist on Audience Match alone; Match ≥ 70 and Showcase ≥ 50 must both pass.

@@ -31,7 +31,8 @@ def _load_package() -> types.ModuleType:
     sys.modules[_PKG_NAME] = pkg
 
     for sub in ("schema", "campaign_nox_integration", "goals", "policies", "outreach_touch",
-                "prior_touch_allowlist", "cal", "discovery_skip",
+                "prior_touch_allowlist", "cal", "discovery_skip", "legacy_outcome_repair",
+                "identity_merge",
                 "discovery_router",
                 "confirmed_ingest", "confirmed_fact_buffer",
                 "pricing_engine", "campaign_validation", "classifier_facts",

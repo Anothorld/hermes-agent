@@ -36,15 +36,36 @@ def _seed_campaign(cal):
 def _facts_payload(handle: str) -> dict:
     now = "2026-06-01T09:00:00+00:00"
     profile = f"https://www.instagram.com/{handle}/"
+    reel = "https://www.instagram.com/reel/ABC123xyz/"
     return {
         "identity.instagram_profile_url": profile,
         "identity.instagram_profile_url_source": "ig_bio",
         "identity.instagram_profile_url_discovered_at": now,
         "identity.instagram_profile_url_discovered_url": profile,
-        "identity.hero_post_url": "https://www.instagram.com/reel/ABC123xyz/",
+        "identity.content_pillars": ["cozy living", "family routines"],
+        "identity.content_pillars_source": "ig_profile_and_reels",
+        "identity.content_pillars_discovered_at": now,
+        "identity.content_pillars_discovered_url": profile,
+        "identity.signature_hooks": ["before/after tour", "POV diary"],
+        "identity.signature_hooks_source": "ig_profile_and_reels",
+        "identity.signature_hooks_discovered_at": now,
+        "identity.signature_hooks_discovered_url": profile,
+        "identity.voice_descriptors": ["warm", "honest", "cozy"],
+        "identity.voice_descriptors_source": "ig_profile_and_reels",
+        "identity.voice_descriptors_discovered_at": now,
+        "identity.voice_descriptors_discovered_url": profile,
+        "identity.hero_post_url": reel,
         "identity.hero_post_url_source": "ig_reel_pick",
         "identity.hero_post_url_discovered_at": now,
         "identity.hero_post_url_discovered_url": profile,
+        "identity.hero_post_note": "Comfort tour reel",
+        "identity.hero_post_note_source": "ig_reel_pick",
+        "identity.hero_post_note_discovered_at": now,
+        "identity.hero_post_note_discovered_url": profile,
+        "identity.recommendation_reason": "Strong family-home fit.",
+        "identity.recommendation_reason_source": "ig_profile_and_reels",
+        "identity.recommendation_reason_discovered_at": now,
+        "identity.recommendation_reason_discovered_url": profile,
     }
 
 
@@ -193,6 +214,31 @@ def test_buffer_replay_imports_pending(cal_db, tmp_path, monkeypatch):
 
     second = buf_mod.replay_pending(path=buf_path)
     assert second["attempted"] == 0
+
+
+def test_ingest_normalizes_flat_identity_fact_keys(cal_db, tmp_path, monkeypatch):
+    cal = cal_db
+    ingest = _ingest(cal, tmp_path, monkeypatch)
+    _seed_campaign(cal)
+
+    flat = {
+        "instagram_profile_url": "https://www.instagram.com/eve2_kol/",
+        "instagram_profile_url_source": "ig_bio",
+        "instagram_profile_url_discovered_at": "2026-06-01T09:00:00+00:00",
+        "instagram_profile_url_discovered_url": "https://www.instagram.com/eve2_kol/",
+        "nox_audience_authenticity": 0.91,
+    }
+    out = ingest.ingest_confirmed_candidate(
+        campaign_id=CAMPAIGN,
+        env="TEST",
+        source="tool:cdp-ingest",
+        identity={"primary_handle": "eve2_kol", "platform": "instagram"},
+        candidate={"source": "discovery", "payload": {}},
+        identity_facts=flat,
+    )
+    assert "identity.instagram_profile_url" in out["written"]["facts"]
+    assert "identity.nox_audience_authenticity" in out["written"]["facts"]
+    assert out["skipped"]["dropped_identity_fact_keys"] == []
 
 
 def test_buffer_crash_recovery_still_replayable(cal_db, tmp_path, monkeypatch):

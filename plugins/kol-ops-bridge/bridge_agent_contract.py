@@ -71,10 +71,13 @@ CLASSIFIER_HANDOFF_BRIEF_LINES: tuple[str, ...] = (
     "## Classifier handoff (Step 2→2.5→3 — mandatory, no operator escalation for format errors)",
     "Load: skill_view kol-reply-dispatcher templates/classifier-handoff-checklist.md",
     " and kol-email-stage-classifier templates/classifier-output.json.",
+    "Step 1.5: transform dispatch_context.goals[] → goals_map + current_goal_state lane map (templates/goals-shape-transform.md).",
     "Path A (preferred): inline classify → raw JSON only → parse → Step 2.5 sanitize-classifier-facts → Step 3 write-facts-multi same turn.",
     "Path B: delegate_task only with kol-email-stage-classifier/templates/delegate-task-context.md override; parse results[0].summary only.",
+    "Before classify: get-parsed-escalation-rules --env <env>; pass summary into classifier escalation_rules input.",
     "Technical parse failure: retry ≤3 (inline preferred), then defer — never open-escalation for JSON format.",
     "After successful parse: never re-run Step 2; never read /tmp/classification_result.json.",
+    "Step 4 select-draftable-plan: pass goals as name→row map (never the raw goals array).",
 )
 
 
@@ -192,11 +195,37 @@ _AGENT_LINT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
         "batch_ingest_files",
         re.compile(
-            r"/tmp/ingest_[^'\"\s]+\.json|"
-            r"candidates\s*=\s*\[[^\]]+\][^\n]*ingest",
-            re.I | re.S,
+            r"(?:"
+            # Multiple ingest JSON paths in one Python list (execute_code batching)
+            r"\[[^\]]*['\"]/tmp/ingest_[^'\"]+\.json['\"][^\]]*['\"]/tmp/ingest_"
+            r"|"
+            # Comma-separated ingest paths in one statement
+            r"/tmp/ingest_[^'\"\s/]+\.json\s*,\s*['\"]?/?tmp/ingest_"
+            r"|"
+            # Loop driving more than one ingest call
+            r"(?:for|while)\s+\w+\s+in\s+[^\n]+(?:ingest_|/tmp/ingest_)"
+            r"|"
+            # candidates[] then ingest-confirmed-candidate in same snippet
+            r"candidates\s*=\s*\[[^\]]+\][\s\S]{0,400}?ingest-confirmed-candidate"
+            r")",
+            re.I,
         ),
-        "Ingest one handle at a time: write @/tmp/ingest_<handle>.json then ingest-confirmed-candidate immediately.",
+        (
+            "Ingest one handle at a time via terminal (not execute_code). "
+            "This is the agent guard — not bridge JSON validation. "
+            "Write @/tmp/ingest_<handle>.json then one ingest-confirmed-candidate call per handle."
+        ),
+    ),
+    (
+        "terminal_multi_ingest",
+        re.compile(
+            r"ingest-confirmed-candidate\b[^;\n]*(?:[;&]|&&|\|\|)[^;\n]*ingest-confirmed-candidate\b",
+            re.I,
+        ),
+        (
+            "One ingest-confirmed-candidate per terminal call — no `;`, `&&`, or `||` chains. "
+            "Ingest handles sequentially in separate terminal invocations."
+        ),
     ),
     (
         "explore_bridge_routes",
@@ -268,13 +297,73 @@ _AGENT_LINT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "(exact prefix is in the gateway brief).",
     ),
     (
-        "redirect_bridge_read_stdout",
+        "redirect_bridge_stdout",
         re.compile(
-            r"kol[_-]bridge(?:-cli|_tool\.py)\s+get-(?:campaign|identity|dispatch-context|"
-            r"facts|escalation|email-conversation)[^\n]*>\s*",
+            r"kol[_-]bridge(?:-cli|_tool\.py)\s+[^\n]*(?<![0-9])>\s*\S",
             re.I,
         ),
-        "Read subcommands must print JSON to terminal stdout — do not redirect to a file.",
+        (
+            "Never redirect bridge CLI stdout with `> file` — the terminal tool only "
+            "sees empty output (45-char wrapper) and it looks like CAL failure. "
+            "Print JSON directly to terminal. `2>/dev/null` alone is OK; never `> /tmp/...`."
+        ),
+    ),
+    (
+        "pipe_bridge_stdout",
+        re.compile(
+            r"kol[_-]bridge(?:-cli|_tool\.py)\s+[^\n]*\|\s*(?:head|tail|grep|awk|sed|jq|python3?|cut)\b",
+            re.I,
+        ),
+        (
+            "Do not pipe bridge CLI output through head/grep/jq/python — read the full "
+            "JSON line from terminal stdout. (`| tee` is OK when you still read stdout.)"
+        ),
+    ),
+    (
+        "invalid_subcommand_read_identity",
+        re.compile(r"kol[_-]bridge(?:-cli|_tool\.py)\s+read-identity\b", re.I),
+        "No read-identity subcommand. Use get-identity --identity-id <id> --env LIVE.",
+    ),
+    (
+        "invalid_subcommand_list_campaigns",
+        re.compile(r"kol[_-]bridge(?:-cli|_tool\.py)\s+list-campaigns\b", re.I),
+        "No list-campaigns subcommand. Use get-campaign --campaign-id <id> --env LIVE.",
+    ),
+    (
+        "nox_subcommand_on_bridge_cli",
+        re.compile(
+            r"kol[_-]bridge(?:-cli|_tool\.py)\s+"
+            r"(?:quota-snapshot|diligence-pack|nox-audience-check|nox-quota-snapshot|creator-search|doctor)\b",
+            re.I,
+        ),
+        (
+            f"Nox subcommands belong on {NOX_TOOL_INVOCATION} — not kol_bridge_tool.py. "
+            "Example: nox_kol_tool.py quota-snapshot --env LIVE"
+        ),
+    ),
+    (
+        "invalid_plain_on_discovery_skip",
+        re.compile(r"list-discovery-skip-handles[^\n]*--plain\b", re.I),
+        (
+            "list-discovery-skip-handles returns JSON — omit --plain; "
+            "parse items[*].handle and items[*].reason."
+        ),
+    ),
+    (
+        "invalid_subcommand_find_identity",
+        re.compile(r"kol[_-]bridge(?:-cli|_tool\.py)\s+find-identity", re.I),
+        "No find-identity-by-handle. Use list-candidate-handles or get-identity --identity-id.",
+    ),
+    (
+        "invalid_cli_pretty_flag_position",
+        re.compile(
+            r"kol[_-]bridge(?:-cli|_tool\.py)\s+(?!--pretty)[\w-]+[^\n]*\s--pretty\b",
+            re.I,
+        ),
+        (
+            "`--pretty` is a global flag before the subcommand: "
+            "python3 -u .../kol_bridge_tool.py --pretty get-identity ..."
+        ),
     ),
 )
 
@@ -341,6 +430,11 @@ def format_block_message(violations: Iterable[dict[str, str]]) -> str:
     primary = items[0] if items else {"code": "bridge_contract", "hint": "Use kol_bridge_tool.py"}
     payload = {
         "error": "bridge_agent_contract_violation",
+        "source": "kol_bridge_agent_guard",
+        "note": (
+            "Agent guard blocked an unsafe CLI pattern — not bridge HTTP/JSON validation. "
+            "Fix the terminal command per hint; do not switch to execute_code."
+        ),
         "code": primary.get("code"),
         "hint": primary.get("hint"),
         "canonical_cli": CANONICAL_CLI_REL,
@@ -442,6 +536,10 @@ def draft_preview_cli_checklist(
 
 def discovery_cli_rules(repo_root: str | None = None) -> str:
     cli = gateway_cli_invocation(repo_root)
+    nox = NOX_TOOL_INVOCATION
+    if repo_root:
+        from pathlib import Path
+        nox = f"{CLI_PYTHON} -u {Path(repo_root).expanduser().resolve() / NOX_TOOL_REL}"
     return "\n".join([
         "# bridge_cli_rules (discovery / rediscover)",
         f"Ingest: {cli} ingest-confirmed-candidate --campaign-id <cid> --env <env> "
@@ -449,10 +547,17 @@ def discovery_cli_rules(repo_root: str | None = None) -> str:
         "Ingest JSON requires top-level source + identity + candidate (primary_handle inside identity; "
         "profile URL in identity_facts as identity.instagram_profile_url). NOT flat handle/profile_url/bio.",
         "Do NOT batch multiple handles in execute_code. Do NOT write /tmp/ingest_*.json via execute_code loops.",
+        "Do NOT chain ingest-confirmed-candidate with `;`, `&&`, or `||` in one terminal call.",
         "Do NOT use ingest-confirmed-candidate in kol-cold-outreach — identity_id already exists.",
         f"Preflight: {cli} list-outreach-cooldown-handles --env <env> --plain",
         f"{cli} list-discovery-skip-handles --env <env> "
         "(JSON — parse items[*].handle + items[*].reason; do not use --plain)",
+        f"Nox (when nox_discovery_enabled): {nox} doctor|quota-snapshot|diligence-pack — "
+        "never on kol_bridge_tool.py (quota-snapshot is NOT a bridge subcommand).",
+        "Invalid bridge subcommands: read-identity, list-campaigns, find-identity-by-handle, "
+        "quota-snapshot, nox-audience-check. Use get-identity / get-campaign / list-candidate-handles.",
+        "`--pretty` is global before subcommand. Guard blocks batch execute_code ingest — "
+        "not bridge JSON errors.",
     ])
 
 
@@ -479,9 +584,18 @@ def terminal_safety_rules(*, repo_root: str | None = None) -> str:
             "never `python3` on the kol-bridge-cli bash wrapper (it is not Python)."
         ),
         (
-            "Read subcommands (get-campaign, get-identity, get-dispatch-context, get-facts, "
-            "get-escalation) must print JSON directly to terminal stdout — "
-            "do NOT redirect with `>` (empty stdout looks like CAL failure)."
+            "Every bridge CLI call must print JSON to terminal stdout — never redirect "
+            "stdout with `> file` (45-char empty wrapper). Never pipe through "
+            "head/grep/jq. `| tee` is OK. `2>/dev/null` alone is OK."
+        ),
+        (
+            "Invalid subcommands (do not use): read-identity → get-identity; "
+            "list-campaigns → get-campaign; find-identity-by-handle → list-candidate-handles. "
+            "`--pretty` is global: kol_bridge_tool.py --pretty get-identity ..."
+        ),
+        (
+            "Guard block JSON includes source=kol_bridge_agent_guard — that is NOT bridge "
+            "validation failure; fix the command per hint."
         ),
         "Do NOT run bare `cd .../hermes-agent` (triggers doc injection, empty stdout).",
         "Do NOT use inline shell JSON for write-event; use `cat > /tmp/event.json` then `--json @/tmp/event.json`.",
@@ -502,26 +616,78 @@ def cold_outreach_thread_anchor(*, campaign_id: str, identity_id: int | str) -> 
     }
 
 
+def _email_discovery_checklist_line(
+    *,
+    identity_id: int | str,
+    email_discovery_queued_ids: set[int] | None,
+) -> str:
+    """Align checklist with Console approve brief (# email_discovery_queued)."""
+    iid = int(identity_id)
+    if email_discovery_queued_ids and iid in email_discovery_queued_ids:
+        return (
+            "If primary_email empty AND this identity is under "
+            "# email_discovery_queued: skip draft (pending_email_discovery); "
+            "do NOT run browser or kol-email-discovery in this outreach run."
+        )
+    return (
+        "If primary_email empty AND NOT under # email_discovery_queued: "
+        "open-escalation contact_email_not_found (Console queues discover separately)."
+    )
+
+
+def _creator_brief_checklist_line(
+    *,
+    identity_id: int | str,
+    creator_brief_queued_ids: set[int] | None,
+) -> str:
+    """Align checklist with Console approve brief (# creator_brief_queued)."""
+    iid = int(identity_id)
+    if creator_brief_queued_ids and iid in creator_brief_queued_ids:
+        return (
+            "If this identity is under # creator_brief_queued: skip draft "
+            "(pending_creator_brief); do NOT run browser or "
+            "kol-creator-brief-loader in this outreach run."
+        )
+    return (
+        "Before kol-cold-outreach / kol-reengagement-outreach: ensure creator "
+        "brief is fresh (6 identity.* keys + content_pillars_discovered_at "
+        "within 90 days via get-facts or cal_snapshot). If missing/stale and "
+        "NOT under # creator_brief_queued, draft with passive loader only "
+        "(browser blocked here) and accept low_personalization."
+    )
+
+
 def redraft_cli_checklist(
     *,
     campaign_id: str,
     env: str,
     identity_id: int | str,
     repo_root: str | None = None,
+    email_discovery_queued: bool = False,
 ) -> str:
     """Write-only CLI steps for single-KOL redraft (reads come from cal_snapshot)."""
     cli = gateway_cli_invocation(repo_root)
     anchors = cold_outreach_thread_anchor(campaign_id=campaign_id, identity_id=identity_id)
+    if email_discovery_queued:
+        email_line = (
+            "If primary_email empty: email discover already queued — skip draft until complete."
+        )
+    else:
+        email_line = (
+            "If primary_email empty: open-escalation contact_email_not_found "
+            "(do not run kol-email-discovery in this draft session — browser blocked)."
+        )
     return "\n".join([
         "# bridge_cli_checklist (redraft — writes only; reads are in cal_snapshot above)",
         (
             "Do NOT run get-campaign / get-identity / get-dispatch-context via terminal "
             "when cal_snapshot is present."
         ),
-        "If primary_email empty: delegate kol-email-discovery; on miss open-escalation contact_email_not_found.",
+        email_line,
         (
             "Draft via kol-cold-outreach or kol-reengagement-outreach SKILL; "
-            f"write /tmp/outreach_{identity_id}.json."
+            f"write child_envelope to /tmp/outreach_persist_{identity_id}.json wrapper "
+            "(see kol-cold-outreach SKILL — not a separate draft-only file)."
         ),
         f"{cli} persist-initial-outreach-draft --env {env} "
         f"--json @/tmp/outreach_persist_{identity_id}.json",
@@ -540,9 +706,13 @@ def approval_cli_checklist(
     env: str,
     identity_ids: list[int] | list[str],
     repo_root: str | None = None,
+    email_discovery_queued_ids: list[int] | None = None,
+    creator_brief_queued_ids: list[int] | None = None,
 ) -> str:
     """Ordered CLI steps for post-shortlist approval / outreach runs."""
     cli = gateway_cli_invocation(repo_root)
+    queued = {int(i) for i in (email_discovery_queued_ids or [])}
+    brief_queued = {int(i) for i in (creator_brief_queued_ids or [])}
     per_kol = []
     for iid in identity_ids:
         anchors = cold_outreach_thread_anchor(campaign_id=campaign_id, identity_id=iid)
@@ -555,8 +725,19 @@ def approval_cli_checklist(
                 identity_id=iid, campaign_id=campaign_id, env=env,
                 repo_root=repo_root,
             ),
-            "If primary_email empty: delegate kol-email-discovery; on miss open-escalation contact_email_not_found.",
-            "Draft via kol-cold-outreach or kol-reengagement-outreach SKILL; write /tmp/outreach_{iid}.json.",
+            _email_discovery_checklist_line(
+                identity_id=iid,
+                email_discovery_queued_ids=queued,
+            ),
+            _creator_brief_checklist_line(
+                identity_id=iid,
+                creator_brief_queued_ids=brief_queued,
+            ),
+            (
+                "Draft via kol-cold-outreach or kol-reengagement-outreach SKILL; "
+                f"write persist wrapper /tmp/outreach_persist_{iid}.json "
+                "(child_envelope inside — see kol-cold-outreach SKILL)."
+            ),
             f"{cli} persist-initial-outreach-draft --env {env} "
             f"--json @/tmp/outreach_persist_{iid}.json",
             (

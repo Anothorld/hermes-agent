@@ -67,31 +67,6 @@ def _try_resolve_false_positive_mismatch(
         message_id,
         identity_id,
     )
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-        from pathlib import Path as _Path
-
-        _payload = {
-            "sessionId": "1496d6",
-            "hypothesisId": "H5",
-            "location": "processor.py:_try_resolve_false_positive_mismatch",
-            "message": "auto-resolved mailbox mismatch escalation",
-            "data": {
-                "escalation_id": cleared,
-                "message_id": message_id,
-                "identity_id": identity_id,
-                "campaign_id": campaign_id,
-            },
-            "timestamp": int(_time.time() * 1000),
-        }
-        _Path("/Users/arnold/agent_prj/.cursor/debug-1496d6.log").open(
-            "a", encoding="utf-8",
-        ).write(_json.dumps(_payload, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-    # #endregion
     return True
 
 

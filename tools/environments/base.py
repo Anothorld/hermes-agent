@@ -547,13 +547,28 @@ class BaseEnvironment(ABC):
                         pass
                 return
             idle_after_exit = 0
+            # Use poll() rather than select(): on a long-running gateway the
+            # process accumulates many open fds (browser CDP, HTTP, SSE, tab
+            # pool …) and the subprocess pipe fd routinely exceeds select()'s
+            # hard FD_SETSIZE cap (1024).  select.select() raises
+            # "filedescriptor out of range in select()" for any fd >= 1024,
+            # which previously broke the drain and returned EMPTY output with
+            # exit 0 for every terminal command (issue: kol bridge CLI "empty
+            # stdout" / 45-char wrapper).  poll() has no fd-number limit.
+            try:
+                poller = select.poll()
+                poller.register(fd, select.POLLIN | select.POLLPRI)
+            except (ValueError, OSError):
+                poller = None
             try:
                 while True:
+                    if poller is None:
+                        break
                     try:
-                        ready, _, _ = select.select([fd], [], [], 0.1)
+                        events = poller.poll(100)  # milliseconds (was select 0.1s)
                     except (ValueError, OSError):
                         break  # fd already closed
-                    if ready:
+                    if events:
                         try:
                             chunk = os.read(fd, 4096)
                         except (ValueError, OSError):

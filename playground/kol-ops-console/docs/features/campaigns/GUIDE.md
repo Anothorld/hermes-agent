@@ -60,11 +60,14 @@
 | **async 占位符** | 队列繁忙时 `/rediscover` 与 **auto-retry** 共用 `launch_or_accept`（202 + `pending:*`）；后台 launch 成功后必须把 placeholder 换成真实 `run_id`。`run_state_reconciler` 若发现 registry 中 `pending:*` 已结束，会将活动置为 `closed` 并把 `run_id` 还原为 registry 里最近一条非 pending 的 run |
 | **diagnostics_history** | 每轮终态答案解析为 JSON 追加到 `product_campaigns.diagnostics_history`（`attempted_angles`、`next_round_focus`、`pending_ingests` 等） |
 | **pending_ingests** | 已 qualify 但未 `ingest-confirmed-candidate` 的 handle；下一轮 brief 生成 `# resume_directives` + **STEP_0**（先入库再浏览） |
+| **discovery bootstrap（gateway 强制）** | `kol-bridge-agent-guard` 在 discovery session 上 **阻塞** `browser_*` / `veedcrawl_*`，直到同 session 依次执行 bridge CLI：`list-candidates`、`skip-handles`、`cooldown-handles`；且 `--campaign-id` / `--env` 必须与 `kol-campaign:{env}:{campaign_id}` 一致（防 8010 session 调 8319） |
 | **解析兜底** | 若 agent 未输出 YAML `pending_ingests:`，Console 从「Qualified but unpersisted」等段落启发式抽取（cap 5） |
 | **排除已入库** | 已在 `list-candidates` 池中的 handle 不会出现在 `resume_directives` |
 | **重置** | 操作员 `POST /campaigns/start` 将 `diagnostics_history` 置为 `[]` |
 
 Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingests` / `next_round_focus` 字段名，勿用「Next round should:」纯 prose）。Rediscover gateway instructions 含 `terminal_safety` + browser no-hang（单页单次、禁止并行 browser fan-out）。
+
+**Launch brief 与 ingest 对齐（2026-06）：** `_LAUNCH_INSTRUCTIONS` step 4 要求 **`ingest-confirmed-candidate`**（嵌套 JSON），不再教 legacy `upsert-identity` → `add-candidate` 三步链。数量下限按 ingest 成功计数。Launch 阶段 **不** 跑全池 `route-discovery`（路由在 Console **批准短名单** 时 scoped 执行）。跨阶段 I/O 见 `agent_prj/docs/kol-pipeline-io-contracts.md`。
 
 工程说明：[`agent_prj/docs/kol-discovery-auto-retry-resume.md`](../../../../../../../docs/kol-discovery-auto-retry-resume.md)。
 
@@ -106,8 +109,10 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 2. **决策反馈校验（fail-fast）** — 对首次批准的 KOL 校验 `decision_feedback`（标签必选、早期评论必填），不通过返回 422 且无任何 CAL 副作用
 3. **`route-discovery`（scoped）** — 仅对这批 `identity_ids` 写 `identity.outreach_path` 并 `select-candidates`；**不会**把池内其余 `discovered` 候选一并提升为已批准（**不再**重复调用 `select-candidates`，避免大批量超时）；随后 best-effort 写入决策学习事件（响应体 `learning`）
 4. **缺邮箱自动排队** — 对每个 `primary_email` 为空的已批 identity，Console 同步跑 Nox Gate B（LIVE + `nox_quota_enabled`）后排队 `kol-email-discover:{env}:{id}`（与详情页「全网搜索」同路径）；Gate B 命中则跳过 browser。响应体含 `email_discovery[]`。
-5. 写 `approved` 事件 + **带重试**拉起 post-approval gateway run（`bridge_approve_timeout_sec` 默认 180s；gateway 502/503/504 自动重试 2 次）；brief 含 `# email_discovery_queued`，outreach agent 对队列中的身份 **不** 开 `contact_email_not_found` escalation，报告 `pending_email_discovery`。
-6. **邮箱发现完成后自动起草** — `run_state_reconciler` 在 `kol-email-discover:*` run 到达 `completed` 且 `primary_email` 已写入、该 identity 仍为 `selected_for_outreach`、尚无待审批草稿时，自动拉起单 KOL 的 `kol-campaign-draft:{env}:{campaign_id}:{identity_id}` run（与详情页 `redraft-outreach` 同 brief/技能；**每 KOL 独立 session**，避免同活动多 KOL 起草共用长 transcript）。audit 记 `campaign.auto_draft_after_email_discover`。有邮箱的 KOL 仍在步骤 4 的 outreach run 中同步起草，不等待队列。
+5. **创作者简介刷新排队** — 对每个 brief 缺失或超过 90 天 stale 的已批 identity，Console 排队 `kol-creator-brief-refresh:{env}:{identity_id}:{run_token}`（与 `# email_discovery_queued` 同模式，共享 browser 串行槽位）。**已在 `# email_discovery_queued` 中的 identity 不再单独排 brief**（由 `kol-email-discovery` Step 6 顺带刷新）。响应体含 `creator_brief_refresh[]`。Shortlist API / UI 返回 `creator_brief_ready` / `creator_brief_status`。
+6. 写 `approved` 事件 + **带重试**拉起 post-approval gateway run（`bridge_approve_timeout_sec` 默认 180s；gateway 502/503/504 自动重试 2 次）；brief 含 `# email_discovery_queued` 与 `# creator_brief_queued`；outreach agent 对队列中的身份报告 `pending_email_discovery` / `pending_creator_brief`，**不** 在 outreach run 内开 browser。
+7. **邮箱发现完成后自动起草** — `run_state_reconciler` 在 `kol-email-discover:*` run 到达 `completed` 且 `primary_email` 已写入、creator brief **已就绪**、该 identity 仍为 `selected_for_outreach`、尚无待审批草稿时，自动拉起单 KOL 的 `kol-campaign-draft:{env}:{campaign_id}:{identity_id}` run。audit 记 `campaign.auto_draft_after_email_discover`。若 Step 6 未刷新 brief，**补排队** `kol-creator-brief-refresh`（audit `kol.creator_brief.refresh_after_email_discover`），不在 brief 缺失时抢跑低个性化草稿。
+8. **创作者简介刷新完成后自动起草** — 同上 reconciler 路径，session `kol-creator-brief-refresh:*` 完成且 brief ready 时触发（audit `campaign.auto_draft_after_creator_brief_refresh`）。适用于「有邮箱、缺 brief」的 approve 排队场景。
 
 若 CAL 已更新但 gateway 启动失败，audit 会记 `campaign.approve_shortlist_gateway_failed`；操作员可再次点击批准（idempotent）或联系工程。
 
@@ -118,7 +123,7 @@ Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingest
 Console `POST …/approve-shortlist` 拉起 gateway run（session `kol-campaign-outreach:{env}:{id}`，与 discovery 的 `kol-campaign:` 分离）；brief 含 `bridge_cli_checklist`：
 
 - 只用 **terminal** + **绝对路径** `kol-bridge-cli`（禁止 bare `python`、禁止相对 `plugins/…`、禁止 execute_code/curl）
-- **禁止 browser / Chrome DevTools MCP** 在 outreach run 内做邮箱 enrichment（邮箱发现由批准前/批准时排队的 `kol-email-discover:*` 完成；guard 在 outreach/reply/draft 前缀 block `browser_*`，**所有** `kol-*` session block `mcp_chrome_devtools_*`）
+- **禁止 browser / Chrome DevTools MCP** 在 outreach run 内做邮箱 enrichment 或创作者简介 active fetch（邮箱发现由 `kol-email-discover:*`、brief 刷新由 `kol-creator-brief-refresh:*` 在批准时排队；guard 在 outreach/reply/draft 前缀 block `browser_*`，**所有** `kol-*` session block `mcp_chrome_devtools_*`）
 - 冷触达草稿：`persist-initial-outreach-draft`（稳定 `draft:outreach_{campaign}_{identity}`）
 
 ### 草稿正文必须是 HTML（POVISON 683 根因修复）
@@ -150,7 +155,7 @@ KOL 详情页 **主动跟进** → `POST /campaigns/{cid}/identities/{iid}/follo
 
 KOL 详情页 **生成待审批草稿** → `POST /campaigns/{cid}/identities/{iid}/redraft-outreach`（skill `kol-cold-outreach` / `kol-reengagement-outreach`）。
 
-Console 在拉起 gateway run **之前** 通过 bridge HTTP 读取 `get_campaign`、`get_identity(env)`、`get_dispatch_context`，并以 `# cal_snapshot` JSON 块嵌入 brief（agent view 瘦身后的 dispatch-context）。Agent **不必**再用 terminal 跑 `get-campaign` / `get-identity` / `get-dispatch-context`；brief 内 `redraft_cli_checklist` 仅列 persist 等写命令。Terminal 读命令若用 `>` 重定向会导致 stdout 为空（45 字符 wrapper），属调用方式错误而非 CAL 故障。
+Console 在拉起 gateway run **之前** 通过 bridge HTTP 读取 `get_campaign`、`get_identity(env)`、`get_dispatch_context`，并以 `# cal_snapshot` JSON 块嵌入 brief（agent view 瘦身后的 dispatch-context）。Agent **不必**再用 terminal 跑 `get-campaign` / `get-identity` / `get-dispatch-context`；brief 内 `redraft_cli_checklist` 仅列 persist 等写命令。Terminal 任何 bridge 子命令若 stdout 被 `>` 重定向会导致空输出（45 字符 wrapper）；guard 拦截 `> file`、`| head/grep/jq`，以及幻觉子命令（`read-identity`、`list-campaigns`）。`batch_ingest_files` block 的 `source: kol_bridge_agent_guard` 表示 guard 拦截，不是 bridge JSON 校验失败。
 
 | 冲突码 | 含义 |
 |--------|------|
@@ -180,6 +185,8 @@ Gmail 发出后会记录真实 `sent_body` 供策略判断。详见 `agent_prj/d
 **结构化交付（Phase 2）**：启动 campaign Step C → **用自然语言描述交付内容** → **解析预览** → 确认表格后启动。写入 `campaign_deliverables_json`（含 ad code 等 extras）；未填 NL 时仍只用 platform checkbox，行为与旧版一致。合同 readiness 与 contract-coordinator 读 `GET …/resolved-deliverables` → `rows`。
 
 **Console PATCH**（`EditCampaignConfigPanel`）可改 `implicit_accept_enabled` / `defer_terms_to_contract` / `strict_explicit_accept` 与 `campaign_deliverables_json`。
+
+**`contract_required=false`（不签合同）**：仅跳过 **contract_signing** 目标；**不会**跳过 commerce，也不会在 KOL 尚未 agreed 时把卡片推进到 fulfillment（logistics / payout）。若历史数据误标 active，运行 `plugins/kol-ops-bridge/scripts/repair_fulfillment_goal_gate.py --scan`。
 
 **运维 backfill**（历史线程缺 `offer.last_outbound_terms_proposed` 时）：
 

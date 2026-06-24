@@ -300,9 +300,7 @@ def test_payout_setup_inactive_before_contract_signed(cal_db):
 
 
 def test_payout_setup_active_when_contract_not_required(cal_db):
-    """If campaign skips contracts, payout_setup still gates on
-    compensation being agreed — _contract_satisfied returns True
-    immediately when contract_required=False."""
+    """If campaign skips contracts, payout_setup still gates on compensation agreed."""
     cal = cal_db
     _seed_campaign(cal, contract_required=False)
     iid = cal.upsert_identity(primary_handle="payout_nocontractreq")
@@ -313,6 +311,27 @@ def test_payout_setup_active_when_contract_not_required(cal_db):
                            "offer.agreed_terms": {"amount": 500, "currency": "USD"}})
     g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
     assert g["payout_setup"]["status"] == "active"
+
+
+def test_fulfillment_inactive_before_compensation_when_no_contract(cal_db):
+    """contract_required=false must not skip commerce and jump to fulfillment."""
+    cal = cal_db
+    _seed_campaign(cal, contract_required=False)
+    iid = cal.upsert_identity(primary_handle="early_fulfillment_block")
+    cal.write_facts(
+        identity_id=iid,
+        campaign_id=CAMPAIGN,
+        namespace="offer",
+        facts={
+            "offer.outreach_sent": True,
+            "offer.interest_signal": "needs_more_info",
+            "offer.compensation_mode": "paid",
+        },
+    )
+    g = {x["goal"]: x for x in cal.get_goal_state(identity_id=iid, campaign_id=CAMPAIGN)}
+    assert g["contract_signing"]["status"] == "skipped"
+    assert g["logistics"]["status"] == "inactive"
+    assert g["payout_setup"]["status"] == "inactive"
 
 
 def test_payout_setup_satisfied_when_method_collected(cal_db):

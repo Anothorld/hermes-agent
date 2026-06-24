@@ -38,6 +38,59 @@ def _max_tokens() -> int:
         return 4096
 
 
+def _http_timeout() -> int:
+    """HTTP read timeout (seconds) for the learning LLM call.
+
+    Overridable via ``KOL_LEARNING_LLM_HTTP_TIMEOUT_SEC`` so operators can
+    tune for a slow local proxy (e.g. Ollama/LiteLLM on 127.0.0.1:4000)
+    without a code change. Defaults to 120s; clamped to [10, 600].
+    """
+    raw = os.environ.get("KOL_LEARNING_LLM_HTTP_TIMEOUT_SEC", "120").strip()
+    try:
+        return max(10, min(int(raw), 600))
+    except ValueError:
+        return 120
+
+
+def _http_retries() -> int:
+    """Extra retry attempts on *transient* LLM failures (timeout / 5xx / empty).
+
+    Overridable via ``KOL_LEARNING_LLM_HTTP_RETRIES``. Default 1 (=> 2 total
+    attempts). Clamped to [0, 3] so a flapping proxy can't stall the run.
+    """
+    raw = os.environ.get("KOL_LEARNING_LLM_HTTP_RETRIES", "1").strip()
+    try:
+        return max(0, min(int(raw), 3))
+    except ValueError:
+        return 1
+
+
+class _TransientLlmError(RuntimeError):
+    """Retryable LLM failure: read timeout, 5xx, or empty content."""
+
+
+# #region agent log
+def _debug_log(message: str, data: dict) -> None:
+    """Best-effort NDJSON debug log (session 60e90d). Never raises."""
+    try:
+        import json as _json
+        import time as _time
+
+        line = _json.dumps({
+            "sessionId": "60e90d",
+            "hypothesisId": "LLM",
+            "location": "learning_llm.py",
+            "message": message,
+            "data": data,
+            "timestamp": int(_time.time() * 1000),
+        }, ensure_ascii=False)
+        with open("/Users/arnold/agent_prj/.cursor/debug-60e90d.log", "a", encoding="utf-8") as _fh:
+            _fh.write(line + "\n")
+    except Exception:
+        pass
+# #endregion
+
+
 def _openai_sdk_available() -> bool:
     try:
         import openai  # noqa: F401
@@ -251,30 +304,61 @@ def _invoke_openai_compatible(
             {"role": "user", "content": prompt},
         ],
     }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base}/chat/completions",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}",
-        },
-        method="POST",
-    )
-    try:
-        with _urlopen(req, timeout=120) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"LLM HTTP {exc.code}: {detail[:500]}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"LLM network error: {exc}") from exc
-    choices = payload.get("choices") or []
-    if not choices:
-        raise RuntimeError("LLM response missing choices")
-    content = (choices[0].get("message") or {}).get("content") or ""
-    if not str(content).strip():
-        raise RuntimeError("LLM response empty content")
-    return str(content)
+    timeout = _http_timeout()
+
+    def _one_call() -> str:
+        req = urllib.request.Request(
+            f"{base}/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}",
+            },
+            method="POST",
+        )
+        try:
+            with _urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            # 5xx are transient (proxy overload / upstream hiccup); 4xx are not.
+            if 500 <= exc.code < 600:
+                raise _TransientLlmError(f"LLM HTTP {exc.code}: {detail[:500]}") from exc
+            raise RuntimeError(f"LLM HTTP {exc.code}: {detail[:500]}") from exc
+        except urllib.error.URLError as exc:
+            # Read timeout / connection reset against the proxy — retryable.
+            raise _TransientLlmError(f"LLM network error: {exc}") from exc
+        choices = payload.get("choices") or []
+        if not choices:
+            raise _TransientLlmError("LLM response missing choices")
+        content = (choices[0].get("message") or {}).get("content") or ""
+        if not str(content).strip():
+            # Empty content from a flapping fallback model — retry once.
+            raise _TransientLlmError("LLM response empty content")
+        return str(content)
+
+    attempts = _http_retries() + 1
+    last_transient: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            result = _one_call()
+            if attempt > 1:
+                _debug_log("llm_recovered_after_retry", {
+                    "base_url": base, "model": resolved_model, "attempt": attempt,
+                })
+            return result
+        except _TransientLlmError as exc:
+            last_transient = exc
+            _debug_log("llm_transient_failure", {
+                "base_url": base, "model": resolved_model,
+                "attempt": attempt, "attempts": attempts,
+                "timeout_sec": timeout, "error": str(exc)[:200],
+            })
+            if attempt >= attempts:
+                break
+    # Surface the transient as a plain RuntimeError so the existing
+    # fallback chain in invoke_learning_llm() can try the root runtime.
+    raise RuntimeError(str(last_transient) if last_transient else "LLM call failed")
 
 
 def _main_model_from_hermes() -> Optional[str]:

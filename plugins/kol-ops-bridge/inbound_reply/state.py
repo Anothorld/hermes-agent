@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -25,7 +26,8 @@ def _default_console_db_path() -> Path:
     explicit = os.environ.get("KOC_DB_PATH")
     if explicit:
         return Path(explicit).expanduser()
-    return _HERMES_HOME / "kol-ops-console" / "app.db"
+    # Console is shared across Hermes profiles; do not tie it to profile HERMES_HOME.
+    return Path.home() / ".hermes" / "kol-ops-console" / "app.db"
 
 
 _CONSOLE_DB_PATH = _default_console_db_path()
@@ -157,11 +159,16 @@ def register_console_run(
 ) -> None:
     if not campaign_id or not run_id:
         return
+    db_path = _default_console_db_path()
     try:
-        if not _CONSOLE_DB_PATH.exists():
+        if not db_path.exists():
+            log.warning(
+                "console run-registry skipped: db missing at %s (set KOC_DB_PATH?)",
+                db_path,
+            )
             return
         now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-        conn = sqlite3.connect(str(_CONSOLE_DB_PATH), timeout=5.0, isolation_level=None)
+        conn = sqlite3.connect(str(db_path), timeout=5.0, isolation_level=None)
         try:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute(
@@ -231,9 +238,29 @@ def record_global_message_seen(
         conn.close()
 
 
+_THREAD_LOCK_DEPTH = threading.local()
+
+
+def _state_lock_depth() -> int:
+    return int(getattr(_THREAD_LOCK_DEPTH, "depth", 0) or 0)
+
+
 @contextlib.contextmanager
 def state_lock(*, blocking: bool = True) -> Iterator[None]:
-    """Exclusive lock around a full run_once cycle (Megan duplicate prevention)."""
+    """Exclusive lock around a full run_once cycle (Megan duplicate prevention).
+
+    Reentrant within the same thread so ``process_message`` can update retry
+    counters while ``run_once`` already holds the cross-process flock.
+    """
+    depth = _state_lock_depth()
+    if depth > 0:
+        _THREAD_LOCK_DEPTH.depth = depth + 1
+        try:
+            yield
+        finally:
+            _THREAD_LOCK_DEPTH.depth = depth
+        return
+
     _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     fh = open(_LOCK_PATH, "a+")
     flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
@@ -247,9 +274,11 @@ def state_lock(*, blocking: bool = True) -> Iterator[None]:
                     f"(lock={_LOCK_PATH})"
                 ) from exc
             raise
+        _THREAD_LOCK_DEPTH.depth = 1
         yield
     finally:
         try:
+            _THREAD_LOCK_DEPTH.depth = 0
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:
             fh.close()

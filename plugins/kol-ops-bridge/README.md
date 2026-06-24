@@ -45,7 +45,10 @@ the external Web system uses to start / read / write KOL outreach state.
 | `python plugins/kol-ops-bridge/kol_bridge_tool.py` (no `scripts/`) | Shim forwards + stderr notice; or use canonical path | Always: `python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py` |
 | Running with no subcommand | Exit 2 + **Hint** pointing at `--help` | Add subcommand, e.g. `health`, `get-escalation` |
 | `get-escalation --campaign-id …` | Preflight **invalid_cli_args** JSON + hint | Use `--escalation-id` only; filter campaigns via `list-escalations --env LIVE` |
-| Empty terminal + exit 2 | Agent only sees **stdout** — stderr-only errors looked like blank output | Read the last stdout line for `{"error":...,"hint":...}`; all failure paths emit there |
+| Empty terminal + exit 0, **45 chars** | stdout redirected with `> file` | Never redirect **any** bridge subcommand stdout; print JSON to terminal |
+| `batch_ingest_files` guard block | execute_code batch ingest (not bridge JSON error) | One terminal `ingest-confirmed-candidate` per handle; check `source: kol_bridge_agent_guard` |
+| `read-identity` / `list-campaigns` | Hallucinated subcommand | Use `get-identity` / `get-campaign` |
+| Pipe `head`/`grep`/`jq` on bridge CLI | Truncated JSON | Read full stdout; `\| tee` is OK |
 | Pipe / non-TTY stdout | Python block-buffers JSON until buffer full | CLI `print_json` always **flushes**; `kol-bridge-cli` uses **python3 -u**; default **compact** JSON (global `--pretty` for indentation) |
 | Dispatch reads | Full bundle repeats lanes + provenance | Agent runs: **`get-dispatch-context --view agent`** (slim goals/config/facts + embedded identity) |
 | Swallowing stderr (`2>/dev/null`) | Hides human-facing mirror only | Errors are on stdout first; keep stderr visible when debugging on a TTY |
@@ -207,6 +210,10 @@ writes (`source=email:*`). Global defaults (override per campaign):
   another confirmation email; `kol-compensation-negotiator` skips with
   `defer_to_contract`; `kol-contract-coordinator` sends the contract as final terms.
 - `strict_explicit_accept=true` — opt out per campaign.
+- `contract_required=false` — skips the **contract_signing** goal only; fulfillment
+  (`logistics`, `payout_setup`) still waits on compensation satisfied
+  (`offer.agreed_terms`, or defer-mode gifted rules). It does **not** mean
+  “skip commerce and go straight to shipping.”
 
 Gmail reconcile persists actual `sent_body` on `outbound_sent` events and
 `offer.last_outbound_terms_proposed` for policy thread evidence. Policy reads
@@ -285,6 +292,40 @@ Cross-campaign **confirmed outreach sends** (`outreach.sent` events and
 
    Response is JSON: `items[]` with `{handle, reason}` per row (omit `--plain` so
    `reason` is available for operator logs).
+
+   **Legacy daily-report false `incomplete`:** rows imported from ``红人日报表``
+   with product/cost could be mis-tagged ``incomplete`` when spreadsheet metadata
+   contained ``否`` (e.g. ``是否凹槽系列=否``). Bridge treats those as
+   discovery-skip ``success`` even before CAL repair, and exposes a one-shot
+   maintenance endpoint to upgrade stored outcomes:
+
+   ```bash
+   # Preview
+   python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py repair-legacy-outcomes \
+     --env LIVE --dry-run
+
+   # Apply
+   python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py repair-legacy-outcomes \
+     --env LIVE
+   ```
+
+   Re-import heuristics live in ``playground/import_red_kol_history.py`` (fixed
+   ``detect_outcome`` + daily-report cost → ``success``).
+
+   Sync stale legacy **event** payloads (relationship already repaired):
+
+   ```bash
+   python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py sync-legacy-event-payloads \
+     --env LIVE --dry-run
+   ```
+
+   Merge duplicate identity rows (same handle):
+
+   ```bash
+   python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py list-duplicate-identities --env LIVE
+   python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py merge-identities \
+     --env LIVE --keep-id 180 --merge-id 471
+   ```
 
 3. **Console tags** — `GET /identities/outreach-touch?identity_ids=1,2,3`
    enriches shortlist rows and KOL detail with `prior_outreach_touch`
@@ -386,6 +427,10 @@ Key payload rules (most frequent failure modes):
     `media_kit`, `agency_page`, `ig_profile_and_reels`, `ig_reel_pick`,
     `llm_summary`)
 - Every `identity.*_url` must be an absolute `http(s)` URL.
+- **`identity_facts` keys use dotted `identity.` prefix.** Bare keys such as
+  `instagram_profile_url` or `nox_audience_authenticity` are normalized
+  server-side; unknown flat keys are dropped and listed in
+  `skipped.dropped_identity_fact_keys`.
 - `identity.linktree_url` host allowlist: `linktr.ee`, `beacons.ai`,
   `bio.link`, `lnk.bio`, `solo.to`, `linkin.bio`.
 - Optional-field policy: if an optional field fails validation, remove/fix
@@ -464,7 +509,7 @@ See ``skills/social-media/kol-contract-coordinator/references/contract-field-sou
 | Learning exports (read-only) | `learning_store.py` | `export-*-events`, `export-fact-corrections`, … | `GET /learning/*` |
 | Learning apply (distill) | `learning_distill.py` | `apply-*-policy`, `apply-pricing-campaign` | `POST /learning/apply-*` |
 | Learning cron (autonomous) | `learning_jobs.py` | `run-learning-jobs`, `list-learning-job-runs` | `POST /learning/run-scheduled-jobs`, `GET /learning/job-runs` |
-| Learning LLM distill | `learning_llm.py` | *(via apply-edit-policy)* | Uses active `HERMES_HOME` model; on failure retries root `~/.hermes` config; override with `KOL_LEARNING_LLM_*` |
+| Learning LLM distill | `learning_llm.py` | *(via apply-edit-policy)* | Uses active `HERMES_HOME` model; on transient failure (timeout/5xx/empty) retries in-place then falls back to root `~/.hermes` config; override with `KOL_LEARNING_LLM_*` |
 | Reject tag vocabulary | `reject_tags.py` | *(via reject body)* | `POST /approvals/.../reject` + `correction` |
 | Sent-body edit diff | `gmail_reconcile.py`, `reply_diff.py` | `reconcile_sent`, `backfill_edit_learning` | `POST /gmail/reconcile-sent`, `POST /learning/backfill-edit-learning` |
 | Gmail coordinator | `gmail_worker.py` | — | `GET /gmail/worker/status` |
@@ -509,9 +554,13 @@ regenerate. On approve, the bridge resolves Gmail `threadId` from thread anchor
 fields — including legacy synthesizer top-level `thread_id` / `in_reply_to`.
 
 **Orphan Gmail draft discard:** when chase supersedes an
-**approved-but-unsent** prior draft, `persist-reply-draft` best-effort
-deletes the old Gmail `draftId` (via `gmail delete-draft`) and clears stale
-`offer.gmail_draft_id` / `offer.gmail_thread_id`. Outcome is recorded on
+**approved-but-unsent reply draft** (real Gmail ``source_message_id``, not
+``draft:outreach_*``), `persist-reply-draft` best-effort deletes the stale
+Gmail ``draftId`` (via ``gmail delete-draft``) and clears matching
+``offer.gmail_draft_id`` / ``offer.gmail_thread_id``. Superseding the initial
+outreach ``approval.reply_draft`` on a KOL's first reply (**cold-outreach**
+``regenerate``) **never** calls Gmail delete — only stale CAL draft facts may
+be cleared; thread anchors are preserved. Outcome is recorded on
 `chase_supersede.orphan_gmail_discard` and in `kol_reply_draft_superseded`.
 Failures are logged but do not block supersede.
 
@@ -614,6 +663,26 @@ cron — see `playground/learning/CRON.md`.
 `run-learning-jobs` rejects `--env TEST`. Audit:
 `kol_bridge_tool list-learning-job-runs --env LIVE` or `GET /learning/job-runs`.
 Disable all jobs: `KOL_LEARNING_JOBS_DISABLED=1`.
+
+#### Resilience knobs (capture/LLM overload)
+
+The capture suite (every 15m) can overlap a slow `backfill_edit_learning`
+(~6–7 min) and, under campaign load, starve the bridge HTTP worker — the cause
+of the `RemoteDisconnected` / `socket.timeout` capture failures seen on
+2026-06-18. Guards:
+
+- **Skip-if-running lock** (`learning_jobs._RUN_LOCK`): a non-dry-run
+  `run_scheduled_jobs` returns `{"skipped": true, "reason":
+  "learning_run_in_progress"}` immediately when another learning run is in
+  flight, instead of piling on. No env needed; always on.
+- **CLI request timeout**: `KOC_BRIDGE_LEARNING_TIMEOUT_SEC` (default `600`)
+  bounds how long the CLI waits for the bridge.
+- **LLM HTTP tuning** (`learning_llm.py`): `KOL_LEARNING_LLM_HTTP_TIMEOUT_SEC`
+  (default `120`, clamp 10–600) and `KOL_LEARNING_LLM_HTTP_RETRIES`
+  (default `1`, clamp 0–3) control per-call timeout and transient-retry count
+  against a slow local proxy (e.g. `127.0.0.1:4000`). Transient = read
+  timeout, 5xx, or empty content; a 4xx is not retried. After retries are
+  exhausted the call falls through to the root `~/.hermes` runtime fallback.
 
 ### Discovery decision learning (shortlist 决策级)
 

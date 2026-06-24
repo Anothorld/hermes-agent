@@ -6,7 +6,9 @@ Load once per reply:
 
 ## Step 2 — Classify
 
-- [ ] **Path A (preferred):** inline in parent — emit ONLY raw JSON matching classifier-output template
+- [ ] Load `templates/goals-shape-transform.md`
+- [ ] Build `goals_map` + `current_goal_state` from `goals[]`
+- [ ] Run `get-parsed-escalation-rules` → `escalation_rules` for classifier
 - [ ] **Path B:** `delegate_task` with `templates/delegate-task-context.md` override block filled in
 - [ ] Parse: inline assistant JSON **or** `results[0].summary` from delegate_task
 - [ ] Validate: `facts_extracted` + `signals` present → store full object as `classifier_result`

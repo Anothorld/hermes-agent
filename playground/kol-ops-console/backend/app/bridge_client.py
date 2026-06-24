@@ -615,6 +615,32 @@ class BridgeClient:
                 parsed[iid] = brief
         return parsed
 
+    async def batch_creator_brief_status(
+        self,
+        identity_ids: list[int],
+        *,
+        env: str = "LIVE",
+    ) -> dict[int, dict[str, Any]]:
+        if not identity_ids:
+            return {}
+        out = await self._req(
+            "POST",
+            "/identities/creator-brief-status",
+            json={"identity_ids": identity_ids, "env": env},
+        )
+        raw = out.get("by_identity") if isinstance(out, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        parsed: dict[int, dict[str, Any]] = {}
+        for key, status in raw.items():
+            try:
+                iid = int(key)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(status, dict):
+                parsed[iid] = status
+        return parsed
+
     async def approve(
         self,
         fact_path: str,

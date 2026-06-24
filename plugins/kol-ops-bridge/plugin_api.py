@@ -34,6 +34,8 @@ _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 from . import cal
 from . import campaign_transfer
 from . import discovery_skip
+from . import identity_merge
+from . import legacy_outcome_repair
 from . import outreach_touch
 from . import campaign_validation
 from . import confirmed_ingest
@@ -753,6 +755,79 @@ def list_discovery_skip_handles(
         "count": len(items),
         "items": items,
     }
+
+
+class LegacyOutcomeRepairBody(BaseModel):
+    dry_run: bool = False
+    identity_ids: Optional[list[int]] = None
+    limit: int = Field(default=10_000, ge=1, le=20_000)
+
+
+@router.post("/maintenance/repair-legacy-outcomes")
+def repair_legacy_outcomes_route(
+    body: LegacyOutcomeRepairBody,
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Upgrade false ``incomplete`` legacy daily-report outcomes to ``success``."""
+    return legacy_outcome_repair.repair_legacy_outcomes(
+        env=env,
+        dry_run=body.dry_run,
+        identity_ids=body.identity_ids,
+        limit=body.limit,
+    )
+
+
+class LegacyEventSyncBody(BaseModel):
+    dry_run: bool = False
+    target_outcome: str = Field(default="success", max_length=60)
+    limit: int = Field(default=10_000, ge=1, le=20_000)
+
+
+@router.post("/maintenance/sync-legacy-event-payloads")
+def sync_legacy_event_payloads_route(
+    body: LegacyEventSyncBody,
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Sync stale ``legacy.collab_imported`` event outcomes for audit consistency."""
+    return legacy_outcome_repair.sync_stale_legacy_event_payloads(
+        env=env,
+        dry_run=body.dry_run,
+        target_outcome=body.target_outcome,
+        limit=body.limit,
+    )
+
+
+class IdentityMergeBody(BaseModel):
+    keep_id: int = Field(ge=1)
+    merge_id: int = Field(ge=1)
+    dry_run: bool = False
+
+
+@router.post("/maintenance/merge-identities")
+def merge_identities_route(
+    body: IdentityMergeBody,
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+) -> dict[str, Any]:
+    """Merge duplicate identity rows (same handle) into ``keep_id``."""
+    try:
+        return identity_merge.merge_identities(
+            keep_id=body.keep_id,
+            merge_id=body.merge_id,
+            env=env,
+            dry_run=body.dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/maintenance/duplicate-identities")
+def list_duplicate_identities_route(
+    env: str = Query(default="LIVE", pattern="^(TEST|LIVE)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """List handle groups with more than one identity row."""
+    items = identity_merge.list_duplicate_identity_groups(env=env, limit=limit)
+    return {"env": env, "count": len(items), "items": items}
 
 
 @router.get("/identities/{identity_id}")
@@ -1941,6 +2016,18 @@ def write_facts_multi(
                 body.source,
                 classifier_adjustments,
             )
+    else:
+        namespaces, alias_adjustments = (
+            classifier_facts.normalize_fulfillment_offer_aliases(namespaces)
+        )
+        if alias_adjustments:
+            classifier_adjustments.extend(alias_adjustments)
+            log.info(
+                "fulfillment_offer_alias identity_id=%s source=%s adjustments=%s",
+                identity_id,
+                body.source,
+                alias_adjustments,
+            )
     if campaign_id:
         state = cal.latest_facts_for(
             identity_id=identity_id,
@@ -2112,6 +2199,21 @@ def batch_identity_briefs(body: BatchIdentityIdsBody) -> dict[str, Any]:
             str(iid): brief for iid, brief in by_id.items()
         },
     }
+
+
+class BatchCreatorBriefStatusBody(BaseModel):
+    identity_ids: list[int] = Field(min_length=1, max_length=2000)
+    env: str = Field(default="LIVE", pattern="^(TEST|LIVE)$")
+
+
+@router.post("/identities/creator-brief-status")
+def batch_creator_brief_status(body: BatchCreatorBriefStatusBody) -> dict[str, Any]:
+    """Batch assess creator-brief readiness (6 keys + 90-day freshness)."""
+    by_id = cal.batch_creator_brief_status(
+        identity_ids=body.identity_ids,
+        env=body.env,
+    )
+    return {"by_identity": {str(iid): status for iid, status in by_id.items()}}
 
 
 # ---------------------------------------------------------------------------
@@ -3834,11 +3936,25 @@ def persist_reply_draft(
         )
         if isinstance(fact_value.get("chase_supersede"), dict) and orphan_discard:
             fact_value["chase_supersede"]["orphan_gmail_discard"] = orphan_discard
+    persist_namespaces: dict[str, dict[str, Any]] = {
+        "approval": {"approval.reply_draft": fact_value},
+    }
+    if reply_draft.is_initial_outreach_draft(
+        {
+            "primary_goal": body.primary_goal,
+            "child_skill": child_skill,
+            "draft": child_envelope,
+            "source_message_id": body.source_message_id,
+        },
+        campaign_id=body.campaign_id,
+        identity_id=body.identity_id,
+    ):
+        persist_namespaces["offer"] = {"offer.outreach_draft_ready": True}
     try:
         written = cal.write_facts_multi(
             identity_id=body.identity_id,
             campaign_id=body.campaign_id,
-            namespaces={"approval": {"approval.reply_draft": fact_value}},
+            namespaces=persist_namespaces,
             source=f"draft:{body.source_message_id}",
             source_event_id=event_id,
             env=body.env,

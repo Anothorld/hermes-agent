@@ -41,9 +41,9 @@ Login cookies and IG session stay shared because all tabs live in the same profi
 | Cloud provider + hybrid `::local` sidecar (private URLs) | No — sidecar stays headless |
 | `LOCAL_CHROME_TAB_POOL=0` | Disabled — legacy shared CDP connection |
 
-If a browser session already exists without `tab_pool` metadata, the plugin
-**blocks** the tool call with an actionable error instead of silently sharing
-the active tab.
+If a browser session already exists without `tab_pool` metadata (typically a stale
+browser-level `BROWSER_CDP_URL` session), the plugin **evicts** it and replaces it
+with a dedicated page tab instead of silently reusing the shared active tab.
 
 ## Enable / disable
 
@@ -86,6 +86,45 @@ to the same active tab. The plugin wraps that function at load time so each
 `task_id` still receives its own page-level CDP URL before any browser command
 runs — even if `pre_tool_call` hooks are skipped on a code path.
 
+## `_create_cdp_session` wrapper (v1.0.4)
+
+Some code paths still call `browser_tool._create_cdp_session` with the
+**browser-level** WebSocket resolved from `BROWSER_CDP_URL`, overwriting the
+pooled page session in `_active_sessions`. Runtime evidence (2026-06-23):
+concurrent discovery runs logged `Resolved CDP …/devtools/browser/…` for every
+campaign while tab-pool acquire succeeded — POVISON/PR0037 then read SSF8033's
+Instagram page (`@cozyvibesdarling`). The plugin now wraps
+`_create_cdp_session` to redirect browser-level creates to the task's pooled
+page tab, and wraps `_ensure_cdp_supervisor` so the supervisor attaches to the
+same page CDP.
+
+## `_run_browser_command` wrapper (v1.0.5–1.0.6)
+
+`browser_tool._run_browser_command` copies the full process environment into each
+`agent-browser` subprocess (`browser_env = {**os.environ}`). When
+`BROWSER_CDP_URL=http://127.0.0.1:9222` is loaded from dotenv (as
+`start-debug-chrome.sh` writes) **and** the tab pool passes a page-level
+`--cdp ws://…/devtools/page/…`, concurrent `open` commands attached to the
+shared browser socket and navigated whichever tab was foreground.
+
+**v1.0.5** strips `BROWSER_CDP_URL` from the subprocess env. Runtime proof showed
+that was necessary but not sufficient — concurrent `open` still raced (SSF8033's
+tab showed PR0037's `angelarosehome` URL while navigating to `homecinema`).
+
+**v1.0.6** routes tab-pool `open` through direct `Page.navigate` on the page
+websocket (`internal/cdp_page.py`), bypassing agent-browser entirely. Agent-browser
+`open` remains a serialized fallback when direct CDP fails. Post-navigate URL checks
+are logged for verification.
+
+**v1.0.7** attempted a serialized agent-browser `open` sync after direct CDP
+navigate. Runtime logs showed `sync_success=true` but `snapshot_len=0`, and the
+sync step reintroduced cross-talk risk — **removed in v1.0.8**.
+
+**v1.0.8** routes tab-pool `open`, `snapshot`, `eval`, `click`, `scroll`, and
+`back` through direct page CDP only (`internal/cdp_page.py`). Each concurrent
+run uses its own page websocket end-to-end — no agent-browser on the hot path.
+Agent-browser remains fallback only when direct CDP navigate fails.
+
 ## `browser_cdp` ownership guard
 
 The raw `browser_cdp` tool connects to the **browser-level** CDP socket and
@@ -125,8 +164,9 @@ listening on the debug port.
 
 | Path | Role |
 |------|------|
+| `plugins/local-chrome-tab-pool/internal/cdp_page.py` | Direct `Page.navigate` on pooled page websockets |
 | `plugins/local-chrome-tab-pool/internal/tab_pool.py` | Canonical tab pool logic |
-| `plugins/local-chrome-tab-pool/hooks.py` | Hermes `pre_tool_call`, `_get_session_info` wrapper, cleanup wrapper |
+| `plugins/local-chrome-tab-pool/hooks.py` | Hermes `pre_tool_call`, session/create/run_browser/supervisor wrappers, cleanup wrapper |
 | `playground/local-chrome-debug/start-debug-chrome.sh` | Chrome launcher |
 | `playground/local-chrome-debug/tab_pool.py` | Backward-compatible re-export |
 

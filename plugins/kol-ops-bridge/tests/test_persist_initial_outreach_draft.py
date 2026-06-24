@@ -85,6 +85,7 @@ def test_persist_initial_outreach_via_api(cal_db, monkeypatch, bridge_pkg):
     assert out["ok"] is True
     facts = cal_db.latest_facts_for(identity_id=iid, campaign_id="C-OUT", env="TEST")
     assert facts["approval.reply_draft"]["draft"]["to"] == "kol@example.com"
+    assert facts.get("offer.outreach_draft_ready") is True
 
 
 def _persist_outreach_body(plugin_api, cal_db, *, iid: str, raw_body: str) -> dict:

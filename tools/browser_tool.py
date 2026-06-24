@@ -55,7 +55,6 @@ import json
 import logging
 import os
 import re
-import signal
 import subprocess
 import shutil
 import sys
@@ -67,8 +66,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from pathlib import Path
 from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
-from utils import is_truthy_value
-from hermes_cli.config import cfg_get
+from utils import env_int, is_truthy_value
+from hermes_cli.config import DEFAULT_CONFIG, cfg_get
 
 try:
     from tools.website_policy import check_website_access
@@ -79,10 +78,12 @@ try:
     from tools.url_safety import (
         is_safe_url as _is_safe_url,
         is_always_blocked_url as _is_always_blocked_url,
+        normalize_url_for_request as _normalize_url_for_request,
     )
 except Exception:
     _is_safe_url = lambda url: False  # noqa: E731 — fail-closed: block all if safety module unavailable
     _is_always_blocked_url = lambda url: True  # noqa: E731 — fail-closed on the floor too
+    _normalize_url_for_request = lambda url: url  # noqa: E731 — best-effort fallback
 # Browser-provider ABC + registry — PR #25214 moved the per-vendor providers
 # (Browserbase / Browser Use / Firecrawl) out of ``tools/browser_providers/``
 # and into ``plugins/browser/<vendor>/``. The dispatcher consults the
@@ -363,15 +364,20 @@ def _ensure_cdp_supervisor(task_id: str) -> None:
     the browser session itself.  The agent simply won't see
     ``pending_dialogs`` / ``frame_tree`` fields in snapshots.
     """
-    cdp_url = _get_cdp_override()
-    if not cdp_url:
-        # Fallback: active session may carry a per-session CDP URL from a
-        # cloud provider (Browserbase sets this).
-        with _cleanup_lock:
-            session_info = _active_sessions.get(task_id, {})
-        maybe = str(session_info.get("cdp_url") or "")
-        if maybe:
-            cdp_url = _resolve_cdp_override(maybe)
+    with _cleanup_lock:
+        session_info = _active_sessions.get(task_id, {})
+    session_features = session_info.get("features") or {}
+    # Tab-pool sessions carry a page-level CDP URL — prefer it over a global
+    # browser-level ``BROWSER_CDP_URL`` so supervisor eval/snapshot attach to
+    # the task's isolated tab, not the shared browser socket.
+    if session_features.get("tab_pool") and session_info.get("cdp_url"):
+        cdp_url = _resolve_cdp_override(str(session_info["cdp_url"]))
+    else:
+        cdp_url = _get_cdp_override()
+        if not cdp_url:
+            maybe = str(session_info.get("cdp_url") or "")
+            if maybe:
+                cdp_url = _resolve_cdp_override(maybe)
     if not cdp_url:
         return
     try:
@@ -618,7 +624,7 @@ def _is_local_mode() -> bool:
 
 
 def _is_local_backend() -> bool:
-    """Return True when the browser runs locally (no cloud provider).
+    """Return True when the browser runs locally AND the terminal is also local.
 
     SSRF protection is only meaningful for cloud backends (Browserbase,
     BrowserUse) where the agent could reach internal resources on a remote
@@ -626,8 +632,20 @@ def _is_local_backend() -> bool:
     Chromium without a cloud provider — the user already has full terminal
     and network access on the same machine, so the check adds no security
     value.
+
+    However, when the terminal runs in a container (docker, modal, daytona,
+    ssh, singularity), the browser on the host can access internal networks
+    that the terminal cannot.  In this case, SSRF protection should be
+    enabled even though the browser is technically "local".
     """
-    return _is_camofox_mode() or _get_cloud_provider() is None
+    if _is_camofox_mode():
+        return True
+    if _get_cloud_provider() is not None:
+        return False
+    # When terminal runs in a container, browser on host can access
+    # internal networks the terminal can't → treat as non-local.
+    terminal_backend = os.getenv("TERMINAL_ENV", "local").strip().lower()
+    return terminal_backend in ("local", "")
 
 
 _auto_local_for_private_urls_resolved = False
@@ -1176,10 +1194,30 @@ _cleanup_done = False
 # Inactivity Timeout Configuration
 # =============================================================================
 
-# Session inactivity timeout (seconds) - cleanup if no activity for this long
-# Default: 5 minutes. Needs headroom for LLM reasoning between browser commands,
-# especially when subagents are doing multi-step browser tasks.
-BROWSER_SESSION_INACTIVITY_TIMEOUT = int(os.environ.get("BROWSER_INACTIVITY_TIMEOUT", "300"))
+# Session inactivity timeout (seconds) - cleanup if no activity for this long.
+# config.yaml is authoritative; BROWSER_INACTIVITY_TIMEOUT remains a legacy
+# fallback so old deployments keep working if they have not migrated yet.
+# Default 300s (not upstream 120) — headroom for LLM reasoning between
+# browser commands in multi-step KOL/IG discovery runs.
+DEFAULT_SESSION_INACTIVITY_TIMEOUT = int(
+    DEFAULT_CONFIG.get("browser", {}).get("inactivity_timeout", 300)
+)
+
+
+def _get_session_inactivity_timeout() -> int:
+    result = env_int("BROWSER_INACTIVITY_TIMEOUT", DEFAULT_SESSION_INACTIVITY_TIMEOUT)
+    try:
+        from hermes_cli.config import read_raw_config
+        cfg = read_raw_config()
+        val = cfg_get(cfg, "browser", "inactivity_timeout")
+        if val is not None:
+            result = max(int(val), 30)  # Floor at 30s to avoid instant reaping
+    except Exception as e:
+        logger.debug("Could not read inactivity_timeout from config: %s", e)
+    return result
+
+
+BROWSER_SESSION_INACTIVITY_TIMEOUT = _get_session_inactivity_timeout()
 
 # Track last activity time per session
 _session_last_activity: Dict[str, float] = {}
@@ -1302,6 +1340,88 @@ def _write_owner_pid(socket_dir: str, session_name: str) -> None:
                      session_name, exc)
 
 
+def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
+                                    session_name: str) -> bool:
+    """Confirm a live PID is genuinely *this* session's agent-browser daemon.
+
+    The orphan reaper scans world-writable, predictably-named temp paths
+    (``/tmp/agent-browser-h_*`` etc.) and reads a daemon PID from a ``.pid``
+    file we do not write ourselves — the agent-browser daemon writes it.  A
+    same-user actor can therefore plant a fake socket dir whose ``.pid`` points
+    at an arbitrary victim process, or a recycled PID can land on an unrelated
+    process after the real daemon exits.  Either way, terminating that PID
+    (a *tree* kill via ``_terminate_host_pid``) is an arbitrary-process DoS.
+
+    Before reaping we require, via ``psutil`` (a hard dependency, cross-platform
+    for same-user processes — the only processes the reaper can signal):
+
+      1. **Identity** — the process looks like agent-browser: ``agent-browser``
+         appears in its name or command line.
+      2. **Binding** — the process is bound to *this* session's socket dir: the
+         socket dir path (or its basename) appears in the command line, or in
+         ``AGENT_BROWSER_SOCKET_DIR`` in the process environment.
+
+    Requirement (2) is the real spoof defense: a planted process pointing at a
+    victim PID will not have the victim's cmdline/environ referencing our
+    socket dir.  An attacker would need a process that genuinely embeds this
+    exact session path — i.e. a real daemon they already own and could signal
+    directly.  Fail-closed: any ambiguity (unreadable cmdline, no match) means
+    we refuse to reap and leave the process and its socket dir alone.
+
+    Returns ``True`` only when both checks pass.
+    """
+    try:
+        import psutil
+    except ImportError:  # psutil is a hard dep; defensive only
+        logger.warning(
+            "Refusing to reap browser daemon PID %d (session %s): "
+            "psutil unavailable for identity verification",
+            daemon_pid, session_name)
+        return False
+
+    try:
+        proc = psutil.Process(daemon_pid)
+        name = (proc.name() or "").lower()
+        cmdline = " ".join(proc.cmdline() or []).lower()
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.AccessDenied, OSError) as exc:
+        logger.warning(
+            "Refusing to reap browser daemon PID %d (session %s): "
+            "could not read process identity (%s)",
+            daemon_pid, session_name, exc)
+        return False
+
+    looks_like_browser = "agent-browser" in name or "agent-browser" in cmdline
+    if not looks_like_browser:
+        logger.warning(
+            "Refusing to reap PID %d (session %s): not an agent-browser "
+            "process (name=%r)", daemon_pid, session_name, name)
+        return False
+
+    socket_dir_l = socket_dir.lower()
+    socket_base_l = os.path.basename(socket_dir).lower()
+    bound = socket_dir_l in cmdline or (
+        socket_base_l and socket_base_l in cmdline)
+    if not bound:
+        try:
+            env_dir = (proc.environ() or {}).get(
+                "AGENT_BROWSER_SOCKET_DIR", "")
+            bound = bool(env_dir) and os.path.normpath(env_dir) == \
+                os.path.normpath(socket_dir)
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            bound = False
+
+    if not bound:
+        logger.warning(
+            "Refusing to reap agent-browser PID %d: not bound to session "
+            "socket dir %s (possible recycled PID or planted pid file)",
+            daemon_pid, socket_dir)
+        return False
+
+    return True
+
+
 def _reap_orphaned_browser_sessions():
     """Scan for orphaned agent-browser daemon processes from previous runs.
 
@@ -1395,6 +1515,12 @@ def _reap_orphaned_browser_sessions():
         from gateway.status import _pid_exists
         if not _pid_exists(daemon_pid):
             shutil.rmtree(socket_dir, ignore_errors=True)
+            continue
+
+        # The PID is live — verify it is this session's agent-browser daemon
+        # before tree-killing (issue #14073 spoof defense).
+        if not _verify_reapable_browser_daemon(
+                daemon_pid, socket_dir, session_name):
             continue
 
         # Daemon is alive and its owner is dead (or legacy + untracked).  Reap.
@@ -1725,6 +1851,11 @@ def _create_cloud_session_with_timeout(
         result = future.result(timeout=timeout_s)
     except concurrent.futures.TimeoutError as exc:
         executor.shutdown(wait=False, cancel_futures=True)
+        logger.warning(
+            "Cloud browser create_session exceeded %ss — abandoning the "
+            "in-flight request (a cloud session may still be created server-side)",
+            timeout_s,
+        )
         raise TimeoutError(
             f"Cloud browser provider create_session exceeded {timeout_s}s "
             "(cloud API unreachable?) — abandoning and falling back to local Chrome"
@@ -1786,7 +1917,32 @@ def _try_autolaunch_local_chrome(
     with _autolaunch_lock:
         existing = _probe_local_cdp(probe_url)
         if existing:
+            tab_pool = _get_tab_pool_module()
+            if tab_pool is not None and tab_pool.is_enabled():
+                if tab_pool.cdp_ws_healthy():
+                    return existing
+                try:
+                    tab_pool.ensure_chrome_running()
+                    return _probe_local_cdp(probe_url)
+                except Exception as exc:
+                    logger.warning(
+                        "Tab pool ensure_chrome_running during autolaunch failed: %s",
+                        exc,
+                    )
+                    return None
             return existing
+
+        tab_pool = _get_tab_pool_module()
+        if tab_pool is not None and tab_pool.is_enabled():
+            try:
+                tab_pool.ensure_chrome_running()
+                return _probe_local_cdp(probe_url)
+            except Exception as exc:
+                logger.warning(
+                    "Tab pool ensure_chrome_running during autolaunch failed: %s",
+                    exc,
+                )
+                return None
 
         script = _locate_local_chrome_launcher()
         if script is None:
@@ -1803,6 +1959,7 @@ def _try_autolaunch_local_chrome(
                 timeout=_AUTOLAUNCH_TIMEOUT_S,
                 capture_output=True,
                 text=True,
+                env={**os.environ, "DEBUG_CHROME_SKIP_ENV": "1"},
             )
         except subprocess.TimeoutExpired:
             logger.warning("Local Chrome autolaunch timed out after %.0fs", _AUTOLAUNCH_TIMEOUT_S)
@@ -1821,6 +1978,119 @@ def _try_autolaunch_local_chrome(
             return None
 
         return _probe_local_cdp(probe_url)
+
+
+_CDP_WS_FAILURE_MARKERS = (
+    "CDP WebSocket connect failed",
+    "Auto-launch failed: CDP WebSocket connect failed",
+)
+
+
+def _get_tab_pool_module():
+    cached = sys.modules.get("hermes_plugins.local_chrome_tab_pool.internal.tab_pool")
+    if cached is not None:
+        return cached
+    try:
+        import importlib.util
+        from pathlib import Path
+
+        path = (
+            Path(__file__).resolve().parent.parent
+            / "plugins"
+            / "local-chrome-tab-pool"
+            / "internal"
+            / "tab_pool.py"
+        )
+        if not path.is_file():
+            return None
+        spec = importlib.util.spec_from_file_location(
+            "hermes_plugins.local_chrome_tab_pool.internal.tab_pool",
+            path,
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
+def _is_cdp_websocket_failure(error: Any) -> bool:
+    text = str(error or "")
+    if any(marker in text for marker in _CDP_WS_FAILURE_MARKERS):
+        return True
+    return "WebSocket" in text and "500" in text
+
+
+def _invalidate_tab_pool_browser_sessions(task_id: str) -> None:
+    tab_pool = _get_tab_pool_module()
+    owner = tab_pool.normalize_task_id(task_id) if tab_pool else task_id
+    dropped: list[str] = []
+    with _cleanup_lock:
+        for key in list(_active_sessions.keys()):
+            info = _active_sessions.get(key) or {}
+            if not info.get("features", {}).get("tab_pool"):
+                continue
+            bare = key[: -len(_LOCAL_SUFFIX)] if key.endswith(_LOCAL_SUFFIX) else key
+            if bare != owner and key != task_id:
+                continue
+            _stop_cdp_supervisor(key)
+            _active_sessions.pop(key, None)
+            dropped.append(key)
+
+
+def _maybe_tab_pool_proactive_probe(task_id: str) -> None:
+    tab_pool = _get_tab_pool_module()
+    if tab_pool is None or not tab_pool.is_enabled():
+        return
+    with _cleanup_lock:
+        info = _active_sessions.get(task_id) or {}
+    if not info.get("features", {}).get("tab_pool"):
+        return
+    if tab_pool.maybe_probe_cdp_health(force=False):
+        return
+    _invalidate_tab_pool_browser_sessions(task_id)
+
+
+def _reseed_tab_pool_browser_session(task_id: str, tab_info: Dict[str, str]) -> None:
+    tab_pool = _get_tab_pool_module()
+    owner = tab_pool.normalize_task_id(task_id) if tab_pool else task_id
+    session_name = f"tabpool_{abs(hash(task_id)) & 0xFFFF_FFFF:08x}"
+    with _cleanup_lock:
+        _active_sessions[task_id] = {
+            "session_name": session_name,
+            "bb_session_id": None,
+            "cdp_url": tab_info["cdp_url"],
+            "features": {
+                "cdp_override": True,
+                "tab_pool": True,
+                "target_id": tab_info["target_id"],
+                "tab_pool_owner": owner,
+            },
+        }
+        _session_last_activity[task_id] = time.time()
+
+
+def _recover_tab_pool_after_cdp_failure(task_id: str) -> bool:
+    tab_pool = _get_tab_pool_module()
+    if tab_pool is None or not tab_pool.is_enabled():
+        return False
+
+    _invalidate_tab_pool_browser_sessions(task_id)
+    try:
+        tab_pool.recover_degraded_chrome(task_id)
+        tab_info = tab_pool.acquire(task_id)
+        _reseed_tab_pool_browser_session(task_id, tab_info)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Tab pool CDP recovery failed for task=%s: %s",
+            task_id,
+            exc,
+        )
+        return False
 
 
 def _get_session_info(
@@ -1911,9 +2181,9 @@ def _get_session_info(
                     cdp_url = _try_autolaunch_local_chrome()
                     if cdp_url:
                         fallback_mode = "cdp_autostart"
-                        # Persist the URL so subsequent tasks in this worker
-                        # skip the cloud round-trip and connect directly.
-                        os.environ["BROWSER_CDP_URL"] = cdp_url
+                        # Do NOT set os.environ["BROWSER_CDP_URL"] — that would
+                        # force all later tasks onto the shared browser-level
+                        # endpoint and break tab-pool per-page isolation.
 
                 if not cdp_url:
                     raise RuntimeError(
@@ -2086,6 +2356,7 @@ def _run_browser_command(
     args: List[str] = None,
     timeout: Optional[int] = None,
     _engine_override: Optional[str] = None,
+    _retry_after_cdp_recovery: bool = False,
 ) -> Dict[str, Any]:
     """
     Run an agent-browser CLI command using our pre-created Browserbase session.
@@ -2106,6 +2377,8 @@ def _run_browser_command(
     if timeout is None:
         timeout = _get_command_timeout()
     args = args or []
+
+    _maybe_tab_pool_proactive_probe(task_id)
 
     # Build the command
     try:
@@ -2435,6 +2708,21 @@ def _run_browser_command(
             fallback_result = _run_chrome_fallback_command(task_id, command, args, timeout)
         return _annotate_lightpanda_fallback(fallback_result, fallback_reason)
 
+    if (
+        not result.get("success")
+        and _is_cdp_websocket_failure(result.get("error"))
+        and not _retry_after_cdp_recovery
+        and _recover_tab_pool_after_cdp_failure(task_id)
+    ):
+        return _run_browser_command(
+            task_id,
+            command,
+            args,
+            timeout=timeout,
+            _engine_override=_engine_override,
+            _retry_after_cdp_recovery=True,
+        )
+
     return result
 
 
@@ -2529,6 +2817,312 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
+_IG_PROFILE_RESERVED = frozenset({
+    "p", "reel", "reels", "explore", "stories", "tv", "accounts", "direct", "about",
+})
+
+_IG_PROFILE_READINESS_EXPR = """(async () => {
+  const probe = () => {
+    const t = document.body?.innerText || '';
+    let followers_snippet = '';
+    if (/followers|粉丝/i.test(t)) {
+      const lines = t.split('\\n');
+      for (const line of lines) {
+        if (/followers|粉丝/i.test(line) && /\\d/.test(line)) {
+          followers_snippet = line.trim().slice(0, 120);
+          break;
+        }
+      }
+      if (!followers_snippet) {
+        const m = t.match(/[\\d,.]+[万kKmM\\+]?\\s*(followers|粉丝)/i);
+        if (m) followers_snippet = m[0].trim().slice(0, 120);
+      }
+    }
+    return {
+      ready_state: document.readyState,
+      text_len: t.length,
+      has_followers: /followers|粉丝/i.test(t),
+      has_posts: /\\bposts\\b|帖子/i.test(t),
+      blocked: /无法访问|Page isn't available|Sorry, this page isn't available/i.test(t),
+      title: document.title || '',
+      followers_snippet
+    };
+  };
+  const deadline = Date.now() + 8000;
+  let last = probe();
+  while (Date.now() < deadline) {
+    if (last.blocked || last.has_followers || last.text_len > 800) return last;
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    last = probe();
+  }
+  return last;
+})()"""
+
+_IG_PROFILE_READINESS_SYNC_EXPR = """(() => {
+  const t = document.body?.innerText || '';
+  let followers_snippet = '';
+  if (/followers|粉丝/i.test(t)) {
+    const lines = t.split('\\n');
+    for (const line of lines) {
+      if (/followers|粉丝/i.test(line) && /\\d/.test(line)) {
+        followers_snippet = line.trim().slice(0, 120);
+        break;
+      }
+    }
+    if (!followers_snippet) {
+      const m = t.match(/[\\d,.]+[万kKmM\\+]?\\s*(followers|粉丝)/i);
+      if (m) followers_snippet = m[0].trim().slice(0, 120);
+    }
+  }
+  return {
+    ready_state: document.readyState,
+    text_len: t.length,
+    has_followers: /followers|粉丝/i.test(t),
+    has_posts: /\\bposts\\b|帖子/i.test(t),
+    blocked: /无法访问|Page isn't available|Sorry, this page isn't available/i.test(t),
+    title: document.title || '',
+    followers_snippet,
+    probe_mode: 'sync'
+  };
+})()"""
+
+
+def _is_instagram_profile_url(url: str) -> bool:
+    """True for https://instagram.com/<handle>/ profile roots only."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url or "")
+        host = (parsed.netloc or "").lower()
+        if "instagram.com" not in host:
+            return False
+        segments = [seg for seg in (parsed.path or "").split("/") if seg]
+        if len(segments) != 1:
+            return False
+        return segments[0].lower() not in _IG_PROFILE_RESERVED
+    except Exception:
+        return False
+
+
+def _is_blank_browser_url(url: str) -> bool:
+    """Return True when ``url`` looks like an empty/new tab."""
+    return (url or "").strip().lower() in ("", "about:blank", "chrome://newtab/")
+
+
+def _session_uses_tab_pool(session_key: str) -> bool:
+    with _cleanup_lock:
+        info = _active_sessions.get(session_key) or {}
+    features = info.get("features") or {}
+    return bool(features.get("tab_pool"))
+
+
+def _poll_navigation_landed_url(
+    session_key: str,
+    bare_task_id: str,
+    *,
+    initial_url: str,
+    max_attempts: int = 4,
+    poll_interval_s: float = 0.5,
+) -> str:
+    """Poll ``window.location.href`` when ``open`` still reports a blank tab.
+
+    Slow networks and SPAs can return ``about:blank`` from agent-browser before
+    the document commits. Tab-pool CDP opens can also need a beat before the
+    first navigation attaches.
+    """
+    if not _is_blank_browser_url(initial_url):
+        return initial_url
+    landed = initial_url
+    for _ in range(max(1, max_attempts) - 1):
+        time.sleep(poll_interval_s)
+        resolved = _resolve_current_page_url(session_key, bare_task_id)
+        if resolved and not _is_blank_browser_url(resolved):
+            return resolved
+        if resolved:
+            landed = resolved
+    return landed
+
+
+def _eval_page_js(
+    session_key: str,
+    task_id: str,
+    expression: str,
+    *,
+    timeout: float = 12.0,
+) -> tuple[bool, Any]:
+    """Evaluate JS in the active page; return (ok, parsed_value)."""
+    try:
+        from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
+        supervisor = SUPERVISOR_REGISTRY.get(session_key)
+        if supervisor is not None:
+            sup_result = supervisor.evaluate_runtime(
+                expression,
+                timeout=timeout,
+            )
+            if sup_result.get("ok"):
+                return True, sup_result.get("result")
+            return False, sup_result.get("error") or "evaluate_runtime failed"
+    except Exception as exc:
+        logger.debug("_eval_page_js supervisor path failed: %s", exc)
+
+    result = _run_browser_command(
+        session_key,
+        "eval",
+        [expression],
+        timeout=max(int(timeout), 10),
+    )
+    if not result.get("success"):
+        return False, result.get("error") or "eval failed"
+    raw_result = (result.get("data") or {}).get("result")
+    parsed: Any = raw_result
+    if isinstance(raw_result, str):
+        try:
+            parsed = json.loads(raw_result)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return True, parsed
+
+
+def _wait_instagram_profile_readiness(session_key: str, task_id: str, url: str) -> dict[str, Any]:
+    """Poll in-page until IG profile text is readable or timeout."""
+    ok, data = _eval_page_js(
+        session_key,
+        task_id,
+        _IG_PROFILE_READINESS_EXPR,
+        timeout=12.0,
+    )
+    needs_fallback = (
+        not ok
+        or not isinstance(data, dict)
+        or (
+            not data.get("blocked")
+            and not data.get("has_followers")
+            and data.get("text_len", 0) < 200
+        )
+    )
+    if needs_fallback:
+        ok_sync, data_sync = _eval_page_js(
+            session_key,
+            task_id,
+            _IG_PROFILE_READINESS_SYNC_EXPR,
+            timeout=5.0,
+        )
+        if ok_sync and isinstance(data_sync, dict):
+            ok, data = ok_sync, data_sync
+    readiness: dict[str, Any] = {
+        "probe_ok": ok,
+        "url": url,
+    }
+    if ok and isinstance(data, dict):
+        readiness.update(data)
+    else:
+        readiness["error"] = str(data)
+    return readiness
+
+
+def _apply_ig_readiness_to_response(
+    session_key: str,
+    bare_task_id: str,
+    page_url: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    """Poll IG profile text and attach readiness fields to an existing response."""
+    ig_readiness = _wait_instagram_profile_readiness(session_key, bare_task_id, page_url)
+    response["ig_readiness"] = ig_readiness
+    if ig_readiness.get("has_followers") and not ig_readiness.get("blocked"):
+        snippet = (ig_readiness.get("followers_snippet") or "").strip()
+        response["ig_profile_readable"] = (
+            "Instagram profile text is readable via CDP "
+            "(ig_readiness.has_followers=true). Do NOT report "
+            "'无法获取 Instagram 页面信息' when this field is present — "
+            "the accessibility snapshot may be sparse while body text is loaded."
+        )
+        if snippet:
+            response["ig_followers_hint"] = snippet
+    if ig_readiness.get("blocked"):
+        response["ig_blocked_warning"] = (
+            "Instagram returned a blocked/unavailable page to CDP "
+            f"({page_url!r}). Do not treat a visually loaded tab as success."
+        )
+    elif not ig_readiness.get("probe_ok"):
+        response["ig_probe_warning"] = (
+            "Could not probe Instagram profile text via CDP. "
+            "Use browser_console(expression=\"document.body.innerText\") "
+            "before concluding the profile is unreachable."
+        )
+    elif not ig_readiness.get("has_followers") and ig_readiness.get("text_len", 0) < 200:
+        response["ig_content_warning"] = (
+            "Profile title loaded but follower/post text is not visible to CDP yet. "
+            "Call browser_console(expression=\"document.body.innerText\") or "
+            "browser_snapshot(full=true) before reporting the page as empty."
+        )
+    return ig_readiness
+
+
+def _attach_compact_snapshot(
+    session_key: str,
+    response: dict[str, Any],
+    *,
+    page_url: str | None = None,
+    log_source: str = "",
+    title: str = "",
+) -> None:
+    """Take compact snapshot and merge into response."""
+    try:
+        snap_result = _run_browser_command(session_key, "snapshot", ["-c"])
+        if not snap_result.get("success"):
+            return
+        snap_data = snap_result.get("data", {})
+        snapshot_text = snap_data.get("snapshot", "")
+        refs = snap_data.get("refs", {})
+        if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+            snapshot_text = _truncate_snapshot(snapshot_text)
+        response["snapshot"] = snapshot_text
+        response["element_count"] = len(refs) if refs else 0
+        if snap_result.get("fallback_warning") and not response.get("fallback_warning"):
+            _copy_fallback_warning(response, snap_result)
+    except Exception as exc:
+        logger.debug("Compact snapshot failed (%s): %s", log_source, exc)
+
+
+def _resolve_current_page_url(session_key: str, bare_task_id: str) -> str | None:
+    ok, data = _eval_page_js(session_key, bare_task_id, "window.location.href")
+    if ok and isinstance(data, str):
+        return data
+    return None
+
+
+def _is_empty_browser_snapshot(snapshot_text: str, refs: dict[str, Any] | None) -> bool:
+    text = (snapshot_text or "").strip()
+    if text in ("(empty page)", ""):
+        return True
+    return len(refs or {}) <= 2
+
+
+def _enrich_ig_profile_context(
+    session_key: str,
+    bare_task_id: str,
+    response: dict[str, Any],
+    *,
+    page_url: str | None = None,
+    log_source: str,
+    title: str = "",
+) -> str | None:
+    """If current page is an IG profile, wait for readiness and attach snapshot."""
+    resolved = page_url or _resolve_current_page_url(session_key, bare_task_id)
+    if not resolved or not _is_instagram_profile_url(resolved):
+        return resolved
+    response["url"] = resolved
+    _apply_ig_readiness_to_response(session_key, bare_task_id, resolved, response)
+    _attach_compact_snapshot(
+        session_key,
+        response,
+        page_url=resolved,
+        log_source=log_source,
+        title=title,
+    )
+    return resolved
+
+
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
@@ -2548,6 +3142,14 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     from agent.redact import _PREFIX_RE
     url_decoded = urllib.parse.unquote(url)
     if _PREFIX_RE.search(url) or _PREFIX_RE.search(url_decoded):
+        return json.dumps({
+            "success": False,
+            "error": "Blocked: URL contains what appears to be an API key or token. "
+                     "Secrets must not be sent in URLs.",
+        })
+    url = _normalize_url_for_request(url)
+    normalized_decoded = urllib.parse.unquote(url)
+    if _PREFIX_RE.search(url) or _PREFIX_RE.search(normalized_decoded):
         return json.dumps({
             "success": False,
             "error": "Blocked: URL contains what appears to be an API key or token. "
@@ -2633,6 +3235,12 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         data = result.get("data", {})
         title = data.get("title", "")
         final_url = data.get("url", url)
+        final_url = _poll_navigation_landed_url(
+            nav_session_key,
+            effective_task_id,
+            initial_url=final_url,
+            max_attempts=5 if _session_uses_tab_pool(nav_session_key) else 4,
+        )
 
         # Post-redirect SSRF check — if the browser followed a redirect to a
         # private/internal address, block the result so the model can't read
@@ -2673,13 +3281,15 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         # about:blank — a silent no-op over the pooled page CDP target.
         # Treat "requested a real URL but landed on a blank tab" as a
         # failure so the model records a miss / moves on instead of
-        # snapshotting an empty page and looping.
+        # snapshotting an empty page and looping.  We poll briefly first
+        # (see ``_poll_navigation_landed_url``) to avoid false positives on
+        # slow SPAs; tab-pool sessions get one extra poll attempt.
         _requested = (url or "").strip().lower()
         _landed = (final_url or "").strip().lower()
         if (
             _requested
-            and _requested not in ("about:blank", "chrome://newtab/")
-            and _landed in ("", "about:blank", "chrome://newtab/")
+            and not _is_blank_browser_url(_requested)
+            and _is_blank_browser_url(_landed)
         ):
             logger.warning(
                 "browser_navigate: blank-tab no-op for %s (landed=%r task=%s)",
@@ -2734,22 +3344,22 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 )
             response["stealth_features"] = active_features
 
-        # Auto-take a compact snapshot so the model can act immediately
-        # without a separate browser_snapshot call.
-        try:
-            snap_result = _run_browser_command(nav_session_key, "snapshot", ["-c"])
-            if snap_result.get("success"):
-                snap_data = snap_result.get("data", {})
-                snapshot_text = snap_data.get("snapshot", "")
-                refs = snap_data.get("refs", {})
-                if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
-                    snapshot_text = _truncate_snapshot(snapshot_text)
-                response["snapshot"] = snapshot_text
-                response["element_count"] = len(refs) if refs else 0
-                if snap_result.get("fallback_warning") and not response.get("fallback_warning"):
-                    _copy_fallback_warning(response, snap_result)
-        except Exception as e:
-            logger.debug("Auto-snapshot after navigate failed: %s", e)
+        if _is_instagram_profile_url(final_url):
+            _enrich_ig_profile_context(
+                nav_session_key,
+                effective_task_id,
+                response,
+                page_url=final_url,
+                log_source="browser_navigate",
+                title=title,
+            )
+        else:
+            _attach_compact_snapshot(
+                nav_session_key,
+                response,
+                log_source="browser_navigate",
+                title=title,
+            )
 
         return json.dumps(response, ensure_ascii=False)
     else:
@@ -2780,6 +3390,7 @@ def browser_snapshot(
         return camofox_snapshot(full, task_id, user_task)
 
     effective_task_id = _last_session_key(task_id or "default")
+    bare_task_id = task_id or "default"
 
     # Build command args based on full flag
     args = []
@@ -2805,6 +3416,29 @@ def browser_snapshot(
             "element_count": len(refs) if refs else 0
         }
         _copy_fallback_warning(response, result)
+
+        if _is_empty_browser_snapshot(snapshot_text, refs):
+            page_url = _resolve_current_page_url(effective_task_id, bare_task_id)
+            if page_url and _is_instagram_profile_url(page_url):
+                _apply_ig_readiness_to_response(
+                    effective_task_id,
+                    bare_task_id,
+                    page_url,
+                    response,
+                )
+                response["url"] = page_url
+                retry = _run_browser_command(effective_task_id, "snapshot", args)
+                if retry.get("success"):
+                    retry_data = retry.get("data", {})
+                    snapshot_text = retry_data.get("snapshot", snapshot_text)
+                    refs = retry_data.get("refs", refs)
+                    if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                        if user_task:
+                            snapshot_text = _extract_relevant_content(snapshot_text, user_task)
+                        else:
+                            snapshot_text = _truncate_snapshot(snapshot_text)
+                    response["snapshot"] = snapshot_text
+                    response["element_count"] = len(refs) if refs else 0
 
         # Merge supervisor state (pending dialogs + frame tree) when a CDP
         # supervisor is attached to this task. No-op otherwise. See
@@ -2844,6 +3478,7 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         return camofox_click(ref, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    bare_task_id = task_id or "default"
 
     # Ensure ref starts with @
     if not ref.startswith("@"):
@@ -2856,7 +3491,18 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
             "success": True,
             "clicked": ref
         }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+        _copy_fallback_warning(response, result)
+        page_url = _enrich_ig_profile_context(
+            effective_task_id,
+            bare_task_id,
+            response,
+            log_source="browser_click",
+        )
+        if not page_url:
+            current = _resolve_current_page_url(effective_task_id, bare_task_id)
+            if current:
+                response["url"] = current
+        return json.dumps(response, ensure_ascii=False)
     else:
         response = {
             "success": False,

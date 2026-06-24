@@ -195,15 +195,15 @@ python plugins/kol-ops-bridge/scripts/kol_bridge_tool.py write-facts-multi \
             "namespaces": {
               "identity": {
                 "identity.content_pillars":          [...],
-                "identity.content_pillars_source":   "ig_profile_reels_comments",
+                "identity.content_pillars_source":   "ig_profile_and_reels",
                 "identity.content_pillars_discovered_at":  "<iso8601 now>",
                 "identity.content_pillars_discovered_url": "<profile_url>",
                 "identity.signature_hooks":          [...],
-                "identity.signature_hooks_source":   "ig_profile_reels_comments",
+                "identity.signature_hooks_source":   "ig_profile_and_reels",
                 "identity.signature_hooks_discovered_at":  "<iso8601 now>",
                 "identity.signature_hooks_discovered_url": "<profile_url>",
                 "identity.voice_descriptors":        [...],
-                "identity.voice_descriptors_source": "ig_profile_reels_comments",
+                "identity.voice_descriptors_source": "ig_profile_and_reels",
                 "identity.voice_descriptors_discovered_at":  "<iso8601 now>",
                 "identity.voice_descriptors_discovered_url": "<profile_url>",
                 "identity.hero_post_url":            "<reel_url>",

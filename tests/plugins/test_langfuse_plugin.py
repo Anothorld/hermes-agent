@@ -166,7 +166,8 @@ class TestHooksInert:
         # Each hook should just return; no exceptions.
         mod.on_pre_llm_call(task_id="t", session_id="s", messages=[{"role": "user", "content": "hi"}])
         mod.on_pre_llm_request(task_id="t", session_id="s", api_call_count=1, request_messages=[])
-        mod.on_post_llm_call(task_id="t", session_id="s", api_call_count=1)
+        mod._on_post_api_request(task_id="t", session_id="s", api_call_count=1)
+        mod._on_post_llm_turn(session_id="s")
         mod.on_pre_tool_call(tool_name="read_file", args={}, task_id="t", session_id="s")
         mod.on_post_tool_call(tool_name="read_file", args={}, result="ok", task_id="t", session_id="s")
 

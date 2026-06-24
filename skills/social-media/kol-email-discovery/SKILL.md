@@ -36,6 +36,7 @@ flowchart TD
 | 3 | Tier 1 — Google SERP + link-in-bio / personal site / Facebook About | `browser_navigate`, `browser_snapshot` |
 | 4 | Tier 2 — IG bio, lazy Linktree/Beacons, image emails (only if Tier 1 miss) | `browser_*`, `vision_analyze` |
 | 5 | Hit → `upsert-identity` + `write-facts-multi`; miss → JSON envelope only | bridge CLI |
+| 6 | Best-effort creator brief refresh when missing/stale | `kol-creator-brief-loader` |
 
 **Budget:** ≤ 8 rendered page loads total across Tier 1 + Tier 2. Google
 SERP navigations and read-only `fb_creator` metadata do not count; every
@@ -346,6 +347,25 @@ Orchestrator / Console run should call `open-escalation` with
 `reason="contact_email_not_found"`, the `tried` list, and a
 **简体中文** `question_to_operator` summarizing what was searched and
 asking the operator how to proceed (manual email, skip, or retry).
+
+### Step 6 — Creator brief refresh (best-effort, same session)
+
+After Step 5 (hit or miss envelope prepared), re-read identity facts and
+check the 6 creator-brief keys plus
+`identity.content_pillars_discovered_at` (90-day freshness — same rules
+as `kol-creator-brief-loader` Step 1).
+
+When any core key is missing OR the anchor is older than 90 days:
+
+1. Invoke `kol-creator-brief-loader` with `force_refresh: true`,
+   `identity_id`, `env`, and `campaign_id` when known.
+2. This run uses `kol-email-discover:*` session — **browser is allowed**
+   here (unlike post-approval outreach runs).
+3. Do not block the Step 5 return envelope on brief failure; brief
+   refresh is additive enrichment after email work completes.
+
+If all 6 keys are fresh, skip Step 6 and return the Step 5 envelope
+unchanged.
 
 ---
 

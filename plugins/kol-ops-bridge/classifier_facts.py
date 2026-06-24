@@ -47,6 +47,16 @@ _DELIVERABLE_REWRITES = (
     ("offer.deliverable_count_per_platform", "offer.deliverable_count_proposed"),
 )
 
+# Child skills historically wrote fulfillment.* for content goals; goal machine
+# and dispatch_router require offer.* (see goals.py content_production).
+_FULFILLMENT_TO_OFFER_KEY_ALIASES: dict[str, str] = {
+    "fulfillment.brief_sent": "offer.brief_sent",
+    "fulfillment.brief_sent_at": "offer.brief_sent_at",
+    "fulfillment.brief_template_id_used": "offer.brief_template_id_used",
+    "fulfillment.draft_submitted": "offer.draft_submitted",
+    "fulfillment.draft_submitted_at": "offer.draft_submitted_at",
+}
+
 
 def active_signal_names(
     signals: Iterable[Mapping[str, Any]],
@@ -68,6 +78,37 @@ def active_signal_names(
         if conf >= min_confidence:
             names.add(name)
     return names
+
+
+def normalize_fulfillment_offer_aliases(
+    namespaces: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Mirror legacy fulfillment.* content keys into offer.* for goal routing."""
+    out: dict[str, dict[str, Any]] = {
+        ns: dict(facts) for ns, facts in namespaces.items() if isinstance(facts, Mapping)
+    }
+    fulfillment = out.get("fulfillment") or {}
+    if not fulfillment:
+        return out, []
+    offer = dict(out.get("offer") or {})
+    adjustments: list[str] = []
+    for fkey, okey in _FULFILLMENT_TO_OFFER_KEY_ALIASES.items():
+        if fkey in fulfillment and okey not in offer:
+            offer[okey] = fulfillment[fkey]
+            adjustments.append(f"mirrored {fkey}→{okey}")
+    if fulfillment.get("fulfillment.draft_approved") is True:
+        if "offer.review_verdict" not in offer:
+            offer["offer.review_verdict"] = "approved"
+            adjustments.append(
+                "mirrored fulfillment.draft_approved→offer.review_verdict=approved"
+            )
+        approved_at = fulfillment.get("fulfillment.draft_approved_at")
+        if approved_at is not None and "offer.review_verdict_at" not in offer:
+            offer["offer.review_verdict_at"] = approved_at
+            adjustments.append("mirrored fulfillment.draft_approved_at→offer.review_verdict_at")
+    if offer:
+        out["offer"] = offer
+    return out, adjustments
 
 
 def sanitize_classifier_namespaces(
@@ -158,6 +199,8 @@ def sanitize_classifier_namespaces(
     else:
         out["offer"] = offer
 
+    out, alias_adj = normalize_fulfillment_offer_aliases(out)
+    adjustments.extend(alias_adj)
     return out, adjustments
 
 

@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable, Optional
 from .background_jobs import create_job, find_active_job, run_in_background
 from .config import get_settings
 from .gateway_client import GatewayClient, GatewayError
-from .run_launch_queue import LaunchResult, launch_queue
+from .run_launch_queue import LaunchResult, _BROWSER_SERIAL_KINDS, launch_queue
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ def queue_would_block(*, session_id: str, kind: str | None = None) -> bool:
     if not get_settings().gateway_launch_queue_enabled:
         return False
     resolved = kind or launch_queue._kind_from_session(session_id)
-    if resolved == "email_discover":
+    if resolved in _BROWSER_SERIAL_KINDS:
         return launch_queue.email_discover_busy()
     snap = launch_queue.snapshot()
     if snap["queue_depth"] > 0:
@@ -126,7 +126,7 @@ async def launch_or_accept(
             if (
                 isinstance(run_id, str)
                 and run_id
-                and resolved_kind != "email_discover"
+                and resolved_kind not in _BROWSER_SERIAL_KINDS
             ):
                 gateway.ensure_run_drained(run_id)
             if on_success is not None:

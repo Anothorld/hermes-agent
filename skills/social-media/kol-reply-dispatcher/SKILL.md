@@ -174,6 +174,27 @@ Use `campaign_facts` for per-campaign negotiation state (`offer.barter_attempted
 `offer.rate_requested`, `offer.proposed_amount`, …). Optional narrow read:
 `get-facts --identity-id ID --campaign-id CID --env LIVE`.
 
+### Step 1.5 — Normalize goals shape (mandatory before Step 2 and Step 4)
+
+Load once per reply:
+
+```
+skill_view(name="kol-reply-dispatcher", file_path="templates/goals-shape-transform.md")
+```
+
+From Step 1 `dispatch_context.goals` (**array**):
+
+1. Build **`goals_map`**: `{goal_name: row}` — used in Step 4
+   `select-draftable-plan` (never pass the raw array).
+2. Build **`current_goal_state`**: `{commerce, fulfillment, publish, meta}` lane
+   map — used as classifier input (not the raw goals array).
+3. Build **`campaign_config_summary`** from `campaign_config` (see template).
+4. Fetch **`escalation_rules`** via `get-parsed-escalation-rules --env <env>`
+   and pass to the classifier.
+
+After Step 3 re-fetch, **recompute** `goals_map` from the new server goals
+before Step 4.
+
 ### Step 2 — Run the classifier (parse once, retry on technical failure only)
 
 **Load templates first (once per reply):**
@@ -197,8 +218,10 @@ immediately and **never** re-run Step 2 for the same inbound `message_id`.
 - Never read `/tmp/classification_result.json` or other sub-agent files.
 
 Inputs for classification: `latest_email`, `thread_history` (verbatim Step 0),
-`anomaly_signals` (Step 0b), `current_goal_state` (Step 1 `goals`),
-`campaign_facts`, `campaign_config_summary`, and optional `relationship_summary`.
+`anomaly_signals` (Step 0b), **`current_goal_state`** (Step 1.5 lane map — **not**
+the raw `goals` array), `campaign_facts`, **`campaign_config_summary`** (Step 1.5),
+**`escalation_rules`** (Step 1.5 `get-parsed-escalation-rules`), and optional
+`relationship_summary`.
 
 #### Path A — Inline classifier (**preferred for handoff reliability**)
 
@@ -446,13 +469,16 @@ After Step 3 re-fetch, call the deterministic plan endpoint:
 
 ```
 python3 plugins/kol-ops-bridge/scripts/kol_bridge_tool.py select-draftable-plan \
-  --json '{"goals": <from dispatch_context.goals as name→row map>,
+  --json '{"goals": <goals_map from Step 1.5 — name→row dict, NOT the array>,
             "facts": <merge reusable_facts.facts + campaign_facts>,
             "signals": <classifier_result.signals>,
             "meta": {"campaign_config": <dispatch_context.campaign_config>},
             "campaign_id": "<campaign_id>",
             "env": "<env>"}'
 ```
+
+**Shape check:** if your `goals` value is `[{...}, {...}]`, stop and apply Step 1.5
+before calling this endpoint.
 
 Response: `{draftable, escalate, wait, idle, primary_contributor, ...}`.
 **`draftable`** lists every active goal with a child skill (including
@@ -489,20 +515,49 @@ Goal → child skill (reference):
 | `content_review_and_golive` | `kol-content-reviewer` |
 | `post_collab_archival` | `kol-archival-writer` |
 
-### Step 5 — Parallel fragment-mode child skills
+**Fragment capability split (Step 5 routing):**
 
-For **each** row in `draftable`, invoke the bound child skill with
-`fragment_mode: true` plus the standard reply inputs:
+| Path | Child skills | Mode |
+|------|--------------|------|
+| **F — Fragment** | `kol-interest-qualifier`, `kol-product-selector`, `kol-deliverables-clarifier`, `kol-compensation-negotiator` | `fragment_mode: true`; facts only in Step 5.5 merge |
+| **W — Whole envelope** | `kol-contract-coordinator`, `kol-shipping-intake`, `kol-logistics-tracker`, `kol-payout-method-intake`, `kol-brief-sender`, `kol-content-reviewer`, `kol-archival-writer` | **No** `fragment_mode`; skill writes facts via terminal; returns full `{body, …}` |
+
+When **`draftable`** contains only Path **W** goals: invoke each skill without
+`fragment_mode`; skip Step 5.5 merge; pass the child body to Step 5.6 as a
+single pseudo-fragment or persist via Step 5.7 with `child_skill` = that skill
+(if one draftable row).
+
+When **`draftable`** mixes **F + W**: run Path **F** goals through Steps 5 → 5.5
+→ 5.6; run Path **W** skills **sequentially after** fragment merge (they manage
+their own facts — do not duplicate in Step 5.5).
+
+### Step 5 — Child skills (Path F fragment or Path W whole)
+
+For each row in `draftable`, check the table above.
+
+**Path F — Fragment mode** (`fragment_mode: true`):
+
+Invoke with the standard reply inputs:
 
 - `identity_id`, `campaign_id`, `env`, `thread_id`
 - `inbound_excerpt`, `thread_history` (verbatim Step 0)
-- `flow_hint` per goal (lane, current_goal, missing_facts, …)
+- `flow_hint` per goal with keys: `lane`, `current_goal`,
+  **`missing_facts_for_current_goal`** (same list as row `missing_facts`),
+  optional `kol_signaled_next_step` from classifier signals
+- `learning_hints` from Step 1 dispatch context
 
-**Parallelism:** prefer `delegate_task` with one task per draftable goal
-(isolated sub-agents). If delegation is unavailable, run sequentially in
-plan order — still collect all fragments before Step 5.5.
+**Path W — Whole envelope** (omit `fragment_mode`):
 
-Each child returns either:
+Same inputs except **no** `fragment_mode`. Skill writes facts via its own
+`write-facts-multi` calls. Return full draft envelope `{body, subject?, …}` for
+Step 5.7 (or single-fragment synthesizer when combined with Path F).
+
+**Parallelism (Path F only):** prefer `delegate_task` with one task per Path F
+goal (OVERRIDE: final message must be JSON envelope, not prose summary). If
+delegation is unavailable, run sequentially in plan order — still collect all
+fragments before Step 5.5.
+
+Each Path F child returns either:
 - `{fragment_mode: true, fragment, proposed_facts, goal, skill}` or
 - `{fragment_mode: true, gate: true, reason, goal}` → open escalation for
   that goal; exclude from synthesis

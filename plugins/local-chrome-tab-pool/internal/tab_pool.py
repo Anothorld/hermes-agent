@@ -165,6 +165,25 @@ def probe_chrome() -> bool:
         return False
 
 
+def get_target_url(target_id: str) -> str:
+    """Return the current URL for a CDP page target, or empty when unknown."""
+    tid = (target_id or "").strip()
+    if not tid:
+        return ""
+    try:
+        targets = _http_json(f"{_base_http_url()}/json/list", timeout=3.0)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return ""
+    if not isinstance(targets, list):
+        return ""
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        if str(target.get("id") or "") == tid:
+            return str(target.get("url") or "").strip()
+    return ""
+
+
 def cdp_ws_healthy(timeout: float = 3.0) -> bool:
     """Return True when Chrome's CDP **WebSocket** actually accepts a connection.
 

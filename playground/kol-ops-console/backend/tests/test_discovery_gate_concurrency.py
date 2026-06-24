@@ -78,6 +78,14 @@ class _StubBridge:
             for iid in identity_ids
         }
 
+    async def batch_creator_brief_status(
+        self, identity_ids: list[int], *, env: str = "LIVE",
+    ):
+        return {
+            iid: {"ready": False, "status": "missing", "missing_keys": []}
+            for iid in identity_ids
+        }
+
     async def upsert_campaign(self, campaign_id: str, body: dict):
         self.upsert_calls.append((campaign_id, body))
         return {"ok": True}

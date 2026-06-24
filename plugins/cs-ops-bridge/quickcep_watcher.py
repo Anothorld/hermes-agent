@@ -14,19 +14,70 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import cal
+from .email_channel import inbound_payload_is_email
 from .gateway_client import GatewayClient
+from .intent_gate import check_intent_gate
 from .session_handoff import handle_operator_send, apply_handoff
+
+from .profile_refs import quickcep_skill_dir
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_SKILL_DIR = Path.home() / ".hermes/profiles/povison-cs/skills/social-media/quickcep"
+_DEBUG_LOG_PATH = "/Users/arnold/agent_prj/.cursor/debug-46e7bf.log"
+
+
+def _agent_debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as _f:
+            _f.write(
+                json.dumps(
+                    {
+                        "sessionId": "46e7bf",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
+
+
+_DEFAULT_SKILL_DIR = quickcep_skill_dir()
 _ENV = os.environ.get("CS_OPS_ENV", "LIVE")
 _stop_event = threading.Event()
 _sio_backoff_sec = 5.0
 
+# REST reconcile only bootstraps missed first launches or retries failed rows.
+# Busy statuses (processing, awaiting_expert, …) must not be re-polled: lastMsgTime
+# moves when we add internal notes, which previously caused false follow-up loops.
+_REST_LAUNCH_STATUSES = frozenset({"pending", "failed"})
+
 
 def _quickcep_scripts_dir() -> Path:
     return Path(os.environ.get("CS_OPS_QUICKCEP_SKILL_DIR", str(_DEFAULT_SKILL_DIR)))
+
+
+def rest_session_message_id(row: dict[str, Any]) -> str:
+    """Stable REST reconcile dedup key — lastMsgTime only (never append unreadNum)."""
+    last_msg = str(row.get("lastMsgTime") or row.get("id") or "").strip()
+    if last_msg:
+        return f"rest:{last_msg}"
+    return f"rest:session:{row.get('id') or 'unknown'}"
+
+
+def rest_reconcile_eligible(*, quickcep_session_id: str, env: str = _ENV) -> bool:
+    """True when REST may enqueue/launch (new session, pending, or failed)."""
+    sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return True
+    return str(sess.get("status") or "") in _REST_LAUNCH_STATUSES
 
 
 def _patch_sio_monitor_for_operator_send(monitor_cls: type) -> None:
@@ -62,22 +113,18 @@ def _on_operator_send(info: dict[str, Any]) -> None:
         log.exception("operator send handoff error: %s", exc)
 
 
-def _handoff_followup_while_busy(session_id: str, message_id: str) -> None:
-    try:
-        apply_handoff(
-            quickcep_session_id=session_id,
-            phase="followup_while_busy",
-            env=_ENV,
-            context={
-                "customer_need": "客户在本轮 AI 处理中追加消息",
-                "actions_taken": f"已记录 message_id={message_id}，未重复 launch",
-                "follow_up": "当前 run 完成后处理最新上下文",
-                "operator_hint": "客户追加了消息",
-            },
-            skip_quickcep=os.environ.get("CS_OPS_HANDOFF_SKIP_QUICKCEP", "").lower() in ("1", "true"),
-        )
-    except Exception as exc:
-        log.warning("followup handoff failed session=%s: %s", session_id, exc)
+def _record_followup_while_busy(*, session_id: str, message_id: str, status: str) -> None:
+    """Audit-only follow-up signal — enqueue already wrote ``customer_followup_while_busy``.
+
+    Intentionally does **not** post QuickCEP internal notes: REST/SIO dedup keys derived from
+    ``lastMsgTime`` would otherwise create a feedback loop when notes bump session activity.
+    """
+    log.info(
+        "customer follow-up while busy session=%s status=%s message_id=%s (CAL event only)",
+        session_id,
+        status,
+        message_id,
+    )
 
 
 def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
@@ -85,6 +132,25 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     message_id = str(info.get("id") or info.get("lastMsgTime") or time.time())
     if not session_id:
         return None
+
+    if not inbound_payload_is_email(info):
+        log.info(
+            "skip launch session %s non_email channel=%s",
+            session_id,
+            info.get("channel"),
+        )
+        return None
+
+    gate = check_intent_gate(session_id, info.get("intentionTags"))
+    if not gate.allowed:
+        log.info(
+            "skip launch session %s intent_gate=%s tags=%s",
+            session_id,
+            gate.reason,
+            list(gate.tags) or None,
+        )
+        return None
+
     email = info.get("email")
     if not email and isinstance(info.get("visitorInfo"), dict):
         email = info["visitorInfo"].get("email")
@@ -99,12 +165,28 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         log.info("deduped session %s message %s", session_id, message_id)
         return None
     if not result.get("should_launch", True):
+        session_status = str((result.get("session") or {}).get("status") or "")
         log.info(
             "skip launch session %s status=%s (busy)",
             session_id,
-            (result.get("session") or {}).get("status"),
+            session_status,
         )
-        _handoff_followup_while_busy(session_id, message_id)
+        _record_followup_while_busy(
+            session_id=session_id,
+            message_id=message_id,
+            status=session_status,
+        )
+        _agent_debug_log(
+            hypothesis_id="A",
+            location="quickcep_watcher.py:_launch_for_message",
+            message="busy session enqueue (no QuickCEP note)",
+            data={
+                "session_id": session_id,
+                "status": session_status,
+                "message_id": message_id,
+                "source": "sio_or_rest",
+            },
+        )
         return None
     cal.update_session_status(session_row_id=result["session"]["id"], status="processing")
     gw = GatewayClient.from_env()
@@ -128,9 +210,9 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             env=_ENV,
             context={
                 "error": "gateway launch failed",
-                "actions_taken": "watcher launch returned no run_id",
-                "follow_up": "Console relaunch 或检查 gateway",
-                "operator_hint": "AI 未启动，需人工处理",
+                "actions_taken": "未能自动处理该会话",
+                "follow_up": "请人工查看客户来信并回复；如需重试可在工单列表重新处理",
+                "operator_hint": "自动处理未启动，请根据客户诉求人工跟进",
             },
             chat_session_id=str(info.get("chatSessionId") or "") or None,
             skip_quickcep=os.environ.get("CS_OPS_HANDOFF_SKIP_QUICKCEP", "").lower() in ("1", "true"),
@@ -180,7 +262,7 @@ def run_rest_reconcile_once() -> dict[str, Any]:
     if not cli.exists():
         return {"error": "quickcep_cli not found", "launched": 0}
     proc = subprocess.run(
-        [sys.executable, str(cli), "sessions", "--email-only", "--unread-only", "--compact"],
+        [sys.executable, str(cli), "sessions", "--email-only", "--unread-only", "--page-size", "100"],
         capture_output=True,
         text=True,
         timeout=120,
@@ -194,22 +276,46 @@ def run_rest_reconcile_once() -> dict[str, Any]:
         return {"error": "invalid json from quickcep_cli", "launched": 0}
     sessions = data.get("sessions", []) if isinstance(data, dict) else data
     launched = 0
+    skipped_busy = 0
     for row in sessions:
         sid = str(row.get("id") or "")
         if not sid:
             continue
-        last_msg = str(row.get("lastMsgTime") or sid)
-        unread = str(row.get("unreadNum") or "0")
-        msg_id = f"{last_msg}:{unread}"
+        if not rest_reconcile_eligible(quickcep_session_id=sid, env=_ENV):
+            skipped_busy += 1
+            busy_sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
+            if busy_sess and str(busy_sess.get("status") or "") == "awaiting_expert":
+                _agent_debug_log(
+                    hypothesis_id="B",
+                    location="quickcep_watcher.py:run_rest_reconcile_once",
+                    message="REST skipped awaiting_expert session",
+                    data={"session_id": sid, "last_message_id": busy_sess.get("last_message_id")},
+                )
+            continue
+        msg_id = rest_session_message_id(row)
+        sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
+        if sess and str(sess.get("last_message_id") or "") == msg_id:
+            continue
+        vi = row.get("visitorInfo") if isinstance(row.get("visitorInfo"), dict) else {}
         info = {
             "chatSubSessionId": sid,
             "chatSessionId": row.get("chatSessionId"),
             "id": msg_id,
-            "email": row.get("email"),
+            "email": row.get("email") or vi.get("email"),
+            "intentionTags": row.get("intentionTags"),
+            "channel": row.get("channel") or "email",
         }
+        if not inbound_payload_is_email(info):
+            continue
         if _launch_for_message(info):
             launched += 1
-    state = {"last_run": time.time(), "launched": launched, "seen": len(sessions), "sio_backoff_sec": _sio_backoff_sec}
+    state = {
+        "last_run": time.time(),
+        "launched": launched,
+        "skipped_busy": skipped_busy,
+        "seen": len(sessions),
+        "sio_backoff_sec": _sio_backoff_sec,
+    }
     cal.set_poller_state("quickcep_watcher", state)
     return state
 
@@ -225,7 +331,7 @@ async def start_background() -> None:
     try:
         while True:
             try:
-                run_rest_reconcile_once()
+                await loop.run_in_executor(None, run_rest_reconcile_once)
             except Exception as exc:
                 log.warning("REST reconcile error: %s", exc)
             await asyncio.sleep(rest_interval)

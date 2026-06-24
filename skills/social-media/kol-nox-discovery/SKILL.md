@@ -22,9 +22,36 @@ tags: ["kol", "nox", "discovery", "supplement"]
 - Quota remaining (`quota-snapshot`); stop on `NOX_AUTH_MISSING`.
 - See `references/quota-budget.md` and `references/nox-to-ingest-mapping.md`.
 
+## Hard stop on quota / auth failure (read first)
+
+Nox is the **only** sanctioned discovery surface for this supplement. When Nox
+cannot serve a request, **STOP the run** — do **not** substitute manual scraping.
+
+Stop immediately (do not retry, do not fall back) when any of these appear:
+
+- `quota-snapshot` shows remaining ≤ 0, or `creator-search` returns
+  `SaaS 40017` / `配额不足` (quota exhausted).
+- `nox_kol_tool.py doctor` ≠ `ok: true`, or any `NOX_AUTH_MISSING`.
+
+On a hard stop, end the run with a one-line report and the diagnostic field
+`floor_unmet_reason: nox_quota_exhausted` (or `nox_auth_missing`). The operator
+recharges quota / fixes auth, then re-fires the supplement. Burning 80+ agent
+iterations on browser fallbacks is the documented SSF8033 failure mode — a
+clean stop is the correct outcome, not a partial workaround.
+
+**Forbidden fallbacks** (these caused the 90-iteration burn):
+
+- ❌ `browser_*` / TikTok / YouTube manual navigation+snapshot to "find creators
+  by hand" when Nox is unavailable. Nox supplement has no browser path.
+- ❌ Re-issuing the same `creator-search` after a quota/auth error hoping it
+  clears. It will not within the run.
+- ❌ Retrying the same `ingest-confirmed-candidate` more than **twice** after a
+  validation (400/422) error — fix the payload shape per the mapping reference
+  or move the handle to `pending_ingests` and continue.
+
 ## Procedure
 
-1. `quota-snapshot --env <env>` — abort if exhausted.
+1. `quota-snapshot --env <env>` — abort if exhausted (hard stop above).
 2. Per platform (separate searches):
 
 ```bash
@@ -54,6 +81,24 @@ not flat `handle` / `profile_url`). See `references/nox-to-ingest-mapping.md`.
 
 - **Failure**: Running during Launch — burns quota against floor policy.
 - **Failure**: Auto-ingest without operator pick — wrong pool hygiene.
+- **Failure (SSF8033)**: Quota hit `配额不足` at 22:12 → agent fell back to
+  TikTok/Nox **browser automation** and looped to `max_iterations_reached(90/90)`.
+  Correct response is the **hard stop** above (`floor_unmet_reason:
+  nox_quota_exhausted`), never a manual browser substitute.
+- **Failure (SSF8033)**: Repeated `ingest-confirmed-candidate` 400/422 from
+  missing provenance triples / disallowed fields / wrong nested shape, retried
+  many times. Fix the payload once per `references/nox-to-ingest-mapping.md`,
+  retry **at most twice**, then defer to `pending_ingests`.
+
+## Provenance & ingest shape (avoid 400/422 loops)
+
+`ingest-confirmed-candidate` JSON must use the **nested** `source` / `identity`
+/ `candidate` shape (not flat `handle`/`profile_url`). Every `identity.*_url`
+or descriptive fact carries its provenance triple in the **same** write:
+`<field>_source`, `<field>_discovered_at`, `<field>_discovered_url`. See
+`references/nox-to-ingest-mapping.md` for the exact field map. A 409
+`discovery_skip_active` means the handle is a prior-collab — skip it, do not
+re-ingest.
 
 ## Verification
 

@@ -13,9 +13,9 @@ After an operator replies in Feishu thread, incorporate their answer and write Q
 
 1. `get-escalation --env LIVE --escalation-id <id>`
 2. `get-dispatch-context --session-id <quickcep_session_id>`
-3. `quickcep_cli.py messages <id> --plain --chronological`
+3. `get-messages --env LIVE --session-id <id>`
 4. Merge `operator_answer` into customer reply (English, Povison tone)
-5. `draft-save` with subject/body/receiver
+5. **`cs_bridge_tool draft-save`** (auto join-chat) with subject/body/receiver — use `--content-file` when draft contains `$`
 6. **`apply-handoff --phase draft_ready`** — tags + internal note (expert answer summary)
 7. `write-event --event-type escalation_resumed`
 8. `update-session-status --status draft_ready`
@@ -25,10 +25,12 @@ After an operator replies in Feishu thread, incorporate their answer and write Q
 ```bash
 python3 cs_bridge_tool.py apply-handoff --env LIVE --session-id <id> \
   --phase draft_ready \
-  --customer-need "<original customer ask>" \
-  --actions-taken "Merged Feishu expert answer; draft-save" \
-  --operator-hint "<one line for next operator>"
+  --customer-need "<中文：客户原始诉求>" \
+  --actions-taken "已合并飞书专家答复并保存草稿" \
+  --operator-hint "<中文：下一操作员接手要点>"
 ```
+
+**备注语言：** 所有 apply-handoff 文本字段必须使用简体中文（客户邮件草稿除外）。
 
 ## Pitfalls
 

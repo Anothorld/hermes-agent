@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -16,10 +17,11 @@ import yaml
 
 from . import cal
 from .pii_sanitize import mask_string
+from .profile_refs import quickcep_skill_dir
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_SKILL_DIR = Path.home() / ".hermes/profiles/povison-cs/skills/social-media/quickcep"
+_DEFAULT_SKILL_DIR = quickcep_skill_dir()
 _TAG_MAP_PATH = Path(__file__).resolve().parent / "config" / "session_tag_map.yaml"
 
 HANDOFF_PHASES = frozenset(
@@ -33,6 +35,20 @@ HANDOFF_PHASES = frozenset(
         "operator_sent",
     }
 )
+
+# Agent-invented aliases observed in production logs → canonical phase.
+PHASE_ALIASES: dict[str, str] = {
+    "completed": "reviewed",
+    "processed_by_human": "reviewed",
+    "human_processed": "reviewed",
+    "done": "reviewed",
+}
+
+
+def normalize_handoff_phase(phase: str) -> str:
+    """Return canonical handoff phase, mapping known aliases."""
+    raw = (phase or "").strip()
+    return PHASE_ALIASES.get(raw.lower(), raw)
 
 PHASE_LABELS: dict[str, str] = {
     "processing": "处理中",
@@ -67,6 +83,50 @@ _STATUS_ORDER: dict[str, int] = {
 
 # Agent-driven phases that must not run after operator already sent / reviewed.
 _STALE_AGENT_PHASES = frozenset({"processing", "draft_ready", "awaiting_expert", "failed"})
+
+# Escalation may follow a saved draft in the same agent run — still sync QuickCEP tags.
+_ESCALATION_OVERRIDE_STATUSES = frozenset({"draft_ready", "processing", "pending"})
+
+_ROUTE_ZH: dict[str, str] = {
+    "auto_handle": "自动处理",
+    "escalate": "升级专家",
+    "review": "待复核",
+}
+
+_CATEGORY_ZH: dict[str, str] = {
+    "logistics": "物流咨询",
+    "product": "产品咨询",
+    "issue_standard": "标准售后问题",
+    "vip_discount": "VIP 折扣诉求",
+    "high_value_refund": "高额退款",
+    "refund_request": "退款申请",
+    "legal_threat": "法律威胁",
+    "social_threat": "社交媒体曝光威胁",
+    "executive_demand": "要求管理层介入",
+    "b2b_inquiry": "企业/批发咨询",
+    "forced": "强制升级",
+    "unclear": "意图不明",
+}
+
+# Replace common English tokens agents paste into handoff fields (longest match first).
+_NOTE_TERM_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bescalation resume\s*\+\s*draft-save\b", re.I), "专家回复已合并并保存草稿"),
+    (re.compile(r"\bMerged Feishu expert answer;\s*draft-save\b", re.I), "已合并飞书专家答复并保存草稿"),
+    (re.compile(r"\bdraft-save\b", re.I), "草稿已保存"),
+    (re.compile(r"\bdraft save\b", re.I), "草稿已保存"),
+    (re.compile(r"\binbound\b", re.I), "客户来信"),
+    (re.compile(r"\bConsole\b"), "工单列表"),
+    (re.compile(r"\bgateway\b", re.I), "自动处理"),
+    (re.compile(r"\bbridge\b", re.I), ""),
+    (re.compile(r"\bthread\s*=", re.I), "线索编号："),
+    (re.compile(r"\bQuickCEP\b", re.I), "会话后台"),
+    (re.compile(r"\bAI\b"), "智能客服"),
+    (re.compile(r"\brelaunch\b", re.I), "重新处理"),
+    (re.compile(r"\blookup\b", re.I), "查询"),
+    (re.compile(r"\bescalate\b", re.I), "升级专家"),
+    (re.compile(r"\bauto_handle\b", re.I), "自动处理"),
+    (re.compile(r"\breview\b", re.I), "待复核"),
+)
 
 
 @dataclass
@@ -137,6 +197,58 @@ def _handoff_stale_for_session(*, phase: str, session_status: str) -> bool:
     return current_rank >= 40 and phase_rank < current_rank
 
 
+def _quickcep_handoff_side_effect_skip_reason(*, phase: str, session_status: str) -> Optional[str]:
+    """When set, ``apply_handoff`` must not post QuickCEP tags or internal notes."""
+    if phase == "followup_while_busy":
+        return "followup_while_busy is CAL-only (no QuickCEP note)"
+    if phase == "awaiting_expert" and session_status in _ESCALATION_OVERRIDE_STATUSES:
+        return None
+    target = STATUS_BY_PHASE.get(phase)
+    if target and session_status == target:
+        return f"session already {session_status}"
+    if phase in _STALE_AGENT_PHASES:
+        current_rank = _STATUS_ORDER.get(session_status, 0)
+        phase_rank = _phase_status_rank(phase)
+        if phase_rank < current_rank:
+            return f"phase {phase} would regress from {session_status}"
+    return None
+
+
+def _status_update_allowed(*, current_status: str, target_status: Optional[str], phase: str) -> bool:
+    if not target_status:
+        return False
+    current_rank = _STATUS_ORDER.get(current_status, 0)
+    target_rank = _STATUS_ORDER.get(target_status, 0)
+    if target_rank >= current_rank:
+        return True
+    return phase == "awaiting_expert" and current_status in _ESCALATION_OVERRIDE_STATUSES
+
+
+def _agent_debug_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        import time as _time
+
+        with open("/Users/arnold/agent_prj/.cursor/debug-400546.log", "a", encoding="utf-8") as _f:
+            _f.write(
+                json.dumps(
+                    {
+                        "sessionId": "400546",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
+
+
 def _inquiry_tag(tag_map: Mapping[str, Any], category: Optional[str]) -> Optional[str]:
     if not category:
         return None
@@ -145,7 +257,89 @@ def _inquiry_tag(tag_map: Mapping[str, Any], category: Optional[str]) -> Optiona
 
 
 def _now_label() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M 协调世界时")
+
+
+def _zh_route(route: Optional[str]) -> str:
+    if not route:
+        return "未分类"
+    return _ROUTE_ZH.get(str(route), str(route))
+
+
+def _zh_category(category: Optional[str]) -> str:
+    if not category:
+        return "未分类"
+    return _CATEGORY_ZH.get(str(category), str(category))
+
+
+def _localize_note_fragment(text: str) -> str:
+    """Normalize handoff field text to Chinese-friendly wording."""
+    if not text:
+        return text
+    out = text
+    for pattern, replacement in _NOTE_TERM_REPLACEMENTS:
+        out = pattern.sub(replacement, out)
+    for key, label in sorted(_ROUTE_ZH.items(), key=lambda kv: -len(kv[0])):
+        out = re.sub(rf"\b{re.escape(key)}\b", label, out, flags=re.I)
+    for key, label in sorted(_CATEGORY_ZH.items(), key=lambda kv: -len(kv[0])):
+        out = re.sub(rf"\b{re.escape(key)}\b", label, out, flags=re.I)
+    return out.strip()
+
+
+# Strip engineering/CLI details — internal notes are CS-operator facing only.
+_OPERATOR_NOTE_SANITIZE: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"--[\w-]+(?:=\S*)?"), ""),
+    (re.compile(r"\bmessage_id\s*[:=]\s*\S+", re.I), ""),
+    (re.compile(r"\brun_id\s*[:=]\s*\S+", re.I), ""),
+    (re.compile(r"\bthread_id\s*[:=]\s*\S+", re.I), ""),
+    (re.compile(r"(?:需人工)?检查(?:网关|桥接服务|系统)(?:与(?:网关|桥接服务|系统))?(?:日志)?"), "请人工处理"),
+    (re.compile(r"网关(?:与|和)?桥接服务(?:日志)?"), ""),
+    (re.compile(r"桥接服务"), ""),
+    (re.compile(r"网关"), ""),
+    (re.compile(r"launch returned no run_id", re.I), "未能自动处理"),
+    (re.compile(r"gateway launch failed", re.I), "未能自动处理"),
+    (re.compile(r"watcher\s+", re.I), ""),
+    (re.compile(r"[\w/\\]+\.(?:py|html|sh|json)\b"), ""),
+    (re.compile(r"\s{2,}"), " "),
+    (re.compile(r"[；;]\s*[；;]+"), "；"),
+)
+
+
+def _sanitize_operator_note(text: str) -> str:
+    """Keep only CS-relevant business wording in QuickCEP internal notes."""
+    if not text:
+        return text
+    out = _localize_note_fragment(text)
+    for pattern, replacement in _OPERATOR_NOTE_SANITIZE:
+        out = pattern.sub(replacement, out)
+    out = re.sub(r"\s+", " ", out).strip(" ；;，,")
+    return out.strip()
+
+
+def _business_failure_summary(*, error: str = "", actions_taken: str = "") -> str:
+    """Map technical failures to operator-facing business summaries."""
+    sanitized_actions = _sanitize_operator_note(actions_taken)
+    if sanitized_actions and not re.search(
+        r"(?:--|run_id|message_id|launch|gateway|watcher|\.py\b|被解析为命令)",
+        sanitized_actions,
+        re.I,
+    ):
+        if sanitized_actions.startswith("处理失败"):
+            return sanitized_actions
+        return f"处理失败：{sanitized_actions}"
+
+    err = (error or "").lower()
+    if "draft" in err or "草稿" in err or "content-file" in err:
+        return "处理失败：未能自动生成回复草稿，需人工撰写并发送"
+    if any(tok in err for tok in ("launch", "gateway", "run_id", "watcher")):
+        return "处理失败：未能自动处理该会话，需人工查看客户来信"
+    if "classify" in err or "intent" in err:
+        return "处理失败：未能识别客户诉求，需人工判断并回复"
+    return "处理失败：未能自动完成客户诉求处理，需人工接管"
+
+
+def _note_header(phase_label: str) -> str:
+    return f"[智能客服] {_now_label()} | {phase_label}"
 
 
 def _compose_standard_note(
@@ -157,8 +351,12 @@ def _compose_standard_note(
     operator_hint: str = "",
     extra_lines: Optional[list[str]] = None,
 ) -> str:
+    customer_need = _sanitize_operator_note(customer_need)
+    actions_taken = _sanitize_operator_note(actions_taken)
+    follow_up = _sanitize_operator_note(follow_up)
+    operator_hint = _sanitize_operator_note(operator_hint)
     lines = [
-        f"[AI-CS] {_now_label()} | {phase_label}",
+        _note_header(phase_label),
         "",
         "【客户需求】",
         f"- {customer_need or '（见会话邮件）'}",
@@ -180,11 +378,15 @@ def _compose_standard_note(
 def _compose_operator_sent_note(ctx: Mapping[str, Any]) -> str:
     operator_id = ctx.get("operator_id") or ctx.get("owner_id") or "—"
     subject = ctx.get("email_subject") or ctx.get("subject") or "—"
-    send_note = ctx.get("send_note") or "操作员在 QuickCEP 发送回复"
-    prior_hint = ctx.get("operator_hint") or "已回复客户，等待客户反馈"
+    send_note = _sanitize_operator_note(
+        str(ctx.get("send_note") or "操作员已发送回复邮件")
+    )
+    prior_hint = _sanitize_operator_note(
+        str(ctx.get("operator_hint") or "已回复客户，等待客户反馈")
+    )
     return "\n".join(
         [
-            f"[AI-CS] {_now_label()} | 操作员已发送回复",
+            _note_header("操作员已发送回复"),
             "",
             "【本次发送】",
             f"- 操作员：{operator_id}",
@@ -206,8 +408,10 @@ def _compose_operator_sent_note(ctx: Mapping[str, Any]) -> str:
 
 def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> HandoffPlan:
     """Build tag add/remove list and note body for a lifecycle phase."""
+    phase = normalize_handoff_phase(phase)
     if phase not in HANDOFF_PHASES:
-        raise ValueError(f"unknown handoff phase: {phase}")
+        allowed = ", ".join(sorted(HANDOFF_PHASES))
+        raise ValueError(f"unknown handoff phase: {phase!r}; allowed: {allowed}")
 
     ctx = dict(context or {})
     tag_map = load_tag_map()
@@ -241,12 +445,14 @@ def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> 
         inq = _inquiry_tag(tag_map, category)
         if inq:
             tags_add.append(inq)
-        actions = actions_taken or f"分类：{route}/{category}；开始处理 inbound"
+        route_zh = _zh_route(str(route) if route else None)
+        category_zh = _zh_category(str(category) if category else None)
+        actions = actions_taken or f"已识别为{category_zh}，{route_zh}；正在处理客户来信"
         note_body = _compose_standard_note(
             phase_label=PHASE_LABELS[phase],
             customer_need=customer_need,
             actions_taken=actions,
-            follow_up=follow_up or "处理完成后更新 draft 或升级",
+            follow_up=follow_up or "处理完成后会生成回复草稿或升级给内部专家",
             operator_hint=operator_hint,
         )
 
@@ -260,13 +466,13 @@ def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> 
         esc = _business_id(tag_map, "escalation")
         if esc:
             tags_remove.append(esc)
-        actions = actions_taken or "draft-save 完成，待操作员审阅发送"
+        actions = actions_taken or "已查询相关信息并保存回复草稿"
         note_body = _compose_standard_note(
             phase_label=PHASE_LABELS[phase],
             customer_need=customer_need,
             actions_taken=actions,
-            follow_up=follow_up or "操作员：在 QuickCEP 审阅并发送草稿",
-            operator_hint=operator_hint or "草稿已保存，请核对后发送",
+            follow_up=follow_up or "请核对草稿内容后发送给客户",
+            operator_hint=operator_hint or "回复草稿已备好，请审阅后发送",
         )
 
     elif phase == "awaiting_expert":
@@ -281,26 +487,31 @@ def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> 
             if urg:
                 tags_add.append(urg)
         feishu_thread = ctx.get("feishu_thread_id") or ""
-        actions = actions_taken or f"已飞书升级 thread={feishu_thread}"
+        if actions_taken:
+            actions = actions_taken
+        elif feishu_thread:
+            actions = f"已升级至内部专家处理（升级编号：{feishu_thread}）"
+        else:
+            actions = "已升级至内部专家处理"
         note_body = _compose_standard_note(
             phase_label=PHASE_LABELS[phase],
             customer_need=customer_need,
             actions_taken=actions,
-            follow_up=follow_up or "等待飞书后援回复",
-            operator_hint=operator_hint or "升级已发出，请勿直接回复客户",
+            follow_up=follow_up or "等待内部专家给出处理意见",
+            operator_hint=operator_hint or "已升级给专家，请勿直接回复客户",
         )
 
     elif phase == "failed":
         tid = _ai_id(tag_map, "failed")
         if tid:
             tags_add.append(tid)
-        actions = actions_taken or f"处理失败：{error or '未知错误'}"
+        actions = _business_failure_summary(error=error, actions_taken=actions_taken)
         note_body = _compose_standard_note(
             phase_label=PHASE_LABELS[phase],
             customer_need=customer_need,
             actions_taken=actions,
-            follow_up=follow_up or "Console relaunch 或人工接管",
-            operator_hint=operator_hint or "需人工检查 gateway/bridge 日志",
+            follow_up=follow_up or "请人工查看客户来信并回复；如需重试可在工单列表重新处理",
+            operator_hint=operator_hint or "自动处理未完成，请根据客户诉求人工跟进",
         )
 
     elif phase == "reviewed":
@@ -316,8 +527,8 @@ def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> 
         note_body = _compose_standard_note(
             phase_label=PHASE_LABELS[phase],
             customer_need=customer_need,
-            actions_taken=actions_taken or "Console 标记已审阅",
-            follow_up=follow_up or "无进一步 AI 动作",
+            actions_taken=actions_taken or "本单已标记为处理完毕",
+            follow_up=follow_up or "暂无后续自动动作",
             operator_hint=operator_hint or "本周期已结案",
         )
 
@@ -328,9 +539,9 @@ def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> 
         note_body = _compose_standard_note(
             phase_label=PHASE_LABELS[phase],
             customer_need=customer_need or "客户在本轮处理中追加消息",
-            actions_taken=actions_taken or "已记录，未重复 launch",
-            follow_up=follow_up or "当前 run 完成后会处理最新上下文",
-            operator_hint=operator_hint or "客户追加了消息",
+            actions_taken=actions_taken or "已记录客户新消息，待当前处理完成后一并纳入",
+            follow_up=follow_up or "当前处理完成后会自动纳入最新来信",
+            operator_hint=operator_hint or "客户追加了消息，请关注是否需调整回复",
         )
 
     elif phase == "operator_sent":
@@ -464,22 +675,52 @@ def apply_handoff(
     skip_quickcep: bool = False,
 ) -> dict[str, Any]:
     """Compose and apply lifecycle handoff (tags + note + CAL events)."""
+    canonical = normalize_handoff_phase(phase)
+    if canonical != phase:
+        log.info(
+            "handoff phase alias %r -> %r session=%s",
+            phase,
+            canonical,
+            quickcep_session_id,
+        )
+        phase = canonical
+
     sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
         return {"ok": False, "error": "session not found"}
 
     if _handoff_stale_for_session(phase=phase, session_status=str(sess["status"])):
+        completion_result = None
+        if phase in ("draft_ready", "failed"):
+            try:
+                from .escalation_completion import complete_resuming_escalation_after_handoff
+
+                completion_result = complete_resuming_escalation_after_handoff(
+                    quickcep_session_id=quickcep_session_id,
+                    phase=phase,
+                    env=env,
+                    operator_hint=str((context or {}).get("operator_hint") or ""),
+                )
+            except Exception as exc:
+                log.warning(
+                    "escalation completion on stale handoff failed session=%s: %s",
+                    quickcep_session_id,
+                    exc,
+                )
         log.info(
             "skip stale handoff phase=%s session=%s status=%s",
             phase,
             quickcep_session_id,
             sess["status"],
         )
-        return {
+        out = {
             "ok": True,
             "skipped": True,
             "reason": f"session already {sess['status']}, skip phase {phase}",
         }
+        if completion_result:
+            out["escalation_completion"] = completion_result
+        return out
 
     plan = compose_handoff(phase, context)
 
@@ -488,6 +729,41 @@ def apply_handoff(
         quickcep_session_id=quickcep_session_id,
         chat_session_id=str(chat_id) if chat_id else None,
     )
+
+    qc_skip_reason = _quickcep_handoff_side_effect_skip_reason(
+        phase=phase,
+        session_status=str(sess["status"]),
+    )
+    _agent_debug_log(
+        hypothesis_id="B",
+        location="session_handoff.py:apply_handoff",
+        message="handoff skip evaluation",
+        data={
+            "quickcep_session_id": quickcep_session_id,
+            "phase": phase,
+            "session_status": str(sess["status"]),
+            "qc_skip_reason": qc_skip_reason,
+        },
+    )
+    if qc_skip_reason:
+        log.info(
+            "skip quickcep tags/note session=%s phase=%s: %s",
+            quickcep_session_id,
+            phase,
+            qc_skip_reason,
+        )
+        _agent_debug_log(
+            hypothesis_id="D",
+            location="session_handoff.py:apply_handoff",
+            message="quickcep side effects skipped",
+            data={
+                "quickcep_session_id": quickcep_session_id,
+                "phase": phase,
+                "session_status": str(sess["status"]),
+                "reason": qc_skip_reason,
+            },
+        )
+        skip_quickcep = True
 
     tag_results: list[dict[str, Any]] = []
     note_result: dict[str, Any] = {"ok": True, "skipped": True}
@@ -505,14 +781,26 @@ def apply_handoff(
                 chat_session_id=chat_id,
                 note_body=plan.note_body,
             )
+            _agent_debug_log(
+                hypothesis_id="E",
+                location="session_handoff.py:apply_handoff",
+                message="quickcep note posted",
+                data={
+                    "quickcep_session_id": quickcep_session_id,
+                    "phase": phase,
+                    "session_status": str(sess["status"]),
+                },
+            )
         elif plan.note_body and not chat_id:
             note_result = {"ok": False, "error": "chat_session_id missing for add-note"}
             log.warning("handoff note skipped: no chat_session_id for %s", quickcep_session_id)
 
     if plan.target_status:
-        current_rank = _STATUS_ORDER.get(str(sess["status"]), 0)
-        target_rank = _STATUS_ORDER.get(plan.target_status, 0)
-        if target_rank >= current_rank:
+        if _status_update_allowed(
+            current_status=str(sess["status"]),
+            target_status=plan.target_status,
+            phase=phase,
+        ):
             cal.update_session_status(session_row_id=sess["id"], status=plan.target_status)
         else:
             log.info(
@@ -563,8 +851,21 @@ def apply_handoff(
             env=env,
         )
 
+    completion_result = None
+    try:
+        from .escalation_completion import complete_resuming_escalation_after_handoff
+
+        completion_result = complete_resuming_escalation_after_handoff(
+            quickcep_session_id=quickcep_session_id,
+            phase=phase,
+            env=env,
+            operator_hint=str((context or {}).get("operator_hint") or ""),
+        )
+    except Exception as exc:
+        log.warning("escalation completion hook failed session=%s: %s", quickcep_session_id, exc)
+
     ok = note_result.get("ok", True) and all(r.get("ok", True) for r in tag_results)
-    return {
+    result = {
         "ok": ok,
         "plan": {
             "phase": plan.phase,
@@ -576,6 +877,9 @@ def apply_handoff(
         "tag_results": tag_results,
         "note_result": note_result,
     }
+    if completion_result:
+        result["escalation_completion"] = completion_result
+    return result
 
 
 def handle_operator_send(
@@ -621,12 +925,12 @@ def handle_operator_send(
         "operator_id": info.get("ownerId") or "",
         "email_subject": info.get("email_subject") or "",
         "operator_hint": prior_hint,
-        "send_note": "操作员在 QuickCEP 发送回复",
+        "send_note": "操作员在会话后台发送回复",
     }
     if sess["status"] == "draft_ready":
-        context["send_note"] = "基于 AI 草稿审阅后发送"
+        context["send_note"] = "审阅智能客服草稿后发送"
     elif sess["status"] == "processing":
-        context["send_note"] = "处理过程中操作员直接发送"
+        context["send_note"] = "处理过程中人工直接回复客户"
 
     if info.get("chatSessionId") and not sess.get("chat_session_id"):
         cal.update_session_chat_id(

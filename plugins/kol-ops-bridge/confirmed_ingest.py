@@ -1,8 +1,6 @@
-"""Deterministic ingest of agent-confirmed KOL candidates into CAL.
-
-Single entry point for the ``ingest-confirmed-candidate`` Bridge endpoint.
-Orchestrates identity upsert → identity facts → candidate upsert in a
-fixed order without LLM involvement.
+"""Deterministic ingest of agent-confirmed candidates. ``identity_facts`` accepts
+dotted ``identity.*`` keys; bare keys (``instagram_profile_url``,
+``nox_audience_authenticity``) are normalized before validation.
 """
 
 from __future__ import annotations
@@ -14,6 +12,7 @@ from typing import Any, Final, Mapping, Optional
 
 from . import cal  # type: ignore[import-not-found]
 from . import discovery_skip  # type: ignore[import-not-found]
+from .creator_brief_status import validate_creator_brief_bundle  # type: ignore[import-not-found]
 
 # Keys allowed in ``identity_facts`` payloads (base + provenance triples).
 _DISCOVERY_BASE_KEYS: Final[tuple[str, ...]] = (
@@ -153,6 +152,31 @@ def _ingest_dedup_key(*, env: str, campaign_id: str, ingest_id: str) -> str:
     return f"{env}:{campaign_id}:{ingest_id}"
 
 
+def normalize_identity_facts(facts: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Coerce agent payloads to dotted ``identity.*`` keys; drop unknown fields.
+
+    Models often emit flat keys (``instagram_profile_url``) or bare Nox fields
+    (``nox_audience_authenticity``). Map those to allowed dotted keys when
+    possible instead of failing the whole ingest.
+    """
+    normalized: dict[str, Any] = {}
+    dropped: list[str] = []
+    for raw_key, value in facts.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        if key in ALLOWED_IDENTITY_FACT_KEYS:
+            normalized[key] = value
+            continue
+        if not key.startswith("identity."):
+            dotted = f"identity.{key}"
+            if dotted in ALLOWED_IDENTITY_FACT_KEYS:
+                normalized[dotted] = value
+                continue
+        dropped.append(key)
+    return normalized, dropped
+
+
 def validate_identity_facts(facts: Mapping[str, Any]) -> None:
     unknown = [k for k in facts if k not in ALLOWED_IDENTITY_FACT_KEYS]
     if unknown:
@@ -215,8 +239,14 @@ def ingest_confirmed_candidate(
     if not isinstance(cand_source, str) or not cand_source.strip():
         raise IngestValidationError("candidate.source required")
 
-    facts_in = dict(identity_facts or {})
+    facts_in, dropped_fact_keys = normalize_identity_facts(identity_facts or {})
     if facts_in:
+        brief_missing = validate_creator_brief_bundle(facts_in)
+        if brief_missing:
+            raise IngestValidationError(
+                "creator brief bundle incomplete; include all 6 identity.* brief "
+                f"keys together or omit the bundle entirely: {brief_missing}",
+            )
         validate_identity_facts(facts_in)
 
     if ingest_id:
@@ -291,6 +321,7 @@ def ingest_confirmed_candidate(
         },
         "skipped": {
             "facts": skipped_facts,
+            "dropped_identity_fact_keys": dropped_fact_keys,
         },
         "already_imported": False,
     }

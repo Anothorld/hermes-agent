@@ -19,7 +19,15 @@ import datetime as _dt
 import sqlite3
 from typing import Iterable, Literal, Optional
 
-RunKind = Literal["outreach", "reply", "draft", "resume", "refine", "email_discover"]
+RunKind = Literal[
+    "outreach",
+    "reply",
+    "draft",
+    "resume",
+    "refine",
+    "email_discover",
+    "creator_brief_refresh",
+]
 
 # How long a registered run is considered "in flight" for dedup purposes.
 # Preview-draft / refine usually complete in 30-60 s; we err on the long

@@ -1,5 +1,5 @@
 name: local-chrome-tab-pool
-version: 1.0.2
+version: 1.0.8
 description: "Per-task CDP tabs on one shared local Chrome profile for concurrent runs."
 author: kol-ops
 kind: backend

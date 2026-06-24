@@ -1,0 +1,9 @@
+# QuickCEP AI-classified business intent tags (intentionTags field on sessions).
+# Watcher only auto-launches when the session has at least one allowed tag.
+# Override via CS_OPS_ALLOWED_INTENTION_TAGS (comma-separated) or CS_OPS_INTENT_FILTER=false.
+
+enabled: true
+
+allowed_intention_tags:
+  - 产品咨询
+  - 物流咨询

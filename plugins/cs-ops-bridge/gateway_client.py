@@ -14,6 +14,7 @@ from .gateway_launch import (
     release_launch,
     try_acquire_launch,
 )
+from .profile_refs import gateway_session_id
 
 log = logging.getLogger(__name__)
 
@@ -46,9 +47,10 @@ class GatewayClient:
     ) -> LaunchOutcome:
         from .bridge_agent_contract import process_cli_checklist
 
-        session_id = f"povison-cs:{env}:{quickcep_session_id}"
+        session_id = gateway_session_id(env=env, quickcep_session_id=quickcep_session_id)
         brief = (
             f"# cs_inbound_process\n"
+            f"hermes_profile: {session_id.split(':')[0]}\n"
             f"env: {env}\n"
             f"quickcep_session_id: {quickcep_session_id}\n"
             f"message_id: {message_id}\n"
@@ -72,9 +74,10 @@ class GatewayClient:
     ) -> LaunchOutcome:
         from .bridge_agent_contract import resume_cli_checklist
 
-        session_id = f"povison-cs:{env}:{quickcep_session_id}"
+        session_id = gateway_session_id(env=env, quickcep_session_id=quickcep_session_id)
         brief = (
             f"# escalation_resume\n"
+            f"hermes_profile: {session_id.split(':')[0]}\n"
             f"escalation_id: {escalation_id}\n"
             f"env: {env}\n"
             f"quickcep_session_id: {quickcep_session_id}\n"

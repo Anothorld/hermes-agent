@@ -2,36 +2,26 @@
 
 from __future__ import annotations
 
-import os
-import re
+import importlib.util
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 HookResult = Optional[Union[None, Dict[str, str]]]
 
-_CS_SESSION_PREFIX = "povison-cs:"
-_SEND_EMAIL_RE = re.compile(
-    r"(?is)"
-    r"quickcep_cli\.py\s+send-email|"
-    r"/im/message/operator/sendEmail|"
-    r"send-email\s+<"
-)
+_SEND_GUARD = None
 
 
-def _guard_enabled() -> bool:
-    return os.environ.get("CS_BRIDGE_AGENT_GUARD", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
-
-
-def _session_key(session_id: str, task_id: str = "") -> str:
-    return (session_id or task_id or "").strip()
-
-
-def _cs_session(session_id: str, task_id: str = "") -> bool:
-    return _session_key(session_id, task_id).startswith(_CS_SESSION_PREFIX)
+def _send_guard():
+    global _SEND_GUARD
+    if _SEND_GUARD is None:
+        path = Path(__file__).with_name("send_guard.py")
+        spec = importlib.util.spec_from_file_location("cs_bridge_send_guard", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot load send_guard from {path}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SEND_GUARD = mod
+    return _SEND_GUARD
 
 
 def pre_tool_call(
@@ -42,19 +32,9 @@ def pre_tool_call(
     tool_call_id: str = "",
 ) -> HookResult:
     del tool_call_id
-    if not _guard_enabled():
-        return None
-    if not _cs_session(session_id, task_id):
-        return None
-    if tool_name != "terminal":
-        return None
-    command = str(args.get("command") or args.get("cmd") or "")
-    if _SEND_EMAIL_RE.search(command):
-        return {
-            "action": "block",
-            "message": (
-                "quickcep send-email is forbidden for povison-cs automation — "
-                "use draft-save only; human operators send from QuickCEP UI."
-            ),
-        }
-    return None
+    return _send_guard().pre_tool_block(
+        tool_name=tool_name,
+        args=args,
+        task_id=task_id,
+        session_id=session_id,
+    )

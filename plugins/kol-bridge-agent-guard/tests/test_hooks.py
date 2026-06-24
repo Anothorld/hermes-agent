@@ -95,6 +95,91 @@ def test_blocks_redirect_bridge_read_stdout():
     assert out["action"] == "block"
 
 
+def test_blocks_redirect_list_candidates_stdout():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+                "list-candidates --campaign-id SSF8033-20260609 --env LIVE > /tmp/candidates.json"
+            ),
+        },
+        session_id="kol-campaign:LIVE:SSF8033-20260609",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    payload = json.loads(out["message"])
+    assert payload["error"] == "bridge_agent_contract_violation"
+    assert payload.get("source") == "kol_bridge_agent_guard"
+
+
+def test_blocks_pipe_head_on_bridge_cli():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+                "list-candidates --campaign-id X --env LIVE | head"
+            ),
+        },
+        session_id="kol-campaign:LIVE:SSF8033-20260609",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_blocks_read_identity_hallucination():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+                "read-identity --identity-id 1 --env LIVE"
+            ),
+        },
+        session_id="kol-campaign:LIVE:SSF8033-20260609",
+    )
+    assert out is not None
+    assert json.loads(out["message"])["code"] == "invalid_subcommand_read_identity"
+
+
+def test_allows_single_ingest_confirmed_candidate_terminal():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+                "ingest-confirmed-candidate --campaign-id SSF8033-20260609 --env LIVE "
+                "--json @/tmp/ingest_dressyourdecor.json"
+            ),
+        },
+        session_id="kol-campaign:LIVE:SSF8033-20260609",
+    )
+    assert out is None
+
+
+def test_blocks_terminal_multi_ingest_semicolon():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+                "ingest-confirmed-candidate --env LIVE --json @/tmp/ingest_a.json; "
+                "python3 -u /Users/me/agent_prj/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+                "ingest-confirmed-candidate --env LIVE --json @/tmp/ingest_b.json"
+            ),
+        },
+        session_id="kol-campaign:LIVE:SSF8033-20260609",
+    )
+    assert out is not None
+    assert json.loads(out["message"])["code"] == "terminal_multi_ingest"
+
+
 def test_blocks_python3_u_on_kol_bridge_cli_wrapper():
     h = _hooks()
     out = h.pre_tool_call(
@@ -139,6 +224,27 @@ def test_blocks_browser_on_outreach_session():
     )
     assert out is not None
     assert out["action"] == "block"
+
+
+def test_blocks_delegate_on_creator_brief_refresh_session():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "delegate_task",
+        {"prompt": "find email"},
+        task_id="kol-creator-brief-refresh:LIVE:701:pending:abc",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_allows_browser_on_creator_brief_refresh_session():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.instagram.com/foo/"},
+        task_id="kol-creator-brief-refresh:LIVE:701:pending:abc",
+    )
+    assert out is None
 
 
 def test_blocks_mcp_chrome_on_kol_session_via_task_id():
@@ -316,12 +422,121 @@ def test_allows_bridge_cli_terminal_on_email_discover():
 
 def test_allows_browser_on_discovery_session():
     h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    ds.reset_bootstrap(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id POVISON-TS-8319",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
     out = h.pre_tool_call(
         "browser_navigate",
         {"url": "https://www.instagram.com/foo/"},
-        task_id="kol-campaign:LIVE:POVISON-TS-8319",
+        task_id=sid,
     )
     assert out is None
+
+
+def test_blocks_web_search_on_campaign_discovery():
+    h = _hooks()
+    for tool in ("web_search", "web_extract"):
+        out = h.pre_tool_call(
+            tool,
+            {"query": "home cinema instagram creator 100k"},
+            task_id="kol-campaign:LIVE:SSF8033-20260609",
+        )
+        assert out is not None, tool
+        assert out["action"] == "block"
+        assert "google.com/search" in out["message"]
+
+
+def test_blocks_terminal_serper_on_campaign_discovery():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "python3 -c \"import requests; requests.get("
+                "'https://google.serper.dev/search', params={'q': 'US home cinema instagram'})\""
+            ),
+        },
+        task_id="kol-campaign:LIVE:SSF8033-20260609",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "browser_navigate" in out["message"]
+
+
+def test_blocks_execute_code_requests_serper_on_campaign_discovery():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "execute_code",
+        {
+            "code": (
+                "import requests\n"
+                "requests.get('https://google.serper.dev/search', params={'q': 'cozy living'})"
+            ),
+        },
+        task_id="kol-campaign:LIVE:SSF8033-20260609",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_allows_bridge_cli_terminal_on_campaign_discovery():
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:SSF8033-20260609"
+    ds.reset_bootstrap(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id SSF8033-20260609",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        out = h.pre_tool_call("terminal", {"command": cmd}, task_id=sid)
+        assert out is None, cmd
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.instagram.com/example/"},
+        task_id=sid,
+    )
+    assert out is None
+
+
+def test_blocks_browser_before_discovery_bootstrap():
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:SSF8033-20260609"
+    ds.reset_bootstrap(sid)
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.instagram.com/example/"},
+        task_id=sid,
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "bootstrap incomplete" in out["message"].lower()
+
+
+def test_blocks_wrong_campaign_id_on_discovery_session():
+    h = _hooks()
+    out = h.pre_tool_call(
+        "terminal",
+        {
+            "command": (
+                "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli "
+                "list-candidates --env LIVE --campaign-id POVISON-TS-8319-20260603"
+            ),
+        },
+        task_id="kol-campaign:LIVE:SEB8010-20260608",
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "does not match" in out["message"]
 
 
 def test_blocks_read_plugin_api_on_kol_session():

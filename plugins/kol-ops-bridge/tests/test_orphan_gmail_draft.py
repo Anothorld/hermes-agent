@@ -55,6 +55,7 @@ def test_discard_deletes_and_clears_offer_facts(cal_db, bridge_pkg, monkeypatch)
         env="TEST",
         prior_fact={
             "decision": "approved",
+            "source_message_id": "MSG-PRIOR",
             "gmail_draft": {"draft_id": "DRAFT-OLD", "thread_id": "TH1"},
         },
         client=client,
@@ -78,6 +79,91 @@ def test_discard_skipped_without_draft_id(cal_db, bridge_pkg):
     )
     assert out["action"] == "skipped"
     assert out["reason"] == "no_orphan_draft_id"
+
+
+def test_discard_skips_gmail_delete_for_outreach_approval(cal_db, bridge_pkg):
+    """Superseding outreach approval must not call Gmail delete-draft."""
+    ogd = bridge_pkg.orphan_gmail_draft
+    iid = cal_db.upsert_identity(primary_handle="@og3", platform="instagram")
+    cid = "C-OG3"
+    cal_db.upsert_campaign_config(campaign_id=cid, env="TEST", test_mode_to="t@x.com")
+    cal_db.write_facts(
+        identity_id=iid,
+        campaign_id=cid,
+        namespace="offer",
+        facts={
+            "offer.gmail_draft_id": "DRAFT-OUTREACH",
+            "offer.gmail_thread_id": "TH-OUTREACH",
+            "offer.gmail_sent_thread_id": "TH-OUTREACH",
+            "offer.outreach_sent": True,
+            "offer.outreach_sent_at": "2026-06-10T18:17:08+00:00",
+        },
+        source="test",
+        env="TEST",
+    )
+    client = MagicMock()
+
+    out = ogd.discard_orphan_gmail_draft(
+        identity_id=iid,
+        campaign_id=cid,
+        env="TEST",
+        prior_fact={
+            "decision": "approved",
+            "source_message_id": f"draft:outreach_{cid}_{iid}",
+            "gmail_draft": {"draft_id": "DRAFT-OUTREACH", "thread_id": "TH-OUTREACH"},
+        },
+        client=client,
+    )
+    assert out["action"] == "skipped"
+    assert out["reason"] == "superseded_outreach_approval"
+    client.delete_draft.assert_not_called()
+    latest = cal_db.latest_facts_for(identity_id=iid, campaign_id=cid, env="TEST")
+    assert latest.get("offer.gmail_draft_id") == ""
+    assert latest.get("offer.gmail_thread_id") == "TH-OUTREACH"
+    assert latest.get("offer.gmail_sent_thread_id") == "TH-OUTREACH"
+
+
+def test_discard_skips_outreach_approval_even_before_sent(cal_db, bridge_pkg):
+    """Cold-outreach anchor supersede skips Gmail delete before outreach_sent too."""
+    ogd = bridge_pkg.orphan_gmail_draft
+    iid = cal_db.upsert_identity(primary_handle="@og4", platform="instagram")
+    cid = "C-OG4"
+    client = MagicMock()
+    out = ogd.discard_orphan_gmail_draft(
+        identity_id=iid,
+        campaign_id=cid,
+        env="TEST",
+        prior_fact={
+            "decision": "approved",
+            "source_message_id": f"draft:outreach_{cid}_{iid}",
+            "gmail_draft": {"draft_id": "DRAFT-OUTREACH", "thread_id": "TH-OUTREACH"},
+        },
+        client=client,
+    )
+    assert out["action"] == "skipped"
+    assert out["reason"] == "superseded_outreach_approval"
+    client.delete_draft.assert_not_called()
+
+
+def test_discard_skips_pending_reply_draft(cal_db, bridge_pkg):
+    ogd = bridge_pkg.orphan_gmail_draft
+    iid = cal_db.upsert_identity(primary_handle="@og5", platform="instagram")
+    cid = "C-OG5"
+    client = MagicMock()
+    out = ogd.discard_orphan_gmail_draft(
+        identity_id=iid,
+        campaign_id=cid,
+        env="TEST",
+        prior_fact={
+            "decision": "pending",
+            "source_message_id": "MSG1",
+            "gmail_draft": {"draft_id": "DRAFT-PENDING", "thread_id": "TH1"},
+        },
+        client=client,
+    )
+    assert out["action"] == "skipped"
+    assert out["reason"] == "not_approved_unsent_reply_draft"
+    client.delete_draft.assert_not_called()
 
 
 def test_persist_supersedes_deletes_orphan_gmail_draft(cal_db, monkeypatch):

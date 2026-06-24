@@ -47,6 +47,7 @@ from ..discovery_feedback import (
 )
 from ..learned_criteria import learned_criteria_brief_section
 from ..email_discover_dispatch import dispatch_email_discovery_for_approved_identities
+from ..creator_brief_dispatch import dispatch_creator_brief_refresh_for_approved_identities
 from ..nox_gate import (
     extract_campaign_config,
     materialize_campaign_config_file,
@@ -141,7 +142,9 @@ _LAUNCH_INSTRUCTIONS = (
     "   `discovery_target_count` and `product_pitch`.\n"
     "2. `skill_view(name='kol-outreach-orchestrator-flow')` to confirm\n"
     "   the master playbook; for a fresh launch the next step is\n"
-    "   kol-discovery-to-outreach-router -> Instagram KOL discovery.\n"
+    "   **Instagram KOL discovery only** — do NOT run\n"
+    "   `route-discovery` or outreach until the operator approves the\n"
+    "   shortlist in Console (router runs scoped on approve).\n"
     "3. `skill_view(name='instagram-kol-discovery')` and then EXECUTE\n"
     "   discovery using built-in `browser_*` on local debug Chrome —\n"
     "   `browser_navigate`, `browser_snapshot`, `browser_get_images`,\n"
@@ -165,9 +168,10 @@ _LAUNCH_INSTRUCTIONS = (
     "\n"
     "   ITERATION CONTRACT — HARD QUANTITY FLOOR (read carefully):\n"
     "   - `discovery_target_count` is a HARD FLOOR on persisted candidates,\n"
-    "     not a soft target. Only `add-candidate` rows present in\n"
-    "     `list-candidates` count toward the floor; disqualifying a profile\n"
-    "     (off-niche, audience too small, no contact) does NOT count.\n"
+    "     not a soft target. Only successful **`ingest-confirmed-candidate`**\n"
+    "     calls (verified via `list-candidates`) count toward the floor;\n"
+    "     disqualifying a profile (off-niche, audience too small, no contact)\n"
+    "     does NOT count.\n"
     "   - Budget yourself up to MAX(50, discovery_target_count * 4) profile\n"
     "     visits per pass. Try at least 3 distinct keyword angles before\n"
     "     considering yourself blocked.\n"
@@ -193,15 +197,17 @@ _LAUNCH_INSTRUCTIONS = (
     "   fails with `outreach_cooldown_active` if you skip the pre-check.\n"
     "4. Persist candidates IMMEDIATELY as you qualify them. Do not keep a\n"
     "   private in-memory candidate list and do not wait until the end of\n"
-    "   discovery to write CAL. For every qualified profile, perform this\n"
-    "   deterministic sequence before browsing for the next profile:\n"
-    "   a) `upsert-identity --env <env> --json @/tmp/identity.json`;\n"
-    "   b) `write-facts` or `write-facts-multi` for followers, region,\n"
-    "      email/contact, creator type, evidence URL, and fit notes;\n"
-    "   c) `add-candidate --env <env> --campaign-id <id> --json\n"
-    "      @/tmp/candidate.json`;\n"
+    "   discovery to write CAL. For every qualified profile, call\n"
+    "   **`ingest-confirmed-candidate`** once (nested JSON — see\n"
+    "   instagram-kol-discovery SKILL and\n"
+    "   references/bridge-cli-json-payloads.md):\n"
+    "   a) Write `@/tmp/ingest_<handle>.json` with identity + candidate +\n"
+    "      identity_facts (include review scores in candidate.payload);\n"
+    "   b) `kol_bridge_tool.py ingest-confirmed-candidate --env <env>\n"
+    "      --campaign-id <id> --json @/tmp/ingest_<handle>.json`;\n"
+    "   c) One handle per terminal call — no batching;\n"
     "   d) `list-candidates --env <env> --campaign-id <id>` and verify\n"
-    "      the handle is now present.\n"
+    "      the handle is present.\n"
     "   Every final answer MUST report the persisted count from\n"
     "   `list-candidates`, not a browser-only list.\n"
     "   After the target pool is persisted, call `resolve-relationships`.\n"
@@ -267,7 +273,8 @@ _APPROVAL_INSTRUCTIONS = (
     "   **NO browser / Chrome DevTools MCP in this outreach run** — Console\n"
     "   already queued `kol-email-discovery` (Nox Gate B + browser) for\n"
     "   identities listed under `# email_discovery_queued` in the input brief.\n"
-    "   a) Non-empty `primary_email` → proceed to step 5.\n"
+    "   a) Non-empty `primary_email` → continue creator-brief checks (4e–4f),\n"
+    "      then proceed to step 5 when not pending.\n"
     "   b) Empty email AND identity listed under `# email_discovery_queued`\n"
     "      (status started/queued/accepted/inflight): skip drafting for this\n"
     "      identity, do NOT open `contact_email_not_found` escalation — report\n"
@@ -280,6 +287,16 @@ _APPROVAL_INSTRUCTIONS = (
     "      approve. Continue to the next identity — never invent an address.\n"
     "   d) Never invoke `kol-cold-outreach` / `kol-reengagement-outreach`\n"
     "      without a verified `primary_email`.\n"
+    "   CREATOR BRIEF (before draft skills). Console may queue\n"
+    "   `kol-creator-brief-refresh` for identities under\n"
+    "   `# creator_brief_queued` in the input brief.\n"
+    "   e) Identity under `# creator_brief_queued` (status\n"
+    "      started/queued/accepted/inflight): skip drafting, report\n"
+    "      `pending_creator_brief` in the per-KOL summary — do NOT run\n"
+    "      browser or `kol-creator-brief-loader` in this outreach run.\n"
+    "   f) Brief missing/stale AND NOT in `# creator_brief_queued`:\n"
+    "      use passive `kol-creator-brief-loader` only (browser blocked\n"
+    "      here); accept `low_personalization` if facts remain empty.\n"
     "5. IDEMPOTENCY GATE (run BEFORE any draft skill invocation). For\n"
     "   each approved identity, call `get-facts --identity-id <id>\n"
     "   --campaign-id <id> --env <env>` and check:\n"
@@ -293,10 +310,11 @@ _APPROVAL_INSTRUCTIONS = (
     "   pending or approved would overwrite the operator's queue and is\n"
     "   a data-pollution bug, not a recoverable case. Only identities\n"
     "   that pass this gate proceed to step 6.\n"
-    "6. For each approved cold prospect WITH a verified email that passed\n"
-    "   step 5, invoke `kol-cold-outreach` with identity_id, campaign_id,\n"
-    "   env. For each approved safe repeat KOL WITH a verified email that\n"
-    "   passed step 5, invoke `kol-reengagement-outreach`. (\"Invoke\"\n"
+    "6. For each approved identity WITH verified email that passed step 5,\n"
+    "   AND is NOT marked `pending_email_discovery` or\n"
+    "   `pending_creator_brief` in the per-KOL summary, invoke\n"
+    "   `kol-cold-outreach` (cold) or `kol-reengagement-outreach` (repeat).\n"
+    "   (\"Invoke\"\n"
     "   means: read the SKILL.md and execute its Procedure yourself — see\n"
     "   Runtime contract above.) Before drafting each identity, build the\n"
     "   prompt header: `kol-email-style-loader` (pass `--owner-user-id` from\n"
@@ -340,6 +358,8 @@ _APPROVAL_INSTRUCTIONS = (
     "  in this outreach session. Open `contact_email_not_found` only for\n"
     "  identities still missing email that are NOT under\n"
     "  `# email_discovery_queued`.\n"
+    "- Identities under `# creator_brief_queued` report `pending_creator_brief`;\n"
+    "  do NOT run browser brief refresh in this outreach session.\n"
     "- Never invent an email address. Never invoke a draft skill for an\n"
     "  identity that does not have a verified `primary_email` after\n"
     "  step 4.\n"
@@ -2781,7 +2801,7 @@ async def _enrich_shortlist_rows(
         )
         return
 
-    facts_result, touch_result, internal_touch_result = await asyncio.gather(
+    facts_result, touch_result, internal_touch_result, brief_status_result = await asyncio.gather(
         bridge.batch_facts_subset(
             campaign_id=campaign_id,
             identity_ids=profile_ids,
@@ -2794,6 +2814,7 @@ async def _enrich_shortlist_rows(
             identity_ids=profile_ids,
             handles=_shortlist_touch_handles(candidates),
         ),
+        bridge.batch_creator_brief_status(profile_ids, env=env),
         return_exceptions=True,
     )
     facts_by_id: dict[int, dict[str, Any]] = (
@@ -2809,6 +2830,9 @@ async def _enrich_shortlist_rows(
         raw_internal = internal_touch_result.get("items")
         if isinstance(raw_internal, dict):
             internal_touch_items = raw_internal
+    brief_by_id: dict[int, dict[str, Any]] = (
+        brief_status_result if isinstance(brief_status_result, dict) else {}
+    )
 
     _apply_internal_touch_counts(candidates, internal_touch_items)
 
@@ -2819,6 +2843,11 @@ async def _enrich_shortlist_rows(
         facts = facts_by_id.get(iid) or {}
         c["preview_facts"] = facts
         c.update(_nox_fields_from_facts(facts))
+        brief_status = brief_by_id.get(iid) or {}
+        c["creator_brief_ready"] = bool(brief_status.get("ready"))
+        c["creator_brief_status"] = brief_status.get("status")
+        if brief_status.get("missing_keys"):
+            c["creator_brief_missing_keys"] = brief_status.get("missing_keys")
         c["profile_url"] = resolve_profile_url(
             platform=c.get("platform") if isinstance(c.get("platform"), str) else None,
             handle=c.get("handle"),
@@ -2992,6 +3021,7 @@ def _compose_approval_brief(
     actor_user_id: int | None = None,
     test_mode_to: str | None,
     email_discovery_queued: list[dict[str, Any]] | None = None,
+    creator_brief_queued: list[dict[str, Any]] | None = None,
 ) -> str:
     lines = [
         "# campaign_approval",
@@ -3046,6 +3076,26 @@ def _compose_approval_brief(
             if item.get("run_id"):
                 lines.append(f"  run_id: {item['run_id']}")
         lines.append("")
+    if creator_brief_queued:
+        lines.extend([
+            "# creator_brief_queued",
+            (
+                "Console queued kol-creator-brief-refresh (browser) "
+                "before this outreach run for these identities:"
+            ),
+        ])
+        for item in creator_brief_queued:
+            lines.append(f"- identity_id: {item.get('identity_id')}")
+            if item.get("handle"):
+                lines.append(f"  handle: {item['handle']}")
+            lines.append(f"  status: {item.get('status', 'queued')}")
+            if item.get("creator_brief_status"):
+                lines.append(
+                    f"  prior_brief_status: {item['creator_brief_status']}",
+                )
+            if item.get("run_id"):
+                lines.append(f"  run_id: {item['run_id']}")
+        lines.append("")
     lines.extend([
         "## Draft format (initial outreach — POVISON 683)",
         "Before `kol-cold-outreach` / `kol-reengagement-outreach`: "
@@ -3058,6 +3108,16 @@ def _compose_approval_brief(
             campaign_id=campaign_id,
             env=env,
             identity_ids=identity_ids,
+            email_discovery_queued_ids=[
+                int(item["identity_id"])
+                for item in (email_discovery_queued or [])
+                if item.get("identity_id") is not None
+            ],
+            creator_brief_queued_ids=[
+                int(item["identity_id"])
+                for item in (creator_brief_queued or [])
+                if item.get("identity_id") is not None
+            ],
         ),
     ])
     return "\n".join(lines)
@@ -3389,6 +3449,28 @@ async def approve_shortlist(
                 "started", "queued", "accepted", "inflight",
             )
         ]
+        email_discovery_identity_ids = {
+            int(item["identity_id"])
+            for item in email_discovery_queued
+            if item.get("identity_id") is not None
+        }
+        creator_brief_outcomes = await dispatch_creator_brief_refresh_for_approved_identities(
+            bridge=bridge,
+            gateway=gateway,
+            conn=conn,
+            campaign_id=campaign_id,
+            env=body.env,
+            selected_rows=selected_rows,
+            actor_email=user["email"],
+            actor_user_id=user["id"],
+            skip_identity_ids=email_discovery_identity_ids,
+        )
+        creator_brief_queued = [
+            item for item in creator_brief_outcomes
+            if item.get("status") in (
+                "started", "queued", "accepted", "inflight",
+            )
+        ]
         approval_brief = _compose_approval_brief(
             campaign_id=campaign_id,
             env=body.env,
@@ -3397,6 +3479,7 @@ async def approve_shortlist(
             actor_user_id=user.get("id"),
             test_mode_to=test_mode_to,
             email_discovery_queued=email_discovery_queued,
+            creator_brief_queued=creator_brief_queued,
         )
         try:
             session_id = f"kol-campaign-outreach:{body.env}:{campaign_id}"
@@ -3461,7 +3544,8 @@ async def approve_shortlist(
             target=campaign_id,
             payload={**payload, "selected_handles": body.selected_handles,
                      "run_id": new_run_id, "event_ids": event_ids,
-                     "email_discovery": email_discovery_outcomes},
+                     "email_discovery": email_discovery_outcomes,
+                     "creator_brief_refresh": creator_brief_outcomes},
         )
         return {
             **route_out,
@@ -3469,6 +3553,7 @@ async def approve_shortlist(
             "approved_count": len(identity_ids),
             "event_ids": event_ids,
             "email_discovery": email_discovery_outcomes,
+            "creator_brief_refresh": creator_brief_outcomes,
             "learning": learning_capture,
         }
 

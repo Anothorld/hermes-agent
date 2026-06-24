@@ -1,3 +1,5 @@
 name: cs-bridge-agent-guard
 description: Block QuickCEP send-email in povison-cs agent runs.
-version: 0.1.0
+version: 0.2.0
+hooks:
+  - pre_tool_call

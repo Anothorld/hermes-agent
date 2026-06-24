@@ -74,6 +74,10 @@ REDISCOVERY_INSTRUCTIONS = (
     f"- Repo root for file tools is {_REPO_ROOT}.\n"
     "- CLI failures print JSON on **stdout**. Empty output + exit 2 → read\n"
     "  stdout for `error`/`hint`; never fall back to execute_code.\n"
+    "- Guard block (`source: kol_bridge_agent_guard`) is NOT bridge validation —\n"
+    "  fix the terminal command per `hint`.\n"
+    "- Invalid subcommands: read-identity → get-identity; list-campaigns →\n"
+    "  get-campaign. `--pretty` is global before subcommand.\n"
     "- Do NOT read or search `plugins/kol-ops-bridge/` for API discovery.\n"
     "- Use the **terminal** tool for `kol_bridge_tool.py` (not execute_code+subprocess).\n"
     "- Ingest JSON shape: `skills/social-media/instagram-kol-discovery/references/"
@@ -89,12 +93,16 @@ REDISCOVERY_INSTRUCTIONS = (
     "1. SKIP kol-campaign-intake. campaign_config is already persisted; do\n"
     "   NOT call upsert-campaign and do NOT overwrite any existing config.\n"
     "2. Read the current candidate pool from CAL FIRST:\n"
-    "   `list-candidates --env <env> --campaign-id <id>`. Build an\n"
+    "   `list-candidates --env <env> --campaign-id <id>` (print to terminal stdout —\n"
+    "   NEVER `> /tmp/...`; redirect empties stdout and looks like CAL failure).\n"
+    "   Or `list-candidate-handles` for a compact handle-only view.\n"
+    "   Build an\n"
     "   exclusion set of every handle currently in the pool, regardless of\n"
     "   candidate_status (new/selected_for_outreach/rejected/archived).\n"
     "   Merge this set with the `already_discovered_handles` block in the\n"
-    "   brief — trust whichever is larger. Also merge handles from\n"
-    "   `list-outreach-cooldown-handles --env <env> --plain` (14-day\n"
+    "   brief — both mean **already persisted in CAL**; trust whichever is\n"
+    "   larger. Do NOT re-ingest handles that appear in either set. Also merge\n"
+    "   handles from `list-outreach-cooldown-handles --env <env> --plain` (14-day\n"
     "   cross-campaign outreach cooldown) so rediscover never re-adds a\n"
     "   recently contacted KOL.\n"
     "3. `skill_view(name='instagram-kol-discovery')` and then EXECUTE\n"
@@ -174,6 +182,11 @@ REDISCOVERY_INSTRUCTIONS = (
     "requires the YAML field names above.\n"
     "\n"
     "## Failure handling\n"
+    "- Terminal tool returned ~45 chars with empty `output` and exit 0 → you\n"
+    "  redirected bridge stdout with `> file` or piped through head/grep/jq.\n"
+    "  Re-run without redirect/pipe; read full JSON from terminal stdout.\n"
+    "- Guard block JSON with `source: kol_bridge_agent_guard` is NOT bridge\n"
+    "  validation — fix the command per `hint`.\n"
     "- If `list-candidates` returns 0 BEFORE step 2, treat the brief's\n"
     "  `already_discovered_handles` as authoritative.\n"
     "- If the bridge returns 401, the X-Bridge-Key header is missing —\n"
@@ -250,7 +263,7 @@ def _compose_rediscover_brief(
         (
             "already_discovered_handles: []"
             if not excluded_handles
-            else "already_discovered_handles:"
+            else "already_discovered_handles:  # ALREADY IN CAL — skip ingest for every handle below"
         ),
     ])
     for handle in excluded_handles:
@@ -608,6 +621,7 @@ def _render_resume_directives_block(pending_items: list[str]) -> list[str]:
         lines.append(f"  - {item}")
     lines.extend([
         "STEP_0: For EACH handle above not in list-candidates exclusion set:",
+        "  (Skip if handle is in `already_discovered_handles` — already in CAL.)",
         "  browser_navigate profile if needed → write /tmp/ingest_<handle>.json",
         "  (nested source/identity/candidate per bridge-cli-json-payloads.md)",
         "  → ingest-confirmed-candidate → list-candidates verify",

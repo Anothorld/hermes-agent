@@ -2314,6 +2314,13 @@ def list_discovery_skip_handles(
             ).fetchall()
         for row in rows:
             _add(row["primary_handle"], str(row["last_outcome"]))
+        try:
+            from . import legacy_outcome_repair as _lor
+
+            for row in _lor.list_misclassified_identities(env=env, limit=limit):
+                _add(row.get("handle"), _lor.REPAIR_TARGET_OUTCOME)
+        except Exception:
+            pass
         return items[:limit]
 
     return _safe("list_discovery_skip_handles", _do) or []
@@ -3669,6 +3676,51 @@ def recompute_goals(*, identity_id: int, campaign_id: str, env: str = "LIVE") ->
                                       campaign_id=campaign_id, env=env) or 0
 
 
+def _agent_debug_goal_gate_log(
+    *,
+    identity_id: int,
+    campaign_id: str,
+    state: Mapping[str, Any],
+    ctx: Any,
+    statuses: Mapping[str, str],
+    hypothesis_id: str = "H1",
+) -> None:
+    """NDJSON debug log for fulfillment gate investigations (session cf0831)."""
+    # #region agent log
+    try:
+        from . import goals as _goals_mod
+
+        payload = {
+            "sessionId": "cf0831",
+            "hypothesisId": hypothesis_id,
+            "location": "cal.py:_recompute_goals_inner",
+            "message": "goal_recompute_fulfillment_gate",
+            "data": {
+                "identity_id": identity_id,
+                "campaign_id": campaign_id,
+                "contract_required": bool(ctx.campaign_cfg.get("contract_required", True)),
+                "defer_terms_to_contract": bool(ctx.campaign_cfg.get("defer_terms_to_contract")),
+                "compensation_mode": state.get("offer.compensation_mode"),
+                "agreed_terms_present": bool(state.get("offer.agreed_terms")),
+                "compensation_satisfied": _goals_mod._compensation_satisfied(state, ctx),
+                "contract_satisfied": _goals_mod._contract_satisfied(state, ctx),
+                "logistics_status": statuses.get("logistics"),
+                "payout_setup_status": statuses.get("payout_setup"),
+                "deliverables_scope_status": statuses.get("deliverables_scope"),
+            },
+            "timestamp": int(_dt.datetime.now(_dt.timezone.utc).timestamp() * 1000),
+        }
+        with open(
+            "/Users/arnold/agent_prj/.cursor/debug-cf0831.log",
+            "a",
+            encoding="utf-8",
+        ) as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+    # #endregion
+
+
 def _recompute_goals_inner(
     conn: sqlite3.Connection, *, identity_id: int, campaign_id: str, env: str
 ) -> int:
@@ -3699,6 +3751,7 @@ def _recompute_goals_inner(
 
     now = _now()
     n = 0
+    status_by_goal: dict[str, str] = {}
     for goal in all_goals():
         missing = goal.missing(state, ctx)
         if goal.is_skipped(state, ctx):
@@ -3709,6 +3762,7 @@ def _recompute_goals_inner(
             status = "active"
         else:
             status = "inactive"
+        status_by_goal[goal.name] = status
         conn.execute(
             """INSERT INTO kol_goal_state
                (identity_id, campaign_id, goal, status, lane,
@@ -3723,6 +3777,14 @@ def _recompute_goals_inner(
              _j(missing), "{}", now, env),
         )
         n += 1
+    if not cfg.get("contract_required", True) or status_by_goal.get("logistics") == "active":
+        _agent_debug_goal_gate_log(
+            identity_id=identity_id,
+            campaign_id=campaign_id,
+            state=state,
+            ctx=ctx,
+            statuses=status_by_goal,
+        )
     return n
 
 
@@ -3885,6 +3947,67 @@ def batch_kanban_facts(
         env=env,
         fact_keys=KANBAN_FACT_KEYS,
     )
+
+
+def batch_identity_facts_subset(
+    *,
+    identity_ids: Iterable[int],
+    env: str = "LIVE",
+    fact_keys: Iterable[str],
+) -> dict[int, dict[str, Any]]:
+    """Latest identity-level fact values (``campaign_id IS NULL``) across many ids."""
+    ids = [int(i) for i in identity_ids if i is not None]
+    if not ids:
+        return {}
+    keys = [str(k) for k in fact_keys if k]
+    if not keys:
+        return {i: {} for i in ids}
+    id_ph = ",".join("?" * len(ids))
+    key_ph = ",".join("?" * len(keys))
+
+    def _do() -> dict[int, dict[str, Any]]:
+        with _connect() as conn:
+            ident_rows = conn.execute(
+                f"""SELECT identity_id, fact_key, fact_value FROM kol_facts_latest
+                     WHERE identity_id IN ({id_ph}) AND campaign_id IS NULL AND env=?
+                       AND fact_key IN ({key_ph})""",
+                (*ids, env, *keys),
+            ).fetchall()
+        out: dict[int, dict[str, Any]] = {i: {} for i in ids}
+        for r in ident_rows:
+            out[int(r["identity_id"])][r["fact_key"]] = _decode_fact_value(r["fact_value"])
+        return out
+
+    return _safe("batch_identity_facts_subset", _do) or {}
+
+
+def batch_creator_brief_status(
+    *,
+    identity_ids: Iterable[int],
+    env: str = "LIVE",
+) -> dict[int, dict[str, Any]]:
+    """Assess creator-brief readiness for many identities (shortlist / approve)."""
+    from .creator_brief_status import (  # noqa: WPS433 — keep cal import surface stable
+        CREATOR_BRIEF_STATUS_FACT_KEYS,
+        assess_creator_brief_readiness,
+    )
+
+    ids = [int(i) for i in identity_ids if i is not None]
+    if not ids:
+        return {}
+
+    def _do() -> dict[int, dict[str, Any]]:
+        facts_by_id = batch_identity_facts_subset(
+            identity_ids=ids,
+            env=env,
+            fact_keys=CREATOR_BRIEF_STATUS_FACT_KEYS,
+        )
+        return {
+            iid: assess_creator_brief_readiness(facts_by_id.get(iid) or {})
+            for iid in ids
+        }
+
+    return _safe("batch_creator_brief_status", _do) or {}
 
 
 def batch_identity_briefs(identity_ids: Iterable[int]) -> dict[int, dict[str, Any]]:

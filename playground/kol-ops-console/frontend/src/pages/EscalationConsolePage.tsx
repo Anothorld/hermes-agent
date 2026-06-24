@@ -34,6 +34,12 @@ import { usePollingFallback } from '../hooks/usePollingFallback';
 import { useDataChannel } from '../hooks/useDataChannel';
 import { useKolListScope } from '../hooks/useKolListScope';
 import { matchesKolQuery } from '../lib/kolSearch';
+import { QueueSortSelect } from '../components/inputs/QueueSortSelect';
+import {
+  queueSortQueryParams,
+  sortByIsoTime,
+  type QueueSortMode,
+} from '../lib/queueSort';
 import {
   escalationDisplaySummary,
   escalationRuleLabel,
@@ -163,6 +169,7 @@ function EscalationList() {
   } = useKolListScope();
   const [rows, setRows] = useState<EscalationRow[]>([]);
   const [sla, setSla] = useState<SlaFilter>('all');
+  const [sortMode, setSortMode] = useState<QueueSortMode>('priority');
   const [state, setState] = useState<
     'awaiting_answer' | 'answered' | 'resolved' | 're_escalated' | 'aborted' | 'all'
   >('awaiting_answer');
@@ -173,6 +180,9 @@ function EscalationList() {
   const refresh = useCallback(async () => {
     try {
       const params = new URLSearchParams({ env });
+      const { sort, order } = queueSortQueryParams(sortMode);
+      params.set('sort', sort);
+      params.set('order', order);
       if (state !== 'all') params.set('state', state);
       for (const [key, value] of scopeQueryParams.entries()) {
         params.set(key, value);
@@ -202,7 +212,7 @@ function EscalationList() {
     } catch (ex) {
       setErr(ex);
     }
-  }, [env, state, markSeen, scopeQueryParams]);
+  }, [env, state, sortMode, markSeen, scopeQueryParams]);
 
   const terminate = useCallback(
     async (rowId: number) => {
@@ -253,14 +263,15 @@ function EscalationList() {
   };
 
   const visibleRows = useMemo(() => {
-    return rows.filter((r) => {
+    const filtered = rows.filter((r) => {
       if (!matchesKolQuery(r, kolQuery)) return false;
       if (sla === 'all') return true;
       const level = slaLevel(r.created_at);
       if (sla === 'at_risk') return level === 'at_risk' || level === 'breached';
       return level === 'breached';
     });
-  }, [rows, sla, kolQuery]);
+    return sortByIsoTime(filtered, sortMode, (r) => r.created_at);
+  }, [rows, sla, kolQuery, sortMode]);
 
   const scopeLabel = useMemo(() => {
     if (!hasKolScope) return null;
@@ -304,6 +315,7 @@ function EscalationList() {
           <option value="at_risk">SLA 30 分钟+</option>
           <option value="breached">SLA 2 小时+</option>
         </select>
+        <QueueSortSelect value={sortMode} onChange={setSortMode} />
       </div>
       {!!err && <ErrorAlert error={err} onRetry={refresh} />}
       <table className="w-full text-sm">

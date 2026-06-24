@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any, Final, Optional
 
 from . import cal
@@ -17,6 +18,36 @@ from .gmail_client import GmailUnavailable
 from .gmail_reconcile import backfill_edit_learning_all_mailboxes, run_reconcile_all_mailboxes
 
 log = logging.getLogger(__name__)
+
+# Process-wide guard so overlapping learning runs (capture every 15m vs a
+# slow backfill, or capture vs nightly) never stack inside the bridge and
+# starve the HTTP worker — the failure mode behind the capture-cron
+# RemoteDisconnected / socket.timeout incidents. A run that arrives while
+# another is in flight returns a fast "skipped" instead of contending.
+# Serializing this scarce resource follows the gateway perf guardrail (§7).
+_RUN_LOCK = threading.Lock()
+
+
+# #region agent log
+def _debug_log(message: str, data: dict) -> None:
+    """Best-effort NDJSON debug log (session 60e90d). Never raises."""
+    try:
+        import json as _json
+        import time as _time
+
+        line = _json.dumps({
+            "sessionId": "60e90d",
+            "hypothesisId": "CAPTURE",
+            "location": "learning_jobs.py",
+            "message": message,
+            "data": data,
+            "timestamp": int(_time.time() * 1000),
+        }, ensure_ascii=False)
+        with open("/Users/arnold/agent_prj/.cursor/debug-60e90d.log", "a", encoding="utf-8") as _fh:
+            _fh.write(line + "\n")
+    except Exception:
+        pass
+# #endregion
 
 # Autonomous cron learning always uses production data.
 SCHEDULED_LEARNING_ENV: Final[str] = "LIVE"
@@ -548,6 +579,69 @@ def run_scheduled_jobs(
             "disabled": True,
             "results": [],
         }
+
+    # Skip-if-running guard: never let a second learning run pile onto an
+    # in-flight one (capture stacking → bridge starvation). Dry-runs are
+    # cheap previews and bypass the lock.
+    if not dry_run:
+        acquired = _RUN_LOCK.acquire(blocking=False)
+        if not acquired:
+            _debug_log("learning_run_skipped_locked", {
+                "suite": suite, "triggered_by": triggered_by, "env": env,
+            })
+            return {
+                "ok": True,
+                "env": env,
+                "triggered_by": triggered_by,
+                "suite": suite,
+                "skipped": True,
+                "reason": "learning_run_in_progress",
+                "results": [],
+            }
+        try:
+            _debug_log("learning_run_started", {
+                "suite": suite, "triggered_by": triggered_by, "env": env,
+            })
+            return _run_scheduled_jobs_locked(
+                env=env,
+                triggered_by=triggered_by,
+                jobs=jobs,
+                suite=suite,
+                limit=limit,
+                lookback_days=lookback_days,
+                max_results=max_results,
+                min_pricing_samples=min_pricing_samples,
+                dry_run=dry_run,
+            )
+        finally:
+            _RUN_LOCK.release()
+
+    return _run_scheduled_jobs_locked(
+        env=env,
+        triggered_by=triggered_by,
+        jobs=jobs,
+        suite=suite,
+        limit=limit,
+        lookback_days=lookback_days,
+        max_results=max_results,
+        min_pricing_samples=min_pricing_samples,
+        dry_run=dry_run,
+    )
+
+
+def _run_scheduled_jobs_locked(
+    *,
+    env: str,
+    triggered_by: str,
+    jobs: Optional[list[str]],
+    suite: Optional[str],
+    limit: int,
+    lookback_days: int,
+    max_results: int,
+    min_pricing_samples: Optional[int],
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Inner body of :func:`run_scheduled_jobs` (runs under the run lock)."""
     min_samples = min_pricing_samples
     if min_samples is None:
         min_samples = int(os.environ.get("KOL_LEARNING_MIN_PRICING_SAMPLES", "3"))

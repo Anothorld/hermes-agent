@@ -11,9 +11,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.post_email_discover_draft import (
+    maybe_trigger_outreach_draft_after_creator_brief_refresh,
     maybe_trigger_outreach_draft_after_email_discover,
+    parse_creator_brief_refresh_session,
     parse_email_discover_session,
 )
+
+
+def test_parse_creator_brief_refresh_session() -> None:
+    assert parse_creator_brief_refresh_session(
+        "kol-creator-brief-refresh:LIVE:42:tok-abc",
+    ) == ("LIVE", 42)
+    assert parse_creator_brief_refresh_session("kol-email-discover:LIVE:42:tok") is None
 
 
 def test_parse_email_discover_session() -> None:
@@ -95,6 +104,7 @@ class _StubBridge:
         }
         self.facts: dict[str, Any] = {}
         self.config: dict[str, Any] = {"product_display_name": "Sofa"}
+        self.brief_ready = False
 
     async def list_candidates(self, campaign_id: str, *, env: str) -> list[dict]:
         return self.candidates
@@ -118,11 +128,22 @@ class _StubBridge:
             "campaign_config": self.config,
         }
 
+    async def batch_creator_brief_status(
+        self, identity_ids: list[int], *, env: str = "LIVE",
+    ) -> dict[int, dict[str, Any]]:
+        if self.brief_ready:
+            return {iid: {"ready": True, "status": "ready"} for iid in identity_ids}
+        return {
+            iid: {"ready": False, "status": "missing", "missing_keys": []}
+            for iid in identity_ids
+        }
+
 
 @pytest.mark.asyncio
 async def test_auto_draft_starts_after_discover_complete(tmp_path) -> None:
     conn = _seed_conn(tmp_path)
     bridge = _StubBridge()
+    bridge.brief_ready = True
     gateway = MagicMock()
     gateway.start_run_with_retry = AsyncMock(return_value={"run_id": "run-draft-1"})
     gateway.launch_via_queue = AsyncMock(return_value={"run_id": "run-draft-1"})
@@ -195,4 +216,67 @@ async def test_auto_draft_skips_when_draft_already_exists(tmp_path) -> None:
     )
 
     assert out is None
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_draft_defers_when_brief_not_ready(tmp_path) -> None:
+    conn = _seed_conn(tmp_path)
+    bridge = _StubBridge()
+    bridge.brief_ready = False
+    gateway = MagicMock()
+
+    with patch(
+        "app.creator_brief_dispatch.dispatch_creator_brief_refresh_for_identity",
+        new_callable=AsyncMock,
+        return_value={"status": "accepted", "identity_id": 42},
+    ) as mock_brief:
+        out = await maybe_trigger_outreach_draft_after_email_discover(
+            bridge=bridge,
+            gateway=gateway,
+            conn=conn,
+            campaign_id="CID-1",
+            env="LIVE",
+            session_id="kol-email-discover:LIVE:42:tok-1",
+            discover_run_id="run-discover-1",
+        )
+
+    assert out is not None
+    assert out["status"] == "deferred_creator_brief"
+    mock_brief.assert_awaited_once()
+    gateway.launch_via_queue.assert_not_called()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_draft_after_brief_refresh_complete(tmp_path) -> None:
+    conn = _seed_conn(tmp_path)
+    bridge = _StubBridge()
+    bridge.brief_ready = True
+    gateway = MagicMock()
+    gateway.start_run_with_retry = AsyncMock(return_value={"run_id": "run-draft-2"})
+    gateway.launch_via_queue = AsyncMock(return_value={"run_id": "run-draft-2"})
+    gateway.ensure_run_drained = MagicMock()
+
+    with patch(
+        "app.post_email_discover_draft._ensure_bridge_key_for_gateway",
+        return_value=True,
+    ):
+        out = await maybe_trigger_outreach_draft_after_creator_brief_refresh(
+            bridge=bridge,
+            gateway=gateway,
+            conn=conn,
+            campaign_id="CID-1",
+            env="LIVE",
+            session_id="kol-creator-brief-refresh:LIVE:42:tok-2",
+            brief_refresh_run_id="run-brief-1",
+        )
+
+    assert out is not None
+    assert out["draft_run_id"] == "run-draft-2"
+    audit = conn.execute(
+        "SELECT action FROM audit_log WHERE action=?",
+        ("campaign.auto_draft_after_creator_brief_refresh",),
+    ).fetchone()
+    assert audit is not None
     conn.close()

@@ -1,17 +1,16 @@
-"""Escalation SLA timeout tracking and Feishu thread reminders."""
+"""Escalation SLA timeout tracking, resuming stale cleanup, and Feishu reminders."""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import cal
+from .escalation_completion import complete_resuming_escalation_by_id
+from .feishu_client import reply_to_message, tenant_access_token
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +20,7 @@ _TIMEOUT_HOURS = {
     "medium": float(os.environ.get("CS_OPS_ESCALATION_TIMEOUT_MED_H", "8")),
     "low": float(os.environ.get("CS_OPS_ESCALATION_TIMEOUT_LOW_H", "24")),
 }
+_RESUMING_TIMEOUT_H = float(os.environ.get("CS_OPS_ESCALATION_RESUMING_TIMEOUT_H", "4"))
 
 
 def _parse_ts(value: str) -> Optional[datetime]:
@@ -32,38 +32,56 @@ def _parse_ts(value: str) -> Optional[datetime]:
         return None
 
 
-def _feishu_token() -> Optional[str]:
-    app_id = os.environ.get("FEISHU_APP_ID", "")
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
-    if not app_id or not app_secret:
+def _hours_since(ts: str, *, now: datetime) -> Optional[float]:
+    parsed = _parse_ts(ts)
+    if not parsed:
         return None
-    body = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
-    req = urllib.request.Request(
-        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read().decode())
-    return data.get("tenant_access_token")
+    return (now - parsed.astimezone(timezone.utc)).total_seconds() / 3600
 
 
-def _post_thread_reply(*, token: str, message_id: str, text: str) -> bool:
-    body = json.dumps({"content": json.dumps({"text": text})}).encode()
-    req = urllib.request.Request(
-        f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
-        data=body,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
+def check_resuming_stale_once() -> dict[str, Any]:
+    """Finalize resuming escalations when resume run never completes handoff."""
+    now = datetime.now(timezone.utc)
+    state = cal.get_poller_state("escalation_resuming_timeout")
+    handled: set[str] = set(state.get("handled_ids") or [])
+    newly_handled = 0
+
+    for esc in cal.list_escalations(state="resuming", env=_ENV):
+        eid = str(esc["id"])
+        if eid in handled:
+            continue
+        ctx = esc.get("resume_context") or {}
+        if ctx.get("resuming_timeout_handled"):
+            handled.add(eid)
+            continue
+        anchor = str(ctx.get("resume_launched_at") or ctx.get("claimed_at") or esc.get("decided_at") or "")
+        elapsed_h = _hours_since(anchor, now=now)
+        if elapsed_h is None or elapsed_h < _RESUMING_TIMEOUT_H:
+            continue
+        qsid = str(esc.get("quickcep_session_id") or "")
+        result = complete_resuming_escalation_by_id(
+            escalation_id=int(eid),
+            phase="failed",
+            quickcep_session_id=qsid,
+            operator_hint=f"resume 超过 {_RESUMING_TIMEOUT_H:g}h 未完成，已自动关闭",
+            feishu_chat_id=esc.get("feishu_chat_id"),
+        )
+        if result.get("ok"):
+            cal.merge_escalation_resume_context(
+                escalation_id=int(eid),
+                patch={"resuming_timeout_handled": True},
+            )
+            handled.add(eid)
+            newly_handled += 1
+            log.warning("resuming escalation timed out esc=%s elapsed_h=%.1f", eid, elapsed_h)
+        else:
+            log.warning("resuming timeout finalize failed esc=%s: %s", eid, result.get("error"))
+
+    cal.set_poller_state(
+        "escalation_resuming_timeout",
+        {"handled_ids": sorted(handled), "last_run": time.time(), "newly_handled": newly_handled},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-        return data.get("code") == 0
-    except urllib.error.HTTPError as exc:
-        log.warning("feishu reminder reply failed: %s", exc)
-        return False
+    return {"newly_handled": newly_handled, "tracked": len(handled)}
 
 
 def check_timeouts_once() -> dict[str, Any]:
@@ -71,7 +89,7 @@ def check_timeouts_once() -> dict[str, Any]:
     state = cal.get_poller_state("escalation_timeout")
     reminded: set[str] = set(state.get("reminded_ids") or [])
     newly_reminded = 0
-    token = _feishu_token()
+    token = tenant_access_token()
 
     for esc in cal.list_escalations(state="awaiting_answer", env=_ENV):
         eid = str(esc["id"])
@@ -100,7 +118,8 @@ def check_timeouts_once() -> dict[str, Any]:
             text = (
                 f"⏰ [ESC:{eid}] 已超过 {hours:g}h 未收到后援回复，请尽快 @AI客服 处理。"
             )
-            if _post_thread_reply(token=str(token), message_id=str(msg_id), text=text):
+            send = reply_to_message(token=str(token), message_id=str(msg_id), text=text)
+            if send.ok:
                 reminded.add(eid)
                 newly_reminded += 1
         else:
@@ -112,7 +131,12 @@ def check_timeouts_once() -> dict[str, Any]:
         "escalation_timeout",
         {"reminded_ids": sorted(reminded), "last_run": time.time(), "newly_reminded": newly_reminded},
     )
-    return {"newly_reminded": newly_reminded, "tracked": len(reminded)}
+    resuming_stats = check_resuming_stale_once()
+    return {
+        "newly_reminded": newly_reminded,
+        "tracked": len(reminded),
+        **resuming_stats,
+    }
 
 
 async def start_background() -> None:

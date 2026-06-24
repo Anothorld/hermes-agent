@@ -80,6 +80,57 @@ def cmd_list_discovery_skip_handles(args: argparse.Namespace) -> None:
     print_json(data)
 
 
+def cmd_repair_legacy_outcomes(args: argparse.Namespace) -> None:
+    body: dict[str, object] = {
+        "dry_run": args.dry_run,
+        "limit": args.limit,
+    }
+    if args.identity_ids:
+        body["identity_ids"] = [
+            int(x) for x in args.identity_ids.split(",") if x.strip().isdigit()
+        ]
+    print_json(client_from_args(args).request(
+        "POST",
+        "/maintenance/repair-legacy-outcomes",
+        params={"env": args.env},
+        body=body,
+    ))
+
+
+def cmd_sync_legacy_event_payloads(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "POST",
+        "/maintenance/sync-legacy-event-payloads",
+        params={"env": args.env},
+        body={
+            "dry_run": args.dry_run,
+            "target_outcome": args.target_outcome,
+            "limit": args.limit,
+        },
+    ))
+
+
+def cmd_list_duplicate_identities(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "GET",
+        "/maintenance/duplicate-identities",
+        params={"env": args.env, "limit": args.limit},
+    ))
+
+
+def cmd_merge_identities(args: argparse.Namespace) -> None:
+    print_json(client_from_args(args).request(
+        "POST",
+        "/maintenance/merge-identities",
+        params={"env": args.env},
+        body={
+            "keep_id": args.keep_id,
+            "merge_id": args.merge_id,
+            "dry_run": args.dry_run,
+        },
+    ))
+
+
 def cmd_batch_outreach_touch(args: argparse.Namespace) -> None:
     ids = [int(x) for x in args.identity_ids.split(",") if x.strip().isdigit()]
     print_json(client_from_args(args).request(
@@ -328,6 +379,58 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--plain", action="store_true",
                    help="Print one handle per line (for brief exclusion sets).")
     p.set_defaults(func=cmd_list_discovery_skip_handles)
+
+    p = sub.add_parser(
+        "repair-legacy-outcomes",
+        help=("POST /maintenance/repair-legacy-outcomes — fix false "
+              "incomplete outcomes on legacy 红人日报表 imports."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report candidates without writing CAL.",
+    )
+    p.add_argument(
+        "--identity-ids",
+        default=None,
+        help="Optional comma-separated identity_id list; default scans all.",
+    )
+    p.add_argument("--limit", type=int, default=10_000)
+    p.set_defaults(func=cmd_repair_legacy_outcomes)
+
+    p = sub.add_parser(
+        "sync-legacy-event-payloads",
+        help=("POST /maintenance/sync-legacy-event-payloads — align stale "
+              "legacy.collab_imported event outcomes."),
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--target-outcome", default="success")
+    p.add_argument("--limit", type=int, default=10_000)
+    p.set_defaults(func=cmd_sync_legacy_event_payloads)
+
+    p = sub.add_parser(
+        "list-duplicate-identities",
+        help="GET /maintenance/duplicate-identities — duplicate handle groups.",
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--limit", type=int, default=100)
+    p.set_defaults(func=cmd_list_duplicate_identities)
+
+    p = sub.add_parser(
+        "merge-identities",
+        help="POST /maintenance/merge-identities — merge duplicate identity rows.",
+    )
+    add_common_args(p)
+    add_env_arg(p)
+    p.add_argument("--keep-id", type=int, required=True)
+    p.add_argument("--merge-id", type=int, required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_merge_identities)
 
     p = sub.add_parser(
         "batch-outreach-touch",

@@ -89,7 +89,7 @@ SCHEMA = [
         campaign_id TEXT NOT NULL,
         env TEXT NOT NULL CHECK (env IN ('LIVE','TEST')),
         run_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('outreach','reply','draft','resume','refine','email_discover')),
+        kind TEXT NOT NULL CHECK (kind IN ('outreach','reply','draft','resume','refine','email_discover','creator_brief_refresh')),
         session_id TEXT,
         dedup_key TEXT,
         started_at TEXT NOT NULL,
@@ -303,6 +303,7 @@ def _migrate_product_campaign_runs(conn: sqlite3.Connection) -> None:
     needs_check_fix = (
         "'refine'" not in existing_sql
         or "'email_discover'" not in existing_sql
+        or "'creator_brief_refresh'" not in existing_sql
     )
     if needs_check_fix:
         # autocommit mode (isolation_level=None) — wrap explicitly so the
@@ -319,7 +320,7 @@ def _migrate_product_campaign_runs(conn: sqlite3.Connection) -> None:
                     campaign_id TEXT NOT NULL,
                     env TEXT NOT NULL CHECK (env IN ('LIVE','TEST')),
                     run_id TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK (kind IN ('outreach','reply','draft','resume','refine','email_discover')),
+                    kind TEXT NOT NULL CHECK (kind IN ('outreach','reply','draft','resume','refine','email_discover','creator_brief_refresh')),
                     session_id TEXT,
                     dedup_key TEXT,
                     started_at TEXT NOT NULL,

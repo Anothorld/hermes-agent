@@ -1,8 +1,7 @@
-"""langfuse — Hermes plugin for Langfuse observability.
+"""langfuse -- Hermes plugin for Langfuse observability.
 
 Traces Hermes conversations, LLM calls, and tool usage to Langfuse.
-
-Activation is handled by the Hermes plugin system — standalone plugins only
+Activation is handled by the Hermes plugin system -- standalone plugins only
 load when listed in ``plugins.enabled`` (via ``hermes plugins enable
 observability/langfuse``, or by checking the box in the interactive
 ``hermes plugins`` UI). At runtime the plugin also requires the
@@ -16,11 +15,19 @@ Required env vars (set in ~/.hermes/.env):
 Optional env vars:
   HERMES_LANGFUSE_ENV         - environment tag (e.g. "production", "local")
   HERMES_LANGFUSE_RELEASE     - release/version tag
-  HERMES_LANGFUSE_SAMPLE_RATE - sampling rate 0.0–1.0 (default: 1.0)
+  HERMES_LANGFUSE_USER_ID     - user identifier for cost attribution & filtering
+  HERMES_LANGFUSE_SAMPLE_RATE - sampling rate 0.0-1.0 (default: 1.0)
   HERMES_LANGFUSE_MAX_CHARS   - max chars per field (default: 12000)
   HERMES_LANGFUSE_DEBUG       - set to "true" for verbose logging
+
+Langfuse SDK v4 notes:
+  - ``release`` and ``environment`` are set via LANGFUSE_RELEASE /
+    LANGFUSE_TRACING_ENVIRONMENT env vars (not constructor kwargs).
+  - ``metadata`` values must be ``dict[str, str]`` with values <=200 chars.
+  - ``set_trace_io()`` is deprecated; set input/output on root observation directly.
+  - ``should_export_span`` controls span export; default only exports LLM spans.
 """
-from __future__ import annotations
+_PLUGIN_VERSION = "2024-06-22-split-handlers"  # marker for runtime verification
 
 import json
 import logging
@@ -50,6 +57,7 @@ class TraceState:
     pending_tools_by_name: Dict[str, list] = field(default_factory=dict)
     turn_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     last_updated_at: float = field(default_factory=time.time)
+    output_set: bool = False
 
 
 _STATE_LOCK = threading.Lock()
@@ -190,8 +198,25 @@ def _get_langfuse() -> Optional[Langfuse]:
         return None
 
     base_url = _env("HERMES_LANGFUSE_BASE_URL") or _env("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com"
-    environment = _env("HERMES_LANGFUSE_ENV") or _env("LANGFUSE_ENV")
-    release = _env("HERMES_LANGFUSE_RELEASE") or _env("LANGFUSE_RELEASE")
+
+    # In Langfuse SDK v4, the OpenTelemetry-based exporter reads credentials
+    # from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST env vars
+    # (NOT constructor kwargs). The HERMES_ prefixed vars are our convention;
+    # we must bridge them to the SDK-expected env vars so the OTLP exporter
+    # can authenticate. Without this, the exporter gets 401 Unauthorized.
+    if public_key and not _env("LANGFUSE_PUBLIC_KEY"):
+        os.environ["LANGFUSE_PUBLIC_KEY"] = public_key
+    if secret_key and not _env("LANGFUSE_SECRET_KEY"):
+        os.environ["LANGFUSE_SECRET_KEY"] = secret_key
+    if base_url and not _env("LANGFUSE_HOST"):
+        os.environ["LANGFUSE_HOST"] = base_url
+
+    # Release and environment are also read from env vars in v4.
+    if _env("HERMES_LANGFUSE_RELEASE") and not _env("LANGFUSE_RELEASE"):
+        os.environ["LANGFUSE_RELEASE"] = _env("HERMES_LANGFUSE_RELEASE")
+    if _env("HERMES_LANGFUSE_ENV") and not _env("LANGFUSE_TRACING_ENVIRONMENT"):
+        os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = _env("HERMES_LANGFUSE_ENV")
+
     sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
 
     kwargs: Dict[str, Any] = {
@@ -199,10 +224,6 @@ def _get_langfuse() -> Optional[Langfuse]:
         "secret_key": secret_key,
         "base_url": base_url,
     }
-    if environment:
-        kwargs["environment"] = environment
-    if release:
-        kwargs["release"] = release
     if sample_rate:
         try:
             kwargs["sample_rate"] = float(sample_rate)
@@ -217,6 +238,27 @@ def _get_langfuse() -> Optional[Langfuse]:
         return None
 
     return _LANGFUSE_CLIENT
+
+
+def _get_user_id() -> str:
+    """Return the user identifier for Langfuse traces.
+
+    Checked in order: HERMES_LANGFUSE_USER_ID, LANGFUSE_USER_ID, then
+    the Hermes USER.md profile name. This enables per-user cost
+    attribution and filtering in the Langfuse dashboard.
+    """
+    explicit = _env("HERMES_LANGFUSE_USER_ID") or _env("LANGFUSE_USER_ID")
+    if explicit:
+        return explicit
+    # Try to read user name from Hermes user profile
+    try:
+        from agent.config import get_user_name
+        name = get_user_name()
+        if name:
+            return str(name)
+    except Exception:
+        pass
+    return ""
 
 
 def _trace_key(task_id: str, session_id: str) -> str:
@@ -543,14 +585,29 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                       api_mode: str, messages: Any, client: Langfuse) -> TraceState:
     trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}")
     trace_input = _extract_last_user_message(messages)
+    # Langfuse SDK v4 metadata must be dict[str, str] with values ≤200 chars.
+    # Store structured context as string values; keep it compact.
     metadata = {
         "source": "hermes",
-        "task_id": task_id,
-        "platform": platform,
-        "provider": provider,
-        "model": model,
-        "api_mode": api_mode,
+        "task_id": str(task_id)[:200] if task_id else "",
+        "platform": str(platform)[:200] if platform else "",
+        "provider": str(provider)[:200] if provider else "",
+        "model": str(model)[:200] if model else "",
+        "api_mode": str(api_mode)[:200] if api_mode else "",
     }
+
+    # Build feature tags for per-feature analytics in the dashboard.
+    # Tags help filter traces by conversation type, tool usage, etc.
+    tags = ["hermes"]
+    if platform:
+        tags.append(f"platform:{platform}")
+    if provider:
+        tags.append(f"provider:{provider}")
+    if api_mode:
+        tags.append(f"mode:{api_mode}")
+
+    # user_id enables cost attribution and per-user filtering.
+    user_id = _get_user_id()
 
     # session_id must be passed in trace_context for Langfuse session grouping.
     trace_ctx: Dict[str, Any] = {"trace_id": trace_id}
@@ -561,8 +618,9 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         try:
             with propagate_attributes(
                 session_id=session_id or task_key,
+                user_id=user_id or None,
                 trace_name="Hermes turn",
-                tags=["hermes", "langfuse"],
+                tags=tags,
             ):
                 root_ctx = client.start_as_current_observation(
                     trace_context=trace_ctx,
@@ -593,11 +651,6 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
             end_on_exit=False,
         )
         root_span = root_ctx.__enter__()
-
-    try:
-        root_span.set_trace_io(input=trace_input)
-    except Exception:
-        pass
 
     _debug(f"started trace {trace_id} for {task_key}")
     return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span)
@@ -665,9 +718,13 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
             for observation in queue:
                 _end_observation(observation)
         final_output = _merge_trace_output(output, state)
-        if final_output is not None:
-            state.root_span.set_trace_io(output=final_output)
+        if final_output is not None and not state.output_set:
+            # v4 best practice: set input/output directly on the root
+            # observation rather than using deprecated set_trace_io().
+            # Guard: if output was already set (e.g. by _on_post_llm_turn),
+            # don't overwrite it with a stale merge result.
             state.root_span.update(output=final_output)
+            state.output_set = True
         state.root_span.end()
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
@@ -788,23 +845,28 @@ def on_pre_llm_request(
             as_type="generation",
             input_value=_serialize_messages(input_messages),
             metadata={
-                "provider": provider,
-                "platform": platform,
-                "api_mode": api_mode,
-                "base_url": base_url,
+                "provider": str(provider)[:200],
+                "platform": str(platform)[:200],
+                "api_mode": str(api_mode)[:200],
+                "base_url": str(base_url)[:200],
             },
             model=model,
             model_parameters={"api_mode": api_mode, "provider": provider},
         )
 
 
-def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str = "", base_url: str = "",
-                     api_mode: str = "", model: str = "", api_call_count: int = 0,
-                     assistant_message: Any = None, response: Any = None,
-                     api_duration: float = 0.0, finish_reason: str = "",
-                     usage: Any = None, assistant_content_chars: int = 0,
-                     assistant_tool_call_count: int = 0, assistant_response: Any = None,
-                     **_: Any) -> None:
+def _on_post_api_request(*, task_id: str = "", session_id: str = "", provider: str = "",
+                         base_url: str = "", api_mode: str = "", model: str = "",
+                         api_call_count: int = 0, assistant_message: Any = None,
+                         response: Any = None, api_duration: float = 0.0,
+                         finish_reason: str = "", usage: Any = None,
+                         assistant_content_chars: int = 0,
+                         assistant_tool_call_count: int = 0, **_: Any) -> None:
+    """Handle post_api_request — fires once per API call.
+
+    Ends the matching generation observation and, for final text replies
+    (no tool calls), finishes the root trace with the assistant content.
+    """
     client = _get_langfuse()
     if client is None:
         return
@@ -818,48 +880,76 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     if state is None or generation is None:
         return
 
-    # Handle both call patterns:
-    # 1. post_api_request: passes usage (dict), assistant_content_chars, assistant_tool_call_count
-    # 2. post_llm_call: passes assistant_message (object), response (object), assistant_response (str)
+    # Build output from the assistant message object (preferred)
+    # or the raw response (fallback), never from char count alone.
     if assistant_message is not None:
         output = _serialize_assistant_message(assistant_message)
-    elif assistant_response is not None:
-        # post_llm_call passes assistant_response as a plain string
-        output = {"content": _safe_value(assistant_response), "reasoning": None, "tool_calls": []}
+        _content_preview = repr(getattr(assistant_message, 'content', None))[:100]
+        logger.info("Langfuse post_api_request: assistant_message branch, content=%s", _content_preview)
+    elif response is not None:
+        # Fallback: extract content directly from the raw response
+        _choice = None
+        _choices = getattr(response, "choices", None)
+        if _choices and len(_choices) > 0:
+            _choice = _choices[0]
+        _msg = getattr(_choice, "message", None) if _choice else None
+        _content = getattr(_msg, "content", None) if _msg else None
+        # Normalize content (list/dict → str, same as conversation_loop)
+        if _content is not None and not isinstance(_content, str):
+            if isinstance(_content, dict):
+                _content = _content.get("text", "") or _content.get("content", "") or str(_content)
+            elif isinstance(_content, list):
+                _parts = []
+                for part in _content:
+                    if isinstance(part, str):
+                        _parts.append(part)
+                    elif isinstance(part, dict) and part.get("type") == "text":
+                        _parts.append(part.get("text", ""))
+                    elif isinstance(part, dict) and "text" in part:
+                        _parts.append(str(part["text"]))
+                _content = "\n".join(_parts)
+            else:
+                _content = str(_content)
+        _reasoning = getattr(_msg, "reasoning", None) if _msg else None
+        _reasoning_content = getattr(_msg, "reasoning_content", None) if _msg else None
+        if _reasoning is None and _reasoning_content is not None:
+            _reasoning = _reasoning_content
+        _tool_calls_raw = getattr(_msg, "tool_calls", None) if _msg else None
+        output = {
+            "content": _safe_value(_content) if _content else None,
+            "reasoning": _safe_value(_reasoning),
+            "tool_calls": _serialize_tool_calls(_tool_calls_raw) if _tool_calls_raw else [],
+        }
+        _debug(f"post_api_request: response fallback, content_type={type(_content).__name__ if _content else 'None'}")
+        logger.info("Langfuse post_api_request: response fallback branch, content_type=%s, content=%s",
+                    type(_content).__name__ if _content else 'None',
+                    repr(_content)[:100] if _content else 'None')
     else:
-        # post_api_request path — reconstruct from summary kwargs
+        # Last resort — only char count available
         output = {
             "content": f"[{assistant_content_chars} chars]" if assistant_content_chars else None,
             "reasoning": None,
-            "tool_calls": [{"id": f"tc_{i}"} for i in range(assistant_tool_call_count)] if assistant_tool_call_count else [],
+            "tool_calls": [],
         }
+        _debug(f"post_api_request: char-count fallback (assistant_content_chars={assistant_content_chars})")
+        logger.warning("Langfuse post_api_request: CHAR-COUNT FALLBACK (assistant_message=None, response=None, chars=%s) — content will show as '[N chars]'!",
+                       assistant_content_chars)
 
     if output.get("tool_calls"):
         state.turn_tool_calls.extend(output["tool_calls"])
 
-    # Extract usage: prefer response object, fall back to usage dict from post_api_request
+    # Extract usage
     if response is not None:
         usage_details, cost_details = _usage_and_cost(
-            response,
-            provider=provider,
-            api_mode=api_mode,
-            model=model,
-            base_url=base_url,
+            response, provider=provider, api_mode=api_mode, model=model, base_url=base_url,
         )
     elif isinstance(usage, dict) and usage:
-        # post_api_request passes a pre-built CanonicalUsage summary dict.
-        # Use Langfuse-convention key names: "input", "output", and
-        # "cache_read_input_tokens" / "cache_creation_input_tokens" so the
-        # dashboard sums cache tokens into the input total automatically.
         _input = usage.get("input_tokens", 0)
         _output = usage.get("output_tokens", 0) or usage.get("completion_tokens", 0)
         _cache_read = usage.get("cache_read_tokens", 0)
         _cache_write = usage.get("cache_write_tokens", 0)
         _reasoning = usage.get("reasoning_tokens", 0)
-        usage_details = {
-            "input": _input,
-            "output": _output,
-        }
+        usage_details = {"input": _input, "output": _output}
         if _cache_read:
             usage_details["cache_read_input_tokens"] = _cache_read
         if _cache_write:
@@ -867,16 +957,13 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         if _reasoning:
             usage_details["reasoning_tokens"] = _reasoning
         cost_details = {}
-        # Estimate per-type cost from the summary if possible
         try:
             from agent.usage_pricing import CanonicalUsage, estimate_usage_cost, get_pricing_entry
             from decimal import Decimal
             _ONE_M = Decimal("1000000")
             _cu = CanonicalUsage(
-                input_tokens=_input,
-                output_tokens=_output,
-                cache_read_tokens=_cache_read,
-                cache_write_tokens=_cache_write,
+                input_tokens=_input, output_tokens=_output,
+                cache_read_tokens=_cache_read, cache_write_tokens=_cache_write,
                 reasoning_tokens=_reasoning,
             )
             entry = get_pricing_entry(model, provider=provider, base_url=base_url)
@@ -899,11 +986,13 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         usage_details, cost_details = {}, {}
 
     tool_count = len(output.get("tool_calls", [])) or assistant_tool_call_count
-    gen_metadata: Dict[str, Any] = {"tool_call_count": tool_count}
+    gen_metadata: Dict[str, str] = {"tool_call_count": str(tool_count)}
     if api_duration and api_duration > 0:
-        gen_metadata["api_duration_s"] = round(api_duration, 3)
+        gen_metadata["api_duration_s"] = str(round(api_duration, 3))
     if finish_reason:
-        gen_metadata["finish_reason"] = finish_reason
+        gen_metadata["finish_reason"] = str(finish_reason)[:200]
+    _debug(f"post_api_request: output={json.dumps(output, default=str, ensure_ascii=False)[:500]}")
+
     _end_observation(
         generation,
         output=output,
@@ -916,6 +1005,55 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     has_content = bool(output.get("content"))
     if not has_tools and has_content:
         _finish_trace(task_key, output=output)
+
+
+def _on_post_llm_turn(*, session_id: str = "", user_message: Any = None,
+                       assistant_response: Any = None, conversation_history: Any = None,
+                       model: str = "", platform: str = "", **_: Any) -> None:
+    """Handle post_llm_call — fires once per turn after the tool loop ends.
+
+    The generation observations have already been ended by post_api_request.
+    This hook ensures the root trace gets finished even when the last API
+    response contained tool_calls (which prevented _finish_trace in
+    _on_post_api_request).  Without this, long-running agent loops (kanban
+    workers, rediscover flows) accumulate open traces that never flush.
+    """
+    client = _get_langfuse()
+    if client is None:
+        return
+
+    # post_llm_call doesn't pass task_id in all Hermes versions —
+    # try session_id as the lookup key, or scan for open traces.
+    if not session_id:
+        return
+
+    # Find any open trace for this session (could be keyed by task_id+session_id)
+    _found = False
+    matched_key = None
+    with _STATE_LOCK:
+        for task_key, state in list(_TRACE_STATE.items()):
+            if session_id in task_key:
+                matched_key = task_key
+                # If the trace is still open and has no root output yet, set it
+                if state.root_span and not state.output_set:
+                    final_output = _safe_value(assistant_response) if isinstance(assistant_response, str) else None
+                    if final_output:
+                        merged = _merge_trace_output({"content": final_output}, state)
+                        state.root_span.update(output=merged)
+                        state.output_set = True
+                        logger.info("Langfuse post_llm_turn: set root trace output for session_id=%s", session_id)
+                    _found = True
+                    break
+
+    # Always finish the trace for this session — the turn is over.
+    # post_api_request only finishes on final-text replies (no tool_calls),
+    # but tool-heavy agent loops never hit that branch.
+    if matched_key:
+        _finish_trace(matched_key, output=None)
+        logger.info("Langfuse post_llm_turn: finished trace for session_id=%s", session_id)
+
+    if not _found and not matched_key:
+        logger.info("Langfuse post_llm_turn: no open trace found for session_id=%s", session_id)
 
 
 def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = "",
@@ -936,7 +1074,7 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
             name=f"Tool: {tool_name}",
             as_type="tool",
             input_value=_safe_value(args),
-            metadata={"tool_name": tool_name, "tool_call_id": tool_call_id},
+            metadata={"tool_name": str(tool_name)[:200], "tool_call_id": str(tool_call_id)[:200]},
         )
         if tool_call_id:
             state.tools[tool_call_id] = observation
@@ -988,17 +1126,26 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
     _end_observation(
         observation,
         output=safe_result_value,
-        metadata={"tool_name": tool_name, "args": _safe_value(args, parse_json_strings=True)},
+        metadata={"tool_name": str(tool_name)[:200], "args": str(_safe_value(args, parse_json_strings=True))[:200]},
     )
 
 
 def register(ctx) -> None:
-    # Register for both hook name variants so the plugin works across
-    # Hermes versions.  pre_api_request / post_api_request fire per API
-    # call (preferred); pre_llm_call / post_llm_call fire once per turn.
+    logger.info("Langfuse plugin v%s loading (split handlers: post_api_request + post_llm_turn)", _PLUGIN_VERSION)
+
+    # per-API-call hooks (fire once per LLM request):
+    #   pre_api_request  → creates generation observation
+    #   post_api_request → ends generation, extracts actual content + usage,
+    #                       finishes root trace on final text reply
     ctx.register_hook("pre_api_request", on_pre_llm_request)
-    ctx.register_hook("post_api_request", on_post_llm_call)
+    ctx.register_hook("post_api_request", _on_post_api_request)
+
+    # per-turn hooks (fire once after the tool-calling loop completes):
+    #   pre_llm_call  → creates root trace if not yet started (legacy path)
+    #   post_llm_call → ensures root trace output is set from final response
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
-    ctx.register_hook("post_llm_call", on_post_llm_call)
+    ctx.register_hook("post_llm_call", _on_post_llm_turn)
+
+    # per-tool-call hooks
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)

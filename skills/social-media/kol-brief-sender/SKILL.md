@@ -1,7 +1,7 @@
 ---
 name: kol-brief-sender
-description: After delivery is confirmed (or in the gifted-no-product fast path), sends the content brief to the KOL: posting requirements, do/don't list, hashtags, mention handles, deadline, and a request to share the draft for review before posting. Reads `campaign_config.brief_template_id` + `audit_standards_md` + `extra_notes` to assemble. Writes `fulfillment.brief_sent=true` and `fulfillment.brief_sent_at`. Does not generate brief CONTENT from scratch — uses the configured template + audit standards as the spine.
-trigger: Invoked by `kol-reply-dispatcher` when `active_goals_by_lane.fulfillment == "content_production"` AND `fulfillment.brief_sent != true`. Also runs in the gifted-no-product fast path when `compensation.satisfied AND no logistics needed`.
+description: After delivery is confirmed (or in the gifted-no-product fast path), sends the content brief to the KOL: posting requirements, do/don't list, hashtags, mention handles, deadline, and a request to share the draft for review before posting. Reads `campaign_config.brief_template_id` + `audit_standards_md` + `extra_notes` to assemble. Writes **`offer.brief_sent=true`** (Bridge also accepts legacy `fulfillment.brief_sent` and mirrors to `offer.*`). Does not generate brief CONTENT from scratch — uses the configured template + audit standards as the spine.
+trigger: Invoked by `kol-reply-dispatcher` when `active_goals_by_lane.fulfillment == "content_production"` AND `offer.brief_sent != true` (legacy: `fulfillment.brief_sent`). Also runs in the gifted-no-product fast path when `compensation.satisfied AND no logistics needed`.
 tags: ["kol", "brief", "content-production", "draft-generator", "fulfillment-lane"]
 ---
 
@@ -24,7 +24,7 @@ classifier on the next inbound).
   be a faithful render of `campaign_config.brief_template_id` (referred
   to by id) + `audit_standards_md` + `extra_notes`. Do not invent
   content guidelines.
-- **Idempotent.** If `fulfillment.brief_sent==true`, abort
+- **Idempotent.** If `offer.brief_sent==true`, abort
   `{"skipped":"already_sent"}`.
 - **Required-fact gate.** Aborts when `fulfillment.delivered_confirmed`
   is missing AND mode is not gifted-no-product. Defense-in-depth.
@@ -43,7 +43,7 @@ Follow shared style-preamble baseline in
 `references/shared/style-and-brief-preambles.md`.
 
 Call contract:
-- inputs: `goal_brief = {goal: "content_production", missing_facts: ["fulfillment.brief_sent"], next_action: "Send brief / posting notes / hashtags"}`,
+- inputs: `goal_brief = {goal: "content_production", missing_facts: ["offer.brief_sent"], next_action: "Send brief / posting notes / hashtags"}`,
   `current_user_id = <operator id from session>`.
 - output: prepend as the first section of the draft prompt; verbatim brief
   body from `campaign_config.brief_template_id` is content (not style) and
@@ -99,9 +99,9 @@ write-facts-multi --json '{
   "campaign_id":"...",
   "source":"skill:kol-brief-sender",
   "namespaces":{
-    "fulfillment": {"fulfillment.brief_sent": true,
-                     "fulfillment.brief_sent_at": "<iso8601>",
-                     "fulfillment.brief_template_id_used": "<id>"}
+    "offer": {"offer.brief_sent": true,
+              "offer.brief_sent_at": "<iso8601>",
+              "offer.brief_template_id_used": "<id>"}
   }
 }'
 ```

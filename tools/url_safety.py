@@ -168,6 +168,54 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return False
 
 
+def normalize_url_for_request(url: str) -> str:
+    """Normalize a URL before safety checks and HTTP requests.
+
+    Performs lightweight, idempotent transformations:
+      - Strip leading/trailing whitespace
+      - Ensure the URL has a scheme (default https)
+      - Encode international domain names (IDN) to ASCII (punycode)
+      - Remove fragments (#...)
+
+    This is intentionally minimal — it does NOT rewrite query params,
+    decode percent-encoding, or follow redirects.  Callers that need
+    those transformations should use httpx/urllib directly.
+    """
+    if not url:
+        return url
+    url = url.strip()
+
+    # Add a default scheme if missing so urlparse works correctly
+    if not url.startswith(("http://", "https://")):
+        # Handle scheme-relative URLs (//host/path)
+        if url.startswith("//"):
+            url = "https:" + url
+        else:
+            url = "https://" + url
+
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if hostname:
+            # Encode IDN hostnames to punycode for DNS resolution safety
+            try:
+                encoded_host = hostname.encode("idna").decode("ascii")
+                if encoded_host != hostname:
+                    # Reconstruct URL with encoded host
+                    netloc = parsed.netloc.replace(hostname, encoded_host)
+                    parsed = parsed._replace(netloc=netloc)
+            except (UnicodeError, ValueError):
+                pass  # Leave as-is if encoding fails
+
+        # Drop fragment — it's never sent to the server
+        if parsed.fragment:
+            parsed = parsed._replace(fragment="")
+
+        return parsed.geturl()
+    except Exception:
+        return url
+
+
 def is_always_blocked_url(url: str) -> bool:
     """Return True when the URL targets an always-blocked endpoint.
 

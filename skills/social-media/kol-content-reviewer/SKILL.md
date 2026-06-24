@@ -1,7 +1,7 @@
 ---
 name: kol-content-reviewer
-description: Reviews the KOL's submitted draft (link or attachment) against `campaign_config.audit_standards_md`. Three branches — (A) approve: standards met → write `fulfillment.draft_approved=true`; (B) request_revision: minor/scoped issues → draft itemized feedback list and write `fulfillment.revision_requested_count++`; (C) escalate: major brand-safety / off-policy / >2 revision rounds → open escalation. Side effect of approval is to enable `golive-and-boost`.
-trigger: Invoked by `kol-reply-dispatcher` when `active_goals_by_lane.publish == "content_review"` AND `fulfillment.draft_submitted == true` AND `fulfillment.draft_approved != true`.
+description: Reviews the KOL's submitted draft (link or attachment) against `campaign_config.audit_standards_md`. Three branches — (A) approve: standards met → write **`offer.review_verdict=approved`**; (B) request_revision: minor/scoped issues → draft itemized feedback list; (C) escalate: major brand-safety / off-policy / >2 revision rounds → open escalation. Side effect of approval is to enable `golive-and-boost`. (Bridge mirrors legacy `fulfillment.draft_approved` → `offer.review_verdict`.)
+trigger: Invoked by `kol-reply-dispatcher` when publish lane active goal is **`content_review_and_golive`** AND `offer.draft_submitted == true` AND `offer.review_verdict` not approved.
 tags: ["kol", "content-review", "draft-generator", "publish-lane"]
 ---
 
@@ -28,7 +28,7 @@ substantive creative judgments outside `audit_standards_md`.
   the next pass MUST escalate, not request a third round.
 - **No clause invention.** If the draft violates something not covered
   by `audit_standards_md`, escalate with `goal=content_review reason="off-policy issue not covered by audit standards: <excerpt>"`.
-- **Idempotent.** If `fulfillment.draft_approved==true`, abort
+- **Idempotent.** If `offer.review_verdict == "approved"`, abort
   `{"skipped":"already_approved"}`.
 
 ## Inputs
@@ -81,11 +81,11 @@ Read:
 - Body: "Looks great — you're cleared to post! Quick reminder: `<one
   line of golive logistics — handle/hashtag will follow in the next
   message>`. Thanks for the quick turnaround."
-- Write:
+- Write (offer namespace — satisfies `content_review_and_golive` goal):
   ```
-  "publish": {"fulfillment.draft_approved": true,
-              "fulfillment.draft_approved_at": "<iso8601>",
-              "fulfillment.draft_url_at_approval": "<url>"}
+  "offer": {"offer.review_verdict": "approved",
+            "offer.review_verdict_at": "<iso8601>",
+            "offer.draft_url_at_approval": "<url>"}
   ```
 
 **Branch B — request_revision:**

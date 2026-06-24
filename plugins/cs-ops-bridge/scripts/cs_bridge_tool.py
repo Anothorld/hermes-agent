@@ -7,9 +7,15 @@ import argparse
 import json
 import sys
 import os
+import subprocess
+import time
+from pathlib import Path
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PLUGIN_ROOT = os.path.dirname(_SCRIPTS_DIR)
 sys.path.insert(0, _SCRIPTS_DIR)
+if _PLUGIN_ROOT not in sys.path:
+    sys.path.insert(0, _PLUGIN_ROOT)
 
 from _cal_client import (  # noqa: E402
     add_common_args,
@@ -17,6 +23,101 @@ from _cal_client import (  # noqa: E402
     client_from_args,
     print_json,
 )
+from profile_refs import quickcep_skill_dir  # noqa: E402
+
+JOIN_CHAT_MAX_ATTEMPTS = 3  # initial + 2 retries
+JOIN_CHAT_BACKOFF_BASE_S = 2.0
+JOIN_CHAT_SUBPROCESS_TIMEOUT = 130  # getUserInfo 45s + joinChat 60s + margin
+_QUICKCEP_CLI_DEFAULT_TIMEOUT = 120
+
+
+def _quickcep_cli_path() -> Path:
+    return quickcep_skill_dir() / "scripts" / "quickcep_cli.py"
+
+
+def _run_quickcep_cli(
+    cli: Path,
+    argv: list[str],
+    *,
+    timeout: int = _QUICKCEP_CLI_DEFAULT_TIMEOUT,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(cli), *argv],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(cli.parent.parent),
+    )
+
+
+def _parse_quickcep_cli_json(stdout: str) -> dict:
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return {"stdout": stdout}
+
+
+def _join_chat_error_is_retryable(payload: dict, proc: subprocess.CompletedProcess[str]) -> bool:
+    """Retry only on HTTP/socket timeouts (transient QuickCEP slowness)."""
+    err = str(payload.get("error") or "")
+    step = str(payload.get("failed_step") or "")
+    blob = f"{err} {step} {proc.stdout} {proc.stderr}".lower()
+    return "timed out" in blob or "timeout" in blob
+
+
+def _format_join_chat_failure(
+    session_id: str,
+    proc: subprocess.CompletedProcess[str],
+    payload: dict,
+    *,
+    attempt: int,
+) -> dict:
+    failed_step = payload.get("failed_step")
+    err = str(payload.get("error") or "join-chat failed")
+    out: dict = {
+        "error": "join-chat failed before draft-save",
+        "session_id": session_id,
+        "exit_code": proc.returncode,
+        "attempt": attempt,
+        "max_attempts": JOIN_CHAT_MAX_ATTEMPTS,
+        "stderr": proc.stderr,
+        "join_chat": payload,
+    }
+    if failed_step:
+        out["failed_step"] = failed_step
+        if "timed out" in err.lower():
+            out["error_detail"] = f"{failed_step} timed out (QuickCEP HTTP)"
+        else:
+            out["error_detail"] = f"{failed_step} failed: {err}"
+    elif "timed out" in err.lower():
+        out["error_detail"] = "join-chat timed out (QuickCEP HTTP)"
+    return out
+
+
+def _join_chat_before_draft(cli: Path, session_id: str) -> dict:
+    """QuickCEP requires joinChat before draftMessage/save (same as send-email)."""
+    last_failure: dict | None = None
+    for attempt in range(1, JOIN_CHAT_MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(JOIN_CHAT_BACKOFF_BASE_S * (2 ** (attempt - 2)))
+        proc = _run_quickcep_cli(
+            cli,
+            ["join-chat", session_id],
+            timeout=JOIN_CHAT_SUBPROCESS_TIMEOUT,
+        )
+        payload = _parse_quickcep_cli_json(proc.stdout)
+        if proc.returncode == 0 and payload.get("result_code") in (200, None):
+            if not payload.get("failed_step"):
+                if attempt > 1:
+                    payload["join_chat_attempts"] = attempt
+                return payload
+        last_failure = _format_join_chat_failure(session_id, proc, payload, attempt=attempt)
+        if attempt < JOIN_CHAT_MAX_ATTEMPTS and _join_chat_error_is_retryable(payload, proc):
+            continue
+        break
+
+    print_json(last_failure or {"error": "join-chat failed before draft-save", "session_id": session_id})
+    sys.exit(last_failure.get("exit_code", 1) if last_failure else 1)
 
 
 def _cmd_health(args: argparse.Namespace) -> None:
@@ -86,24 +187,98 @@ def _cmd_update_session_status(args: argparse.Namespace) -> None:
     )
 
 
+def _read_optional_file(value: str | None, file_path: str | None) -> str | None:
+    if file_path:
+        return Path(file_path).read_text(encoding="utf-8")
+    return value
+
+
 def _cmd_open_escalation(args: argparse.Namespace) -> None:
-    print_json(
-        client_from_args(args).request(
-            "POST",
-            "/escalations",
-            body={
-                "quickcep_session_id": args.session_id,
-                "reason": args.reason,
-                "urgency": args.urgency,
-                "question_to_operator": args.question,
-                "feishu_chat_id": args.feishu_chat_id,
-                "feishu_thread_id": args.feishu_thread_id,
-                "feishu_message_id": args.feishu_message_id,
-                "resume_context": json.loads(args.resume_context or "{}"),
-                "env": args.env,
-            },
-        )
-    )
+    body = {
+        "quickcep_session_id": args.session_id,
+        "reason": args.reason,
+        "urgency": args.urgency,
+        "question_to_operator": args.question,
+        "customer_email": args.customer_email,
+        "email_summary": _read_optional_file(args.email_summary, args.email_summary_file),
+        "email_quote": _read_optional_file(args.email_quote, args.email_quote_file),
+        "escalation_message": args.message,
+        "auto_send_feishu": not args.skip_feishu_send,
+        "feishu_chat_id": args.feishu_chat_id,
+        "feishu_thread_id": args.feishu_thread_id,
+        "feishu_message_id": args.feishu_message_id,
+        "resume_context": json.loads(args.resume_context or "{}"),
+        "env": args.env,
+    }
+    print_json(client_from_args(args).request("POST", "/escalations", body=body))
+
+
+def _cmd_get_messages(args: argparse.Namespace) -> None:
+    """Wrap quickcep_cli messages with canonical profile skill path."""
+    cli = _quickcep_cli_path()
+    if not cli.exists():
+        print_json({"error": f"quickcep_cli not found: {cli}"})
+        sys.exit(2)
+
+    argv = ["messages", args.session_id]
+    if args.page:
+        argv.extend(["--page", str(args.page)])
+    if args.page_size != 20:
+        argv.extend(["--page-size", str(args.page_size)])
+    if args.plain:
+        argv.append("--plain")
+    if args.chronological:
+        argv.append("--chronological")
+
+    proc = _run_quickcep_cli(cli, argv)
+    if proc.returncode != 0:
+        print_json({"error": proc.stderr or proc.stdout, "exit_code": proc.returncode})
+        sys.exit(proc.returncode)
+    try:
+        print_json(json.loads(proc.stdout))
+    except json.JSONDecodeError:
+        print(proc.stdout, flush=True)
+
+
+def _cmd_draft_save(args: argparse.Namespace) -> None:
+    """Wrap quickcep_cli draft-save with join-chat + canonical profile skill path."""
+    cli = _quickcep_cli_path()
+    if not cli.exists():
+        print_json({"error": f"quickcep_cli not found: {cli}"})
+        sys.exit(2)
+    if args.content_file:
+        content_path = Path(args.content_file)
+        if not content_path.is_file():
+            print_json({"error": f"content file not found: {content_path}"})
+            sys.exit(2)
+        content = content_path.read_text(encoding="utf-8")
+    else:
+        content = args.content
+
+    join_chat = _join_chat_before_draft(cli, args.session_id)
+
+    draft_argv = [
+        "draft-save",
+        args.session_id,
+        "--content",
+        content,
+    ]
+    if args.subject:
+        draft_argv.extend(["--subject", args.subject])
+    if args.receiver:
+        draft_argv.extend(["--receiver", args.receiver])
+    if getattr(args, "attachments", None):
+        draft_argv.extend(["--attachments", args.attachments])
+    proc = _run_quickcep_cli(cli, draft_argv)
+    if proc.returncode != 0:
+        print_json({"error": proc.stderr or proc.stdout, "exit_code": proc.returncode, "join_chat": join_chat})
+        sys.exit(proc.returncode)
+    try:
+        result = json.loads(proc.stdout)
+        result["join_chat"] = join_chat
+        print_json(result)
+    except json.JSONDecodeError:
+        print(proc.stdout, flush=True)
 
 
 def _cmd_apply_handoff(args: argparse.Namespace) -> None:
@@ -149,6 +324,20 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--session-id", required=True)
     g.set_defaults(func=_cmd_get_dispatch_context)
 
+    gm = sub.add_parser("get-messages", help="Read QuickCEP session messages (wraps quickcep_cli messages)")
+    add_env_arg(gm)
+    gm.add_argument("--session-id", required=True)
+    gm.add_argument("--page", type=int, default=0, help="pageIndex (0-based, default: 0)")
+    gm.add_argument("--page-size", type=int, default=20, help="Page size (default: 20)")
+    gm.add_argument("--plain", action=argparse.BooleanOptionalAction, default=True, help="Strip HTML (default: true)")
+    gm.add_argument(
+        "--chronological",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Oldest-first order (default: true)",
+    )
+    gm.set_defaults(func=_cmd_get_messages)
+
     c = sub.add_parser("classify-intent")
     add_env_arg(c)
     c.add_argument("--subject", default="")
@@ -179,13 +368,61 @@ def _build_parser() -> argparse.ArgumentParser:
     add_env_arg(o)
     o.add_argument("--session-id", required=True)
     o.add_argument("--reason", required=True)
-    o.add_argument("--urgency", default="medium")
-    o.add_argument("--question", default=None)
+    o.add_argument("--urgency", default="medium", choices=("high", "medium", "low"))
+    o.add_argument("--question", default=None, help="Question for the expert group")
+    o.add_argument(
+        "--customer-email",
+        default=None,
+        help="Customer email from get-messages (required for Feishu notify unless --message)",
+    )
+    o.add_argument(
+        "--email-summary",
+        default=None,
+        help="Simplified Chinese summary of relevant customer email (required for Feishu notify)",
+    )
+    o.add_argument(
+        "--email-summary-file",
+        default=None,
+        help="Read --email-summary from file",
+    )
+    o.add_argument(
+        "--email-quote",
+        default=None,
+        help="Partial quote in customer's original language (required for Feishu notify)",
+    )
+    o.add_argument(
+        "--email-quote-file",
+        default=None,
+        help="Read --email-quote from file (preferred for multiline / $ amounts)",
+    )
+    o.add_argument("--message", default=None, help="Full Feishu message body (optional override)")
+    o.add_argument("--skip-feishu-send", action="store_true", help="Record escalation only; do not post to Feishu")
     o.add_argument("--feishu-chat-id", default=None)
     o.add_argument("--feishu-thread-id", default=None)
     o.add_argument("--feishu-message-id", default=None)
     o.add_argument("--resume-context", default="{}")
     o.set_defaults(func=_cmd_open_escalation)
+
+    ds = sub.add_parser("draft-save", help="Save QuickCEP draft (wraps quickcep_cli draft-save)")
+    add_env_arg(ds)
+    ds.add_argument("--session-id", required=True)
+    content_src = ds.add_mutually_exclusive_group(required=True)
+    content_src.add_argument(
+        "--content",
+        help="Draft body (HTML or plain). In shell, use single quotes if text contains $.",
+    )
+    content_src.add_argument(
+        "--content-file",
+        help="Read draft body from file (preferred when content contains $ amounts).",
+    )
+    ds.add_argument("--subject", default=None)
+    ds.add_argument("--receiver", default=None)
+    ds.add_argument(
+        "--attachments",
+        default=None,
+        help='JSON array of attachment objects (same as quickcep_cli draft-save --attachments)',
+    )
+    ds.set_defaults(func=_cmd_draft_save)
 
     ge = sub.add_parser("get-escalation")
     add_env_arg(ge)

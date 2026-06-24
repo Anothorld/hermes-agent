@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 _REPO_ROOT = str(Path(__file__).resolve().parents[5])
 
 from ..audit import write_audit
+from ..queue_list_sort import sort_queue_rows, validate_queue_sort
 from ..bridge_client import BridgeClient, BridgeError
 from ..bridge_runtime import ensure_gateway_bridge_key
 from ..campaign_config_sync import assert_campaign_config_complete
@@ -447,10 +448,13 @@ async def list_approvals(
     env: Optional[str] = Query(None),
     identity_id: Optional[int] = Query(None, ge=1),
     campaign_id: Optional[str] = Query(None),
+    sort: str = Query("priority"),
+    order: str = Query("asc"),
 ) -> list[dict[str, Any]]:
     resolved_env = _env(env)
     if status_filter not in ("pending", "approved", "rejected", "all"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"unknown status: {status_filter}")
+    validate_queue_sort(sort, order)
     try:
         raw = await bridge.list_approvals(
             status=status_filter,
@@ -481,7 +485,13 @@ async def list_approvals(
         if row.get("fact_path") == REPLY_DRAFT_PATH:
             row["draft_origin"] = "escalation_preview"
             row["draft_origin_label"] = _DRAFT_ORIGIN_LABELS["escalation_preview"]
-    rows.sort(key=lambda r: _approval_priority(r, resolved_env))
+    sort_queue_rows(
+        rows,
+        sort=sort,
+        order=order,
+        time_field="opened_at",
+        priority_key=lambda r: _approval_priority(r, resolved_env),
+    )
     return rows
 
 

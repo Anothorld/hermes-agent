@@ -40,6 +40,17 @@ def test_trim_seen_caps_at_2000(state_mod):
     assert trimmed[-1] == "m02499"
 
 
+def test_default_console_db_path_ignores_profile_hermes_home(
+    state_mod, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    mod = state_mod
+    monkeypatch.delenv("KOC_DB_PATH", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profiles" / "kol-orchestrator"))
+    assert mod._default_console_db_path() == (
+        Path.home() / ".hermes" / "kol-ops-console" / "app.db"
+    )
+
+
 def test_global_message_seen_roundtrip(state_mod, tmp_path: Path, monkeypatch):
     mod = state_mod
     db_path = tmp_path / "console.db"

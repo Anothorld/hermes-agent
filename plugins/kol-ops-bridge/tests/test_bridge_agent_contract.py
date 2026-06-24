@@ -44,6 +44,30 @@ def test_lint_batch_ingest_tmp():
     assert any(h["code"] == "batch_ingest_files" for h in hits)
 
 
+def test_allows_single_ingest_confirmed_candidate_terminal():
+    c = _contract()
+    good = (
+        "python3 -u /Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+        "ingest-confirmed-candidate --campaign-id SSF8033-20260609 --env LIVE "
+        "--json @/tmp/ingest_dressyourdecor.json"
+    )
+    hits = c.lint_agent_bridge_snippet(good)
+    assert not any(h["code"] == "batch_ingest_files" for h in hits)
+    assert not any(h["code"] == "terminal_multi_ingest" for h in hits)
+
+
+def test_blocks_terminal_multi_ingest_semicolon():
+    c = _contract()
+    bad = (
+        "python3 -u /abs/kol_bridge_tool.py ingest-confirmed-candidate --env LIVE "
+        "--json @/tmp/ingest_a.json; "
+        "python3 -u /abs/kol_bridge_tool.py ingest-confirmed-candidate --env LIVE "
+        "--json @/tmp/ingest_b.json"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "terminal_multi_ingest" for h in hits)
+
+
 def test_lint_file_tool_blocks_plugin_api():
     c = _contract()
     hits = c.lint_file_tool_path("plugins/kol-ops-bridge/plugin_api.py")
@@ -71,6 +95,30 @@ def test_resume_checklist_includes_get_escalation():
     assert "get-escalation --escalation-id 108" in text
     assert "--view agent" in text
     assert "get-email-conversation" not in text
+
+
+def test_approval_checklist_skips_discover_when_queued():
+    c = _contract()
+    text = c.approval_cli_checklist(
+        campaign_id="C1",
+        env="LIVE",
+        identity_ids=[101, 102],
+        email_discovery_queued_ids=[101],
+    )
+    assert "pending_email_discovery" in text
+    assert text.count("delegate kol-email-discovery") == 0
+
+
+def test_approval_checklist_skips_brief_when_queued():
+    c = _contract()
+    text = c.approval_cli_checklist(
+        campaign_id="C1",
+        env="LIVE",
+        identity_ids=[201],
+        creator_brief_queued_ids=[201],
+    )
+    assert "pending_creator_brief" in text
+    assert "kol-creator-brief-loader in this outreach run" in text
 
 
 def test_approval_checklist_uses_persist_initial_outreach():
@@ -146,7 +194,120 @@ def test_blocks_redirect_on_get_campaign():
         "get-campaign --campaign-id X --env LIVE > /tmp/c.json"
     )
     hits = c.lint_terminal_command(bad)
-    assert any(h["code"] == "redirect_bridge_read_stdout" for h in hits)
+    assert any(h["code"] == "redirect_bridge_stdout" for h in hits)
+
+
+def test_blocks_redirect_on_list_candidates():
+    c = _contract()
+    bad = (
+        "python3 -u /Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+        "list-candidates --campaign-id SSF8033-20260609 --env LIVE > /tmp/candidates.json"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "redirect_bridge_stdout" for h in hits)
+
+
+def test_blocks_redirect_on_list_outreach_cooldown_handles():
+    c = _contract()
+    bad = (
+        "python3 -u /Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+        "list-outreach-cooldown-handles --env LIVE --plain > /tmp/cooldown.txt"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "redirect_bridge_stdout" for h in hits)
+
+
+def test_blocks_redirect_on_print_agent_contract():
+    c = _contract()
+    bad = (
+        "python3 -u /Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+        "print-agent-contract > /tmp/contract.txt"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "redirect_bridge_stdout" for h in hits)
+
+
+def test_blocks_pipe_head_on_list_candidates():
+    c = _contract()
+    bad = (
+        "python3 -u /Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+        "list-candidates --campaign-id X --env LIVE | head -20"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "pipe_bridge_stdout" for h in hits)
+
+
+def test_allows_tee_on_list_candidates():
+    c = _contract()
+    ok = (
+        "python3 -u /Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+        "list-candidates --campaign-id X --env LIVE | tee /tmp/candidates.json"
+    )
+    hits = c.lint_terminal_command(ok)
+    assert not hits
+
+
+def test_allows_stderr_redirect_only_on_list_candidates():
+    c = _contract()
+    ok = (
+        "python3 -u /Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol_bridge_tool.py "
+        "list-candidates --campaign-id SSF8033-20260609 --env LIVE 2>/dev/null"
+    )
+    hits = c.lint_terminal_command(ok)
+    assert not any(h["code"] == "redirect_bridge_stdout" for h in hits)
+
+
+def test_blocks_invalid_read_identity_subcommand():
+    c = _contract()
+    bad = (
+        "python3 -u /abs/kol_bridge_tool.py read-identity --identity-id 1 --env LIVE"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "invalid_subcommand_read_identity" for h in hits)
+
+
+def test_blocks_invalid_list_campaigns_subcommand():
+    c = _contract()
+    bad = "python3 -u /abs/kol_bridge_tool.py list-campaigns --env LIVE"
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "invalid_subcommand_list_campaigns" for h in hits)
+
+
+def test_blocks_invalid_pretty_flag_position():
+    c = _contract()
+    bad = (
+        "python3 -u /abs/kol_bridge_tool.py get-identity --identity-id 1 "
+        "--env LIVE --pretty"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "invalid_cli_pretty_flag_position" for h in hits)
+
+
+def test_blocks_nox_quota_snapshot_on_bridge_cli():
+    c = _contract()
+    bad = (
+        "python3 -u /abs/kol_bridge_tool.py quota-snapshot --env LIVE"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "nox_subcommand_on_bridge_cli" for h in hits)
+
+
+def test_blocks_invalid_plain_on_discovery_skip():
+    c = _contract()
+    bad = (
+        "python3 -u /abs/kol_bridge_tool.py list-discovery-skip-handles --env LIVE --plain"
+    )
+    hits = c.lint_terminal_command(bad)
+    assert any(h["code"] == "invalid_plain_on_discovery_skip" for h in hits)
+
+
+def test_format_block_message_includes_guard_source():
+    c = _contract()
+    msg = c.format_block_message([{"code": "batch_ingest_files", "hint": "x"}])
+    import json
+    payload = json.loads(msg)
+    assert payload["source"] == "kol_bridge_agent_guard"
+    assert "note" in payload
 
 
 def test_lint_write_facts_reply_draft():

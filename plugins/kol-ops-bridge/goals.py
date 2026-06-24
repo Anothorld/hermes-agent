@@ -137,8 +137,15 @@ def _compensation_satisfied(s: State, c: Context) -> bool:
 
 
 def _contract_satisfied(s: State, c: Context) -> bool:
+    """Gate fulfillment entry on commerce completion.
+
+    When ``contract_required`` is false the ``contract_signing`` goal is skipped,
+    but logistics / payout must still wait until compensation is satisfied
+    (``offer.agreed_terms`` or defer-mode gifted/hybrid rules) — not jump
+    straight to fulfillment on outreach alone.
+    """
     if not c.campaign_cfg.get("contract_required", True):
-        return True
+        return _compensation_satisfied(s, c)
     return _present(s, "offer.contract_signed")
 
 

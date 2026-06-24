@@ -8,45 +8,81 @@ import logging
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from typing import Any, Optional
+from typing import Any
 
 from . import cal
 from .escalation_resume import resume_escalation
+from .feishu_client import escalation_chat_id, list_container_messages, tenant_access_token
+from .feishu_notify import is_system_escalation_message, notify_escalation_locked
 
 log = logging.getLogger(__name__)
 
 _ENV = os.environ.get("CS_OPS_ENV", "LIVE")
 _POLL_SEC = int(os.environ.get("CS_OPS_FEISHU_POLL_INTERVAL_SEC", "30"))
+_CHAT_PAGE_SIZE = int(os.environ.get("CS_OPS_FEISHU_CHAT_PAGE_SIZE", "50"))
+_CHAT_MAX_PAGES = int(os.environ.get("CS_OPS_FEISHU_CHAT_LIST_MAX_PAGES", "5"))
+_THREAD_PAGE_SIZE = int(os.environ.get("CS_OPS_FEISHU_THREAD_PAGE_SIZE", "20"))
+_THREAD_MAX_PAGES = int(os.environ.get("CS_OPS_FEISHU_THREAD_LIST_MAX_PAGES", "5"))
 
 
-def _feishu_token() -> Optional[str]:
-    app_id = os.environ.get("FEISHU_APP_ID", "")
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
-    if not app_id or not app_secret:
-        return None
-    body = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
-    req = urllib.request.Request(
-        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+def _is_topic_thread_id(thread_id: str) -> bool:
+    """Feishu topic threads use omt_* ids; om_* message ids are not valid thread containers."""
+    return thread_id.startswith("omt_")
+
+
+def _list_thread_messages(*, token: str, thread_id: str) -> list[dict[str, Any]]:
+    return list_container_messages(
+        token=token,
+        container_id_type="thread",
+        container_id=thread_id,
+        page_size=_THREAD_PAGE_SIZE,
+        max_pages=_THREAD_MAX_PAGES,
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read().decode())
-    return data.get("tenant_access_token")
 
 
-def _list_thread_messages(*, token: str, thread_id: str, page_size: int = 20) -> list[dict[str, Any]]:
-    url = (
-        "https://open.feishu.cn/open-apis/im/v1/messages"
-        f"?container_id_type=thread&container_id={thread_id}&page_size={page_size}"
+def _list_chat_messages(*, token: str, chat_id: str) -> list[dict[str, Any]]:
+    return list_container_messages(
+        token=token,
+        container_id_type="chat",
+        container_id=chat_id,
+        page_size=_CHAT_PAGE_SIZE,
+        max_pages=_CHAT_MAX_PAGES,
     )
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        data = json.loads(resp.read().decode())
-    items = data.get("data", {}).get("items") or []
-    return items if isinstance(items, list) else []
+
+
+def _replies_to_root(messages: list[dict[str, Any]], root_message_id: str) -> list[dict[str, Any]]:
+    """Human replies under a root post in a normal group use parent_id, not thread containers."""
+    root = str(root_message_id)
+    replies: list[dict[str, Any]] = []
+    for msg in messages:
+        mid = str(msg.get("message_id") or "")
+        if not mid or mid == root:
+            continue
+        if str(msg.get("parent_id") or "") == root:
+            replies.append(msg)
+    return replies
+
+
+def _list_escalation_reply_messages(
+    *,
+    token: str,
+    feishu_chat_id: str,
+    feishu_message_id: str,
+    feishu_thread_id: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Return candidate reply messages and the listing strategy used."""
+    if feishu_thread_id and _is_topic_thread_id(feishu_thread_id):
+        return _list_thread_messages(token=token, thread_id=feishu_thread_id), "topic_thread"
+
+    chat_id = feishu_chat_id or (escalation_chat_id() or "")
+    root_id = feishu_message_id or feishu_thread_id
+    if not chat_id or not root_id:
+        return [], "missing_chat_or_root"
+
+    chat_messages = _list_chat_messages(token=token, chat_id=chat_id)
+    return _replies_to_root(chat_messages, root_id), "chat_parent"
 
 
 def _message_text(item: dict[str, Any]) -> str:
@@ -70,73 +106,272 @@ def _msg_ts(item: dict[str, Any]) -> int:
         return 0
 
 
+def _escalation_created_ms(esc: dict[str, Any]) -> int:
+    try:
+        from datetime import datetime
+
+        return int(
+            datetime.fromisoformat(str(esc.get("created_at", "")).replace("Z", "+00:00")).timestamp() * 1000
+        )
+    except (ValueError, TypeError):
+        return 0
+
+
+def _is_valid_operator_reply(msg: dict[str, Any], *, esc_created_ms: int) -> bool:
+    mid = str(msg.get("message_id") or "")
+    if not mid:
+        return False
+    if esc_created_ms and _msg_ts(msg) <= esc_created_ms:
+        return False
+    sender = msg.get("sender") or {}
+    if sender.get("sender_type") == "app":
+        return False
+    text = _message_text(msg).strip()
+    return bool(text) and not is_system_escalation_message(text)
+
+
+def _collect_operator_replies(
+    messages: list[dict[str, Any]],
+    *,
+    esc_created_ms: int,
+) -> list[dict[str, Any]]:
+    """Return valid human replies sorted oldest-first."""
+    replies = [msg for msg in messages if _is_valid_operator_reply(msg, esc_created_ms=esc_created_ms)]
+    replies.sort(key=_msg_ts)
+    return replies
+
+
+def _pick_first_operator_reply(
+    messages: list[dict[str, Any]],
+    *,
+    esc_created_ms: int,
+    seen_message_id: str,
+) -> dict[str, Any] | None:
+    """Return the earliest valid human reply (first-reply-wins)."""
+    candidates = _collect_operator_replies(messages, esc_created_ms=esc_created_ms)
+    for msg in candidates:
+        mid = str(msg.get("message_id") or "")
+        if mid and mid != seen_message_id:
+            return msg
+    return None
+
+
+def _ensure_escalation_lock_notified(
+    *,
+    escalation_id: int,
+    feishu_root_message_id: str,
+    token: str,
+    resume_context: dict[str, Any] | None = None,
+) -> bool:
+    """Post [ESC-LOCK:…] once; persist feishu_lock_notified for retries while resuming."""
+    ctx = resume_context or {}
+    if ctx.get("feishu_lock_notified"):
+        return True
+    if not feishu_root_message_id:
+        return False
+    lock = notify_escalation_locked(
+        escalation_id=escalation_id,
+        feishu_root_message_id=feishu_root_message_id,
+        token=token,
+    )
+    if not lock.ok:
+        log.warning("feishu lock notify failed esc=%s: %s", escalation_id, lock.error)
+        return False
+    cal.merge_escalation_resume_context(
+        escalation_id=escalation_id,
+        patch={"feishu_lock_notified": True, "feishu_lock_message_id": lock.message_id},
+    )
+    if resume_context is not None:
+        resume_context["feishu_lock_notified"] = True
+        resume_context["feishu_lock_message_id"] = lock.message_id
+    return True
+
+
+def _poll_resuming_escalations(
+    *,
+    token: str,
+    env: str,
+    seen_late: dict[str, list[str]],
+) -> dict[str, int]:
+    """Retry LOCK if missing; track late operator replies under claimed escalations."""
+    locks_retried = 0
+    late_detected = 0
+    for esc in cal.list_escalations(state="resuming", env=env):
+        eid = str(esc["id"])
+        ctx = esc.get("resume_context") or {}
+        winning_mid = str(ctx.get("feishu_reply_message_id") or "")
+        feishu_chat_id = str(esc.get("feishu_chat_id") or "")
+        feishu_message_id = str(esc.get("feishu_message_id") or "")
+        feishu_thread_id = str(esc.get("feishu_thread_id") or "")
+        root_for_lock = feishu_message_id or feishu_thread_id
+        if not root_for_lock and not feishu_thread_id:
+            continue
+
+        try:
+            messages, listing_mode = _list_escalation_reply_messages(
+                token=token,
+                feishu_chat_id=feishu_chat_id,
+                feishu_message_id=feishu_message_id,
+                feishu_thread_id=feishu_thread_id,
+            )
+        except urllib.error.HTTPError as exc:
+            log.warning("feishu list messages failed resuming esc=%s: %s", eid, exc)
+            continue
+
+        if listing_mode == "missing_chat_or_root":
+            continue
+
+        if root_for_lock and not ctx.get("feishu_lock_notified"):
+            if _ensure_escalation_lock_notified(
+                escalation_id=int(eid),
+                feishu_root_message_id=root_for_lock,
+                token=token,
+                resume_context=ctx,
+            ):
+                locks_retried += 1
+
+        esc_created_ms = _escalation_created_ms(esc)
+        late_ids = seen_late.setdefault(eid, [])
+        for msg in _collect_operator_replies(messages, esc_created_ms=esc_created_ms):
+            mid = str(msg.get("message_id") or "")
+            if not mid or mid == winning_mid or mid in late_ids:
+                continue
+            late_ids.append(mid)
+            late_detected += 1
+            log.info("late operator reply ignored esc=%s msg=%s", eid, mid)
+            if root_for_lock:
+                _ensure_escalation_lock_notified(
+                    escalation_id=int(eid),
+                    feishu_root_message_id=root_for_lock,
+                    token=token,
+                    resume_context=ctx,
+                )
+
+    return {"locks_retried": locks_retried, "late_detected": late_detected}
+
+
+def _retry_resuming_without_run(*, env: str) -> int:
+    """Retry gateway launch for claimed escalations when a prior launch failed."""
+    retried = 0
+    for esc in cal.list_escalations(state="resuming", env=env):
+        ctx = esc.get("resume_context") or {}
+        if ctx.get("resume_run_id"):
+            continue
+        eid = int(esc["id"])
+        answer = str(ctx.get("operator_answer_raw") or esc.get("operator_answer") or "").strip()
+        if not answer:
+            continue
+        result = resume_escalation(
+            escalation_id=eid,
+            operator_answer=answer,
+            decided_by=str(esc.get("decided_by") or "feishu_operator"),
+            env=env,
+            already_claimed=True,
+        )
+        if result.get("ok"):
+            retried += 1
+        else:
+            log.warning("retry resume escalation %s failed: %s", eid, result.get("error"))
+    return retried
+
+
 def poll_once() -> dict[str, Any]:
-    token = _feishu_token()
+    token = tenant_access_token()
     if not token:
         return {"error": "missing FEISHU_APP_ID/SECRET", "resumed": 0}
 
     state = cal.get_poller_state("feishu_escalation_poller")
     seen: dict[str, str] = dict(state.get("seen_replies") or {})
+    seen_late: dict[str, list[str]] = {
+        str(k): list(v) for k, v in (state.get("seen_late_replies") or {}).items()
+    }
     resumed = 0
 
     for esc in cal.list_escalations(state="awaiting_answer", env=_ENV):
-        thread_id = esc.get("feishu_thread_id")
-        if not thread_id:
-            continue
         eid = str(esc["id"])
-        esc_created_ms = 0
-        try:
-            from datetime import datetime
+        feishu_chat_id = str(esc.get("feishu_chat_id") or "")
+        feishu_message_id = str(esc.get("feishu_message_id") or "")
+        feishu_thread_id = str(esc.get("feishu_thread_id") or "")
+        if not feishu_message_id and not feishu_thread_id:
+            continue
 
-            esc_created_ms = int(
-                datetime.fromisoformat(str(esc.get("created_at", "")).replace("Z", "+00:00")).timestamp() * 1000
-            )
-        except (ValueError, TypeError):
-            pass
+        esc_created_ms = _escalation_created_ms(esc)
         try:
-            messages = _list_thread_messages(token=token, thread_id=thread_id)
+            messages, listing_mode = _list_escalation_reply_messages(
+                token=token,
+                feishu_chat_id=feishu_chat_id,
+                feishu_message_id=feishu_message_id,
+                feishu_thread_id=feishu_thread_id,
+            )
         except urllib.error.HTTPError as exc:
             log.warning("feishu list messages failed esc=%s: %s", eid, exc)
             continue
-        for msg in reversed(messages):
-            mid = str(msg.get("message_id") or "")
-            if not mid or seen.get(eid) == mid:
-                continue
-            if esc_created_ms and _msg_ts(msg) <= esc_created_ms:
-                continue
-            sender = msg.get("sender") or {}
-            if sender.get("sender_type") == "app":
-                continue
-            text = _message_text(msg).strip()
-            if not text or text.startswith("[ESC:"):
-                continue
-            esc_full = cal.get_escalation(escalation_id=int(eid))
-            qsid = ""
-            if esc_full and esc_full.get("session"):
-                qsid = str(esc_full["session"].get("quickcep_session_id") or "")
-            if not qsid:
-                log.warning("escalation %s missing quickcep session — skip", eid)
-                break
-            from .escalation_resume import resume_escalation
 
-            result = resume_escalation(
+        if listing_mode == "missing_chat_or_root":
+            continue
+
+        msg = _pick_first_operator_reply(
+            messages,
+            esc_created_ms=esc_created_ms,
+            seen_message_id=seen.get(eid, ""),
+        )
+        if not msg:
+            continue
+
+        mid = str(msg.get("message_id") or "")
+        text = _message_text(msg).strip()
+        sender = msg.get("sender") or {}
+        root_for_lock = feishu_message_id or feishu_thread_id
+
+        if not cal.claim_escalation_reply(
+            escalation_id=int(eid),
+            operator_answer=text,
+            decided_by=str(sender.get("id") or "feishu_operator"),
+            feishu_reply_message_id=mid,
+        ):
+            continue
+
+        if root_for_lock:
+            _ensure_escalation_lock_notified(
                 escalation_id=int(eid),
-                operator_answer=text,
-                decided_by=str(sender.get("id") or "feishu_operator"),
-                env=_ENV,
+                feishu_root_message_id=root_for_lock,
+                token=token,
             )
-            if not result.get("ok"):
-                log.error("resume escalation %s failed: %s", eid, result.get("error"))
-                break
-            seen[eid] = mid
-            resumed += 1
-            break
+
+        result = resume_escalation(
+            escalation_id=int(eid),
+            operator_answer=text,
+            decided_by=str(sender.get("id") or "feishu_operator"),
+            env=_ENV,
+            feishu_reply_message_id=mid,
+            already_claimed=True,
+        )
+        if not result.get("ok"):
+            log.error("resume escalation %s failed: %s", eid, result.get("error"))
+            continue
+        seen[eid] = mid
+        resumed += 1
+
+    retried = _retry_resuming_without_run(env=_ENV)
+    resuming_stats = _poll_resuming_escalations(token=token, env=_ENV, seen_late=seen_late)
 
     cal.set_poller_state(
         "feishu_escalation_poller",
-        {"seen_replies": seen, "last_run": time.time(), "resumed": resumed},
+        {
+            "seen_replies": seen,
+            "seen_late_replies": seen_late,
+            "last_run": time.time(),
+            "resumed": resumed,
+            "retried": retried,
+            **resuming_stats,
+        },
     )
-    return {"resumed": resumed, "tracked_escalations": len(seen)}
+    return {
+        "resumed": resumed,
+        "retried": retried,
+        "tracked_escalations": len(seen),
+        **resuming_stats,
+    }
 
 
 async def start_background() -> None:

@@ -63,6 +63,7 @@ def test_process_run_builds_expected_gateway_body():
 
 def test_launch_for_message_enqueues_and_launches(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
     cal = _load_module("cal")
     qw = _load_module("quickcep_watcher")
     gw_mod = _load_module("gateway_client")
@@ -79,6 +80,7 @@ def test_launch_for_message_enqueues_and_launches(monkeypatch, tmp_path):
             "chatSessionId": "chat-1",
             "id": "mid-1",
             "email": "visitor@example.com",
+            "channel": "email",
         }
     )
     assert run_id == "run-abc"
@@ -88,6 +90,7 @@ def test_launch_for_message_enqueues_and_launches(monkeypatch, tmp_path):
 
 def test_launch_failure_applies_failed_handoff(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
     cal = _load_module("cal")
     qw = _load_module("quickcep_watcher")
     gw_mod = _load_module("gateway_client")
@@ -111,6 +114,7 @@ def test_launch_failure_applies_failed_handoff(monkeypatch, tmp_path):
             "chatSessionId": "chat-1",
             "id": "mid-1",
             "email": "visitor@example.com",
+            "channel": "email",
         }
     )
     assert run_id is None
@@ -118,3 +122,41 @@ def test_launch_failure_applies_failed_handoff(monkeypatch, tmp_path):
     assert sess["status"] == "failed"
     assert len(handoffs) == 1
     assert handoffs[0]["phase"] == "failed"
+
+
+def test_launch_skipped_when_intent_not_allowed(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_module("cal")
+    qw = _load_module("quickcep_watcher")
+
+    run_id = qw._launch_for_message(
+        {
+            "chatSubSessionId": "sess-blocked",
+            "chatSessionId": "chat-1",
+            "id": "mid-1",
+            "email": "visitor@example.com",
+            "intentionTags": ["支付咨询"],
+            "channel": "email",
+        }
+    )
+    assert run_id is None
+    assert cal.get_session(quickcep_session_id="sess-blocked", env="LIVE") is None
+
+
+def test_launch_skipped_for_non_email_channel(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
+    cal = _load_module("cal")
+    qw = _load_module("quickcep_watcher")
+
+    run_id = qw._launch_for_message(
+        {
+            "chatSubSessionId": "sess-web",
+            "chatSessionId": "chat-1",
+            "id": "mid-1",
+            "email": "visitor@example.com",
+            "channel": "web",
+        }
+    )
+    assert run_id is None
+    assert cal.get_session(quickcep_session_id="sess-web", env="LIVE") is None

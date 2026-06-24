@@ -40,6 +40,7 @@ def _load_pkg() -> ModuleType:
         "quickcep_watcher",
         "feishu_escalation_poller",
         "escalation_timeout",
+        "processing_stale",
         "escalation_resume",
         "plugin_api",
     ):
@@ -66,13 +67,39 @@ def _build_app() -> FastAPI:
         qw = pkg.quickcep_watcher
         fp = pkg.feishu_escalation_poller
         et = pkg.escalation_timeout
+        ps = pkg.processing_stale
+        gw_base = os.environ.get("CS_OPS_GATEWAY_BASE", "http://127.0.0.1:8643").rstrip("/")
+
+        async def _probe_gateway() -> None:
+            import urllib.error
+            import urllib.request
+
+            await asyncio.sleep(2.0)
+            url = f"{gw_base}/v1/models"
+            try:
+                with urllib.request.urlopen(url, timeout=5) as resp:
+                    ok = 200 <= resp.status < 300
+            except urllib.error.HTTPError as exc:
+                ok = exc.code < 500
+            except Exception:
+                log = logging.getLogger("cs-ops-bridge")
+                log.error(
+                    "Gateway API unreachable at %s — CS launches will fail. "
+                    "Run: hermes -p povison-cs gateway run --replace (with API_SERVER_ENABLED=true)",
+                    gw_base,
+                )
+                return
+
         tasks = []
+        tasks.append(asyncio.create_task(_probe_gateway(), name="cs-gateway-probe"))
         if os.environ.get("CS_OPS_QUICKCEP_WATCHER_AUTO_START", "true").lower() in ("1", "true", "yes"):
             tasks.append(asyncio.create_task(qw.start_background(), name="cs-quickcep-watcher"))
         if os.environ.get("CS_OPS_FEISHU_POLLER_AUTO_START", "true").lower() in ("1", "true", "yes"):
             tasks.append(asyncio.create_task(fp.start_background(), name="cs-feishu-poller"))
         if os.environ.get("CS_OPS_ESCALATION_TIMEOUT_AUTO_START", "true").lower() in ("1", "true", "yes"):
             tasks.append(asyncio.create_task(et.start_background(), name="cs-escalation-timeout"))
+        if os.environ.get("CS_OPS_PROCESSING_STALE_AUTO_START", "true").lower() in ("1", "true", "yes"):
+            tasks.append(asyncio.create_task(ps.start_background(), name="cs-processing-stale"))
         yield
         qw.request_stop()
         for t in tasks:
@@ -91,6 +118,19 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8081)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    from profile_env import load_profile_dotenv
+    from profile_refs import assert_expected_profile, cs_profile_dir, cs_profile_name, quickcep_skill_dir
+
+    load_profile_dotenv()
+
+    assert_expected_profile(context="serve")
+    log = logging.getLogger("cs-ops-bridge")
+    log.info(
+        "profile=%s dir=%s quickcep=%s",
+        cs_profile_name(),
+        cs_profile_dir(),
+        quickcep_skill_dir(),
+    )
     import uvicorn
 
     uvicorn.run(_build_app(), host=args.host, port=args.port, log_level="info")

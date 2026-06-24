@@ -64,6 +64,8 @@ API：
 
 **KOL 筛选**：升级队列工具栏支持按 **@handle / 邮箱** 搜索；从 KOL 详情或看板跳转时 URL 含 `identity_id`、`campaign_id`、`q`，列表自动只显示该 KOL 的升级。点「已筛选 ✕」恢复全量。
 
+**排序**：工具栏下拉可选 **智能优先级**（默认）、**等待最久**（`created_at` 升序）、**最新到达**（`created_at` 降序）。
+
 1. 在 **升级队列** `/escalations` 打开工单，阅读触发回信与 **③ 回信预览**（若有）。
 2. 阅读 **请求操作员答复**（`suggested_question` / `question_to_operator`）— 文案应为 **简体中文**（来自策略规则模板、Bridge 确定性文案，或 Agent 开单时写入；KOL 追信块由系统自动追加）。
 3. 填写 **操作员答复** 与所需 facts（如 `approval.paid_ceiling_override`）。
@@ -91,7 +93,7 @@ API：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/escalations` | 列表（可按 `state` / `env` / `identity_id` / `campaign_id` 过滤；行内带 `handle`、`email`） |
+| GET | `/escalations` | 列表（可按 `state` / `env` / `identity_id` / `campaign_id` 过滤；`sort=priority\|time`、`order=asc\|desc`；行内带 `handle`、`email`） |
 | GET | `/escalations/{id}` | 详情 + 关联入站 |
 | PATCH | `/escalations/{id}` | resume / terminate；返回 `draft_expected` + `draft_followup`（`expected` / `already_pending` / `in_flight` / `none`） |
 | POST | `/escalations/{id}/preview-draft` | 试写草稿（不 resolve） |

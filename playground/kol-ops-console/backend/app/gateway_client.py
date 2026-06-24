@@ -315,7 +315,7 @@ class GatewayClient:
         kind: Optional[str] = None,
     ) -> dict[str, Any]:
         """Start a run through :mod:`run_launch_queue` when enabled."""
-        from .run_launch_queue import launch_queue
+        from .run_launch_queue import _BROWSER_SERIAL_KINDS, launch_queue
 
         result = await launch_queue.launch(
             start_fn,
@@ -329,7 +329,7 @@ class GatewayClient:
         if (
             isinstance(run_id, str)
             and run_id
-            and resolved_kind != "email_discover"
+            and resolved_kind not in _BROWSER_SERIAL_KINDS
         ):
             self.ensure_run_drained(run_id)
         if result.queued:

@@ -72,8 +72,8 @@ extraction in a single LLM pass — never split across goals/stages.
    keep them deterministic-friendly (no fabricated identity claims).
 4. `current_goal_state` — `{commerce: <goal_name|null>, fulfillment:
    <goal_name|null>, publish: <goal_name|null>}` plus each goal's
-   `missing_facts`. The dispatcher fetches this via
-   `kol_bridge_tool.py get-goals --identity-id <id> --campaign-id <cid> --env TEST|LIVE`.
+   `missing_facts`. **Shape:** lane map built by dispatcher Step 1.5 from
+   `get-dispatch-context.goals[]` — **not** the raw goals array.
 5. `campaign_config_summary` — `paid_ceiling`, `paid_target_budget` (if set),
    `commission_band`,
    `sku_whitelist`, `deliverable_count_per_platform`, `contract_required`,

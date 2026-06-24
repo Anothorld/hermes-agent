@@ -16,6 +16,7 @@ from .discovery_gate import REDISCOVERY_INSTRUCTIONS, evaluate_gate_after_termin
 from .gateway_client import GatewayClient, GatewayError, TERMINAL_STATES
 from .perf_snapshot import perf
 from .post_email_discover_draft import (
+    maybe_trigger_outreach_draft_after_creator_brief_refresh,
     maybe_trigger_outreach_draft_after_email_discover,
 )
 from .run_status_cache import run_status_cache
@@ -64,6 +65,7 @@ async def reconcile_run_states(
     updates: dict[str, dict[str, Any]] = {}
     gate_work: list[dict[str, Any]] = []
     email_discover_followups: list[dict[str, Any]] = []
+    creator_brief_followups: list[dict[str, Any]] = []
     dirty = False
 
     for r in rows:
@@ -252,6 +254,16 @@ async def reconcile_run_states(
                         "session_id": session_id,
                         "discover_run_id": str(run_id_to_poll),
                     })
+                elif (
+                    rstate == "completed"
+                    and session_id.startswith("kol-creator-brief-refresh:")
+                ):
+                    creator_brief_followups.append({
+                        "campaign_id": campaign_id,
+                        "env": env,
+                        "session_id": session_id,
+                        "brief_refresh_run_id": str(run_id_to_poll),
+                    })
 
         _run_state_cache[(campaign_id, env)] = dict(entry)
 
@@ -277,6 +289,25 @@ async def reconcile_run_states(
                     followup.get("discover_run_id"),
                 )
         if email_discover_followups:
+            conn.commit()
+        for followup in creator_brief_followups:
+            try:
+                await maybe_trigger_outreach_draft_after_creator_brief_refresh(
+                    bridge=bridge,
+                    gateway=gateway,
+                    conn=conn,
+                    campaign_id=followup["campaign_id"],
+                    env=followup["env"],
+                    session_id=followup["session_id"],
+                    brief_refresh_run_id=followup["brief_refresh_run_id"],
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "auto-draft after creator brief refresh failed for %s/%s",
+                    followup.get("campaign_id"),
+                    followup.get("brief_refresh_run_id"),
+                )
+        if creator_brief_followups:
             conn.commit()
 
     if dispatch_gate and bridge is not None:

@@ -13,7 +13,11 @@ import yaml
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _TAG_MAP = _PLUGIN_ROOT / "config" / "session_tag_map.yaml"
-_DEFAULT_SKILL = Path.home() / ".hermes/profiles/povison-cs/skills/social-media/quickcep"
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+from profile_refs import quickcep_skill_dir  # noqa: E402
+
+_DEFAULT_SKILL = quickcep_skill_dir()
 
 AI_TAG_NAMES = {
     "processing": "AI-处理中",

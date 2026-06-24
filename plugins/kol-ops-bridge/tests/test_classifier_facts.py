@@ -106,3 +106,27 @@ def test_should_sanitize_email_source(bridge_pkg):
     cf = _cf(bridge_pkg)
     assert cf.should_sanitize_classifier_source("email:abc123")
     assert not cf.should_sanitize_classifier_source("skill:fragment-merge")
+
+
+def test_mirror_fulfillment_brief_sent_to_offer(bridge_pkg):
+    cf = _cf(bridge_pkg)
+    ns, adj = cf.normalize_fulfillment_offer_aliases(
+        {"fulfillment": {"fulfillment.brief_sent": True}},
+    )
+    assert ns["offer"]["offer.brief_sent"] is True
+    assert any("mirrored" in a for a in adj)
+
+
+def test_mirror_draft_approved_to_review_verdict(bridge_pkg):
+    cf = _cf(bridge_pkg)
+    ns, adj = cf.normalize_fulfillment_offer_aliases(
+        {
+            "fulfillment": {
+                "fulfillment.draft_approved": True,
+                "fulfillment.draft_approved_at": "2026-06-01T00:00:00Z",
+            },
+        },
+    )
+    assert ns["offer"]["offer.review_verdict"] == "approved"
+    assert ns["offer"]["offer.review_verdict_at"] == "2026-06-01T00:00:00Z"
+    assert adj

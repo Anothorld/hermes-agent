@@ -62,10 +62,25 @@ Approval watcher 在 open runs >5 时自动切换 `poll_aggregate`，减少上�
 | 层 | 文件 | 行为 |
 |----|------|------|
 | **A 工具批次时钟** | `agent/tool_executor.py` | 并发工具批次有 wall-clock 上限（默认 1200s，`HERMES_TOOL_BATCH_TIMEOUT_S`）。超限即合成 timeout 工具结果、**停止 30s 心跳**、`shutdown(wait=False)` 放弃挂死 future，让 run 继续而非空转。心跳曾掩盖 gateway 回收，这是根因。 |
-| **B 导航硬校验** | `tools/browser_tool.py` `browser_navigate` | `open` 报成功但仍停在 `about:blank`/空 → 判失败（`blank_tab_no_op`），让模型记 miss/换策略，不把空标签页当已加载页。 |
+| **B 导航硬校验** | `tools/browser_tool.py` `browser_navigate` | `open` 报成功但仍停在 `about:blank`/空 → 短轮询 `window.location.href` 后仍 blank 则判失败（`blank_tab_no_op`），让模型记 miss/换策略；tab-pool 多一次 poll。 |
 | **C 无进展看门狗** | `gateway/platforms/api_server.py` `_watchdog_stuck_runs` / `_stuck_run_ids` | 每 60s 扫描；`running` 且 `agent._last_activity_ts`（事件 **或** 工具心跳）超时无进展（默认 1800s，`HERMES_RUN_NO_PROGRESS_TIMEOUT_S`，0 关闭）→ interrupt + 置 `failed` + 发 `run.failed`。**跳过 `waiting_for_approval`**（合法等操作员）与终态/queued。 |
 
 注：浏览器子进程本身有 60s 硬超时、CDP supervisor 10/15s 上限；A/B/C 是覆盖「工具内超时之外」的批次/导航/整 run 层兜底。长工具（构建、子代理）靠心跳保活，看门狗只杀真正静默的 run。
+
+## Browser 加固回归修复（2026-06）
+
+在保留 tab-pool / cloud-fallback / IG readiness 等 KOL 定制能力的同时，恢复上游安全与稳定性行为：
+
+| 项 | 文件 | 修复 |
+|----|------|------|
+| Orphan reaper 误杀 | `tools/browser_tool.py` | 恢复 `_verify_reapable_browser_daemon`（psutil 校验 PID 绑定 socket dir） |
+| 容器 SSRF | `tools/browser_tool.py` | 恢复 `_is_local_backend()` 对 `TERMINAL_ENV` 的判断（docker/modal/ssh 等仍做 SSRF） |
+| URL 密钥泄露 | `tools/browser_tool.py` | 恢复 `normalize_url_for_request` + 规范化后二次 `_PREFIX_RE` 检查 |
+| 配置失效 | `tools/browser_tool.py` | 恢复 `_get_session_inactivity_timeout()` 读 `config.yaml`（默认仍 300s） |
+| Tab 串台 | `tools/browser_tool.py` | cloud fallback **不再**写全局 `os.environ["BROWSER_CDP_URL"]`；CDP 仅存 session；autostart 带 `DEBUG_CHROME_SKIP_ENV=1` |
+| Supervisor eval | `tools/browser_supervisor.py` | 恢复 `returnByValue` 超长链重试 |
+| CDP 附着 | `tools/browser_tool.py` | tab-pool session 的 supervisor 优先用 **page-level** CDP，不用全局 browser ws |
+| Browser Use 扫描 | `plugins/browser/browser_use/provider.py` | `is_available()` 恢复 `peek_nous_access_token`，避免 OAuth refresh 风暴 |
 
 ## 浏览器并发与「卡死」真因（POVISON 686/690 最终定位）
 
@@ -280,7 +295,7 @@ terminal HTTP 抓取，提示改用 `browser_navigate` + Google URL。
 
 Console brief / instructions 注入 `bridge_agent_contract.py`（经 `bridge_agent_contract_loader`，默认带 `hermes-agent` 绝对路径）：
 
-- **`terminal_safety`** + **`approval_cli_checklist`** / **`resume_cli_checklist`**：同一绝对路径 `python3 -u .../kol_bridge_tool.py`；禁止对 `kol-bridge-cli` 套 `python3`、禁止相对 `plugins/…`、禁止对 get-* 读命令使用 `>` 重定向（会导致 terminal 空 stdout）
+- **`terminal_safety`** + **`approval_cli_checklist`** / **`resume_cli_checklist`**：同一绝对路径 `python3 -u .../kol_bridge_tool.py`；禁止对 `kol-bridge-cli` 套 `python3`、禁止相对 `plugins/…`、禁止对**任何** bridge 子命令 stdout 使用 `>` 重定向或 `| head/grep/jq`（会导致 terminal 空/截断 stdout）；`| tee` 允许。Guard block JSON 含 `source: kol_bridge_agent_guard` — 非 bridge 校验失败。
 - **stdout 错误契约**：CLI 失败输出 JSON 到 stdout；agent 若看到空 terminal + exit 2，应解析 stdout 的 `error`/`hint`，不得改用 `execute_code`（guard 会拦）
 
 详见 `agent_prj/docs/kol-bridge-agent-tooling.md`。

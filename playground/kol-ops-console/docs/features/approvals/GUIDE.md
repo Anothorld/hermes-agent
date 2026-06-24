@@ -14,6 +14,8 @@
 
 **KOL 筛选**：工具栏搜索框支持按 **@handle / 邮箱** 过滤当前列表；从 KOL 详情或看板卡片跳转时会带上 `identity_id`、`campaign_id` 与 `q`（handle 或邮箱），自动收窄到该 KOL。点「已筛选 ✕」可恢复全量列表。
 
+**排序**：工具栏下拉可选 **智能优先级**（默认，LIVE / 回信稿 / 超时等加权）、**等待最久**（按 `opened_at` 升序）、**最新到达**（按 `opened_at` 降序）。
+
 ## 关键文件
 
 | 层 | 文件 |
@@ -26,7 +28,7 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/approvals` | 待办列表（可按 `campaign_id` / `identity_id` / `env` 过滤） |
+| GET | `/approvals` | 待办列表（可按 `campaign_id` / `identity_id` / `env` 过滤；`sort=priority\|time`、`order=asc\|desc` 控制排序，默认智能优先级） |
 | POST | `/approvals/{fact_path}/approve` | 批准 |
 | POST | `/approvals/approval.reply_draft/reject` | 结构化驳回（见根 `README.md` 示例） |
 | POST | `/approvals/.../refine` | 要求 Agent 改写 |

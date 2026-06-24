@@ -398,6 +398,9 @@ type ShortlistCandidate = {
     campaign_id: string;
     selected_at?: string | null;
   } | null;
+  creator_brief_ready?: boolean;
+  creator_brief_status?: string | null;
+  creator_brief_missing_keys?: string[] | null;
 };
 
 type ShortlistPayload = {
@@ -410,6 +413,13 @@ type ShortlistPayload = {
     prior_sku_approved_in_pending?: number;
   };
 };
+
+function creatorBriefStatusLabel(c: ShortlistCandidate): string | null {
+  if (c.creator_brief_ready) return '简介已就绪';
+  if (c.creator_brief_status === 'stale') return '简介需刷新';
+  if (c.creator_brief_status === 'missing') return '缺少创作者简介';
+  return null;
+}
 
 function isPriorSkuDupe(c: ShortlistCandidate): boolean {
   return (
@@ -905,6 +915,22 @@ function ShortlistReviewPanel({
                     >
                       Nox: {c.nox_diligence_verdict}
                       {c.nox_cache_month ? ` · ${c.nox_cache_month}` : ''}
+                    </span>
+                  )}
+                  {creatorBriefStatusLabel(c) && (
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] ${
+                        c.creator_brief_ready
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-orange-100 text-orange-900'
+                      }`}
+                      title={
+                        c.creator_brief_missing_keys?.length
+                          ? `缺少: ${c.creator_brief_missing_keys.join(', ')}`
+                          : '个性化邮件所需的创作者简介（6 项 identity 事实）'
+                      }
+                    >
+                      {creatorBriefStatusLabel(c)}
                     </span>
                   )}
                   {c.display_name && c.display_name !== c.handle && (

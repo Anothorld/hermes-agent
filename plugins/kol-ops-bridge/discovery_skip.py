@@ -59,6 +59,13 @@ def resolve_discovery_skip_reason(
     last_outcome = rel.get("last_outcome")
     if is_discovery_skip_outcome(last_outcome):
         return str(last_outcome)
+    try:
+        from . import legacy_outcome_repair as _lor
+
+        if _lor.should_skip_misclassified_legacy(identity_id=identity_id):
+            return _lor.REPAIR_TARGET_OUTCOME
+    except Exception:
+        pass
     return None
 
 

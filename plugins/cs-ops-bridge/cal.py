@@ -135,12 +135,13 @@ def enqueue_session(
             ),
         )
         conn.commit()
-        return {
+        result = {
             "created": True,
             "deduped": False,
             "should_launch": should_launch,
             "session": session,
         }
+        return result
 
 
 def list_sessions(
@@ -196,6 +197,88 @@ def update_session_status(*, session_row_id: int, status: str) -> None:
         conn.commit()
 
 
+def _fetch_visitor_orders(quickcep_session_id: str) -> dict[str, Any]:
+    """Fetch customer orders from QuickCEP getOrderList API.
+
+    Uses the same quickcep_cli import pattern as email_channel.fetch_email_session_row.
+    Returns {"orders": [...], "userUUID": str|None, "customer_email": str|None, "source": str}.
+    Best-effort: on any failure returns empty orders list.
+    """
+    import argparse as _ap
+    import sys as _sys
+
+    try:
+        from .email_channel import fetch_email_session_row, _quickcep_scripts_dir
+    except Exception:
+        return {"orders": [], "source": "error", "error": "email_channel import failed"}
+
+    scripts = _quickcep_scripts_dir()
+    if str(scripts) not in _sys.path:
+        _sys.path.insert(0, str(scripts))
+    try:
+        import quickcep_cli as qc  # type: ignore
+    except ImportError:
+        return {"orders": [], "source": "error", "error": "quickcep_cli unavailable"}
+
+    # 1. Get userUUID from session row
+    row = fetch_email_session_row(quickcep_session_id)
+    if not row:
+        return {"orders": [], "source": "error", "error": "session not found in email channel"}
+
+    vi = row.get("visitorInfo") if isinstance(row.get("visitorInfo"), dict) else {}
+    user_uuid = vi.get("userUUID")
+    customer_email = vi.get("email")
+    if not user_uuid:
+        return {"orders": [], "userUUID": None, "customer_email": customer_email, "source": "error", "error": "no userUUID"}
+
+    # 2. Call getOrderList
+    try:
+        args = _ap.Namespace(token=None, email=None, password=None)
+        jwt = qc.get_jwt(args)
+    except Exception:
+        return {"orders": [], "userUUID": user_uuid, "customer_email": customer_email, "source": "error", "error": "QuickCEP auth failed"}
+
+    try:
+        body = {"storeId": 3371, "userUUID": user_uuid}
+        result = qc.api_request("POST", "/cdp-analysis/api/store/platform/data/getOrderList", jwt, body, timeout=15)
+        data = result.get("data", {})
+        order_list = data.get("list", []) if isinstance(data, dict) else []
+    except Exception as exc:
+        return {"orders": [], "userUUID": user_uuid, "customer_email": customer_email, "source": "error", "error": str(exc)[:200]}
+
+    # 3. Filter to relevant fields
+    orders = []
+    for od in order_list[:10]:
+        if not isinstance(od, dict):
+            continue
+        line_items = []
+        for item in (od.get("lineItems") or [])[:5]:
+            if isinstance(item, dict):
+                line_items.append({
+                    "title": item.get("title", ""),
+                    "price": item.get("price", ""),
+                    "quantity": item.get("quantity", 1),
+                    "productUrl": item.get("productUrl", ""),
+                    "imageSrc": item.get("imageSrc", ""),
+                })
+        orders.append({
+            "orderId": od.get("orderId", ""),
+            "totalPrice": od.get("totalPrice", ""),
+            "currency": od.get("currency", "USD"),
+            "financialStatus": od.get("financialStatus", ""),
+            "fulfillmentStatus": od.get("fulfillmentStatus", ""),
+            "createDate": od.get("createDate", ""),
+            "lineItems": line_items,
+        })
+
+    return {
+        "orders": orders,
+        "userUUID": user_uuid,
+        "customer_email": customer_email,
+        "source": "getOrderList" if orders else "empty",
+    }
+
+
 def get_dispatch_context(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict[str, Any]]:
     with _connect() as conn:
         sess = conn.execute(
@@ -223,6 +306,13 @@ def get_dispatch_context(*, quickcep_session_id: str, env: str = "LIVE") -> Opti
         for f in facts:
             ns = f["namespace"]
             facts_map.setdefault(ns, {})[f["fact_key"]] = json.loads(f["fact_value_json"])
+
+        # Best-effort order context injection (never blocks dispatch)
+        try:
+            order_ctx = _fetch_visitor_orders(quickcep_session_id)
+        except Exception:
+            order_ctx = {"orders": [], "source": "error", "error": "unexpected failure"}
+
         return {
             "session": dict(sess),
             "facts": facts_map,
@@ -235,6 +325,7 @@ def get_dispatch_context(*, quickcep_session_id: str, env: str = "LIVE") -> Opti
                 for e in events
             ],
             "latest_escalation": dict(esc) if esc else None,
+            "orders": order_ctx,
         }
 
 
@@ -325,12 +416,32 @@ def open_escalation(
                 now,
             ),
         )
-        conn.execute(
-            "UPDATE cs_session SET status='awaiting_expert', updated_at=? WHERE id=?",
-            (now, sess["id"]),
-        )
+        # Lifecycle status is owned by apply-handoff (awaiting_expert phase), not open_escalation.
         conn.commit()
         return int(cur.lastrowid)
+
+
+def update_escalation_feishu(
+    *,
+    escalation_id: int,
+    feishu_chat_id: Optional[str] = None,
+    feishu_thread_id: Optional[str] = None,
+    feishu_message_id: Optional[str] = None,
+) -> bool:
+    """Persist Feishu delivery ids after bridge sends escalation notify."""
+    now = _now()
+    with _connect() as conn:
+        cur = conn.execute(
+            """UPDATE cs_escalations SET
+                   feishu_chat_id=COALESCE(?, feishu_chat_id),
+                   feishu_thread_id=COALESCE(?, feishu_thread_id),
+                   feishu_message_id=COALESCE(?, feishu_message_id),
+                   updated_at=?
+               WHERE id=?""",
+            (feishu_chat_id, feishu_thread_id, feishu_message_id, now, escalation_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def get_escalation(*, escalation_id: int) -> Optional[dict[str, Any]]:
@@ -373,6 +484,132 @@ def list_escalations(*, state: Optional[str] = None, env: str = "LIVE") -> list[
         return out
 
 
+def get_resuming_escalation_for_session(
+    *,
+    quickcep_session_id: str,
+    env: str = "LIVE",
+) -> Optional[dict[str, Any]]:
+    """Return the in-flight escalation resume row for a QuickCEP session, if any."""
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT * FROM cs_escalations
+               WHERE session_id=? AND env=? AND state='resuming'
+               ORDER BY id DESC LIMIT 1""",
+            (sess["id"], env),
+        ).fetchone()
+        if not row:
+            return None
+        out = dict(row)
+        out["resume_context"] = json.loads(out.pop("resume_context_json") or "{}")
+        out["session"] = dict(sess)
+        return out
+
+
+def claim_escalation_reply(
+    *,
+    escalation_id: int,
+    operator_answer: str,
+    decided_by: str,
+    feishu_reply_message_id: str,
+) -> bool:
+    """Atomically accept the first operator reply (awaiting_answer → resuming)."""
+    answer = (operator_answer or "").strip()
+    if not answer:
+        return False
+    now = _now()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT resume_context_json FROM cs_escalations WHERE id=? AND state='awaiting_answer'",
+            (escalation_id,),
+        ).fetchone()
+        if not row:
+            return False
+        ctx = json.loads(row["resume_context_json"] or "{}")
+        ctx["feishu_reply_message_id"] = feishu_reply_message_id
+        ctx["claimed_at"] = now
+        ctx["operator_answer_raw"] = answer
+        cur = conn.execute(
+            """UPDATE cs_escalations SET
+                   state='resuming',
+                   operator_answer=?,
+                   decided_by=?,
+                   decision='claim',
+                   decided_at=?,
+                   resume_context_json=?,
+                   updated_at=?
+               WHERE id=? AND state='awaiting_answer'""",
+            (mask_string(answer), decided_by, now, json.dumps(ctx), now, escalation_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def record_escalation_resume_run(*, escalation_id: int, run_id: str) -> bool:
+    """Persist gateway run id while escalation stays in resuming until handoff completes."""
+    now = _now()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT resume_context_json FROM cs_escalations WHERE id=? AND state='resuming'",
+            (escalation_id,),
+        ).fetchone()
+        if not row:
+            return False
+        ctx = json.loads(row["resume_context_json"] or "{}")
+        ctx["resume_run_id"] = run_id
+        ctx["resume_launched_at"] = now
+        cur = conn.execute(
+            """UPDATE cs_escalations SET resume_context_json=?, updated_at=?
+               WHERE id=? AND state='resuming'""",
+            (json.dumps(ctx), now, escalation_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def finalize_escalation(
+    *,
+    escalation_id: int,
+    decision: str = "completed",
+    final_state: str = "resolved",
+) -> bool:
+    """Close a resuming escalation without changing cs_session status."""
+    if final_state not in ESCALATION_STATES:
+        raise ValueError(f"invalid final_state: {final_state}")
+    now = _now()
+    with _connect() as conn:
+        cur = conn.execute(
+            """UPDATE cs_escalations SET
+                   decision=?, decided_at=?, state=?, updated_at=?
+               WHERE id=? AND state='resuming'""",
+            (decision, now, final_state, now, escalation_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def merge_escalation_resume_context(*, escalation_id: int, patch: Mapping[str, Any]) -> bool:
+    """Merge keys into resume_context_json for an escalation row."""
+    now = _now()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT resume_context_json FROM cs_escalations WHERE id=?",
+            (escalation_id,),
+        ).fetchone()
+        if not row:
+            return False
+        ctx = json.loads(row["resume_context_json"] or "{}")
+        ctx.update(dict(patch))
+        cur = conn.execute(
+            "UPDATE cs_escalations SET resume_context_json=?, updated_at=? WHERE id=?",
+            (json.dumps(ctx), now, escalation_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
 def resolve_escalation(
     *,
     escalation_id: int,
@@ -380,10 +617,12 @@ def resolve_escalation(
     decided_by: str,
     operator_answer: Optional[str] = None,
     final_state: str = "resolved",
+    touch_session: bool = True,
 ) -> bool:
     if final_state not in ESCALATION_STATES:
         raise ValueError(f"invalid final_state: {final_state}")
     now = _now()
+    masked_answer = mask_string(operator_answer) if operator_answer else None
     with _connect() as conn:
         row = conn.execute("SELECT session_id FROM cs_escalations WHERE id=?", (escalation_id,)).fetchone()
         if not row:
@@ -393,15 +632,38 @@ def resolve_escalation(
                    decision=?, decided_by=?, decided_at=?, operator_answer=COALESCE(?, operator_answer),
                    state=?, updated_at=?
                WHERE id=?""",
-            (decision, decided_by, now, operator_answer, final_state, now, escalation_id),
+            (decision, decided_by, now, masked_answer, final_state, now, escalation_id),
         )
-        if final_state == "resolved":
+        if final_state == "resolved" and touch_session:
             conn.execute(
                 "UPDATE cs_session SET status='processing', updated_at=? WHERE id=?",
                 (now, row["session_id"]),
             )
         conn.commit()
     return True
+
+
+def patch_escalation_decision(
+    *,
+    escalation_id: int,
+    decision: str,
+    decided_by: str,
+    operator_answer: Optional[str] = None,
+) -> bool:
+    """Update decision metadata after finalize (e.g. manual resolve overlay)."""
+    now = _now()
+    masked_answer = mask_string(operator_answer) if operator_answer else None
+    with _connect() as conn:
+        cur = conn.execute(
+            """UPDATE cs_escalations SET
+                   decision=?, decided_by=?, decided_at=?,
+                   operator_answer=COALESCE(?, operator_answer),
+                   updated_at=?
+               WHERE id=?""",
+            (decision, decided_by, now, masked_answer, now, escalation_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
 
 
 def get_poller_state(poller_name: str) -> dict[str, Any]:

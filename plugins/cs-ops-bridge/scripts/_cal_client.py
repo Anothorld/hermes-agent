@@ -36,7 +36,26 @@ def _load_key() -> Optional[str]:
     if SECRETS_PATH.exists():
         for line in SECRETS_PATH.read_text(encoding="utf-8").splitlines():
             if line.strip().startswith("bridge_key:"):
-                return line.split(":", 1)[1].strip().strip("'\"")
+                val = line.split(":", 1)[1].strip().strip("'\"")
+                if val:
+                    return val
+    # Gateway agent subprocess may not inherit bridge env; read profile .env.
+    try:
+        plugin_root = Path(__file__).resolve().parents[1]
+        if str(plugin_root) not in sys.path:
+            sys.path.insert(0, str(plugin_root))
+        from profile_refs import cs_profile_dir  # noqa: WPS433
+
+        env_path = cs_profile_dir() / ".env"
+        if env_path.exists():
+            for raw in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if line.startswith(f"{KEY_ENV}="):
+                    val = line.split("=", 1)[1].strip().strip("'\"")
+                    if val:
+                        return val
+    except Exception:
+        pass
     return None
 
 

@@ -78,3 +78,21 @@ def test_agent_view_omits_lanes_and_strips_provenance() -> None:
     assert slim["campaign_config"]["variant_candidates"] == [{"sku": "A"}]
     assert "[redacted" in slim["campaign_facts"]["approval.reply_draft"]["draft"]["body"]
     assert "identity.content_pillars_source" not in slim["identity_facts"]
+
+
+def test_agent_view_keeps_creator_brief_freshness_anchors() -> None:
+    bundle = {
+        "identity_id": 9,
+        "campaign_id": "C2",
+        "env": "LIVE",
+        "identity_facts": {
+            "identity.content_pillars": ["cozy"],
+            "identity.content_pillars_source": "ig_profile_and_reels",
+            "identity.content_pillars_discovered_at": "2026-05-01T12:00:00Z",
+        },
+    }
+    slim = slim_dispatch_context_for_agent(bundle)
+    assert slim["identity_facts"]["identity.content_pillars_discovered_at"] == (
+        "2026-05-01T12:00:00Z"
+    )
+    assert "identity.content_pillars_source" not in slim["identity_facts"]

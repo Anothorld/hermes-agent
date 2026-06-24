@@ -17,6 +17,7 @@
 |------|--------|------|
 | Run 启动队列 | `KOC_GATEWAY_LAUNCH_QUEUE_ENABLED`（默认 true） | 上限 `KOC_GATEWAY_LAUNCH_MAX_INFLIGHT=8` |
 | Email discover 串行 | 队列 `kind=email_discover` max=1 | 全局仅 1 路 `kol-email-discover:*`；worker 在 `start_run` 返回 run_id 后**仍持有 semaphore** 直至 SSE drain 结束（HTTP/202 不阻塞整段 browser run）；**队列关闭时** bypass 路径同样 serial + drain |
+| Creator brief refresh 串行 | 与 email discover 共享 browser semaphore | `kind=creator_brief_refresh`（`kol-creator-brief-refresh:*`）与 email discover **共用** 全局 browser 槽（max 1），避免并行 Chrome |
 | Recovery 串行 | `KOC_RECOVERY_LAUNCH_SERIAL=true` | `recovery-*` session 不 fan-out |
 | SSE 排水 | 自动 | 非 email-discover：`ensure_run_drained` 后台排水；email-discover 由队列 worker 同步 drain（不重复） |
 | Run 状态后台对齐 | `KOC_RUN_RECONCILER_ENABLED=true` | GET 默认只读缓存 |

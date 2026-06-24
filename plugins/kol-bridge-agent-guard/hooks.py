@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -18,7 +19,13 @@ HookResult = Optional[Union[None, Dict[str, str]]]
 # ``kol-campaign-draft:`` and ``kol-campaign-outreach:`` task ids the Console
 # emits — a trailing colon here let those slip past the mcp-chrome block and
 # loop on the dead chrome-devtools MCP endpoint (POVISON stuck-run incident).
-_KOL_SESSION_PREFIXES = ("kol-campaign", "kol-reply:", "kol-email-discover:", "kol-nox-")
+_KOL_SESSION_PREFIXES = (
+    "kol-campaign",
+    "kol-reply:",
+    "kol-email-discover:",
+    "kol-creator-brief-refresh:",
+    "kol-nox-",
+)
 
 # Post-approval / reply / Nox batch: Nox API + bridge CLI only — no browser crawl.
 # ``kol-email-discover:`` is intentionally excluded: Console「全网搜索邮箱」runs
@@ -47,11 +54,24 @@ _TERMINAL_SCRAPE_WORKAROUND_RE = re.compile(
     r"(?is)"
     # search-engine / link-in-bio HTML scraping
     r"duckduckgo\.com|google\.com/search|bing\.com/search|"
+    r"serper\.dev|google\.serper|"
     r"beacons\.ai|linktr\.ee|bio\.link|lnk\.bio|solo\.to|instagram\.com|"
     # generic HTTP-fetch-from-terminal substitutes for web_extract / browser_*
     r"\bcurl\b|\bwget\b|"
     r"urllib\.request|urlopen\b|\brequests\.(?:get|post)\b|"
     r"httpx\.|http\.client",
+)
+
+# Public-web workarounds on kol-campaign discovery — narrower than email-discover
+# terminal scrape (do not block bridge-health curl in execute_code).
+_CAMPAIGN_PUBLIC_WEB_WORKAROUND_RE = re.compile(
+    r"(?is)"
+    r"serper\.dev|google\.serper|"
+    r"duckduckgo\.com|google\.com/search|bing\.com/search|"
+    r"\brequests\.(?:get|post)\b|"
+    r"urllib\.request|urlopen\b|httpx\.|http\.client|"
+    r"\bcurl\b.*(?:serper|google\.com/search|duckduckgo|bing\.com)|"
+    r"\bwget\b",
 )
 
 
@@ -97,6 +117,19 @@ def _email_discover_session(session_id: str, task_id: str = "") -> bool:
     return sid.startswith("kol-email-discover:")
 
 
+def _creator_brief_refresh_session(session_id: str, task_id: str = "") -> bool:
+    sid = _session_key(session_id, task_id)
+    return sid.startswith("kol-creator-brief-refresh:")
+
+
+def _browser_enrichment_session(session_id: str, task_id: str = "") -> bool:
+    """Email discover and dedicated creator-brief refresh runs."""
+    return (
+        _email_discover_session(session_id, task_id)
+        or _creator_brief_refresh_session(session_id, task_id)
+    )
+
+
 def _campaign_discovery_session(session_id: str, task_id: str = "") -> bool:
     """Launch / rediscover runs (``kol-campaign:LIVE:...``), not outreach/draft."""
     sid = _session_key(session_id, task_id)
@@ -138,6 +171,21 @@ def _browser_blocked_message() -> str:
     )
 
 
+def _campaign_discovery_public_web_message(kind: str) -> str:
+    return (
+        f"{kind} is disabled for kol-campaign discovery runs. Public web "
+        "(Google / TikTok / Reddit) uses local debug Chrome: "
+        "`browser_navigate` to "
+        "`https://www.google.com/search?q=<url_encoded_query>`, then "
+        "`browser_snapshot`; open promising result URLs with the same tools. "
+        "Cross-verify IG handles via "
+        "`browser_navigate(https://www.instagram.com/<handle>/)` and read "
+        "`ig_readiness` / `ig_followers_hint`. Do NOT use `web_search`, "
+        "`web_extract`, terminal curl/urllib/requests, Serper API one-liners, "
+        "or `python3 -c` HTTP scripts as substitutes."
+    )
+
+
 def _campaign_discovery_workaround_message(kind: str) -> str:
     return (
         f"{kind} is disabled for kol-campaign discovery runs. Execute Instagram "
@@ -151,8 +199,27 @@ def _campaign_discovery_workaround_message(kind: str) -> str:
         "Veedcrawl calls must include full args (e.g. "
         '`{"q": "luxury home decor", "platform": "instagram"}` for '
         "veedcrawl_search_social_videos). Do NOT use delegate_task, "
-        "mcp_chrome_devtools_*, or terminal HTTP scraping as substitutes."
+        "mcp_chrome_devtools_*, or terminal HTTP scraping as substitutes. "
+        "For Google public-web discovery, see "
+        "`instagram-kol-discovery` → Public web via browser Google."
     )
+
+
+def _load_discovery_session():
+    cached = sys.modules.get("kol_bridge_agent_guard_discovery_session")
+    if cached is not None:
+        return cached
+    path = Path(__file__).resolve().parent / "internal" / "discovery_session.py"
+    spec = importlib.util.spec_from_file_location(
+        "kol_bridge_agent_guard_discovery_session",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load discovery_session from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_contract():
@@ -192,6 +259,40 @@ def _extract_path(tool_name: str, args: Dict[str, Any]) -> str:
     return ""
 
 
+def _discovery_exploration_tool(tool_name: str) -> bool:
+    return _is_browser_tool(tool_name) or _is_veedcrawl_tool(tool_name)
+
+
+def _check_discovery_bootstrap(
+    tool_name: str,
+    args: Dict[str, Any],
+    session_id: str,
+    task_id: str,
+) -> HookResult:
+    """Block exploration tools until list-candidates + exclusion pulls complete."""
+    ds = _load_discovery_session()
+    sid = _session_key(session_id, task_id)
+    if not _campaign_discovery_session(session_id, task_id):
+        return None
+
+    if tool_name == "terminal":
+        command = _extract_text(tool_name, args)
+        binding_err = ds.validate_campaign_binding(sid, command)
+        if binding_err:
+            return {"action": "block", "message": binding_err}
+        step = ds.classify_bootstrap_step(command)
+        if step:
+            ds.mark_bootstrap_step(sid, step)
+        return None
+
+    if _discovery_exploration_tool(tool_name) and not ds.bootstrap_complete(sid):
+        return {
+            "action": "block",
+            "message": ds.bootstrap_block_message(sid),
+        }
+    return None
+
+
 def pre_tool_call(
     tool_name: str,
     args: Dict[str, Any],
@@ -205,6 +306,10 @@ def pre_tool_call(
         return None
 
     sid = _session_key(session_id, task_id)
+
+    bootstrap_result = _check_discovery_bootstrap(tool_name, args, session_id, task_id)
+    if bootstrap_result is not None:
+        return bootstrap_result
 
     if _is_mcp_chrome_tool(tool_name) and _kol_session(session_id, task_id):
         return {
@@ -224,8 +329,27 @@ def pre_tool_call(
                 "action": "block",
                 "message": _campaign_discovery_workaround_message("delegate_task"),
             }
+        if tool_name in ("web_search", "web_extract"):
+            return {
+                "action": "block",
+                "message": _campaign_discovery_public_web_message(tool_name),
+            }
+        if tool_name == "terminal":
+            cmd = _extract_text(tool_name, args)
+            if _CAMPAIGN_PUBLIC_WEB_WORKAROUND_RE.search(cmd):
+                return {
+                    "action": "block",
+                    "message": _campaign_discovery_public_web_message("terminal HTTP"),
+                }
+        if tool_name == "execute_code":
+            code = _extract_text(tool_name, args)
+            if _CAMPAIGN_PUBLIC_WEB_WORKAROUND_RE.search(code):
+                return {
+                    "action": "block",
+                    "message": _campaign_discovery_public_web_message("execute_code HTTP"),
+                }
 
-    if _email_discover_session(session_id, task_id):
+    if _browser_enrichment_session(session_id, task_id):
         if tool_name in ("web_search", "web_extract"):
             return {
                 "action": "block",
@@ -270,6 +394,11 @@ def pre_tool_call(
 
     if tool_name in ("execute_code", "terminal"):
         text = _extract_text(tool_name, args)
+        if _campaign_discovery_session(session_id, task_id):
+            ds = _load_discovery_session()
+            binding_err = ds.validate_campaign_binding(sid, text)
+            if binding_err:
+                return {"action": "block", "message": binding_err}
         violations = contract.lint_agent_bridge_snippet(text)
         if violations:
             return {

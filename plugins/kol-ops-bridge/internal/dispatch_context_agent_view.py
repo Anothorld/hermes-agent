@@ -66,10 +66,23 @@ _PROVENANCE_SUFFIXES: tuple[str, ...] = (
     "_url",
 )
 
+# Creator-brief passive freshness anchors (kol-creator-brief-loader 90-day check).
+_BRIEF_FRESHNESS_KEEP_KEYS: frozenset[str] = frozenset({
+    "identity.content_pillars_discovered_at",
+    "identity.signature_hooks_discovered_at",
+    "identity.voice_descriptors_discovered_at",
+    "identity.hero_post_url_discovered_at",
+    "identity.hero_post_note_discovered_at",
+    "identity.recommendation_reason_discovered_at",
+})
+
 
 def _strip_provenance_keys(facts: Mapping[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in facts.items():
+        if key in _BRIEF_FRESHNESS_KEEP_KEYS:
+            out[key] = value
+            continue
         if any(key.endswith(suffix) for suffix in _PROVENANCE_SUFFIXES):
             continue
         out[key] = value

@@ -1,4 +1,4 @@
-"""Gateway run launch queue — caps concurrency and serializes email discovery."""
+"""Gateway run launch queue — caps concurrency and serializes browser runs."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 StartFn = Callable[[], Awaitable[dict[str, Any]]]
 BridgeHealthFn = Callable[[], Awaitable[bool]]
 _bridge_health_fn: Optional[BridgeHealthFn] = None
+
+_BROWSER_SERIAL_KINDS = frozenset({"email_discover", "creator_brief_refresh"})
 
 
 def set_bridge_health_check(fn: Optional[BridgeHealthFn]) -> None:
@@ -51,8 +53,8 @@ class _QueueItem:
     future: asyncio.Future[LaunchResult] = field(compare=False)
 
 
-async def drain_email_discover_run(run: dict[str, Any]) -> None:
-    """Hold email-discover slot until gateway SSE closes."""
+async def drain_browser_serial_run(run: dict[str, Any]) -> None:
+    """Hold browser-serial slot until gateway SSE closes."""
     run_id = run.get("run_id") if isinstance(run, dict) else None
     if not isinstance(run_id, str) or not run_id or run_id.startswith("pending:"):
         return
@@ -63,6 +65,11 @@ async def drain_email_discover_run(run: dict[str, Any]) -> None:
         await gw.drain_run_events(run_id)
     finally:
         await gw.aclose()
+
+
+async def drain_email_discover_run(run: dict[str, Any]) -> None:
+    """Backward-compatible alias for email-discover drain."""
+    await drain_browser_serial_run(run)
 
 
 class RunLaunchQueue:
@@ -82,6 +89,8 @@ class RunLaunchQueue:
     def _kind_from_session(self, session_id: str) -> str:
         if session_id.startswith("kol-email-discover:"):
             return "email_discover"
+        if session_id.startswith("kol-creator-brief-refresh:"):
+            return "creator_brief_refresh"
         if ":recovery-" in session_id:
             return "recovery"
         return "general"
@@ -89,20 +98,25 @@ class RunLaunchQueue:
     def _priority_for(self, kind: str) -> int:
         if kind == "recovery":
             return 2
-        if kind == "email_discover":
+        if kind in _BROWSER_SERIAL_KINDS:
             return 1
         return 0
 
-    def email_discover_busy(self) -> bool:
-        """True when an email-discover run is inflight or queued."""
-        if self._inflight_kinds.get("email_discover", 0) > 0:
+    def _browser_serial_busy(self) -> bool:
+        if any(
+            self._inflight_kinds.get(k, 0) > 0 for k in _BROWSER_SERIAL_KINDS
+        ):
             return True
-        return any(item.kind == "email_discover" for item in self._pending_items)
+        return any(item.kind in _BROWSER_SERIAL_KINDS for item in self._pending_items)
+
+    def email_discover_busy(self) -> bool:
+        """True when a browser-serial run is inflight or queued."""
+        return self._browser_serial_busy()
 
     def email_discover_queue_depth(self) -> int:
-        """Count of email-discover items waiting (excludes currently running)."""
+        """Count of browser-serial items waiting (excludes currently running)."""
         return sum(
-            1 for item in self._pending_items if item.kind == "email_discover"
+            1 for item in self._pending_items if item.kind in _BROWSER_SERIAL_KINDS
         )
 
     async def start(self) -> None:
@@ -133,12 +147,12 @@ class RunLaunchQueue:
         s = get_settings()
         resolved_kind = kind or self._kind_from_session(session_id)
         if not s.gateway_launch_queue_enabled:
-            if resolved_kind == "email_discover":
+            if resolved_kind in _BROWSER_SERIAL_KINDS:
                 await self._email_sem.acquire()
                 try:
                     run = await start_fn()
                     perf.launch_started_total += 1
-                    await drain_email_discover_run(run)
+                    await drain_browser_serial_run(run)
                     return LaunchResult(run=run)
                 finally:
                     self._email_sem.release()
@@ -185,7 +199,7 @@ class RunLaunchQueue:
 
     async def _acquire_kind(self, kind: str) -> None:
         assert self._general_sem is not None
-        if kind == "email_discover":
+        if kind in _BROWSER_SERIAL_KINDS:
             await self._email_sem.acquire()
         elif kind == "recovery" and get_settings().recovery_launch_serial:
             await self._recovery_sem.acquire()
@@ -197,7 +211,7 @@ class RunLaunchQueue:
 
     def _release_kind(self, kind: str) -> None:
         assert self._general_sem is not None
-        if kind == "email_discover":
+        if kind in _BROWSER_SERIAL_KINDS:
             self._email_sem.release()
         elif kind == "recovery" and get_settings().recovery_launch_serial:
             self._recovery_sem.release()
@@ -267,7 +281,7 @@ class RunLaunchQueue:
                 # Hold email-discover semaphore until SSE closes, but return
                 # run_id to callers immediately (approve/discover HTTP must not
                 # block for the full browser run).
-                if item.kind == "email_discover":
+                if item.kind in _BROWSER_SERIAL_KINDS:
                     await self._drain_email_discover_run(run)
             except GatewayError as exc:
                 if is_gateway_concurrency_limit(exc):
