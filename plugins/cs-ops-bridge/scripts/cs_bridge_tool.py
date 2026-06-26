@@ -10,6 +10,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PLUGIN_ROOT = os.path.dirname(_SCRIPTS_DIR)
@@ -25,10 +26,34 @@ from _cal_client import (  # noqa: E402
 )
 from profile_refs import quickcep_skill_dir  # noqa: E402
 
+# Normalize draft HTML (plugin root for quickcep_cli subprocess import)
+_PLUGIN_ROOT_FOR_ENV = _PLUGIN_ROOT
+_DEBUG_LOG_PATH = Path("/Users/arnold/agent_prj/.cursor/debug-922c3e.log")
+
 JOIN_CHAT_MAX_ATTEMPTS = 3  # initial + 2 retries
 JOIN_CHAT_BACKOFF_BASE_S = 2.0
 JOIN_CHAT_SUBPROCESS_TIMEOUT = 130  # getUserInfo 45s + joinChat 60s + margin
 _QUICKCEP_CLI_DEFAULT_TIMEOUT = 120
+
+
+def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "922c3e",
+            "id": f"log_{int(time.time() * 1000)}_{hypothesis_id}",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # #endregion
 
 
 def _quickcep_cli_path() -> Path:
@@ -41,12 +66,15 @@ def _run_quickcep_cli(
     *,
     timeout: int = _QUICKCEP_CLI_DEFAULT_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.setdefault("CS_OPS_BRIDGE_PLUGIN_DIR", str(_PLUGIN_ROOT_FOR_ENV))
     return subprocess.run(
         [sys.executable, str(cli), *argv],
         capture_output=True,
         text=True,
         timeout=timeout,
         cwd=str(cli.parent.parent),
+        env=env,
     )
 
 
@@ -251,9 +279,56 @@ def _cmd_draft_save(args: argparse.Namespace) -> None:
         if not content_path.is_file():
             print_json({"error": f"content file not found: {content_path}"})
             sys.exit(2)
+        unsafe_shared_path = content_path.as_posix() == "/tmp/draft.html"
+        _debug_log(
+            run_id="draft-save",
+            hypothesis_id="H1",
+            location="cs_bridge_tool.py:_cmd_draft_save",
+            message="draft-save content file path observed",
+            data={
+                "quickcep_session_id": str(args.session_id),
+                "content_file": content_path.as_posix(),
+                "unsafe_shared_path": unsafe_shared_path,
+            },
+        )
+        if unsafe_shared_path:
+            print_json(
+                {
+                    "error": "unsafe shared content-file path /tmp/draft.html",
+                    "error_detail": "use a session-scoped path like /tmp/draft-<session_id>.html",
+                    "session_id": args.session_id,
+                }
+            )
+            sys.exit(2)
         content = content_path.read_text(encoding="utf-8")
     else:
         content = args.content
+
+    try:
+        from draft_html import normalize_draft_html  # noqa: E402 — plugin root on sys.path
+    except ImportError:
+        normalize_draft_html = None
+    if normalize_draft_html is not None:
+        content = normalize_draft_html(content)
+
+    # Internal domain guard — block drafts containing internal/backend URLs
+    try:
+        from internal_domain_guard import guard_draft  # noqa: E402 — plugin root on sys.path
+    except ImportError:
+        guard_draft = None
+    if guard_draft is not None:
+        guard_result = guard_draft(content, getattr(args, "attachments", None))
+        if guard_result["blocked"]:
+            print_json(
+                {
+                    "error": guard_result["error"],
+                    "error_detail": f"Matched: {', '.join(guard_result['matches'])}",
+                    "source": guard_result["source"],
+                    "snippet": guard_result["snippet"],
+                    "session_id": args.session_id,
+                }
+            )
+            sys.exit(2)
 
     join_chat = _join_chat_before_draft(cli, args.session_id)
 
@@ -388,14 +463,21 @@ def _build_parser() -> argparse.ArgumentParser:
     o.add_argument(
         "--email-quote",
         default=None,
-        help="Partial quote in customer's original language (required for Feishu notify)",
+        help="Customer's full original email text (required for Feishu notify)",
     )
     o.add_argument(
         "--email-quote-file",
         default=None,
-        help="Read --email-quote from file (preferred for multiline / $ amounts)",
+        help="Read --email-quote from file (preferred for full email text)",
     )
-    o.add_argument("--message", default=None, help="Full Feishu message body (optional override)")
+    o.add_argument(
+        "--message",
+        default=None,
+        help=(
+            "Full Feishu message body override. Skips bridge template: no auto 📦 order block, "
+            "and --email-summary/--email-quote are not required. Include order info manually."
+        ),
+    )
     o.add_argument("--skip-feishu-send", action="store_true", help="Record escalation only; do not post to Feishu")
     o.add_argument("--feishu-chat-id", default=None)
     o.add_argument("--feishu-thread-id", default=None)
@@ -413,7 +495,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     content_src.add_argument(
         "--content-file",
-        help="Read draft body from file (preferred when content contains $ amounts).",
+        help="Read draft body from file (preferred when content contains $ amounts); use session-scoped paths like /tmp/draft-<session_id>.html.",
     )
     ds.add_argument("--subject", default=None)
     ds.add_argument("--receiver", default=None)

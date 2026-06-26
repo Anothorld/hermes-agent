@@ -86,3 +86,18 @@ def test_fetch_when_tags_missing(ig):
         result = ig.check_intent_gate("sess-7", None, fetch_if_missing=True)
     assert result.allowed is True
     assert result.tags == ("物流咨询",)
+
+
+def test_prior_customer_bypass_without_intent_tags(ig):
+    cal_mod = types.ModuleType(f"{_PKG}.cal")
+    cal_mod.has_prior_session_for_email = lambda **kwargs: True
+    sys.modules[f"{_PKG}.cal"] = cal_mod
+    with patch.object(ig, "fetch_session_intention_tags", return_value=()):
+        result = ig.check_intent_gate(
+            "2547699985349894145",
+            None,
+            fetch_if_missing=True,
+            customer_email="jessicahall289@gmail.com",
+        )
+    assert result.allowed is True
+    assert result.reason == "prior_customer_no_intent_tags"

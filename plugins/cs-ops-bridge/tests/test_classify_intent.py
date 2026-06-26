@@ -86,3 +86,58 @@ def test_enqueue_skips_launch_when_busy(monkeypatch, tmp_path):
     r2 = cal.enqueue_session(quickcep_session_id="456", message_id="m2", env="LIVE")
     assert r2["created"] is True
     assert r2["should_launch"] is False
+
+
+def test_dispatch_context_prefills_tracking_for_logistics(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    ot = _load_pkg_module("order_tracking")
+    cal.enqueue_session(quickcep_session_id="prefill-1", message_id="m1", env="LIVE")
+    monkeypatch.setattr(
+        cal,
+        "_fetch_visitor_orders",
+        lambda _sid: {
+            "orders": [{"orderId": "260619360220455021"}],
+            "intention_tags": ["物流咨询"],
+            "source": "getOrderList",
+        },
+    )
+    monkeypatch.setattr(
+        ot,
+        "fetch_tracking_prefill",
+        lambda ids, max_orders=3: {
+            "enabled": True,
+            "source": "order-track-api",
+            "reason": "ok",
+            "circuitOpen": False,
+            "summaries": [{"orderId": ids[0], "status": "transit"}],
+            "errors": [],
+        },
+    )
+    ctx = cal.get_dispatch_context(quickcep_session_id="prefill-1", env="LIVE")
+    assert ctx["tracking"]["enabled"] is True
+    assert ctx["tracking"]["summaries"][0]["status"] == "transit"
+
+
+def test_dispatch_context_skips_tracking_for_non_logistics(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    ot = _load_pkg_module("order_tracking")
+    cal.enqueue_session(quickcep_session_id="prefill-2", message_id="m1", env="LIVE")
+    monkeypatch.setattr(
+        cal,
+        "_fetch_visitor_orders",
+        lambda _sid: {
+            "orders": [{"orderId": "260619360220455021"}],
+            "intention_tags": ["产品咨询"],
+            "source": "getOrderList",
+        },
+    )
+
+    def _should_not_run(_ids, max_orders=3):  # pragma: no cover - defensive
+        raise AssertionError("tracking prefill must not run for non-logistics intent")
+
+    monkeypatch.setattr(ot, "fetch_tracking_prefill", _should_not_run)
+    ctx = cal.get_dispatch_context(quickcep_session_id="prefill-2", env="LIVE")
+    assert ctx["tracking"]["enabled"] is False
+    assert ctx["tracking"]["reason"] == "intent_not_logistics_or_no_orders"

@@ -24,6 +24,39 @@
 | BE | `gateway_client.py`, `run_registry.py`, `gateway_approval_watcher.py`, `routers/campaigns.py`（stream）, `routers/gateway_approvals.py` |
 | 配置 | `bridge_runtime.py`（bridge key 注入 gateway env） |
 
+## Gateway 鉴权（合并后必填）
+
+Upstream Hermes 要求所有 API server 绑定地址（含 `127.0.0.1`）配置
+`API_SERVER_KEY`。未配置时 gateway **拒绝启动** API server，Console 无法 launch run。
+
+| 变量 | 位置 | 说明 |
+|------|------|------|
+| `API_SERVER_KEY` | `~/.hermes/profiles/kol-orchestrator/.env` | Gateway 进程读取 |
+| `KOC_GATEWAY_KEY` | `kol-ops-console/.env` | Console → gateway `Authorization: Bearer` |
+| `HERMES_GATEWAY_KEY` | 同上 profile `.env` | kol-ops-bridge inbound / dispatcher 脚本 |
+
+三处 **必须相同**。生成：`openssl rand -hex 32`。
+
+验证：
+
+```bash
+curl -H "Authorization: Bearer $KOC_GATEWAY_KEY" http://127.0.0.1:8642/v1/models
+```
+
+运维清单见 [post-merge-hermes-checklist.md](../../../../../../docs/post-merge-hermes-checklist.md)。
+
+## KOL browser inactivity
+
+IG discovery 在 LLM 思考间隔可能超过 2 分钟。Profile 中建议：
+
+```yaml
+browser:
+  inactivity_timeout: 300
+```
+
+`.env` 的 `BROWSER_INACTIVITY_TIMEOUT` 应与 `config.yaml` 保持一致（config 优先）。
+合并后 code default 为 300s；若 profile 仍写 120，会覆盖 code default。
+
 ## 主要 API
 
 | 方法 | 路径 | 说明 |

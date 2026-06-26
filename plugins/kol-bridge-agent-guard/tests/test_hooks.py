@@ -574,3 +574,17 @@ def test_blocks_write_facts_reply_draft_in_execute_code():
         session_id="kol-campaign:LIVE:C1",
     )
     assert out is not None
+
+
+def test_pre_tool_call_accepts_observer_kwargs():
+    """Hermes passes turn_id/api_request_id/middleware_trace since 0.14 — guard must not crash."""
+    h = _hooks()
+    out = h.pre_tool_call(
+        "skill_view",
+        {"name": "kol-reply-dispatcher"},
+        session_id="kol-reply:LIVE:862:msg",
+        turn_id="turn-abc",
+        api_request_id="req-xyz",
+        middleware_trace=[{"kind": "test"}],
+    )
+    assert out is None

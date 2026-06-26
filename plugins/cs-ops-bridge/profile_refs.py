@@ -55,6 +55,32 @@ def gateway_session_id(*, env: str, quickcep_session_id: str) -> str:
     return f"{cs_profile_name()}:{env}:{quickcep_session_id}"
 
 
+def hindsight_bridge_script() -> Path:
+    """Bundled hindsight_bridge.py (shared under HERMES home, not profile-local)."""
+    override = os.environ.get("CS_OPS_HINDSIGHT_BRIDGE_SCRIPT", "").strip()
+    if override:
+        return Path(override).expanduser()
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        candidate = Path(hermes_home).expanduser() / "skills" / "hindsight-memory" / "scripts" / "hindsight_bridge.py"
+        if candidate.is_file():
+            return candidate
+    return Path.home() / ".hermes" / "skills" / "hindsight-memory" / "scripts" / "hindsight_bridge.py"
+
+
+def hindsight_bank_id() -> str:
+    """Default Hindsight bank for CS escalation Q&A retain."""
+    return (os.environ.get("CS_OPS_HINDSIGHT_BANK") or "povison-cs-hermes-user").strip() or "povison-cs-hermes-user"
+
+
+def hindsight_recall_tracker_script() -> Path:
+    """Hindsight recall success tracker script (profile-local)."""
+    override = os.environ.get("CS_OPS_HINDSIGHT_RECALL_TRACKER", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return cs_profile_dir() / "skills" / "customer-service" / "povison-cs-orchestrator-flow" / "scripts" / "hindsight_recall_tracker.py"
+
+
 def assert_expected_profile(*, context: str = "cs-ops-bridge") -> None:
     """Log a warning when CS_OPS_PROFILE is not the default povison-cs profile."""
     name = cs_profile_name()

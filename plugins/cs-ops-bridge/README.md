@@ -27,7 +27,27 @@ hermes -p povison-cs gateway run
 ```yaml
 API_SERVER_ENABLED: true
 API_SERVER_PORT: 8643
+platform_toolsets:
+  api_server:
+    - browser
+    - cronjob
+    - file
+    - memory
+    - session_search
+    - skills
+    - terminal
+    - todo
+    - vision
+    - web
 ```
+
+Bridge-launched runs use the `api_server` platform. Without `platform_toolsets.api_server`, Hermes falls back to `hermes-api-server` (includes `execute_code` and `delegate_task`), which causes agents to bypass direct `terminal` calls. Apply the block above with:
+
+```bash
+python playground/povison-cs-console/scripts/ensure_cs_send_guard.py --profile povison-cs
+```
+
+Restart `hermes -p povison-cs gateway run` after changing toolsets.
 
 ## Env vars
 
@@ -42,6 +62,7 @@ API_SERVER_PORT: 8643
 | `CS_OPS_QUICKCEP_SKILL_DIR` | `<CS_OPS_PROFILE_DIR>/skills/social-media/quickcep` | CLI/SIO scripts |
 | `CS_OPS_ENV` | `LIVE` | TEST/LIVE partition |
 | `CS_OPS_GATEWAY_DRAIN` | `true` | Best-effort SSE drain after launch |
+| `CS_OPS_GATEWAY_YOLO` | `1` | When set, bridge POST `/v1/runs` includes `"yolo": true` (skip routine approval prompts) |
 | `CS_OPS_ESCALATION_TIMEOUT_AUTO_START` | `true` | SLA reminder worker |
 | `CS_OPS_ESCALATION_TIMEOUT_INTERVAL_SEC` | `900` | SLA check interval |
 | `CS_OPS_ESCALATION_TIMEOUT_HIGH_H` | `2` | High urgency SLA (hours) |
@@ -63,9 +84,14 @@ API_SERVER_PORT: 8643
 - **Processing stale recovery**: if a session stays in `processing` longer than `CS_OPS_PROCESSING_STALE_MIN` (default **2 hours**; agent run died, gateway restart, terminal approval denied), background worker applies `failed` handoff so inbound can relaunch or operators can take over. **`awaiting_expert` is never touched** — those sessions wait on Feishu escalation reply (`feishu_escalation_poller` + escalation SLA timeout only).
 - **Gateway launch**: retry on 429/502/503/504, in-process dedup, optional SSE drain (`gateway_launch.py`).
 - **Escalation SLA**: `escalation_timeout.py` posts Feishu thread reminders and CAL events.
-- **Feishu escalation notify**: `POST /escalations` auto-posts to **AI客服后援**. Shows **客户邮箱**, **客户来信摘要** (agent `--email-summary` in Simplified Chinese), and **原文引用** (agent `--email-quote` in the customer's original language). Both fields required when Feishu auto-send is on.
+- **Feishu escalation notify**: `POST /escalations` auto-posts to **AI客服后援**. Shows **客户邮箱**, **📦 订单信息** (bridge auto-fetches QuickCEP `getOrderList` + Povison tracking when available), **客户来信摘要** (agent `--email-summary` in Simplified Chinese), and **原文引用** (agent `--email-quote` in the customer's original language). Summary/quote required when Feishu auto-send is on. **Custom body** (`--message` / `escalation_message`) sends the text verbatim — **no auto 📦 order block**, no required summary/quote validation; include order details manually if needed.
 - **Feishu reply polling**: operators click **Reply** on the `[ESC:…]` post (no `@` needed). Poller lists `container_id_type=chat` with pagination and matches `parent_id` to `feishu_message_id`; topic groups (`omt_*`) use `container_id_type=thread`. **First reply wins** — atomic claim (`awaiting_answer` → `resuming`), thread lock notice `[ESC-LOCK:…]` (persisted as `feishu_lock_notified`, retried while `resuming` if send failed), later replies tracked and ignored. Full operator text is kept in `resume_context.operator_answer_raw` for gateway resume (SQLite `operator_answer` column stays masked). After agent `apply-handoff` reaches `draft_ready`/`failed`, bridge posts standalone `[ESC-DONE:…]`. `PATCH /escalations` on a `resuming` row routes through the same DONE path; `awaiting_answer` closes without DONE. Stale `resuming` rows auto-close via `CS_OPS_ESCALATION_RESUMING_TIMEOUT_H`.
-- **Agent guard**: enable plugin `cs-bridge-agent-guard` on the povison-cs gateway profile (`ensure_cs_send_guard.py`) to block any direct `quickcep_cli` in agent `terminal`/`execute_code` plus `send-email` at the CLI hook.
+- **Agent guard**: enable plugin `cs-bridge-agent-guard` on the povison-cs gateway profile (`ensure_cs_send_guard.py`) to block direct `quickcep_cli`, `send-email`, and **`cs_bridge_tool` wrapped in `execute_code`**. Bridge steps must use **terminal** (one command per call).
+- **Follow-up sub-session without `intentionTags`**: intent gate bypass when CAL already has another session row for the same customer email (`prior_customer_no_intent_tags`).
+- **SIO token login**: watcher patches QuickCEP login env from profile `QUICKCEP_EMAIL` / `QUICKCEP_PASSWORD`, re-binds the SIO monitor module after import (avoids stale `from import get_valid_token`), and logs **WARNING** when cached JWT is invalid but re-login is skipped or fails.
+- **Operator send when SIO down**: each REST poll runs `operator_send_reconcile` — scans `draft_ready` / `awaiting_expert` / `processing` rows for operator-sent messages and applies `operator_sent` handoff. `quickcep_cli messages` failures log at **WARNING** (not silent debug).
+- **Graceful stack restart**: `playground/povison-cs-console/start.sh restart|stop` waits for CAL `processing` + escalation `resuming` before stopping bridge/gateway (see console README).
+- **Gateway approvals**: bridge-launched runs POST `/v1/runs` with `"yolo": true` by default (`CS_OPS_GATEWAY_YOLO=1`) so routine Tirith warnings on terminal bridge calls do not stall automation. Hardline blocks (send-email, direct quickcep_cli, execute_code bridge batching) still apply. Profile uses `approvals.mode: smart`, omits `code_execution` from CLI toolsets, and pins `platform_toolsets.api_server` without `delegation` or `code_execution` so bridge steps use **terminal** directly.
 
 ## PII
 
@@ -93,7 +119,10 @@ Automation listens to and processes **QuickCEP email sessions only**. Web chat, 
 Shared module: `email_channel.py` (`is_email_channel`, `inbound_payload_is_email`, `session_is_email`).
 
 - SIO `visitorSendMsg` and REST reconcile both pass through `intent_gate.check_intent_gate` before enqueue/launch.
-- Sessions with no tags yet (classification pending) are skipped; REST reconcile retries on the next poll once QuickCEP assigns tags.
+- Sessions with no `intentionTags` are skipped unless CAL already has another session for the same customer email (follow-up threads that QuickCEP opens as a new sub-session often lack AI intent tags).
+- Other sessions with no tags yet (classification pending) are skipped; REST reconcile retries on the next poll once QuickCEP assigns tags.
+- REST inbound launch only auto-enqueues CAL rows in `pending` / `failed` (avoids loops when internal notes bump `lastMsgTime`). **New QuickCEP sub-sessions** (no CAL row) are always eligible; follow-up on the **same** closed session still depends on SIO or manual relaunch.
+- REST uses `--unread-only`; read follow-ups on an existing CAL row are not re-polled unless SIO delivers the event.
 - Disable for debugging: `CS_OPS_INTENT_FILTER=false`.
 - Config file: `config/intent_filter.yaml`.
 
@@ -125,7 +154,13 @@ Phases: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `reviewed`, `f
 
 On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error_detail` for operators. Subprocess budget per attempt: 130s.
 
-**Operator send:** SIO `operatorSendMsg` → automatic `operator_sent` handoff (tags + post-send note).
+**Draft HTML:** `draft-save` normalizes plain text and fake `<html><body>` wrappers into `<p>` / `<br>` so QuickCEP shows paragraph breaks. Prefer plain English in `--content-file`; avoid Markdown-only bold unless `**text**` (converted to `<strong>`).
+
+**Concurrent run safety:** shared `/tmp/draft.html` is now rejected by `cs_bridge_tool draft-save` because concurrent sessions can overwrite each other. Use session-scoped files (for example `/tmp/draft-<quickcep_session_id>.html`).
+
+**Dispatch-context tracking prefill:** when `intentionTags` includes `物流咨询` and `orders` is non-empty, bridge adds `tracking` summaries in `get-dispatch-context` (status, tracking number, EDD window) via Povison order-track API. This reduces model hallucination and lets logistics replies start from deterministic data.
+
+**Operator send:** SIO `operatorSendMsg` → automatic `operator_sent` handoff (tags + post-send note). SIO login uses `QUICKCEP_EMAIL` / `QUICKCEP_PASSWORD` from profile `.env` (same as `quickcep_cli`). When SIO is unavailable, each REST poll also runs `operator_send_reconcile` to backfill `operator_sent` for CAL rows still in `draft_ready` / `awaiting_expert` / `processing` when QuickCEP message history shows an operator outbound.
 
 **Tag map:** `config/session_tag_map.yaml` — run `scripts/sync_session_tags.py` after creating **AI客服** tags in QuickCEP admin (`AI-处理中`, `AI-草稿待审`, `AI-待专家`, `AI-处理失败`, `AI-已结案`).
 

@@ -293,12 +293,13 @@ def _check_discovery_bootstrap(
     return None
 
 
-def pre_tool_call(
+def re_toopl_call(
     tool_name: str,
     args: Dict[str, Any],
     task_id: str = "",
     session_id: str = "",
     tool_call_id: str = "",
+    **_: Any,
 ) -> HookResult:
     del tool_call_id
 

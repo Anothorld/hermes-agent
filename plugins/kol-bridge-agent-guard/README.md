@@ -35,6 +35,9 @@ Allowed:
 Gateway passes the run namespace as **`task_id`** (e.g. `kol-email-discover:LIVE:701`), not
 `session_id`. This hook matches on `session_id or task_id` so blocks actually fire.
 
+Observer hooks may also pass `turn_id`, `api_request_id`, and `middleware_trace`; this
+plugin ignores them via `**kwargs` forward compatibility (required since Hermes 0.14).
+
 ## Disable
 
 ```bash

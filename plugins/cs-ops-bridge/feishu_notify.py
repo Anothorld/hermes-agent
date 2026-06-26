@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .escalation_context import resolve_customer_email
+from .escalation_orders import fetch_escalation_order_context, format_order_section
 from .feishu_client import FeishuSendResult, escalation_chat_id, send_group_text
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ def validate_feishu_notify_inputs(
             email_quote=(email_quote or "").strip(),
         )
 
+    # email_quote now carries the customer's full original email text (not a partial excerpt).
     summary = (email_summary or "").strip()
     if not summary:
         raise ValueError(
@@ -60,7 +62,7 @@ def validate_feishu_notify_inputs(
     quote = (email_quote or "").strip()
     if not quote:
         raise ValueError(
-            "email_quote required: agent must provide a partial quote in the customer's original language"
+            "email_quote required: agent must provide the customer's full original email text"
         )
 
     email = (customer_email or "").strip()
@@ -87,6 +89,7 @@ def build_escalation_text(
     email_summary: Optional[str] = None,
     email_quote: Optional[str] = None,
     extra_message: Optional[str] = None,
+    order_section: Optional[str] = None,
 ) -> str:
     icon = {"high": "🔴", "medium": "🟠", "low": "🟢"}.get(urgency, "🟠")
     email_line = customer_email.strip() if customer_email else "（未知）"
@@ -96,6 +99,9 @@ def build_escalation_text(
         f"客户邮箱: {email_line}",
         f"原因: {reason.strip()}",
     ]
+    order_text = (order_section or "").strip()
+    if order_text:
+        lines.extend(["", "📦 订单信息:", order_text])
     summary = (email_summary or "").strip()
     quote = (email_quote or "").strip()
     if summary or quote:
@@ -103,7 +109,7 @@ def build_escalation_text(
         if summary:
             lines.append(summary)
         if quote:
-            lines.extend(["", "原文引用：", f"「{quote}」"])
+            lines.extend(["", "原始来信：", quote])
     if question_to_operator and question_to_operator.strip():
         lines.extend(["", "❓ 需要后援确认:", question_to_operator.strip()])
     if extra_message and extra_message.strip():
@@ -130,6 +136,7 @@ def notify_escalation_opened(
     """Send escalation card to the configured Feishu group."""
     chat_id = (feishu_chat_id or escalation_chat_id() or DEFAULT_ESCALATION_CHAT).strip()
     if escalation_message:
+        # Custom body bypasses bridge template — no auto 📦 order block or summary/quote layout.
         text = escalation_message
     else:
         content = validate_feishu_notify_inputs(
@@ -141,6 +148,10 @@ def notify_escalation_opened(
             quickcep_session_id=quickcep_session_id,
             env=env,
         )
+        order_ctx = fetch_escalation_order_context(
+            quickcep_session_id=quickcep_session_id,
+            text_hints=[reason, question_to_operator or "", email_summary or "", email_quote or ""],
+        )
         text = build_escalation_text(
             escalation_id=escalation_id,
             customer_email=content.customer_email,
@@ -149,6 +160,7 @@ def notify_escalation_opened(
             question_to_operator=question_to_operator,
             email_summary=content.email_summary,
             email_quote=content.email_quote,
+            order_section=format_order_section(order_ctx),
         )
     result = send_group_text(chat_id=chat_id, text=text)
     if result.ok:

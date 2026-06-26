@@ -1118,7 +1118,8 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         _finish_trace(task_key, output=output)
 
 
-def _on_post_llm_turn(*, session_id: str = "", user_message: Any = None,
+def _on_post_llm_turn(*, session_id: str = "", task_id: str = "", turn_id: str = "",
+                       user_message: Any = None,
                        assistant_response: Any = None, conversation_history: Any = None,
                        model: str = "", platform: str = "", **_: Any) -> None:
     """Handle post_llm_call — fires once per turn after the tool loop ends.
@@ -1126,42 +1127,66 @@ def _on_post_llm_turn(*, session_id: str = "", user_message: Any = None,
     The generation observations have already been ended by post_api_request.
     This hook ensures the root trace gets finished even when the last API
     response contained tool_calls (which prevented _finish_trace in
-    _on_post_api_request).  Without this, long-running agent loops (kanban
+    on_post_llm_call).  Without this, long-running agent loops (kanban
     workers, rediscover flows) accumulate open traces that never flush.
     """
     client = _get_langfuse()
     if client is None:
         return
 
-    # post_llm_call doesn't pass task_id in all Hermes versions —
-    # try session_id as the lookup key, or scan for open traces.
-    if not session_id:
+    if not session_id and not task_id:
         return
 
-    # Find any open trace for this session (could be keyed by task_id+session_id)
-    _found = False
     matched_key = None
-    with _STATE_LOCK:
-        for task_key, state in list(_TRACE_STATE.items()):
-            if session_id in task_key:
-                matched_key = task_key
-                # If the trace is still open and has no root output yet, set it
-                if state.root_span and not state.output_set:
-                    final_output = _safe_value(assistant_response) if isinstance(assistant_response, str) else None
-                    if final_output:
-                        merged = _merge_trace_output({"content": final_output}, state)
-                        state.root_span.update(output=merged)
-                        state.output_set = True
-                        logger.info("Langfuse post_llm_turn: set root trace output for session_id=%s", session_id)
-                    _found = True
-                    break
+    if turn_id:
+        candidate = _trace_key(task_id, session_id, turn_id=turn_id)
+        with _STATE_LOCK:
+            if candidate in _TRACE_STATE:
+                matched_key = candidate
+    if matched_key is None and task_id:
+        with _STATE_LOCK:
+            if task_id in _TRACE_STATE:
+                matched_key = task_id
 
-    # Always finish the trace for this session — the turn is over.
-    # post_api_request only finishes on final-text replies (no tool_calls),
-    # but tool-heavy agent loops never hit that branch.
+    _found = False
+    if matched_key is None:
+        # Legacy fallback: scan open traces whose key contains session_id.
+        with _STATE_LOCK:
+            for task_key, state in list(_TRACE_STATE.items()):
+                if session_id and session_id in task_key:
+                    matched_key = task_key
+                    if state.root_span and not state.output_set:
+                        final_output = _safe_value(assistant_response) if isinstance(assistant_response, str) else None
+                        if final_output:
+                            merged = _merge_trace_output({"content": final_output}, state)
+                            state.root_span.update(output=merged)
+                            state.output_set = True
+                            logger.info("Langfuse post_llm_turn: set root trace output for session_id=%s", session_id)
+                        _found = True
+                    break
+    else:
+        with _STATE_LOCK:
+            state = _TRACE_STATE.get(matched_key)
+            if state and state.root_span and not state.output_set:
+                final_output = _safe_value(assistant_response) if isinstance(assistant_response, str) else None
+                if final_output:
+                    merged = _merge_trace_output({"content": final_output}, state)
+                    state.root_span.update(output=merged)
+                    state.output_set = True
+                    logger.info(
+                        "Langfuse post_llm_turn: set root trace output for task_key=%s",
+                        matched_key,
+                    )
+                _found = True
+
     if matched_key:
         _finish_trace(matched_key, output=None)
-        logger.info("Langfuse post_llm_turn: finished trace for session_id=%s", session_id)
+        logger.info(
+            "Langfuse post_llm_turn: finished trace for task_id=%s session_id=%s turn_id=%s",
+            task_id,
+            session_id,
+            turn_id,
+        )
 
     if not _found and not matched_key:
         logger.info("Langfuse post_llm_turn: no open trace found for session_id=%s", session_id)

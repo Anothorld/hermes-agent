@@ -18,6 +18,7 @@ from .email_channel import inbound_payload_is_email
 from .gateway_client import GatewayClient
 from .intent_gate import check_intent_gate
 from .session_handoff import handle_operator_send, apply_handoff
+from .operator_send_reconcile import reconcile_operator_sent_once
 
 from .profile_refs import quickcep_skill_dir
 
@@ -54,6 +55,14 @@ _ENV = os.environ.get("CS_OPS_ENV", "LIVE")
 _stop_event = threading.Event()
 _sio_backoff_sec = 5.0
 
+
+def _truthy_env(key: str, *, default: bool) -> bool:
+    """Read a boolean env var with default."""
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
 # REST reconcile only bootstraps missed first launches or retries failed rows.
 # Busy statuses (processing, awaiting_expert, …) must not be re-polled: lastMsgTime
 # moves when we add internal notes, which previously caused false follow-up loops.
@@ -80,6 +89,82 @@ def rest_reconcile_eligible(*, quickcep_session_id: str, env: str = _ENV) -> boo
     return str(sess.get("status") or "") in _REST_LAUNCH_STATUSES
 
 
+def _load_quickcep_credentials_from_profile() -> None:
+    """Ensure QUICKCEP_* are in os.environ (profile .env), even when empty placeholders exist."""
+    if os.environ.get("QUICKCEP_EMAIL") and os.environ.get("QUICKCEP_PASSWORD"):
+        return
+    try:
+        from profile_refs import cs_profile_dir
+
+        env_path = cs_profile_dir() / ".env"
+        if not env_path.exists():
+            return
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            if key not in ("QUICKCEP_EMAIL", "QUICKCEP_PASSWORD"):
+                continue
+            val = val.strip().strip("'").strip('"')
+            if val and not os.environ.get(key):
+                os.environ[key] = val
+    except Exception as exc:
+        log.debug("could not load QUICKCEP credentials from profile .env: %s", exc)
+
+
+def _patch_quickcep_login_env() -> None:
+    """SIO monitor calls get_valid_token() with no args; fall back to profile .env credentials."""
+    _load_quickcep_credentials_from_profile()
+    scripts = _quickcep_scripts_dir() / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import quickcep_login  # type: ignore
+
+    if getattr(quickcep_login, "_cs_bridge_env_login", False):
+        return
+
+    original = quickcep_login.get_valid_token
+
+    def _get_valid_token_with_env(email=None, password=None):
+        eff_email = (email or os.environ.get("QUICKCEP_EMAIL") or "").strip() or None
+        eff_password = (password or os.environ.get("QUICKCEP_PASSWORD") or "").strip() or None
+        had_cached = bool((quickcep_login.load_token() or {}).get("jwt"))
+        try:
+            token = original(email=eff_email, password=eff_password)
+            if had_cached and eff_email:
+                log.info("QuickCEP token refreshed via re-login")
+            return token
+        except ValueError as exc:
+            msg = str(exc)
+            if "No valid cached token" in msg:
+                if not eff_email or not eff_password:
+                    log.warning(
+                        "QuickCEP re-login skipped: cached JWT invalid and "
+                        "QUICKCEP_EMAIL/QUICKCEP_PASSWORD missing from process env"
+                    )
+                else:
+                    log.warning(
+                        "QuickCEP cached JWT invalid but re-login was not attempted (%s)",
+                        msg,
+                    )
+            elif msg.startswith("Login failed"):
+                acct = eff_email or "<unknown>"
+                log.warning("QuickCEP re-login failed for %s: %s", acct, msg)
+            raise
+
+    quickcep_login.get_valid_token = _get_valid_token_with_env  # type: ignore[assignment]
+    quickcep_login._cs_bridge_env_login = True
+
+
+def _rebind_sio_get_valid_token(sio_module: Any) -> None:
+    """Rebind SIO module global used by ``connect()`` — ``from import`` binds too early for patches."""
+    import quickcep_login  # type: ignore
+
+    sio_module.get_valid_token = quickcep_login.get_valid_token
+
+
 def _patch_sio_monitor_for_operator_send(monitor_cls: type) -> None:
     """Extend profile SIO monitor to invoke operator-send callbacks without editing profile files."""
     if getattr(monitor_cls, "_cs_bridge_operator_patch", False):
@@ -104,7 +189,11 @@ def _on_operator_send(info: dict[str, Any]) -> None:
     try:
         result = handle_operator_send(info, env=_ENV)
         if result.get("skipped"):
-            log.debug("operator send skipped session=%s reason=%s", info.get("chatSubSessionId"), result.get("reason"))
+            log.info(
+                "operator send skipped session=%s reason=%s",
+                info.get("chatSubSessionId"),
+                result.get("reason"),
+            )
         elif result.get("ok"):
             log.info("operator send handoff ok session=%s", info.get("chatSubSessionId"))
         else:
@@ -141,7 +230,16 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         )
         return None
 
-    gate = check_intent_gate(session_id, info.get("intentionTags"))
+    email = info.get("email")
+    if not email and isinstance(info.get("visitorInfo"), dict):
+        email = info["visitorInfo"].get("email")
+
+    gate = check_intent_gate(
+        session_id,
+        info.get("intentionTags"),
+        customer_email=str(email) if email else None,
+        env=_ENV,
+    )
     if not gate.allowed:
         log.info(
             "skip launch session %s intent_gate=%s tags=%s",
@@ -151,9 +249,20 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         )
         return None
 
-    email = info.get("email")
-    if not email and isinstance(info.get("visitorInfo"), dict):
-        email = info["visitorInfo"].get("email")
+    # Skip sessions already assigned to human operators (unless AI is actively processing)
+    if _truthy_env("CS_OPS_SKIP_ASSIGNED_SESSIONS", default=True):
+        existing_sess = cal.get_session(quickcep_session_id=session_id, env=_ENV)
+        ai_busy = existing_sess and str(existing_sess.get("status") or "") not in ("pending", "failed", "")
+        if not ai_busy:
+            op_ids = info.get("operatorIds")
+            if op_ids:
+                log.info(
+                    "skip launch session %s assigned_to_operators=%s",
+                    session_id,
+                    op_ids,
+                )
+                return None
+
     result = cal.enqueue_session(
         quickcep_session_id=session_id,
         chat_session_id=str(info.get("chatSessionId") or "") or None,
@@ -229,9 +338,14 @@ def run_sio_loop() -> None:
     if not monitor_path.exists():
         log.error("QuickCEP SIO monitor not found: %s", monitor_path)
         return
-    sys.path.insert(0, str(scripts))
     try:
-        from quickcep_sio_email_monitor import QuickCEPSioMonitor, on_new_email  # type: ignore
+        _patch_quickcep_login_env()
+        sys.path.insert(0, str(scripts))
+        import quickcep_sio_email_monitor as sio_module  # type: ignore
+
+        _rebind_sio_get_valid_token(sio_module)
+        QuickCEPSioMonitor = sio_module.QuickCEPSioMonitor
+        on_new_email = sio_module.on_new_email
 
         _patch_sio_monitor_for_operator_send(QuickCEPSioMonitor)
 
@@ -257,6 +371,12 @@ def run_sio_loop() -> None:
         log.exception("SIO watcher failed: %s", exc)
 
 
+def _quickcep_subprocess_env() -> dict[str, str]:
+    """Subprocess env with profile QUICKCEP credentials when the parent process lacks them."""
+    _load_quickcep_credentials_from_profile()
+    return {k: v for k, v in os.environ.items() if isinstance(v, str)}
+
+
 def run_rest_reconcile_once() -> dict[str, Any]:
     cli = _quickcep_scripts_dir() / "scripts" / "quickcep_cli.py"
     if not cli.exists():
@@ -267,6 +387,7 @@ def run_rest_reconcile_once() -> dict[str, Any]:
         text=True,
         timeout=120,
         cwd=str(_quickcep_scripts_dir()),
+        env=_quickcep_subprocess_env(),
     )
     if proc.returncode != 0:
         return {"error": proc.stderr or proc.stdout, "launched": 0}
@@ -304,17 +425,21 @@ def run_rest_reconcile_once() -> dict[str, Any]:
             "email": row.get("email") or vi.get("email"),
             "intentionTags": row.get("intentionTags"),
             "channel": row.get("channel") or "email",
+            "operatorIds": row.get("operatorIds"),
         }
         if not inbound_payload_is_email(info):
             continue
         if _launch_for_message(info):
             launched += 1
+    op_sync = reconcile_operator_sent_once(env=_ENV)
     state = {
         "last_run": time.time(),
         "launched": launched,
         "skipped_busy": skipped_busy,
         "seen": len(sessions),
         "sio_backoff_sec": _sio_backoff_sec,
+        "operator_sent_synced": op_sync.get("synced", 0),
+        "operator_sent_checked": op_sync.get("checked", 0),
     }
     cal.set_poller_state("quickcep_watcher", state)
     return state

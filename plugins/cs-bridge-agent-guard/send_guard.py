@@ -32,6 +32,14 @@ _CLI_BLOCK_MESSAGE = (
     "use cs_bridge_tool only (get-messages, draft-save, apply-handoff, …)."
 )
 
+_EXECUTE_CODE_BRIDGE_BLOCK_MESSAGE = (
+    "Do not wrap cs_bridge_tool in execute_code or subprocess.run — "
+    "call the terminal tool once per bridge step (get-escalation, get-messages, "
+    "draft-save, apply-handoff, …)."
+)
+
+_CS_BRIDGE_TOOL_COMMAND_RE = re.compile(r"(?is)cs_bridge_tool(?:\.py)?\b")
+
 
 def guard_enabled() -> bool:
     return os.environ.get("CS_BRIDGE_AGENT_GUARD", "1").strip().lower() not in (
@@ -74,6 +82,10 @@ def looks_like_quickcep_send_email(text: str) -> bool:
 
 def looks_like_direct_quickcep_cli(text: str) -> bool:
     return bool(text) and bool(_QUICKCEP_CLI_COMMAND_RE.search(text))
+
+
+def looks_like_cs_bridge_tool_invocation(text: str) -> bool:
+    return bool(text) and bool(_CS_BRIDGE_TOOL_COMMAND_RE.search(text))
 
 
 def block_payload(*, via: str) -> dict[str, str]:
@@ -150,6 +162,13 @@ def pre_tool_block(
             return {
                 **block_payload(via=tool_name),
                 "message": _CLI_BLOCK_MESSAGE,
+            }
+        if looks_like_cs_bridge_tool_invocation(code):
+            return {
+                "action": "block",
+                "message": _EXECUTE_CODE_BRIDGE_BLOCK_MESSAGE,
+                "blocked_by": "cs-bridge-agent-guard",
+                "via": tool_name,
             }
         return None
 

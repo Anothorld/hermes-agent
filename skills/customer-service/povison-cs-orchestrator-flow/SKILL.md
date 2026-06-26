@@ -27,12 +27,14 @@ Processes one inbound QuickCEP **email** session: classify, auto-handle or escal
 Read `# agent_tool_paths` from the gateway brief **or** `get-dispatch-context` → `agent_tool_paths`:
 
 - **`cs_bridge_tool` only** — all bridge and QuickCEP operations (`get-messages`, `draft-save`, `apply-handoff`, …)
+- **`terminal` tool only** — one `python3 <cs_bridge_tool> …` command per terminal call
+- **Never `execute_code` / subprocess.run** to batch bridge CLI steps (gateway blocks this on `povison-cs:*` runs)
 
-Example:
+Example (each line is a separate **terminal** tool call):
 
 ```bash
 python3 <cs_bridge_tool> get-messages --env LIVE --session-id <id>
-python3 <cs_bridge_tool> draft-save --env LIVE --session-id <id> --content-file /tmp/draft.html --subject "Re: ..." --receiver "customer@email.com"
+python3 <cs_bridge_tool> draft-save --env LIVE --session-id <id> --content-file /tmp/draft-<id>.html --subject "Re: ..." --receiver "customer@email.com"
 python3 <cs_bridge_tool> apply-handoff --env LIVE --session-id <id> --phase processing ...
 ```
 
@@ -45,12 +47,13 @@ When using `--content` in shell, **single-quote** drafts that contain `$` (e.g. 
 1. `skill_view(name='povison-cs-orchestrator-flow')` — this skill
 2. Bridge CLI (use absolute path from `# agent_tool_paths` / dispatch-context):
    - `get-dispatch-context --env LIVE --session-id <id>`
+   - Read `orders` from dispatch-context. For logistics intent + non-empty orders, dispatch-context now includes `tracking` prefill summaries from Povison order-track API (`status`, `trackingNumber`, `earliestEdd`, `latestEdd`).
 3. `get-messages --env LIVE --session-id <id>`
 4. `classify-intent` via bridge CLI with email subject + body
 5. **`apply-handoff --phase processing`** — tags (AI-处理中 + inquiry) + start note
 6. **If route=auto_handle:**
    - Product → `povison-product-lookup` skill
-   - Logistics → `povison-order-track` skill
+   - Logistics → `povison-order-track` skill (if `dispatch-context.tracking.enabled=true`, use prefetched `tracking.summaries` first; only call additional lookup when summary is missing)
    - Compose English reply → **`cs_bridge_tool draft-save`** (auto join-chat) with `--content` or `--content-file`, `--subject`, `--receiver` (never `send-email`)
    - **`apply-handoff --phase draft_ready`** — AI-草稿待审 + 待客户回复 + completion note
    - `update-session-status --status draft_ready`
@@ -88,11 +91,17 @@ Bridge applies QuickCEP tags and `add-note` automatically — **do not** call `t
 
 ## Pitfalls
 
+**execute_code for bridge CLI** — Forbidden. Do not wrap `cs_bridge_tool` in Python/subprocess; use **terminal** once per step. The guard blocks `execute_code` that references `cs_bridge_tool`.
+
 **Wrong script path** — Never search for `quickcep_cli.py`. Use `cs_bridge_tool` path from the brief or dispatch-context only.
 
 **Direct quickcep_cli** — Forbidden in automation. Use `cs_bridge_tool get-messages` and `cs_bridge_tool draft-save`.
 
 **Skipping join-chat before draft** — Use **`cs_bridge_tool draft-save`** only; it calls `join-chat` automatically.
+
+**Shared temp draft path** — Never use `/tmp/draft.html` across sessions. Always use session-scoped paths like `/tmp/draft-<session_id>.html` to avoid cross-session draft contamination under concurrent runs.
+
+**Fake HTML wrappers** — Do not save `<html><body>…</body></html>` with plain-text newlines; QuickCEP shows one block. Use plain text in `--content-file` (auto `<p>/<br>`) or real `<p>` tags.
 
 **draft-save missing flags** — Requires `--content` or `--content-file`; add `--subject` and `--receiver` for email drafts.
 

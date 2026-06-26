@@ -36,13 +36,39 @@ def test_process_checklist_uses_cs_bridge_tool_only() -> None:
     cli = contract.cs_bridge_cli_path()
     text = contract.process_cli_checklist(env="LIVE", quickcep_session_id="sess-1")
     assert str(cli) in text
-    assert "quickcep_cli" not in text
+    assert "Do **NOT** call quickcep_cli directly" in text
+    assert "python3" in text and "quickcep_cli" not in text.split("bridge_cli_checklist", 1)[1]
     assert "get-messages --env LIVE --session-id sess-1" in text
     assert "draft-save --env LIVE --session-id sess-1 --content-file" in text
     assert "agent_tool_paths" in text
+    assert "terminal:" in text
 
 
 def test_process_instructions_forbid_quickcep_cli() -> None:
     text = contract.process_instructions()
     assert "Do not call quickcep_cli directly" in text
     assert "cs_bridge_tool" in text
+    assert "execute_code" in text
+    assert "terminal" in text
+    assert "Do NOT use delegate_task" in text
+
+
+def test_gateway_toolsets_exclude_delegation_and_code_execution() -> None:
+    toolsets = _load("gateway_toolsets", _PLUGIN_ROOT / "gateway_toolsets.py")
+    names = set(toolsets.POVISON_CS_API_SERVER_TOOLSETS)
+    assert "terminal" in names
+    assert "delegation" not in names
+    assert "code_execution" not in names
+
+
+def test_resume_checklist_forbids_execute_code() -> None:
+    text = contract.resume_cli_checklist(env="LIVE", escalation_id=17)
+    assert "execute_code" in text
+    assert "terminal` tool IS in your available tool list" in text
+    assert "delegate_task is PROHIBITED" in text
+    assert "skill_view(name='povison-cs-escalation-resumer')" in text
+    assert "terminal:" in text
+    assert "quickcep_session_id" in text
+    assert "povison-cs-hermes-user" in text
+    assert "povison-cs-hermes-knowledge" not in text
+    assert "hindsight_bridge.py" in text

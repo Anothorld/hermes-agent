@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -12,12 +14,35 @@ from typing import Any, Mapping, Optional
 from .schema import ESCALATION_STATES, SESSION_STATUSES, recreate_all
 from .pii_sanitize import mask_string, sanitize_mapping, sanitize_namespaces
 
+log = logging.getLogger(__name__)
+
 _DB_PATH = Path(
     os.environ.get(
         "HERMES_CS_OPS_CAL_DB",
         Path(os.path.expanduser("~/.hermes/cs-ops-bridge/cal.db")),
     )
 )
+_DEBUG_LOG_PATH = Path("/Users/arnold/agent_prj/.cursor/debug-922c3e.log")
+
+
+def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "922c3e",
+            "id": f"log_{int(time.time() * 1000)}_{hypothesis_id}",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # #endregion
 
 
 def _now() -> str:
@@ -177,6 +202,36 @@ def get_session(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict
         return dict(row) if row else None
 
 
+def session_has_event(*, session_row_id: int, event_type: str) -> bool:
+    """True when at least one CAL conversation event of ``event_type`` exists."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM cs_conversation_events WHERE session_id=? AND event_type=? LIMIT 1",
+            (session_row_id, event_type),
+        ).fetchone()
+        return row is not None
+
+
+def has_prior_session_for_email(
+    *,
+    customer_email: str,
+    env: str = "LIVE",
+    exclude_quickcep_session_id: Optional[str] = None,
+) -> bool:
+    """True when CAL already has another session row for this customer email."""
+    email = (customer_email or "").strip().lower()
+    if not email or "@" not in email:
+        return False
+    with _connect() as conn:
+        sql = "SELECT 1 FROM cs_session WHERE env=? AND lower(customer_email)=?"
+        params: list[Any] = [env, email]
+        if exclude_quickcep_session_id:
+            sql += " AND quickcep_session_id != ?"
+            params.append(exclude_quickcep_session_id)
+        sql += " LIMIT 1"
+        return conn.execute(sql, params).fetchone() is not None
+
+
 def update_session_chat_id(*, session_row_id: int, chat_session_id: str) -> None:
     with _connect() as conn:
         conn.execute(
@@ -210,7 +265,7 @@ def _fetch_visitor_orders(quickcep_session_id: str) -> dict[str, Any]:
     try:
         from .email_channel import fetch_email_session_row, _quickcep_scripts_dir
     except Exception:
-        return {"orders": [], "source": "error", "error": "email_channel import failed"}
+        return {"orders": [], "intention_tags": [], "source": "error", "error": "email_channel import failed"}
 
     scripts = _quickcep_scripts_dir()
     if str(scripts) not in _sys.path:
@@ -218,25 +273,46 @@ def _fetch_visitor_orders(quickcep_session_id: str) -> dict[str, Any]:
     try:
         import quickcep_cli as qc  # type: ignore
     except ImportError:
-        return {"orders": [], "source": "error", "error": "quickcep_cli unavailable"}
+        return {"orders": [], "intention_tags": [], "source": "error", "error": "quickcep_cli unavailable"}
 
     # 1. Get userUUID from session row
     row = fetch_email_session_row(quickcep_session_id)
     if not row:
-        return {"orders": [], "source": "error", "error": "session not found in email channel"}
+        return {"orders": [], "intention_tags": [], "source": "error", "error": "session not found in email channel"}
 
     vi = row.get("visitorInfo") if isinstance(row.get("visitorInfo"), dict) else {}
+    raw_tags = row.get("intentionTags")
+    if isinstance(raw_tags, str):
+        intention_tags = [raw_tags.strip()] if raw_tags.strip() else []
+    elif isinstance(raw_tags, (list, tuple)):
+        intention_tags = [str(t).strip() for t in raw_tags if str(t).strip()]
+    else:
+        intention_tags = []
     user_uuid = vi.get("userUUID")
     customer_email = vi.get("email")
     if not user_uuid:
-        return {"orders": [], "userUUID": None, "customer_email": customer_email, "source": "error", "error": "no userUUID"}
+        return {
+            "orders": [],
+            "userUUID": None,
+            "customer_email": customer_email,
+            "intention_tags": intention_tags,
+            "source": "error",
+            "error": "no userUUID",
+        }
 
     # 2. Call getOrderList
     try:
         args = _ap.Namespace(token=None, email=None, password=None)
         jwt = qc.get_jwt(args)
     except Exception:
-        return {"orders": [], "userUUID": user_uuid, "customer_email": customer_email, "source": "error", "error": "QuickCEP auth failed"}
+        return {
+            "orders": [],
+            "userUUID": user_uuid,
+            "customer_email": customer_email,
+            "intention_tags": intention_tags,
+            "source": "error",
+            "error": "QuickCEP auth failed",
+        }
 
     try:
         body = {"storeId": 3371, "userUUID": user_uuid}
@@ -244,7 +320,14 @@ def _fetch_visitor_orders(quickcep_session_id: str) -> dict[str, Any]:
         data = result.get("data", {})
         order_list = data.get("list", []) if isinstance(data, dict) else []
     except Exception as exc:
-        return {"orders": [], "userUUID": user_uuid, "customer_email": customer_email, "source": "error", "error": str(exc)[:200]}
+        return {
+            "orders": [],
+            "userUUID": user_uuid,
+            "customer_email": customer_email,
+            "intention_tags": intention_tags,
+            "source": "error",
+            "error": str(exc)[:200],
+        }
 
     # 3. Filter to relevant fields
     orders = []
@@ -275,6 +358,7 @@ def _fetch_visitor_orders(quickcep_session_id: str) -> dict[str, Any]:
         "orders": orders,
         "userUUID": user_uuid,
         "customer_email": customer_email,
+        "intention_tags": intention_tags,
         "source": "getOrderList" if orders else "empty",
     }
 
@@ -311,7 +395,73 @@ def get_dispatch_context(*, quickcep_session_id: str, env: str = "LIVE") -> Opti
         try:
             order_ctx = _fetch_visitor_orders(quickcep_session_id)
         except Exception:
-            order_ctx = {"orders": [], "source": "error", "error": "unexpected failure"}
+            order_ctx = {"orders": [], "intention_tags": [], "source": "error", "error": "unexpected failure"}
+
+        intention_tags = [
+            str(tag).strip()
+            for tag in (order_ctx.get("intention_tags") or [])
+            if str(tag).strip()
+        ]
+        orders = order_ctx.get("orders") or []
+        should_prefill_tracking = bool(orders) and ("物流咨询" in intention_tags)
+        tracking_ctx: dict[str, Any] = {
+            "enabled": False,
+            "source": "order-track-api",
+            "reason": "intent_not_logistics_or_no_orders",
+            "summaries": [],
+            "errors": [],
+            "circuitOpen": False,
+        }
+
+        _debug_log(
+            run_id="dispatch-context",
+            hypothesis_id="H2",
+            location="cal.py:get_dispatch_context",
+            message="dispatch-context order and intent snapshot",
+            data={
+                "quickcep_session_id": quickcep_session_id,
+                "orders_count": len(orders) if isinstance(orders, list) else 0,
+                "intention_tags": intention_tags[:5],
+                "should_prefill_tracking": should_prefill_tracking,
+                "order_source": str(order_ctx.get("source") or ""),
+            },
+        )
+
+        if should_prefill_tracking:
+            try:
+                from .order_tracking import fetch_tracking_prefill
+
+                order_ids = [
+                    str(item.get("orderId") or "").strip()
+                    for item in orders
+                    if isinstance(item, dict) and str(item.get("orderId") or "").strip()
+                ]
+                tracking_ctx = fetch_tracking_prefill(order_ids)
+            except Exception as exc:
+                tracking_ctx = {
+                    "enabled": False,
+                    "source": "order-track-api",
+                    "reason": "prefill_exception",
+                    "summaries": [],
+                    "errors": [str(exc)[:120]],
+                    "circuitOpen": False,
+                }
+                log.warning("dispatch tracking prefill failed session=%s: %s", quickcep_session_id, exc)
+
+        _debug_log(
+            run_id="dispatch-context",
+            hypothesis_id="H3",
+            location="cal.py:get_dispatch_context",
+            message="dispatch-context tracking prefill result",
+            data={
+                "quickcep_session_id": quickcep_session_id,
+                "prefill_enabled": bool(tracking_ctx.get("enabled")),
+                "summary_count": len(tracking_ctx.get("summaries") or []),
+                "error_count": len(tracking_ctx.get("errors") or []),
+                "reason": str(tracking_ctx.get("reason") or ""),
+                "circuit_open": bool(tracking_ctx.get("circuitOpen")),
+            },
+        )
 
         return {
             "session": dict(sess),
@@ -326,6 +476,7 @@ def get_dispatch_context(*, quickcep_session_id: str, env: str = "LIVE") -> Opti
             ],
             "latest_escalation": dict(esc) if esc else None,
             "orders": order_ctx,
+            "tracking": tracking_ctx,
         }
 
 

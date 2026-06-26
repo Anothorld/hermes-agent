@@ -19,6 +19,12 @@ from .profile_refs import gateway_session_id
 log = logging.getLogger(__name__)
 
 
+def _gateway_yolo_enabled() -> bool:
+    """CS automation runs skip routine approval prompts; hardline blocks still apply."""
+    raw = os.environ.get("CS_OPS_GATEWAY_YOLO", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 @dataclass(frozen=True)
 class LaunchOutcome:
     run_id: str | None
@@ -110,6 +116,8 @@ class GatewayClient:
                 "session_id": session_id,
                 "conversation_history": [],
             }
+            if _gateway_yolo_enabled():
+                body["yolo"] = True
             out = post_run_with_retry(base=self.base, api_key=self.api_key, body=body)
             if not out:
                 return LaunchOutcome(run_id=None)

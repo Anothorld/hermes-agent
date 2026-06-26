@@ -116,7 +116,22 @@ def test_allows_cs_bridge_tool_in_execute_code():
         args={"code": "subprocess.run(['python3','cs_bridge_tool.py','get-messages','--session-id','123'])"},
         session_id="povison-cs:LIVE:12345",
     )
-    assert out is None
+    assert out is not None
+    assert out["action"] == "block"
+    assert "terminal" in out["message"].lower()
+
+
+def test_hooks_accepts_turn_id_kwarg():
+    h = _load("hooks", PLUGIN_ROOT / "hooks.py")
+    out = h.pre_tool_call(
+        "execute_code",
+        {"code": "subprocess.run(['python3','cs_bridge_tool.py','get-escalation'])"},
+        session_id="povison-cs:LIVE:12345",
+        turn_id="turn-1",
+        tool_call_id="tc-1",
+    )
+    assert out is not None
+    assert out["action"] == "block"
 
 
 def test_quickcep_cli_override(monkeypatch):

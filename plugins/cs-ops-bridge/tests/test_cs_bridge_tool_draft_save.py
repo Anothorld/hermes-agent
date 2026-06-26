@@ -134,3 +134,30 @@ def test_join_chat_failure_includes_failed_step(tmp_path, monkeypatch):
     assert err["failed_step"] == "getUserInfo"
     assert "getUserInfo timed out" in err["error_detail"]
     assert err["attempt"] == tool.JOIN_CHAT_MAX_ATTEMPTS
+
+
+def test_draft_save_rejects_shared_tmp_path(tmp_path, monkeypatch):
+    tool = _load_cs_bridge_tool()
+    cli = tmp_path / "quickcep_cli.py"
+    cli.write_text("# stub", encoding="utf-8")
+    monkeypatch.setattr(tool, "_quickcep_cli_path", lambda: cli)
+
+    shared = Path("/tmp/draft.html")
+    shared.write_text("unsafe shared draft", encoding="utf-8")
+
+    args = MagicMock(
+        session_id="sess-unsafe",
+        content=None,
+        content_file=str(shared),
+        subject="Re: test",
+        receiver="a@b.com",
+        attachments=None,
+    )
+    with patch.object(tool, "print_json") as mock_print, patch.object(
+        tool.sys, "exit", side_effect=SystemExit(2)
+    ):
+        with pytest.raises(SystemExit):
+            tool._cmd_draft_save(args)
+
+    out = mock_print.call_args[0][0]
+    assert out["error"] == "unsafe shared content-file path /tmp/draft.html"

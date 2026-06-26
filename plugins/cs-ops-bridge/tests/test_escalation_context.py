@@ -74,7 +74,7 @@ def test_build_escalation_text_separates_summary_and_quote():
     assert "客户邮箱: tessa@example.com" in text
     assert "客户来信摘要:" in text
     assert "客户需要 SF8181 的安装视频及缺件清单。" in text
-    assert "原文引用：" in text
+    assert "原始来信：" in text
     assert "I still need the assembly video for model SF8181." in text
     assert text.index("客户需要") < text.index("I still need")
 

@@ -56,9 +56,30 @@ def test_process_run_builds_expected_gateway_body():
     assert outcome.run_id == "mock-run-1"
     body = captured["body"]
     assert body["session_id"] == "povison-cs:LIVE:2541533288463695873"
+    assert body.get("yolo") is True
     assert "cs_inbound_process" in body["input"]
     assert "2541533288463695873" in body["input"]
     assert "povison-cs-orchestrator-flow" in body["instructions"] or "orchestrator" in body["instructions"]
+
+
+def test_process_run_respects_yolo_disable(monkeypatch):
+    monkeypatch.setenv("CS_OPS_GATEWAY_YOLO", "0")
+    gw_mod = _load_module("gateway_client")
+    captured: dict = {}
+
+    def _fake_post(*, base, api_key, body, max_attempts=4):
+        captured["body"] = body
+        return {"run_id": "mock-run-2"}
+
+    client = gw_mod.GatewayClient(base="http://127.0.0.1:8643", api_key="test-key")
+    with patch.object(gw_mod, "post_run_with_retry", side_effect=_fake_post):
+        with patch.object(gw_mod, "drain_run_events"):
+            client.start_process_run(
+                quickcep_session_id="2541533288463695873",
+                env="LIVE",
+                message_id="msg-100",
+            )
+    assert "yolo" not in captured["body"]
 
 
 def test_launch_for_message_enqueues_and_launches(monkeypatch, tmp_path):

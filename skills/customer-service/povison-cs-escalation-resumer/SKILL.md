@@ -9,23 +9,35 @@ tags: [povison, customer-service, escalation, resume]
 
 After an operator replies in Feishu thread, incorporate their answer and write QuickCEP draft with lifecycle handoff.
 
+## Tool rules (mandatory)
+
+- **`cs_bridge_tool` only** for bridge/QuickCEP operations
+- **`terminal` tool only** — one `python3 <cs_bridge_tool> …` command per call
+- **Never `execute_code` / subprocess.run** to batch bridge steps (blocked on `povison-cs:*` runs)
+- **Never `quickcep_cli` directly**
+- Use **quickcep_session_id** (long numeric id) — never CAL internal session id
+
 ## Procedure
 
-1. `get-escalation --env LIVE --escalation-id <id>`
-2. `get-dispatch-context --session-id <quickcep_session_id>`
-3. `get-messages --env LIVE --session-id <id>`
-4. Merge `operator_answer` into customer reply (English, Povison tone)
-5. **`cs_bridge_tool draft-save`** (auto join-chat) with subject/body/receiver — use `--content-file` when draft contains `$`
-6. **`apply-handoff --phase draft_ready`** — tags + internal note (expert answer summary)
-7. `write-event --event-type escalation_resumed`
-8. `update-session-status --status draft_ready`
+0. `skill_view(name='povison-cs-escalation-resumer')` — this skill
+1. **terminal:** `get-escalation --env LIVE --escalation-id <id>`
+2. **terminal:** `get-dispatch-context --env LIVE --session-id <quickcep_session_id>`
+3. **terminal:** `get-messages --env LIVE --session-id <quickcep_session_id>`
+4. Merge `operator_answer` into customer reply (English, Povison tone) → `/tmp/draft-<quickcep_session_id>.html`
+   - **Plain text is OK** — `draft-save` converts `\n\n` to `<p>` and single `\n` to `<br>`.
+   - **Do not** wrap in `<html><body>` with raw newlines (QuickCEP ignores `\n` in HTML).
+   - Prefer `<p>...</p>` only if you hand-write HTML; or plain text / minimal `<p>` blocks.
+5. **terminal:** Hindsight `retain` (required before draft-save) — see orchestrator/resumer checklist
+6. **terminal:** `draft-save --env LIVE --session-id <quickcep_session_id> --content-file /tmp/draft-<quickcep_session_id>.html …`
+7. **terminal:** `apply-handoff --phase draft_ready` — tags + internal note
+8. **terminal:** `write-event --event-type escalation_resumed`
+9. **terminal:** `update-session-status --status draft_ready`
 
 ## apply-handoff example
 
 ```bash
-python3 cs_bridge_tool.py apply-handoff --env LIVE --session-id <id> \
+python3 cs_bridge_tool.py apply-handoff --env LIVE --session-id <quickcep_session_id> \
   --phase draft_ready \
-  --customer-need "<中文：客户原始诉求>" \
   --actions-taken "已合并飞书专家答复并保存草稿" \
   --operator-hint "<中文：下一操作员接手要点>"
 ```
@@ -34,14 +46,20 @@ python3 cs_bridge_tool.py apply-handoff --env LIVE --session-id <id> \
 
 ## Pitfalls
 
+**execute_code for bridge CLI** — Forbidden. ESC:17 used `subprocess.run(['python3','cs_bridge_tool.py',…])` → gateway approval stall. Use **terminal** per step.
+
+**Wrong session id** — Use `quickcep_session_id` from escalation JSON, not CAL `session.id` (e.g. 1088).
+
 **Ignoring operator_answer** — The Feishu reply is authoritative for policy exceptions.
 
 **send-email** — Never auto-send; draft only.
+
+**Shared temp draft path** — Never use `/tmp/draft.html`; concurrent runs can overwrite content. Always use session-scoped paths (`/tmp/draft-<quickcep_session_id>.html`).
 
 **Skipping apply-handoff** — No AI-草稿待审 tag or handoff note after resume.
 
 ## Examples
 
-**Success:** Operator confirms assembly needs two people → draft reflects that → apply-handoff draft_ready → draft_ready status.
+**Success:** Operator confirms OEKO-TEX certification → draft reflects that → apply-handoff draft_ready → draft_ready status.
 
-**Failure:** Agent replies in Feishu instead of QuickCEP draft — wrong channel.
+**Failure:** Agent uses execute_code to batch get-escalation + get-messages → blocked or stuck on approval.

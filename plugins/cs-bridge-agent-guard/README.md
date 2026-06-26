@@ -31,9 +31,10 @@ CS_OPS_ALLOW_QUICKCEP_SEND=1 python quickcep_cli.py send-email ...
 |-------|--------|
 | Hermes `pre_tool_call` | Any `quickcep_cli` / `quickcep_cli.py` in `terminal` **or** `execute_code` on `povison-cs:*` runs |
 | Hermes `pre_tool_call` | `send-email` / `/im/message/operator/sendEmail` in `terminal` or `execute_code` on `povison-cs:*` runs |
+| Hermes `pre_tool_call` | **`cs_bridge_tool` inside `execute_code`** — use **terminal** once per bridge step instead |
 | QuickCEP CLI hook | `quickcep_cli.py send-email` when `CS_OPS_PROFILE` is a povison profile (unless override env set) |
 
 ## What is allowed
 
-- `cs_bridge_tool` (`get-messages`, `draft-save`, `apply-handoff`, …), bridge HTTP API, Feishu escalation scripts
+- **`terminal` + `cs_bridge_tool`** — one subcommand per call (`get-messages`, `draft-save`, `apply-handoff`, …)
 - All tools on non-`povison-cs:` sessions

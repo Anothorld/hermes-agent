@@ -1,0 +1,93 @@
+"""Tests for REST operator_sent backfill."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import types
+from pathlib import Path
+from unittest.mock import patch
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+_PKG = "cs_ops_bridge_op_reconcile_test"
+
+
+def _reset_modules() -> None:
+    for key in list(sys.modules):
+        if key == _PKG or key.startswith(f"{_PKG}."):
+            del sys.modules[key]
+
+
+def _load(sub: str):
+    if _PKG not in sys.modules:
+        pkg = types.ModuleType(_PKG)
+        pkg.__path__ = [str(_PLUGIN_ROOT)]  # type: ignore[attr-defined]
+        sys.modules[_PKG] = pkg
+    full = f"{_PKG}.{sub}"
+    if full in sys.modules:
+        return sys.modules[full]
+    spec = importlib.util.spec_from_file_location(
+        full,
+        _PLUGIN_ROOT / f"{sub}.py",
+        submodule_search_locations=[str(_PLUGIN_ROOT)],
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = _PKG
+    sys.modules[full] = mod
+    assert spec.loader
+    spec.loader.exec_module(mod)
+    setattr(sys.modules[_PKG], sub, mod)
+    return mod
+
+
+def test_reconcile_operator_sent_syncs_draft_ready(monkeypatch, tmp_path):
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    rec = _load("operator_send_reconcile")
+
+    r = cal.enqueue_session(
+        quickcep_session_id="2547506973813489665",
+        message_id="m1",
+        env="LIVE",
+        customer_email="jessicahall289@gmail.com",
+    )
+    cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+
+    op_msg = {"id": "2547621894254018560", "createTime": "2026-06-24 17:32:08"}
+
+    class _Proc:
+        returncode = 0
+        stdout = json.dumps({"messages": [{"ownerType": "operator", "id": op_msg["id"]}]})
+        stderr = ""
+
+    with patch.object(rec, "_fetch_last_operator_message", return_value=op_msg):
+        with patch.object(rec, "handle_operator_send", return_value={"ok": True}) as handoff:
+            stats = rec.reconcile_operator_sent_once(env="LIVE")
+
+    assert stats["synced"] == 1
+    handoff.assert_called_once()
+
+
+def test_reconcile_skips_when_operator_sent_event_exists(monkeypatch, tmp_path):
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    rec = _load("operator_send_reconcile")
+
+    r = cal.enqueue_session(quickcep_session_id="s1", message_id="m1", env="LIVE")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+    cal.write_event(
+        quickcep_session_id="s1",
+        event_type="operator_sent",
+        payload={"message_id": "op-1"},
+        env="LIVE",
+    )
+
+    with patch.object(rec, "_fetch_last_operator_message", return_value=None) as fetch:
+        stats = rec.reconcile_operator_sent_once(env="LIVE")
+
+    assert stats["synced"] == 0
+    assert stats["skipped_already"] == 1
+    fetch.assert_not_called()

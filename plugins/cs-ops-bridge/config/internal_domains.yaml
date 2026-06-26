@@ -1,0 +1,49 @@
+# Internal domains and URL patterns that must NEVER appear in customer-facing drafts.
+# The internal-domain guard scans draft content + attachment URLs before writing to QuickCEP.
+# If any match is found, draft-save aborts with an error listing the matched patterns.
+#
+# Matching is substring-based (case-insensitive) against the full draft text.
+# Add domains/patterns here as new internal systems are discovered.
+#
+# Override via env CS_OPS_INTERNAL_DOMAINS_FILE to point to an alternative config.
+
+enabled: true
+
+# Internal OSS / CDN / API hosts — these are backend infrastructure, not customer-facing.
+blocked_domains:
+  # Aliyun OSS internal buckets (note: the = obfuscation pattern seen in leaked URLs)
+  - musem-scm-public.oss-cn-guangzhou.aliyuncs.com
+  - musem-scm=public.oss-cn=guangzhou.alyuncs.com
+  - musem-scm-public.oss-cn-guangzhou
+  # SCM / ERP / internal system domains
+  - musem-scm
+  - scm.povison
+  - erp.povison
+  - internal.povison
+  - admin.povison
+  - staging.povison
+  - dev.povison
+  # QuickCEP internal API hosts
+  - quickcep.com/api
+  - api.quickcep.com
+  # Local network / development
+  - localhost
+  - 127.0.0.1
+  - 0.0.0.0
+  - 192.168.
+  - 10.0.
+  - 172.16.
+  # Internal IP-like patterns in URLs
+  - file:///
+  # Feishu internal
+  - open.feishu.cn
+  - feishu.cn
+
+# Additional regex patterns for more complex internal URL obfuscation
+blocked_patterns:
+  # OSS bucket URLs with = obfuscation (e.g. oss-cn=guangzhou.alyuncs.com)
+  - 'oss-cn=\w+\.alyuncs\.com'
+  # Any musem-scm variant with = encoding
+  - 'musem-scm[=\-]public'
+  # Internal port references in URLs
+  - ':\d{4,5}/'  # matches :8081/ :8643/ etc. in URL paths

@@ -45,8 +45,8 @@ def _patches(bundled, skills_dir, manifest_file):
             return_value=bundled.parent / "optional-skills",
         )
     )
-    stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
-    stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+    stack.enter_context(patch("tools.skills_sync._skills_dir", return_value=skills_dir))
+    stack.enter_context(patch("tools.skills_sync._manifest_file", return_value=manifest_file))
     return stack
 
 
