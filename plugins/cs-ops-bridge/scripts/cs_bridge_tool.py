@@ -268,6 +268,40 @@ def _cmd_get_messages(args: argparse.Namespace) -> None:
         print(proc.stdout, flush=True)
 
 
+def _fetch_allowed_attachment_urls(args: argparse.Namespace) -> list[str]:
+    """Load PDF allow list from bridge HTTP (same DB as serve, works across hosts)."""
+    try:
+        client = client_from_args(args)
+        data = client.request(
+            "GET",
+            f"/sessions/{args.session_id}/attachment-guard-context",
+            query={"env": str(args.env)},
+        )
+        if isinstance(data, dict):
+            return list(data.get("allowed_attachment_urls") or [])
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+    return []
+
+
+def _cmd_upload_file(args: argparse.Namespace) -> None:
+    """Upload a local file to QuickCEP CDN."""
+    path = Path(args.file_path)
+    if not path.is_file():
+        print_json({"error": f"file not found: {path}"})
+        sys.exit(2)
+    try:
+        from quickcep_cdn import upload_file_to_cdn  # noqa: E402
+    except ImportError as exc:
+        print_json({"error": f"quickcep_cdn unavailable: {exc}"})
+        sys.exit(2)
+    result = upload_file_to_cdn(path, feature=args.feature or "email")
+    print_json(result)
+    sys.exit(0 if result.get("ok") else 2)
+
+
 def _cmd_draft_save(args: argparse.Namespace) -> None:
     """Wrap quickcep_cli draft-save with join-chat + canonical profile skill path."""
     cli = _quickcep_cli_path()
@@ -330,6 +364,34 @@ def _cmd_draft_save(args: argparse.Namespace) -> None:
             )
             sys.exit(2)
 
+    # PDF attachment guard — only vault-sourced PDFs on escalation resume
+    try:
+        from draft_attachment_guard import attachments_contain_pdf, guard_draft_attachments  # noqa: E402
+    except ImportError:
+        attachments_contain_pdf = None  # type: ignore[assignment,misc]
+        guard_draft_attachments = None  # type: ignore[assignment,misc]
+    attachments_json = getattr(args, "attachments", None)
+    if not isinstance(attachments_json, str):
+        attachments_json = None
+    if attachments_contain_pdf is not None and guard_draft_attachments is not None:
+        if attachments_contain_pdf(attachments_json):
+            allowed_urls = _fetch_allowed_attachment_urls(args)
+            att_guard = guard_draft_attachments(
+                attachments_json,
+                allowed_attachment_urls=allowed_urls,
+            )
+            if att_guard["blocked"]:
+                print_json(
+                    {
+                        "error": att_guard["error"],
+                        "error_detail": att_guard.get("error_detail", ""),
+                        "source": att_guard.get("source", "attachments"),
+                        "blocked_kind": att_guard.get("blocked_kind", ""),
+                        "session_id": args.session_id,
+                    }
+                )
+                sys.exit(2)
+
     join_chat = _join_chat_before_draft(cli, args.session_id)
 
     draft_argv = [
@@ -343,7 +405,7 @@ def _cmd_draft_save(args: argparse.Namespace) -> None:
     if args.receiver:
         draft_argv.extend(["--receiver", args.receiver])
     if getattr(args, "attachments", None):
-        draft_argv.extend(["--attachments", args.attachments])
+        draft_argv.extend(["--attachments", attachments_json or args.attachments])
     proc = _run_quickcep_cli(cli, draft_argv)
     if proc.returncode != 0:
         print_json({"error": proc.stderr or proc.stdout, "exit_code": proc.returncode, "join_chat": join_chat})
@@ -505,6 +567,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help='JSON array of attachment objects (same as quickcep_cli draft-save --attachments)',
     )
     ds.set_defaults(func=_cmd_draft_save)
+
+    uf = sub.add_parser("upload-file", help="Upload local file to QuickCEP CDN")
+    uf.add_argument("file_path", help="Path to file on disk")
+    uf.add_argument(
+        "--feature",
+        default="email",
+        choices=("email", "send-image"),
+        help="QuickCEP upload feature (email for draft attachments)",
+    )
+    uf.set_defaults(func=_cmd_upload_file)
 
     ge = sub.add_parser("get-escalation")
     add_env_arg(ge)

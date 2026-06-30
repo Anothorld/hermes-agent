@@ -72,6 +72,30 @@ def post_run_with_retry(
     return None
 
 
+def stop_run(*, base: str, api_key: Optional[str], run_id: str) -> bool:
+    """Best-effort POST /v1/runs/{id}/stop — free gateway slot when operator superseded resume."""
+    rid = (run_id or "").strip()
+    if not rid:
+        return False
+    headers: dict[str, str] = {"Accept": "application/json", "Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    url = f"{base.rstrip('/')}/v1/runs/{rid}/stop"
+    req = urllib.request.Request(url, data=b"{}", headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as exc:
+        if exc.code in (404, 409):
+            log.info("gateway stop run=%s HTTP %s (already finished)", rid, exc.code)
+            return True
+        log.warning("gateway stop run failed run=%s HTTP %s", rid, exc.code)
+        return False
+    except urllib.error.URLError as exc:
+        log.warning("gateway stop run failed run=%s: %s", rid, exc)
+        return False
+
+
 def drain_run_events(*, base: str, api_key: Optional[str], run_id: str, timeout_sec: float = 5.0) -> None:
     """Best-effort SSE drain so gateway concurrency slots free promptly."""
     if os.environ.get("CS_OPS_GATEWAY_DRAIN", "true").lower() in ("0", "false", "no"):

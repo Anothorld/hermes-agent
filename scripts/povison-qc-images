@@ -1,0 +1,42 @@
+#!/bin/bash
+# Povison SCM Quality Check Images CLI Wrapper
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_SCRIPT="$SCRIPT_DIR/povison_scm_api.py"
+
+# Check if Python script exists
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    echo "Error: povison_scm_api.py not found at $PYTHON_SCRIPT"
+    exit 1
+fi
+
+# Check if JWT token is configured
+if [[ -z "$POVISON_SCM_JWT_TOKEN" ]]; then
+    # Try to load from .env file
+    ENV_FILE="$HOME/.hermes/profiles/povison-cs/.env"
+    if [[ -f "$ENV_FILE" ]]; then
+        export $(grep "^POVISON_SCM_JWT_TOKEN=" "$ENV_FILE" | xargs)
+    fi
+fi
+
+# Check again
+if [[ -z "$POVISON_SCM_JWT_TOKEN" ]]; then
+    echo "❌ POVISON_SCM_JWT_TOKEN not configured"
+    echo ""
+    echo "🔧 配置方法:"
+    echo "1. 打开 https://scm.povison-inc.com/qualityManage/qualityPicture"
+    echo "2. 按F12 → Network → 执行查询"
+    echo "3. 复制 x-access-token 的值"
+    echo "4. 运行: ./scripts/configure_povison_scm.sh <token>"
+    echo ""
+    exit 1
+fi
+
+# Check if requests library is available
+python3 -c "import requests" 2>/dev/null || {
+    echo "⚠️  requests library not installed. Installing..."
+    pip3 install requests
+}
+
+# Run the Python script
+python3 "$PYTHON_SCRIPT" "$@"

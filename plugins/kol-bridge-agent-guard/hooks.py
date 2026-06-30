@@ -293,7 +293,7 @@ def _check_discovery_bootstrap(
     return None
 
 
-def re_toopl_call(
+def pre_tool_call(
     tool_name: str,
     args: Dict[str, Any],
     task_id: str = "",

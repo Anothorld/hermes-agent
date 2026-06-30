@@ -1,0 +1,10 @@
+# PDF attachment guard for draft-save (cs_bridge_tool).
+enabled: true
+
+# Block PDF attachments pointing at product/static assembly URLs.
+blocked_pdf_url_patterns:
+  - static\.povison\.com/.*\.pdf
+  - povison\.com/.*\.pdf
+
+# PDF allow list comes from bridge GET /sessions/{id}/attachment-guard-context
+# (resume_context.allowed_attachment_urls on the resuming escalation).

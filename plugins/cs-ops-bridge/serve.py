@@ -42,6 +42,7 @@ def _load_pkg() -> ModuleType:
         "escalation_timeout",
         "processing_stale",
         "escalation_resume",
+        "escalation_vault_cleanup",
         "plugin_api",
     ):
         spec = importlib.util.spec_from_file_location(
@@ -100,6 +101,9 @@ def _build_app() -> FastAPI:
             tasks.append(asyncio.create_task(et.start_background(), name="cs-escalation-timeout"))
         if os.environ.get("CS_OPS_PROCESSING_STALE_AUTO_START", "true").lower() in ("1", "true", "yes"):
             tasks.append(asyncio.create_task(ps.start_background(), name="cs-processing-stale"))
+        if os.environ.get("CS_OPS_ESC_VAULT_CLEANUP_AUTO_START", "true").lower() in ("1", "true", "yes"):
+            vc = pkg.escalation_vault_cleanup
+            tasks.append(asyncio.create_task(vc.start_background(), name="cs-vault-cleanup"))
         yield
         qw.request_stop()
         for t in tasks:
@@ -131,6 +135,11 @@ def main() -> None:
         cs_profile_dir(),
         quickcep_skill_dir(),
     )
+    from bridge_lan import default_vault_public_base
+
+    explicit = os.environ.get("CS_OPS_ESC_VAULT_PUBLIC_BASE", "").strip()
+    vault_base = explicit.rstrip("/") if explicit else default_vault_public_base()
+    log.info("vault upload base=%s (LAN experts use this host, not 127.0.0.1)", vault_base)
     import uvicorn
 
     uvicorn.run(_build_app(), host=args.host, port=args.port, log_level="info")

@@ -144,3 +144,27 @@ def test_build_pricing_report(bridge_pkg):
     ])
     assert report["sample_size"] == 2
     assert report["suggested_paid_ratio_override"] == 0.54
+
+
+def test_reconcile_stale_running_runs(cal_db, bridge_pkg):
+    store = bridge_pkg.learning_job_store
+    with cal_db._connect() as conn:  # type: ignore[attr-defined]
+        run_id = store.start_run(
+            conn,
+            job_name="reconcile_sent",
+            env="TEST",
+            triggered_by="test-stale",
+        )
+        conn.execute(
+            "UPDATE kol_learning_job_runs SET started_at=? WHERE id=?",
+            ("2020-01-01T00:00:00+00:00", run_id),
+        )
+        conn.commit()
+        reconciled = store.reconcile_stale_running_runs(
+            conn, env="TEST", stale_hours=1,
+        )
+        row = store.list_runs(conn, env="TEST", limit=1)[0]
+    assert len(reconciled) == 1
+    assert reconciled[0]["id"] == run_id
+    assert row["status"] == store.JOB_STATUS_ERROR
+    assert row.get("error_message")

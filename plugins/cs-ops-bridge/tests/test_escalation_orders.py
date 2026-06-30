@@ -167,7 +167,8 @@ def test_notify_escalation_fetches_orders(monkeypatch):
     assert "260619360220455021" in sent_text
 
 
-def test_custom_message_skips_auto_order_block():
+def test_custom_message_skips_auto_order_block(monkeypatch):
+    monkeypatch.setenv("HERMES_CS_OPS_BRIDGE_KEY", "test-key")
     notify = _load("feishu_notify")
     fc = _load("feishu_client")
     with patch.object(notify, "fetch_escalation_order_context") as fetch_ctx:
@@ -185,5 +186,6 @@ def test_custom_message_skips_auto_order_block():
             )
     fetch_ctx.assert_not_called()
     sent_text = send.call_args.kwargs["text"]
-    assert sent_text == "[ESC:100] custom body without order block"
+    assert sent_text.startswith("[ESC:100] custom body without order block")
     assert "📦 订单信息:" not in sent_text
+    assert "/escalations/100/upload" in sent_text

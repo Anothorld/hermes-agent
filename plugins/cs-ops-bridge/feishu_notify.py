@@ -114,6 +114,9 @@ def build_escalation_text(
         lines.extend(["", "❓ 需要后援确认:", question_to_operator.strip()])
     if extra_message and extra_message.strip():
         lines.extend(["", extra_message.strip()])
+    from .escalation_attachment_vault import vault_upload_notice_or_fallback
+
+    lines.append(vault_upload_notice_or_fallback(escalation_id=escalation_id))
     lines.extend(["", "🤖 由 cs-ops-bridge 自动提交", "请直接回复本主题（仅采纳首位专家回复）"])
     return "\n".join(lines)
 
@@ -136,8 +139,11 @@ def notify_escalation_opened(
     """Send escalation card to the configured Feishu group."""
     chat_id = (feishu_chat_id or escalation_chat_id() or DEFAULT_ESCALATION_CHAT).strip()
     if escalation_message:
-        # Custom body bypasses bridge template — no auto 📦 order block or summary/quote layout.
-        text = escalation_message
+        # Custom body bypasses bridge template — still append vault upload link + SOP.
+        text = escalation_message.strip()
+        from .escalation_attachment_vault import vault_upload_notice_or_fallback
+
+        text += vault_upload_notice_or_fallback(escalation_id=escalation_id)
     else:
         content = validate_feishu_notify_inputs(
             auto_send_feishu=auto_send_feishu,
@@ -197,6 +203,21 @@ def notify_escalation_locked(
     return reply_to_message(message_id=feishu_root_message_id, text=text, token=token)
 
 
+def notify_vault_upload_link(
+    *,
+    escalation_id: int,
+    feishu_root_message_id: str,
+    token: Optional[str] = None,
+) -> FeishuSendResult:
+    """Thread reply with vault upload URL (backfill when opening post omitted the link)."""
+    from .escalation_attachment_vault import vault_upload_notice_or_fallback
+    from .feishu_client import reply_to_message
+
+    body = vault_upload_notice_or_fallback(escalation_id=escalation_id).strip()
+    text = f"[ESC:{escalation_id}] 📎 附件上传链接补发\n\n{body}"
+    return reply_to_message(message_id=feishu_root_message_id, text=text, token=token)
+
+
 def notify_escalation_completed(
     *,
     escalation_id: int,
@@ -209,6 +230,8 @@ def notify_escalation_completed(
     chat_id = (feishu_chat_id or escalation_chat_id() or DEFAULT_ESCALATION_CHAT).strip()
     if outcome == "failed":
         status_line = "❌ 处理失败，请人工接手 QuickCEP 会话"
+    elif outcome == "operator_manual_reply":
+        status_line = "✅ 客服已在 QuickCEP 直接回复客户，升级关闭"
     else:
         status_line = "✅ 已处理完成，QuickCEP 草稿待审"
     lines = [

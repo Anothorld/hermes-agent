@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import cal
+from .operator_outbound_detect import pick_latest_operator_outbound_email
+from .operator_escalation_close import repair_orphaned_escalations_once
 from .profile_refs import quickcep_skill_dir
 from .session_handoff import handle_operator_send
 
@@ -54,7 +56,7 @@ def _quickcep_subprocess_env() -> dict[str, str]:
 
 
 def _fetch_last_operator_message(quickcep_session_id: str) -> Optional[dict[str, Any]]:
-    """Return the newest operator outbound message from QuickCEP, if any."""
+    """Return operator/html outbound only when it is the latest conversational message."""
     cli = _quickcep_scripts_dir() / "scripts" / "quickcep_cli.py"
     if not cli.exists():
         return None
@@ -94,18 +96,14 @@ def _fetch_last_operator_message(quickcep_session_id: str) -> Optional[dict[str,
     records = data.get("messages") if isinstance(data, dict) else None
     if not isinstance(records, list):
         return None
-    for msg in records:
-        if str(msg.get("ownerType") or "") != "operator":
-            continue
-        msg_id = str(msg.get("id") or "").strip()
-        if not msg_id:
-            continue
-        return {
-            "id": msg_id,
-            "createTime": msg.get("createTime") or msg.get("time") or "",
-            "chatSubSessionId": quickcep_session_id,
-        }
-    return None
+    picked = pick_latest_operator_outbound_email(records)
+    if not picked:
+        return None
+    return {
+        "id": picked["id"],
+        "createTime": picked.get("createTime") or "",
+        "chatSubSessionId": quickcep_session_id,
+    }
 
 
 def reconcile_operator_sent_once(*, env: str | None = None) -> dict[str, Any]:
@@ -149,4 +147,11 @@ def reconcile_operator_sent_once(*, env: str | None = None) -> dict[str, Any]:
                     sid,
                     result.get("reason"),
                 )
-    return {"checked": checked, "synced": synced, "skipped_already": skipped}
+    repair = repair_orphaned_escalations_once(env=env)
+    return {
+        "checked": checked,
+        "synced": synced,
+        "skipped_already": skipped,
+        "escalation_repair_checked": repair.get("checked", 0),
+        "escalation_repair_closed": repair.get("repaired", 0),
+    }

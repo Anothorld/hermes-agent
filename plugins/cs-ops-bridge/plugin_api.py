@@ -8,33 +8,22 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Body, Header, HTTPException, Query
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import cal
+from .bridge_secrets import load_bridge_key
 from .classify_intent import classify_intent
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-_SECRETS_PATH = Path(os.path.expanduser("~/.hermes/cs-ops-bridge/secrets.yaml"))
 _OPEN_MODE_WARNED = False
 
 
 def _load_bridge_key() -> Optional[str]:
-    env = os.environ.get("HERMES_CS_OPS_BRIDGE_KEY")
-    if env:
-        return env.strip() or None
-    if _SECRETS_PATH.exists():
-        for raw in _SECRETS_PATH.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" in line:
-                k, v = line.split(":", 1)
-                if k.strip() == "bridge_key":
-                    return v.strip().strip("'\"") or None
-    return None
+    return load_bridge_key()
 
 
 def _require_bridge_key(provided: Optional[str]) -> None:
@@ -272,6 +261,32 @@ def get_dispatch_context(
     return ctx
 
 
+@router.get("/sessions/{quickcep_session_id}/attachment-guard-context")
+def get_attachment_guard_context(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+) -> dict[str, Any]:
+    """Read-only context for draft-save PDF attachment guard (resuming escalation allow list)."""
+    esc = cal.get_resuming_escalation_for_session(
+        quickcep_session_id=quickcep_session_id,
+        env=env,
+    )
+    if not esc:
+        return {
+            "quickcep_session_id": quickcep_session_id,
+            "env": env,
+            "escalation_id": None,
+            "allowed_attachment_urls": [],
+        }
+    ctx = esc.get("resume_context") or {}
+    return {
+        "quickcep_session_id": quickcep_session_id,
+        "env": env,
+        "escalation_id": esc.get("id"),
+        "allowed_attachment_urls": list(ctx.get("allowed_attachment_urls") or []),
+    }
+
+
 @router.post("/sessions/status")
 def update_session_status(
     body: SessionStatusBody,
@@ -343,6 +358,111 @@ def get_escalation(escalation_id: int) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="escalation not found")
     return row
+
+
+@router.get("/escalations/{escalation_id}/upload-link")
+def get_escalation_upload_link(
+    escalation_id: int,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Return signed vault upload URL (ops backfill when Feishu post omitted the link)."""
+    _require_bridge_key(x_bridge_key)
+    row = cal.get_escalation(escalation_id=escalation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="escalation not found")
+    from .escalation_attachment_vault import build_public_upload_url
+
+    try:
+        url = build_public_upload_url(escalation_id=escalation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"escalation_id": escalation_id, "upload_url": url, "state": row.get("state")}
+
+
+@router.post("/escalations/{escalation_id}/feishu-upload-link")
+def post_feishu_upload_link(
+    escalation_id: int,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Reply on the Feishu escalation thread with the vault upload link."""
+    _require_bridge_key(x_bridge_key)
+    from . import feishu_notify
+
+    row = cal.get_escalation(escalation_id=escalation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="escalation not found")
+    root = str(row.get("feishu_message_id") or row.get("feishu_thread_id") or "")
+    if not root:
+        raise HTTPException(status_code=409, detail="escalation has no feishu root message")
+    send = feishu_notify.notify_vault_upload_link(
+        escalation_id=escalation_id,
+        feishu_root_message_id=root,
+    )
+    if not send.ok:
+        raise HTTPException(status_code=502, detail=send.error or "feishu reply failed")
+    return {"ok": True, "escalation_id": escalation_id, "feishu_message_id": send.message_id}
+
+
+@router.get("/escalations/{escalation_id}/upload", response_class=HTMLResponse)
+def vault_upload_page(
+    escalation_id: int,
+    token: str = Query(..., description="Signed upload token from Feishu escalation message"),
+) -> HTMLResponse:
+    from .escalation_attachment_vault import upload_page_html, verify_upload_token
+
+    if not verify_upload_token(escalation_id=escalation_id, token=token):
+        raise HTTPException(status_code=403, detail="invalid or expired upload token")
+    return HTMLResponse(upload_page_html(escalation_id=escalation_id, token=token))
+
+
+@router.post("/escalations/{escalation_id}/vault")
+async def vault_upload_file(
+    escalation_id: int,
+    token: str = Query(...),
+    file: UploadFile = File(...),
+    uploaded_by: Optional[str] = Form(None),
+) -> dict[str, Any]:
+    from .escalation_attachment_vault import store_upload, verify_upload_token
+
+    if not verify_upload_token(escalation_id=escalation_id, token=token):
+        raise HTTPException(status_code=403, detail="invalid or expired upload token")
+    data = await file.read()
+    result = store_upload(
+        escalation_id=escalation_id,
+        file_bytes=data,
+        original_name=file.filename or "upload.bin",
+        content_type=file.content_type,
+        uploaded_by=uploaded_by,
+    )
+    if not result.get("ok"):
+        status = int(result.get("status") or 422)
+        raise HTTPException(status_code=status, detail=result.get("error") or "upload failed")
+    return result
+
+
+@router.get("/escalations/{escalation_id}/vault")
+def vault_list_files(
+    escalation_id: int,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    from .escalation_attachment_vault import list_vault_files
+
+    return {"escalation_id": escalation_id, "files": list_vault_files(escalation_id=escalation_id)}
+
+
+@router.delete("/escalations/{escalation_id}/vault/{link_id}")
+def vault_delete_file(
+    escalation_id: int,
+    link_id: str,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    links = cal.list_vault_links_for_escalation(escalation_id=escalation_id)
+    if not any(str(l.get("id")) == link_id for l in links):
+        raise HTTPException(status_code=404, detail="vault link not found")
+    ok = cal.delete_vault_link(link_id=link_id)
+    return {"ok": ok, "link_id": link_id}
 
 
 @router.post("/escalations")

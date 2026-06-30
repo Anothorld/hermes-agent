@@ -3769,6 +3769,28 @@ def persist_reply_draft(
 
     child_envelope = dict(body.child_envelope or {})
     latest_email = dict(body.latest_email or {})
+    if not (
+        str(latest_email.get("from") or latest_email.get("from_addr") or "").strip()
+    ):
+        recovered_to, recovered_subj = _resolve_envelope_from_inbound(
+            identity_id=body.identity_id,
+            campaign_id=body.campaign_id,
+            env=body.env,
+            source_message_id=body.source_message_id,
+            thread_id=str(latest_email.get("thread_id") or "") or None,
+        )
+        if recovered_to:
+            latest_email.setdefault("from_addr", recovered_to)
+        if recovered_subj and not str(latest_email.get("subject") or "").strip():
+            latest_email["subject"] = recovered_subj.removeprefix("Re: ").strip()
+    if not (
+        str(latest_email.get("from") or latest_email.get("from_addr") or "").strip()
+    ):
+        identity_row = cal.get_identity(body.identity_id)
+        if isinstance(identity_row, dict):
+            primary_email = str(identity_row.get("primary_email") or "").strip()
+            if primary_email:
+                latest_email.setdefault("from_addr", primary_email)
     if is_proactive:
         try:
             facts = cal.latest_facts_for(

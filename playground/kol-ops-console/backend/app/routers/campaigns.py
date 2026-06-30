@@ -2865,6 +2865,69 @@ async def _enrich_shortlist_rows(
         )
         if merged is not None:
             c["prior_outreach_touch"] = merged
+            # #region agent log
+            try:
+                last_at = merged.get("last_touch_at")
+                pool_at = c.get("updated_at") or c.get("selected_at")
+                wc = merged.get("within_cooldown")
+                if wc is None and isinstance(last_at, str):
+                    try:
+                        s = last_at.strip()
+                        if s.endswith("Z"):
+                            s = s[:-1] + "+00:00"
+                        parsed = _dt.datetime.fromisoformat(s)
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+                        wc = (
+                            _dt.datetime.now(_dt.timezone.utc)
+                            - parsed.astimezone(_dt.timezone.utc)
+                        ) < _dt.timedelta(days=14)
+                    except ValueError:
+                        wc = False
+                post_pool = (
+                    isinstance(last_at, str)
+                    and isinstance(pool_at, str)
+                    and last_at > pool_at
+                )
+                if wc and post_pool:
+                    tag_reason = "post_pool_outreach"
+                elif wc:
+                    tag_reason = "at_ingest_cooldown"
+                elif last_at:
+                    tag_reason = "historical_gt14d"
+                else:
+                    tag_reason = "none"
+                internal_count = c.get("internal_touch_count") or 0
+                with open(
+                    "/Users/arnold/agent_prj/.cursor/debug-3d483c.log",
+                    "a",
+                    encoding="utf-8",
+                ) as _dbg_f:
+                    _dbg_f.write(
+                        json.dumps(
+                            {
+                                "sessionId": "3d483c",
+                                "timestamp": int(time.time() * 1000),
+                                "location": "campaigns.py:_enrich_shortlist_rows",
+                                "message": "shortlist touch tag reason",
+                                "hypothesisId": "B",
+                                "data": {
+                                    "campaign_id": campaign_id,
+                                    "handle": c.get("handle"),
+                                    "identity_id": iid,
+                                    "within_cooldown": bool(wc),
+                                    "tag_reason": tag_reason,
+                                    "last_touch_at": last_at,
+                                    "pool_at": pool_at,
+                                    "internal_touch_count": internal_count,
+                                },
+                            },
+                        )
+                        + "\n",
+                    )
+            except Exception:
+                pass
+            # #endregion
 
     await enrich_shortlist_profile_og(
         bridge,

@@ -174,6 +174,55 @@ def test_persist_missing_recipient_400(cal_db):
     assert exc.value.status_code == 400
 
 
+def test_persist_recipient_from_inbound_event(cal_db):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(primary_handle="t2-inbound", platform="instagram")
+    cal_db.upsert_campaign_config(campaign_id="C1", env="TEST")
+    cal_db.write_event(
+        identity_id=iid,
+        campaign_id="C1",
+        event_type="kol_inbound_reply",
+        goal="interest_qualification",
+        lane="commerce",
+        actor="gmail",
+        payload={
+            "message_id": "M1",
+            "thread_id": "TH1",
+            "from_addr": "kol@agency.com",
+            "subject": "Re: collab",
+        },
+        env="TEST",
+    )
+    out = plugin_api.persist_reply_draft(
+        _body(
+            plugin_api,
+            identity_id=iid,
+            latest_email={"subject": "collab", "thread_id": "TH1"},
+        ),
+        x_bridge_key=None,
+    )
+    assert out["draft"]["to"] == "kol@agency.com"
+
+
+def test_persist_recipient_from_identity_email(cal_db):
+    plugin_api = _load_plugin_api()
+    iid = cal_db.upsert_identity(
+        primary_handle="t2-id",
+        platform="instagram",
+        primary_email="creator@example.com",
+    )
+    cal_db.upsert_campaign_config(campaign_id="C1", env="TEST")
+    out = plugin_api.persist_reply_draft(
+        _body(
+            plugin_api,
+            identity_id=iid,
+            latest_email={"subject": "hello", "thread_id": "TH9"},
+        ),
+        x_bridge_key=None,
+    )
+    assert out["draft"]["to"] == "creator@example.com"
+
+
 def test_persist_strips_quoted_thread_from_body(cal_db):
     plugin_api = _load_plugin_api()
     iid = cal_db.upsert_identity(primary_handle="t2q", platform="instagram")

@@ -653,8 +653,18 @@ def _run_scheduled_jobs_locked(
         and suite in (None, "nightly", "all")
     ):
         names = list(names) + [JOB_APPLY_EDIT_USER_STYLE]
+    stale_hours = float(os.environ.get("KOL_LEARNING_STALE_RUNNING_HOURS", "2"))
     results: list[dict[str, Any]] = []
     with cal._connect() as conn:  # type: ignore[attr-defined]
+        stale = job_store.reconcile_stale_running_runs(
+            conn, env=env, stale_hours=stale_hours,
+        )
+        if stale:
+            log.warning(
+                "reconciled %s stale learning job run(s) (threshold=%sh)",
+                len(stale),
+                stale_hours,
+            )
         for name in names:
             results.append(run_single_job(
                 conn,

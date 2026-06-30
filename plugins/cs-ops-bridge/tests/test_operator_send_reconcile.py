@@ -70,6 +70,30 @@ def test_reconcile_operator_sent_syncs_draft_ready(monkeypatch, tmp_path):
     handoff.assert_called_once()
 
 
+def test_reconcile_skips_when_visitor_is_latest(monkeypatch, tmp_path):
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    rec = _load("operator_send_reconcile")
+    detect = _load("operator_outbound_detect")
+
+    r = cal.enqueue_session(quickcep_session_id="s2", message_id="m1", env="LIVE")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+
+    messages = [
+        {"ownerType": "visitor", "contentType": "html", "id": "v-new"},
+        {"ownerType": "operator", "contentType": "html", "id": "op-old"},
+    ]
+    assert detect.pick_latest_operator_outbound_email(messages) is None
+
+    with patch.object(rec, "_fetch_last_operator_message", return_value=None):
+        with patch.object(rec, "handle_operator_send") as handoff:
+            stats = rec.reconcile_operator_sent_once(env="LIVE")
+
+    assert stats["synced"] == 0
+    handoff.assert_not_called()
+
+
 def test_reconcile_skips_when_operator_sent_event_exists(monkeypatch, tmp_path):
     _reset_modules()
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
@@ -86,8 +110,10 @@ def test_reconcile_skips_when_operator_sent_event_exists(monkeypatch, tmp_path):
     )
 
     with patch.object(rec, "_fetch_last_operator_message", return_value=None) as fetch:
-        stats = rec.reconcile_operator_sent_once(env="LIVE")
+        with patch.object(rec, "repair_orphaned_escalations_once", return_value={"checked": 0, "repaired": 0}) as repair:
+            stats = rec.reconcile_operator_sent_once(env="LIVE")
 
     assert stats["synced"] == 0
     assert stats["skipped_already"] == 1
     fetch.assert_not_called()
+    repair.assert_called_once()

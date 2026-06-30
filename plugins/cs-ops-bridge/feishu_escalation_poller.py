@@ -345,6 +345,10 @@ def poll_once() -> dict[str, Any]:
             env=_ENV,
             feishu_reply_message_id=mid,
             already_claimed=True,
+            feishu_messages=messages,
+            feishu_token=token,
+            exclude_feishu_message_ids={mid},
+            feishu_after_ms=esc_created_ms,
         )
         if not result.get("ok"):
             log.error("resume escalation %s failed: %s", eid, result.get("error"))

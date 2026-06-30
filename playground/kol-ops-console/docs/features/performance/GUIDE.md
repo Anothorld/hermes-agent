@@ -10,6 +10,16 @@
 | 四路 email-discover 同时挂死数小时 | 浏览器 discover 并行占槽 |
 | 产品页刷新变慢 | GET 曾触发 gateway 轮询（已后台化） |
 | bridge.log 报 `unable to open database file` | CAL 争用 / EMFILE |
+| bridge.log 大量 `gmail call timed out` | Google API 慢 / 30s 硬超时（已默认 60s + 1 次重试） |
+| learning job 长期 `status=running` | Gmail 任务中断未 finish；定时 batch 会自动 reconcile |
+
+## Bridge 侧 Gmail / Learning 环境变量
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `KOL_GMAIL_TIMEOUT_SEC` | `60` | `google_api.py` 子进程超时（原 30s） |
+| `KOL_GMAIL_MAX_RETRIES` | `1` | 超时后自动重试次数 |
+| `KOL_LEARNING_STALE_RUNNING_HOURS` | `2` | 超过此时间的 `running` learning job 在下次 batch 开头标为 `error` |
 
 ## Console 侧机制（已实现）
 
@@ -68,6 +78,7 @@ python scripts/health/check_kol_perf.py
 
 - `Tab pool acquired` 后 120s 无 `browser_navigate completed` → WARN
 - bridge `unable to open database file` ≥3 → WARN
+- bridge `gmail call timed out` 聚集 → WARN（可调 `KOL_GMAIL_TIMEOUT_SEC` / 查 Google token）
 - `mcp_chrome_devtools_*` 错误聚集 → WARN
 - run `api_calls=90/90` → WARN
 

@@ -76,6 +76,13 @@ Restart `hermes -p povison-cs gateway run` after changing toolsets.
 | `CS_OPS_FEISHU_CHAT_LIST_MAX_PAGES` | `5` | Max pages when listing chat replies |
 | `CS_OPS_FEISHU_THREAD_PAGE_SIZE` | `20` | Feishu topic thread page size |
 | `CS_OPS_FEISHU_THREAD_LIST_MAX_PAGES` | `5` | Max pages when listing topic thread replies |
+| `CS_OPS_OPERATOR_RECONCILE_CLOSE_ESC` | `true` | When operator sends in QuickCEP, auto-close open `awaiting_answer` / `resuming` escalations for that session (`touch_session=false` for awaiting) |
+| `CS_OPS_ESC_VAULT_DIR` | `<plugin>/data/esc_vault` | ESC attachment vault blob storage |
+| `CS_OPS_ESC_VAULT_PUBLIC_BASE` | auto: `http://<LAN-IP>:8081/api/plugins/cs-ops-bridge` | Public base for expert upload links (Feishu); override for fixed hostname |
+| `CS_OPS_ATTACHMENT_GUARD` | `1` | PDF attachment guard on `draft-save` (set `0` incident-only) |
+| `CS_OPS_CLAIM_UPLOAD_BUDGET_SEC` | `60` | Max seconds for vault/Feishu CDN uploads on claim |
+
+See [docs/povison-cs-escalation-vault.md](../../docs/povison-cs-escalation-vault.md) for vault API, PDF rules, and probe steps.
 
 ## Phase 2 safeguards
 
@@ -85,11 +92,12 @@ Restart `hermes -p povison-cs gateway run` after changing toolsets.
 - **Gateway launch**: retry on 429/502/503/504, in-process dedup, optional SSE drain (`gateway_launch.py`).
 - **Escalation SLA**: `escalation_timeout.py` posts Feishu thread reminders and CAL events.
 - **Feishu escalation notify**: `POST /escalations` auto-posts to **AI客服后援**. Shows **客户邮箱**, **📦 订单信息** (bridge auto-fetches QuickCEP `getOrderList` + Povison tracking when available), **客户来信摘要** (agent `--email-summary` in Simplified Chinese), and **原文引用** (agent `--email-quote` in the customer's original language). Summary/quote required when Feishu auto-send is on. **Custom body** (`--message` / `escalation_message`) sends the text verbatim — **no auto 📦 order block**, no required summary/quote validation; include order details manually if needed.
-- **Feishu reply polling**: operators click **Reply** on the `[ESC:…]` post (no `@` needed). Poller lists `container_id_type=chat` with pagination and matches `parent_id` to `feishu_message_id`; topic groups (`omt_*`) use `container_id_type=thread`. **First reply wins** — atomic claim (`awaiting_answer` → `resuming`), thread lock notice `[ESC-LOCK:…]` (persisted as `feishu_lock_notified`, retried while `resuming` if send failed), later replies tracked and ignored. Full operator text is kept in `resume_context.operator_answer_raw` for gateway resume (SQLite `operator_answer` column stays masked). After agent `apply-handoff` reaches `draft_ready`/`failed`, bridge posts standalone `[ESC-DONE:…]`. `PATCH /escalations` on a `resuming` row routes through the same DONE path; `awaiting_answer` closes without DONE. Stale `resuming` rows auto-close via `CS_OPS_ESCALATION_RESUMING_TIMEOUT_H`.
+- **Feishu reply polling**: operators click **Reply** on the `[ESC:…]` post (no `@` needed). Poller lists `container_id_type=chat` with pagination and matches `parent_id` to `feishu_message_id`; topic groups (`omt_*`) use `container_id_type=thread`. **First reply wins** — atomic claim (`awaiting_answer` → `resuming`), thread lock notice `[ESC-LOCK:…]` (persisted as `feishu_lock_notified`, retried while `resuming` if send failed), later replies tracked and ignored. Full operator text is kept in `resume_context.operator_answer_raw` for gateway resume (SQLite `operator_answer` column stays masked). On claim, **vault files + Feishu thread images** upload to QuickCEP CDN → `operator_attachments` + `allowed_attachment_urls`. Escalation message includes **Vault upload link** for PDF/multi-file. After agent `apply-handoff` reaches `draft_ready`/`failed`, bridge posts standalone `[ESC-DONE:…]`. `PATCH /escalations` on a `resuming` row routes through the same DONE path; `awaiting_answer` closes without DONE. Stale `resuming` rows auto-close via `CS_OPS_ESCALATION_RESUMING_TIMEOUT_H`.
+- **PDF attachment guard**: `draft-save --attachments` with `.pdf` requires URL in session `allowed_attachment_urls` (vault path only). Product/static.povison PDFs blocked — text extraction in body instead. JPG/png unaffected. Disable: `CS_OPS_ATTACHMENT_GUARD=0`.
 - **Agent guard**: enable plugin `cs-bridge-agent-guard` on the povison-cs gateway profile (`ensure_cs_send_guard.py`) to block direct `quickcep_cli`, `send-email`, and **`cs_bridge_tool` wrapped in `execute_code`**. Bridge steps must use **terminal** (one command per call).
 - **Follow-up sub-session without `intentionTags`**: intent gate bypass when CAL already has another session row for the same customer email (`prior_customer_no_intent_tags`).
 - **SIO token login**: watcher patches QuickCEP login env from profile `QUICKCEP_EMAIL` / `QUICKCEP_PASSWORD`, re-binds the SIO monitor module after import (avoids stale `from import get_valid_token`), and logs **WARNING** when cached JWT is invalid but re-login is skipped or fails.
-- **Operator send when SIO down**: each REST poll runs `operator_send_reconcile` — scans `draft_ready` / `awaiting_expert` / `processing` rows for operator-sent messages and applies `operator_sent` handoff. `quickcep_cli messages` failures log at **WARNING** (not silent debug).
+- **Operator send when SIO down**: each REST poll runs `operator_send_reconcile` — scans `draft_ready` / `awaiting_expert` / `processing` rows for operator-sent messages and applies `operator_sent` handoff. Detection requires the **latest conversational message** to be `operator/html` (skips internal notes; ignores operator mail when a newer visitor mail exists). `quickcep_cli messages` failures log at **WARNING** (not silent debug). On successful handoff, open escalations (`awaiting_answer`, `resuming`) are resolved with `operator_manual_reply` unless `CS_OPS_OPERATOR_RECONCILE_CLOSE_ESC=false`. A **repair sweep** in the same tick closes orphaned open escalations when the session is already `operator_replied` or has an `operator_sent` event (covers prior close failures and deduped retries).
 - **Graceful stack restart**: `playground/povison-cs-console/start.sh restart|stop` waits for CAL `processing` + escalation `resuming` before stopping bridge/gateway (see console README).
 - **Gateway approvals**: bridge-launched runs POST `/v1/runs` with `"yolo": true` by default (`CS_OPS_GATEWAY_YOLO=1`) so routine Tirith warnings on terminal bridge calls do not stall automation. Hardline blocks (send-email, direct quickcep_cli, execute_code bridge batching) still apply. Profile uses `approvals.mode: smart`, omits `code_execution` from CLI toolsets, and pins `platform_toolsets.api_server` without `delegation` or `code_execution` so bridge steps use **terminal** directly.
 
@@ -145,7 +153,7 @@ python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py apply-handoff \
 
 Phases: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `reviewed`, `followup_while_busy`, `operator_sent`.
 
-**Draft save:** `cs_bridge_tool draft-save` supports optional `--attachments` (JSON array, forwarded to QuickCEP). Agents must use `cs_bridge_tool` only — not raw `quickcep_cli`. Before writing a draft it calls QuickCEP `joinChat` automatically:
+**Draft save:** `cs_bridge_tool draft-save` supports optional `--attachments` (JSON array, forwarded to QuickCEP). **PDF guard** blocks non-vault PDFs when `--attachments` contains `.pdf` (see `config/attachment_guard.yaml`). `upload-file` subcommand wraps QuickCEP CDN upload. Agents must use `cs_bridge_tool` only — not raw `quickcep_cli`. Before writing a draft it calls QuickCEP `joinChat` automatically:
 
 | Step | Timeout | Retry |
 |------|---------|-------|
@@ -160,7 +168,7 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 
 **Dispatch-context tracking prefill:** when `intentionTags` includes `物流咨询` and `orders` is non-empty, bridge adds `tracking` summaries in `get-dispatch-context` (status, tracking number, EDD window) via Povison order-track API. This reduces model hallucination and lets logistics replies start from deterministic data.
 
-**Operator send:** SIO `operatorSendMsg` → automatic `operator_sent` handoff (tags + post-send note). SIO login uses `QUICKCEP_EMAIL` / `QUICKCEP_PASSWORD` from profile `.env` (same as `quickcep_cli`). When SIO is unavailable, each REST poll also runs `operator_send_reconcile` to backfill `operator_sent` for CAL rows still in `draft_ready` / `awaiting_expert` / `processing` when QuickCEP message history shows an operator outbound.
+**Operator send:** SIO `operatorSendMsg` → automatic `operator_sent` handoff (tags + post-send note). Open escalations for the session are auto-resolved (`operator_manual_reply`; `resuming` stops the gateway resume run when possible, posts Feishu `[ESC-DONE:…]` with「客服已直接回复」). Deduped SIO events still attempt ESC close when open rows remain. SIO login uses `QUICKCEP_EMAIL` / `QUICKCEP_PASSWORD` from profile `.env` (same as `quickcep_cli`). When SIO is unavailable, each REST poll also runs `operator_send_reconcile` to backfill `operator_sent` for CAL rows still in `draft_ready` / `awaiting_expert` / `processing` when QuickCEP message history shows the latest outbound is operator email, then **repair** orphaned open escalations.
 
 **Tag map:** `config/session_tag_map.yaml` — run `scripts/sync_session_tags.py` after creating **AI客服** tags in QuickCEP admin (`AI-处理中`, `AI-草稿待审`, `AI-待专家`, `AI-处理失败`, `AI-已结案`).
 
@@ -173,6 +181,12 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/sessions` | — | List/search sessions |
+| GET | `/escalations/{id}/upload-link` | key | Signed upload URL (Feishu backfill) |
+| POST | `/escalations/{id}/feishu-upload-link` | key | Reply upload link on Feishu thread |
+| GET | `/escalations/{id}/vault` | key | List vault files |
+| GET | `/escalations/{id}/upload` | token | Expert upload page |
+| POST | `/escalations/{id}/vault` | token | Expert upload file |
+| GET | `/sessions/{id}/attachment-guard-context` | — | PDF guard allow list for draft-save |
 | POST | `/escalations/{id}/resume` | key | Launch gateway + resolve |
 | POST | `/sessions/{id}/relaunch` | key | Retry failed/stuck session |
 

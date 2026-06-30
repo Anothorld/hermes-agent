@@ -1,0 +1,29 @@
+#!/bin/bash
+# Povison Quality Check Images CLI Wrapper (Documented API)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_SCRIPT="$SCRIPT_DIR/quality_check_api.py"
+
+# Check if Python script exists
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    echo "Error: quality_check_api.py not found at $PYTHON_SCRIPT"
+    exit 1
+fi
+
+# Set credentials if not already set
+if [[ -z "$POVISON_API_ID" ]]; then
+    export POVISON_API_ID="scm"
+fi
+
+if [[ -z "$POVISON_API_KEY" ]]; then
+    export POVISON_API_KEY="sdg4W8A8xX2e3dfaGpn6ylVygo9f9H"
+fi
+
+# Check if requests library is available
+python3 -c "import requests" 2>/dev/null || {
+    echo "⚠️  requests library not installed. Installing..."
+    pip3 install requests
+}
+
+# Run the Python script
+python3 "$PYTHON_SCRIPT" "$@"

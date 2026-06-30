@@ -72,7 +72,8 @@ def test_open_escalation_auto_sends_feishu(monkeypatch, tmp_path):
     assert esc["feishu_thread_id"] == "om_test_msg"
 
 
-def test_build_escalation_text_includes_esc_id():
+def test_build_escalation_text_includes_esc_id(monkeypatch):
+    monkeypatch.setenv("HERMES_CS_OPS_BRIDGE_KEY", "test-key")
     notify = _load("feishu_notify")
     text = notify.build_escalation_text(
         escalation_id=42,
@@ -87,3 +88,56 @@ def test_build_escalation_text_includes_esc_id():
     assert "tshea2121@gmail.com" in text
     assert "客户需要 SF8181" in text
     assert "assembly instructions" in text
+    assert "请务必先上传附件" in text
+    assert "/escalations/42/upload" in text
+
+
+def test_reply_to_message_includes_msg_type(monkeypatch):
+    fc = _load("feishu_client")
+    captured: dict = {}
+
+    class FakeResp:
+        def read(self):
+            return b'{"code":0,"data":{"message_id":"om_reply"}}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=20):
+        import json as _json
+
+        captured["body"] = _json.loads(req.data.decode())
+        return FakeResp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with patch.object(fc, "tenant_access_token", return_value="tok"):
+        result = fc.reply_to_message(message_id="om_root", text="hello")
+    assert result.ok
+    assert captured["body"]["msg_type"] == "text"
+    assert "hello" in captured["body"]["content"]
+
+
+def test_custom_escalation_message_appends_vault_link(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("HERMES_CS_OPS_BRIDGE_KEY", "test-key")
+    notify = _load("feishu_notify")
+    with patch.object(
+        notify,
+        "send_group_text",
+        return_value=notify.FeishuSendResult(ok=True, message_id="m1"),
+    ) as mock_send:
+        result = notify.notify_escalation_opened(
+            escalation_id=7,
+            quickcep_session_id="qs-1",
+            reason="custom",
+            escalation_message="Custom ESC body only",
+            auto_send_feishu=True,
+        )
+    assert result.ok
+    sent_text = mock_send.call_args.kwargs.get("text") or mock_send.call_args[0][1]
+    assert "Custom ESC body only" in sent_text
+    assert "/escalations/7/upload" in sent_text
+    assert "请务必先上传附件" in sent_text

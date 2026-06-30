@@ -212,6 +212,31 @@ def session_has_event(*, session_row_id: int, event_type: str) -> bool:
         return row is not None
 
 
+def session_has_open_escalation(*, quickcep_session_id: str, env: str = "LIVE") -> bool:
+    """True when the session has awaiting_answer or resuming escalation rows."""
+    return bool(
+        list_escalations_for_session(
+            quickcep_session_id=quickcep_session_id,
+            states=("awaiting_answer", "resuming"),
+            env=env,
+        )
+    )
+
+
+def list_sessions_with_open_escalations(*, env: str = "LIVE", limit: int = 200) -> list[dict[str, Any]]:
+    """Sessions joined to open escalations (awaiting_answer or resuming)."""
+    limit = max(1, min(int(limit), 200))
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT s.* FROM cs_session s
+               INNER JOIN cs_escalations e ON e.session_id = s.id AND e.env = s.env
+               WHERE s.env=? AND e.state IN ('awaiting_answer', 'resuming')
+               ORDER BY s.updated_at DESC LIMIT ?""",
+            (env, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def has_prior_session_for_email(
     *,
     customer_email: str,
@@ -635,6 +660,42 @@ def list_escalations(*, state: Optional[str] = None, env: str = "LIVE") -> list[
         return out
 
 
+def list_escalations_for_session(
+    *,
+    quickcep_session_id: str,
+    states: tuple[str, ...] | None = None,
+    env: str = "LIVE",
+) -> list[dict[str, Any]]:
+    """Return escalation rows for one QuickCEP session, optionally filtered by state."""
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return []
+    with _connect() as conn:
+        if states:
+            placeholders = ",".join("?" for _ in states)
+            rows = conn.execute(
+                f"""SELECT * FROM cs_escalations
+                    WHERE session_id=? AND env=? AND state IN ({placeholders})
+                    ORDER BY id DESC""",
+                (sess["id"], env, *states),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM cs_escalations
+                   WHERE session_id=? AND env=?
+                   ORDER BY id DESC""",
+                (sess["id"], env),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["resume_context"] = json.loads(item.pop("resume_context_json") or "{}")
+            item["quickcep_session_id"] = quickcep_session_id
+            item["session_status"] = sess.get("status")
+            out.append(item)
+        return out
+
+
 def get_resuming_escalation_for_session(
     *,
     quickcep_session_id: str,
@@ -813,6 +874,129 @@ def patch_escalation_decision(
                WHERE id=?""",
             (decision, decided_by, now, masked_answer, now, escalation_id),
         )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+# ── ESC attachment vault ─────────────────────────────────────────────
+
+
+def get_vault_blob(md5: str) -> Optional[dict[str, Any]]:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM vault_blob WHERE md5=?", (md5,)).fetchone()
+        return dict(row) if row else None
+
+
+def insert_vault_blob(
+    *,
+    md5: str,
+    stored_path: str,
+    size_bytes: int,
+    content_type: Optional[str],
+    kind: str,
+) -> None:
+    now = _now()
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO vault_blob(md5, stored_path, size_bytes, content_type, kind, ref_count, created_at)
+               VALUES (?,?,?,?,?,0,?)""",
+            (md5, stored_path, size_bytes, content_type, kind, now),
+        )
+        conn.commit()
+
+
+def set_vault_blob_cdn_url(*, md5: str, cdn_url: str) -> None:
+    now = _now()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE vault_blob SET cdn_url=?, cdn_uploaded_at=? WHERE md5=?",
+            (cdn_url, now, md5),
+        )
+        conn.commit()
+
+
+def insert_vault_link(
+    *,
+    link_id: str,
+    escalation_id: int,
+    blob_md5: str,
+    original_name: str,
+    uploaded_by: Optional[str] = None,
+) -> None:
+    now = _now()
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO escalation_vault_link(id, escalation_id, blob_md5, original_name, uploaded_at, uploaded_by)
+               VALUES (?,?,?,?,?,?)""",
+            (link_id, escalation_id, blob_md5, original_name, now, uploaded_by),
+        )
+        conn.execute(
+            "UPDATE vault_blob SET ref_count = ref_count + 1 WHERE md5=?",
+            (blob_md5,),
+        )
+        conn.commit()
+
+
+def list_vault_links_for_escalation(*, escalation_id: int) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT l.*, b.kind, b.cdn_url, b.size_bytes, b.content_type, b.stored_path
+               FROM escalation_vault_link l
+               JOIN vault_blob b ON b.md5 = l.blob_md5
+               WHERE l.escalation_id=?
+               ORDER BY l.uploaded_at ASC""",
+            (escalation_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_vault_link(*, link_id: str) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT blob_md5 FROM escalation_vault_link WHERE id=?",
+            (link_id,),
+        ).fetchone()
+        if not row:
+            return False
+        blob_md5 = row["blob_md5"]
+        cur = conn.execute("DELETE FROM escalation_vault_link WHERE id=?", (link_id,))
+        if cur.rowcount:
+            conn.execute(
+                "UPDATE vault_blob SET ref_count = CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END WHERE md5=?",
+                (blob_md5,),
+            )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def list_stale_vault_links(*, escalation_resolved_before: str) -> list[dict[str, Any]]:
+    """Links on escalations in terminal states before cutoff timestamp."""
+    terminal = ("resolved", "aborted", "re_escalated")
+    placeholders = ",".join("?" for _ in terminal)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT l.id, l.escalation_id, l.blob_md5
+               FROM escalation_vault_link l
+               JOIN cs_escalations e ON e.id = l.escalation_id
+               WHERE e.state IN ({placeholders})
+                 AND e.updated_at < ?""",
+            (*terminal, escalation_resolved_before),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_orphan_vault_blobs(*, created_before: str) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM vault_blob WHERE ref_count <= 0 AND created_at < ?",
+            (created_before,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_vault_blob(*, md5: str) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM vault_blob WHERE md5=?", (md5,))
         conn.commit()
         return cur.rowcount == 1
 

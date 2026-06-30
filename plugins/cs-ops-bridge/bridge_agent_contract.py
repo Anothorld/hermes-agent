@@ -96,6 +96,7 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
    If bridge script times out (60s), retry via terminal with: curl -s -X POST http://localhost:8888/v1/default/banks/{hindsight_bank}/memories -H 'Content-Type: application/json' -d '{{"content":"<Q&A>","context":"povison escalation Q&A","tags":["povison","escalation-qa"]}}' --max-time 120
    Only skip if Hindsight server is confirmed down.
 6. terminal: python3 {cli} draft-save --env {env} --session-id <quickcep_session_id> --content-file /tmp/draft-<quickcep_session_id>.html --subject "Re: ..." --receiver "<email>" (never send-email; join-chat is automatic)
+   If get-escalation resume_context includes operator_attachments, pass them via --attachments with the JSON array (fileName, fileSize, url). PDF attachments must be vault-sourced — draft-save attachment guard blocks assembly/static.povison PDFs.
    **Internal domain guard**: draft-save blocks drafts with internal URLs (OSS buckets, localhost, feishu.cn, internal IPs/ports). If blocked, strip internal links and retry.
 7. terminal: python3 {cli} apply-handoff --env {env} --session-id <quickcep_session_id> --phase draft_ready --actions-taken "已合并飞书专家答复并保存草稿" --operator-hint "<中文：操作员接手要点>"
 8. terminal: python3 {cli} write-event --env {env} --session-id <quickcep_session_id> --event-type escalation_resumed --json '{{...}}'
@@ -158,5 +159,7 @@ def resume_instructions() -> str:
         "Hindsight memory via hindsight_bridge.py retain (see step 5 in the checklist) — "
         "executed via the **terminal** tool, NOT execute_code. "
         "If hindsight_bridge.py times out, retry via terminal with a curl command (see checklist). "
-        "This enables future auto-handling of identical questions without re-escalation."
+        "This enables future auto-handling of identical questions without re-escalation. "
+        "When resume_context includes operator_attachments, include them in draft-save --attachments. "
+        "Only vault-uploaded PDFs may be attached — product assembly PDFs must be text in the body."
     )

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Final, Mapping, Optional
 
@@ -274,6 +275,43 @@ def ingest_confirmed_candidate(
     discovery_skip.assert_discovery_not_skipped(
         identity_id=int(identity_id), env=env,
     )
+
+    # #region agent log
+    try:
+        _touch = cal.batch_global_outreach_touch([int(identity_id)], env=env).get(
+            int(identity_id),
+        )
+        with open(
+            "/Users/arnold/agent_prj/.cursor/debug-3d483c.log", "a", encoding="utf-8",
+        ) as _dbg_f:
+            _dbg_f.write(
+                json.dumps(
+                    {
+                        "sessionId": "3d483c",
+                        "timestamp": int(time.time() * 1000),
+                        "location": "confirmed_ingest.py:pre_upsert",
+                        "message": "ingest cooldown snapshot",
+                        "hypothesisId": "A",
+                        "data": {
+                            "handle": primary_handle,
+                            "identity_id": identity_id,
+                            "campaign_id": campaign_id,
+                            "source": cand_source,
+                            "within_cooldown": bool(
+                                _touch and _touch.get("within_cooldown"),
+                            ),
+                            "last_touch_at": (
+                                _touch.get("last_touch_at") if _touch else None
+                            ),
+                            "enforce_outreach_cooldown": False,
+                        },
+                    },
+                )
+                + "\n",
+            )
+    except Exception:
+        pass
+    # #endregion
 
     written_facts: list[str] = []
     skipped_facts: list[str] = []

@@ -522,7 +522,11 @@ The `/logic/*` endpoints above (except reply-draft persist) are pure (no DB
 read/write) and need no bridge
 key. `persist-reply-draft` writes CAL (event + `approval.reply_draft` fact in
 one call, after enriching `to` / `Re:`-subject / `thread_id`) and requires the
-key like every other mutating route. Child `body` must be **new prose only** —
+key like every other mutating route. When `latest_email` omits `from` /
+`from_addr`, the server backfills from the matching `kol_inbound_reply` event
+(by `source_message_id` / `thread_id`) or the identity's `primary_email` before
+enrichment — agents must not fail persist solely because they wrote an empty
+``from`` in the JSON file. Child `body` must be **new prose only** —
 ``On … wrote:`` / ``>`` quote blocks are stripped at persist time (bridge re-adds
 one Gmail quote on approve). When the child envelope omits ``attachments``,
 ``persist-reply-draft`` preserves prior draft attachments or falls back to
@@ -675,6 +679,15 @@ of the `RemoteDisconnected` / `socket.timeout` capture failures seen on
   `run_scheduled_jobs` returns `{"skipped": true, "reason":
   "learning_run_in_progress"}` immediately when another learning run is in
   flight, instead of piling on. No env needed; always on.
+- **Stale `running` reconciliation**: at the start of each scheduled batch,
+  rows in `kol_learning_job_runs` with `status=running` older than
+  `KOL_LEARNING_STALE_RUNNING_HOURS` (default `2`) are marked `error` with
+  `reconciled_stale_running` so zombie rows from crashed Gmail jobs do not
+  pollute ops views.
+- **Gmail CLI timeout / retry** (`gmail_client.py`):
+  `KOL_GMAIL_TIMEOUT_SEC` (default `60`, was hard-coded 30) and
+  `KOL_GMAIL_MAX_RETRIES` (default `1`) — one automatic retry on subprocess
+  timeout before surfacing `GmailUnavailable`.
 - **CLI request timeout**: `KOC_BRIDGE_LEARNING_TIMEOUT_SEC` (default `600`)
   bounds how long the CLI waits for the bridge.
 - **LLM HTTP tuning** (`learning_llm.py`): `KOL_LEARNING_LLM_HTTP_TIMEOUT_SEC`

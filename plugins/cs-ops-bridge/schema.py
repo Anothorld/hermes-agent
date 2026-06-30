@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Final
 
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 
 SESSION_STATUSES: Final[tuple[str, ...]] = (
     "pending",
@@ -109,12 +109,37 @@ TABLES: dict[str, str] = {
             created_at            TEXT NOT NULL
         )
     """,
+    "vault_blob": """
+        CREATE TABLE IF NOT EXISTS vault_blob (
+            md5                   TEXT PRIMARY KEY,
+            stored_path           TEXT NOT NULL,
+            size_bytes            INTEGER NOT NULL,
+            content_type          TEXT,
+            kind                  TEXT NOT NULL,
+            ref_count             INTEGER NOT NULL DEFAULT 0,
+            cdn_url               TEXT,
+            cdn_uploaded_at       TEXT,
+            created_at            TEXT NOT NULL
+        )
+    """,
+    "escalation_vault_link": """
+        CREATE TABLE IF NOT EXISTS escalation_vault_link (
+            id                    TEXT PRIMARY KEY,
+            escalation_id         INTEGER NOT NULL REFERENCES cs_escalations(id) ON DELETE CASCADE,
+            blob_md5              TEXT NOT NULL REFERENCES vault_blob(md5),
+            original_name         TEXT NOT NULL,
+            uploaded_at           TEXT NOT NULL,
+            uploaded_by           TEXT
+        )
+    """,
 }
 
 INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_cs_session_status ON cs_session(status, env)",
     "CREATE INDEX IF NOT EXISTS idx_cs_escalations_state ON cs_escalations(state, env)",
     "CREATE INDEX IF NOT EXISTS idx_cs_events_session ON cs_conversation_events(session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vault_link_esc ON escalation_vault_link(escalation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vault_link_blob ON escalation_vault_link(blob_md5)",
 )
 
 

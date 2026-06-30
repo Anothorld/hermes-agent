@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from . import cal
 from .gateway_client import GatewayClient
@@ -19,6 +19,11 @@ def resume_escalation(
     env: str = "LIVE",
     feishu_reply_message_id: str | None = None,
     already_claimed: bool = False,
+    feishu_messages: Optional[list[dict[str, Any]]] = None,
+    feishu_token: Optional[str] = None,
+    exclude_feishu_message_ids: Optional[set[str]] = None,
+    feishu_after_ms: int = 0,
+    skip_attachment_prepare: bool = False,
 ) -> dict[str, Any]:
     """Launch gateway resume run for a claimed escalation (stays resuming until handoff completes)."""
     esc = cal.get_escalation(escalation_id=escalation_id)
@@ -41,6 +46,28 @@ def resume_escalation(
     if state != "resuming":
         return {"ok": False, "error": f"escalation state is {state}, expected resuming"}
 
+    ctx = esc.get("resume_context") or {}
+    if ctx.get("resume_run_id"):
+        return {
+            "ok": True,
+            "run_id": ctx["resume_run_id"],
+            "escalation_id": escalation_id,
+            "dedup_skipped": True,
+        }
+
+    if not skip_attachment_prepare:
+        from .escalation_attachments import prepare_escalation_attachments
+
+        prepare_escalation_attachments(
+            escalation_id=escalation_id,
+            feishu_messages=feishu_messages,
+            feishu_token=feishu_token,
+            exclude_message_ids=exclude_feishu_message_ids,
+            after_ms=feishu_after_ms,
+        )
+        esc = cal.get_escalation(escalation_id=escalation_id) or esc
+        ctx = esc.get("resume_context") or {}
+
     sess = esc.get("session") or {}
     qsid = str(sess.get("quickcep_session_id") or "")
     if not qsid:
@@ -54,19 +81,16 @@ def resume_escalation(
     if not answer:
         return {"ok": False, "error": "operator_answer required"}
 
-    if ctx.get("resume_run_id"):
-        return {
-            "ok": True,
-            "run_id": ctx["resume_run_id"],
-            "escalation_id": escalation_id,
-            "dedup_skipped": True,
-        }
+    operator_attachments = ctx.get("operator_attachments") or []
+    allowed_urls = ctx.get("allowed_attachment_urls") or []
 
     outcome = GatewayClient.from_env().start_resume_run(
         escalation_id=escalation_id,
         quickcep_session_id=qsid,
         env=env,
         operator_answer=answer,
+        operator_attachments=operator_attachments,
+        allowed_attachment_urls=allowed_urls,
     )
     if not outcome.run_id:
         err = "launch deduped" if outcome.dedup_skipped else "gateway launch failed"

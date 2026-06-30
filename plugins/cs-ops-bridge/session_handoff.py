@@ -882,6 +882,35 @@ def apply_handoff(
     return result
 
 
+def _maybe_close_escalations_after_operator_send(
+    *,
+    session_id: str,
+    env: str,
+    operator_hint: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Best-effort ESC close when operator send is deduped or after successful handoff."""
+    if not cal.session_has_open_escalation(quickcep_session_id=session_id, env=env):
+        return result
+    try:
+        from .operator_escalation_close import close_escalations_on_operator_manual_reply
+
+        esc_close = close_escalations_on_operator_manual_reply(
+            quickcep_session_id=session_id,
+            env=env,
+            operator_hint=operator_hint,
+        )
+        if esc_close.get("closed"):
+            result["escalation_close"] = esc_close
+    except Exception as exc:
+        log.warning(
+            "escalation close on operator send failed session=%s: %s",
+            session_id,
+            exc,
+        )
+    return result
+
+
 def handle_operator_send(
     info: Mapping[str, Any],
     *,
@@ -915,11 +944,15 @@ def handle_operator_send(
 
     ctx_data = cal.get_dispatch_context(quickcep_session_id=session_id, env=env) or {}
     facts = ctx_data.get("facts") or {}
+    prior_hint = (facts.get("handoff") or {}).get("last_operator_hint") or "已按草稿回复客户"
     last_out = (facts.get("handoff") or {}).get("last_operator_outbound_id")
     if message_id and last_out and str(last_out) == message_id:
-        return {"ok": True, "skipped": True, "reason": "deduped message id"}
-
-    prior_hint = (facts.get("handoff") or {}).get("last_operator_hint") or "已按草稿回复客户"
+        return _maybe_close_escalations_after_operator_send(
+            session_id=session_id,
+            env=env,
+            operator_hint=prior_hint,
+            result={"ok": True, "skipped": True, "reason": "deduped message id"},
+        )
     context: dict[str, Any] = {
         "message_id": message_id,
         "operator_id": info.get("ownerId") or "",
@@ -929,6 +962,8 @@ def handle_operator_send(
     }
     if sess["status"] == "draft_ready":
         context["send_note"] = "审阅智能客服草稿后发送"
+    elif sess["status"] == "awaiting_expert":
+        context["send_note"] = "升级待专家期间人工直接回复客户"
     elif sess["status"] == "processing":
         context["send_note"] = "处理过程中人工直接回复客户"
 
@@ -938,10 +973,18 @@ def handle_operator_send(
             chat_session_id=str(info["chatSessionId"]),
         )
 
-    return apply_handoff(
+    result = apply_handoff(
         quickcep_session_id=session_id,
         phase="operator_sent",
         env=env,
         context=context,
         chat_session_id=str(info.get("chatSessionId") or sess.get("chat_session_id") or "") or None,
     )
+    if result.get("ok") and not result.get("skipped"):
+        return _maybe_close_escalations_after_operator_send(
+            session_id=session_id,
+            env=env,
+            operator_hint=str(context.get("send_note") or ""),
+            result=result,
+        )
+    return result

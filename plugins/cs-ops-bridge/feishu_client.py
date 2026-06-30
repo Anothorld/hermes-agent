@@ -159,7 +159,10 @@ def reply_to_message(*, message_id: str, text: str, token: Optional[str] = None)
         return FeishuSendResult(ok=False, error="missing FEISHU_APP_ID/FEISHU_APP_SECRET")
     if not message_id:
         return FeishuSendResult(ok=False, error="missing message_id")
-    payload = {"content": json.dumps({"text": text}, ensure_ascii=False)}
+    payload = {
+        "msg_type": "text",
+        "content": json.dumps({"text": text}, ensure_ascii=False),
+    }
     req = urllib.request.Request(
         f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
         data=json.dumps(payload).encode("utf-8"),
@@ -182,3 +185,29 @@ def reply_to_message(*, message_id: str, text: str, token: Optional[str] = None)
     msg_data: dict[str, Any] = data.get("data") or {}
     mid = str(msg_data.get("message_id") or "") or None
     return FeishuSendResult(ok=True, message_id=mid, chat_id=msg_data.get("chat_id"))
+
+
+def download_message_resource(
+    *,
+    message_id: str,
+    file_key: str,
+    resource_type: str = "image",
+    token: Optional[str] = None,
+) -> Optional[bytes]:
+    """Download binary resource (image/file) from a Feishu message."""
+    tok = token or tenant_access_token()
+    if not tok or not message_id or not file_key:
+        return None
+    qs = urllib.parse.urlencode({"type": resource_type})
+    url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}?{qs}"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {tok}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.read()
+    except (urllib.error.HTTPError, OSError) as exc:
+        log.warning("feishu resource download failed msg=%s key=%s: %s", message_id, file_key, exc)
+        return None

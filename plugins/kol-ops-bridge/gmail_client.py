@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -136,14 +137,20 @@ class GmailClient:
         python_executable: Optional[str] = None,
         google_api_path: Optional[Path] = None,
         credentials_path: Optional[Path] = None,
-        timeout_sec: float = 30.0,
+        timeout_sec: float | None = None,
     ) -> None:
+        if timeout_sec is None:
+            timeout_sec = float(os.environ.get("KOL_GMAIL_TIMEOUT_SEC", "60"))
         self._python = python_executable or sys.executable
         self._script = google_api_path or _GOOGLE_API_PY
         self._credentials_path = (
             Path(credentials_path).expanduser() if credentials_path else None
         )
         self._timeout = timeout_sec
+        self._max_retries = max(
+            0,
+            int(os.environ.get("KOL_GMAIL_MAX_RETRIES", "1")),
+        )
         # Lazily-loaded Gmail label name -> id cache. Invalidated only when
         # ``modify_labels`` discovers a name that's missing from the cache.
         self._label_cache: Optional[dict[str, str]] = None
@@ -510,6 +517,28 @@ class GmailClient:
     # -- internals -----------------------------------------------------------
 
     def _invoke(self, args: list[str]) -> Any:
+        last_exc: GmailUnavailable | None = None
+        attempts = self._max_retries + 1
+        for attempt in range(attempts):
+            try:
+                return self._invoke_once(args)
+            except GmailUnavailable as exc:
+                last_exc = exc
+                is_timeout = "timed out" in str(exc).lower()
+                if not is_timeout or attempt >= attempts - 1:
+                    raise
+                log.warning(
+                    "gmail call timed out (attempt %s/%s), retrying: %s",
+                    attempt + 1,
+                    attempts,
+                    args[:2],
+                )
+                time.sleep(min(2.0 * (attempt + 1), 5.0))
+        if last_exc is not None:
+            raise last_exc
+        raise GmailUnavailable("gmail call failed without detail")
+
+    def _invoke_once(self, args: list[str]) -> Any:
         if not self.is_available():
             raise GmailUnavailable(
                 f"google_token.json missing at {self.token_path} — connect Gmail in "

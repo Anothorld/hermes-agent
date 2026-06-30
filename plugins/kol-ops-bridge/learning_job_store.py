@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 JOB_STATUS_OK = "ok"
@@ -125,3 +125,49 @@ def list_runs(
                 d[key.replace("_json", "")] = {}
         out.append(d)
     return out
+
+
+def reconcile_stale_running_runs(
+    conn: sqlite3.Connection,
+    *,
+    env: Optional[str] = None,
+    stale_hours: float = 2.0,
+) -> list[dict[str, Any]]:
+    """Mark ``running`` rows older than ``stale_hours`` as ``error``.
+
+    Gmail-heavy jobs can exceed subprocess timeouts when the API is slow; if
+    the bridge process dies mid-job the row stays ``running`` forever. Called
+    at the start of each scheduled learning batch so ops views stay honest.
+    """
+    stale_hours = max(0.25, float(stale_hours))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_hours)
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
+    where = ["status = 'running'", "started_at < ?"]
+    args: list[Any] = [cutoff_iso]
+    if env is not None:
+        where.append("env = ?")
+        args.append(env)
+    rows = conn.execute(
+        "SELECT id, job_name, env, started_at FROM kol_learning_job_runs "
+        f"WHERE {' AND '.join(where)}",
+        args,
+    ).fetchall()
+    reconciled: list[dict[str, Any]] = []
+    for row in rows:
+        run_id = int(row["id"])
+        finished = finish_run(
+            conn,
+            run_id,
+            status=JOB_STATUS_ERROR,
+            output={"reconciled_stale_running": True},
+            error_message="stale running (process lost or exceeded stale threshold)",
+            started_at=str(row["started_at"] or ""),
+        )
+        reconciled.append({
+            "id": run_id,
+            "job_name": row["job_name"],
+            "env": row["env"],
+            "started_at": row["started_at"],
+            "finished": finished,
+        })
+    return reconciled

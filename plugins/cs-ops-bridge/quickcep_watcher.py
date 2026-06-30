@@ -440,6 +440,8 @@ def run_rest_reconcile_once() -> dict[str, Any]:
         "sio_backoff_sec": _sio_backoff_sec,
         "operator_sent_synced": op_sync.get("synced", 0),
         "operator_sent_checked": op_sync.get("checked", 0),
+        "escalation_repair_checked": op_sync.get("escalation_repair_checked", 0),
+        "escalation_repair_closed": op_sync.get("escalation_repair_closed", 0),
     }
     cal.set_poller_state("quickcep_watcher", state)
     return state
