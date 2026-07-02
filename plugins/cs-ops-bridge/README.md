@@ -134,6 +134,24 @@ Shared module: `email_channel.py` (`is_email_channel`, `inbound_payload_is_email
 - Disable for debugging: `CS_OPS_INTENT_FILTER=false`.
 - Config file: `config/intent_filter.yaml`.
 
+## Resume failure detection + manual retry
+
+When a resume agent run ends without calling `apply-handoff` (the ESC36/37 failure mode — model produced gibberish and treated it as completion), the escalation stays stuck in `resuming` with no draft. The bridge now detects this immediately and notifies the operator:
+
+1. **Detection** — the `cs-bridge-agent-guard` gateway plugin registers an `on_session_end` hook that fire-and-forgets an HTTP POST to `POST /internal/run-finished` on the bridge whenever any CS agent run ends. The bridge checks whether a `resuming` escalation still exists for that session (handoff not applied). A false-positive guard queries `GET /v1/runs/{resume_run_id}` to confirm the resume run itself has terminated (not a concurrent `operator_edit_memory` run).
+
+2. **Notification** — on confirmed failure, the bridge writes a `escalation_resume_failed` CAL event, posts `[ESC-FAILED:{id}]` to the Feishu escalation thread (skipped for console-only escalations with no Feishu thread), and sets `resume_failed_notified` in `resume_context` (idempotent — duplicate hook callbacks are no-ops).
+
+3. **Manual retry** — the operator clicks the existing Console「重新生成」button. `POST /sessions/{id}/relaunch` now auto-routes: if the session has an escalation with a recorded expert answer, the call reopens the escalation (`reopen_escalation_for_resume` — clears `resume_run_id` + failure markers, resets the 4h timeout anchor) and relaunches `# escalation_resume` with the original `operator_answer_raw`. The response includes `kind: "resume_retry"` so the frontend toast distinguishes it from a normal inbound relaunch. Sessions without an expert answer fall through to the original inbound relaunch (and the `awaiting_expert` 409 guard still applies).
+
+4. **Feishu retry tags** — `[ESC-DONE:{id}]（重试）` and `[ESC-FAILED:{id}]（重试后）` distinguish retry outcomes from first-attempt messages.
+
+**Key safety constraints:**
+- `reopen` resets `resume_launched_at=now` so the 4h `escalation_timeout` doesn't immediately re-close the reopened escalation.
+- `operator_replied`/`reviewed`/`operator_sent` sessions skip resume retry (status whitelist guard) to avoid overwriting already-sent customer replies.
+- Resume retry does not change session status — the agent's `apply-handoff` drives lifecycle transitions naturally.
+- Gateway hook env vars (`CS_OPS_BRIDGE_BASE`, `HERMES_CS_OPS_BRIDGE_KEY`) must be set in the povison-cs profile `.env`; missing vars degrade gracefully (log + fall back to 4h timeout).
+
 ## Session handoff (tags + internal notes)
 
 Deterministic lifecycle labeling via `session_handoff.py`:
@@ -180,7 +198,8 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| GET | `/sessions` | — | List/search sessions |
+| GET | `/sessions` | — | List/search sessions (supports `since`/`until` server-side date-window filter on `COALESCE(processing_started_at, created_at)`) |
+| GET | `/daily-report/stats` | — | One-shot daily-report aggregate: processed sessions in window + escalation count by `created_at` + `draft_saved` event session-id set (schema v5+) |
 | GET | `/escalations/{id}/upload-link` | key | Signed upload URL (Feishu backfill) |
 | POST | `/escalations/{id}/feishu-upload-link` | key | Reply upload link on Feishu thread |
 | GET | `/escalations/{id}/vault` | key | List vault files |
@@ -188,7 +207,8 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 | POST | `/escalations/{id}/vault` | token | Expert upload file |
 | GET | `/sessions/{id}/attachment-guard-context` | — | PDF guard allow list for draft-save |
 | POST | `/escalations/{id}/resume` | key | Launch gateway + resolve |
-| POST | `/sessions/{id}/relaunch` | key | Retry failed/stuck session |
+| POST | `/sessions/{id}/relaunch` | key | Retry failed/stuck session (auto-routes to resume retry when an escalation with expert answer exists) |
+| POST | `/internal/run-finished` | key | Gateway `on_session_end` callback for resume failure detection |
 | POST | `/sessions/{id}/close` | key | QuickCEP `leave-chat` + optional CAL `reviewed` (Console **结束工单**) |
 
 **Close confirmation:** Email sessions record `leaveChat` in message history; live chat uses `chat_end`. Bridge `close_session.py` and profile `quickcep_cli leave-chat` accept both; legacy CLI-only `chat_end` checks caused false `chat_end_not_confirmed`.
@@ -220,3 +240,14 @@ See [docs/povison-cs-architecture.md](../../docs/povison-cs-architecture.md).
 - `povison-cs-orchestrator-flow` — inbound processing
 - `povison-cs-escalation-resumer` — post-Feishu resume
 - `povison-feishu-escalation` — escalation message templates
+- `povison-cs-daily-reporting` — daily performance report (lives in the `povison-cs` profile; reads `/daily-report/stats`)
+
+## CAL schema version
+
+Current: **v5**. The `cs_session` table carries:
+
+- `processing_started_at` (v5) — stamped once when a session first leaves `pending`, never overwritten. The daily report buckets sessions by this timestamp (with `created_at` fallback for pre-v5 rows) instead of the volatile `updated_at`, so cross-day follow-ups no longer migrate a session across daily buckets. Migration is non-backfilling by design.
+- `sent_draft_html` / `sent_draft_source` / `sent_draft_at` (v4) — snapshot of the AI draft taken at `clear_draft()` time so the daily report can compute adoption rates after the composer is cleared.
+- `draft_*` (v3) — current draft state.
+
+The `/daily-report/stats` endpoint bundles the three reads the daily report needs (processed sessions in window, escalation count by `created_at`, `draft_saved` event session-id set) into one consistent snapshot — see `povison-cs-daily-reporting/SKILL.md` for the report-side contract.

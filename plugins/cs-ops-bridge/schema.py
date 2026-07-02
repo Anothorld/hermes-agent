@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Final
 
-SCHEMA_VERSION: Final[int] = 4
+SCHEMA_VERSION: Final[int] = 5
 
 SESSION_STATUSES: Final[tuple[str, ...]] = (
     "pending",
@@ -59,6 +59,7 @@ TABLES: dict[str, str] = {
             sent_draft_html       TEXT,
             sent_draft_source     TEXT,
             sent_draft_at         TEXT,
+            processing_started_at TEXT,
             UNIQUE (quickcep_session_id, env)
         )
     """,
@@ -173,6 +174,8 @@ INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_cs_session_status ON cs_session(status, env)",
     "CREATE INDEX IF NOT EXISTS idx_cs_escalations_state ON cs_escalations(state, env)",
     "CREATE INDEX IF NOT EXISTS idx_cs_events_session ON cs_conversation_events(session_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_cs_session_processing_started ON cs_session(processing_started_at, env)",
+    "CREATE INDEX IF NOT EXISTS idx_cs_escalations_created ON cs_escalations(created_at, env)",
     "CREATE INDEX IF NOT EXISTS idx_vault_link_esc ON escalation_vault_link(escalation_id)",
     "CREATE INDEX IF NOT EXISTS idx_vault_link_blob ON escalation_vault_link(blob_md5)",
     "CREATE INDEX IF NOT EXISTS idx_ap_send_at ON cs_autopilot_jobs(send_at) WHERE status='scheduled'",
@@ -202,6 +205,16 @@ _SESSION_V4_COLUMNS: tuple[tuple[str, str], ...] = (
     ("sent_draft_at", "TEXT"),
 )
 
+# Column added to cs_session by v4→v5 migration (daily-report correctness):
+# timestamp of the first time a session left `pending` for active processing.
+# The daily report uses this instead of `updated_at` to decide which day a
+# session was "processed", so cross-day follow-ups no longer migrate a
+# session across daily buckets. Existing v4 rows have NULL and fall back to
+# `created_at` at query time.
+_SESSION_V5_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("processing_started_at", "TEXT"),
+)
+
 
 def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     # PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
@@ -224,6 +237,14 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE cs_session ADD COLUMN {name} {coltype}")
 
 
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """Add cs_session.processing_started_at (idempotent per column)."""
+    existing = _existing_columns(conn, "cs_session")
+    for name, coltype in _SESSION_V5_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE cs_session ADD COLUMN {name} {coltype}")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Run forward migrations based on the persisted schema_version."""
     row = conn.execute(
@@ -239,15 +260,20 @@ def migrate(conn: sqlite3.Connection) -> None:
         _migrate_v2_to_v3(conn)
     if current < 4:
         _migrate_v3_to_v4(conn)
+    if current < 5:
+        _migrate_v4_to_v5(conn)
 
 
 def recreate_all(conn: sqlite3.Connection) -> None:
     """Create or migrate schema to current version."""
     for ddl in TABLES.values():
         conn.execute(ddl)
+    # Migrate BEFORE creating indexes: v5 adds the processing_started_at column
+    # that idx_cs_session_processing_started references, so the index DDL must
+    # run after the ALTER TABLE has landed.
+    migrate(conn)
     for idx in INDEXES:
         conn.execute(idx)
-    migrate(conn)
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
         (str(SCHEMA_VERSION),),

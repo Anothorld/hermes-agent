@@ -112,6 +112,13 @@ class SessionRelaunchBody(BaseModel):
     message_id: Optional[str] = None
 
 
+class RunFinishedBody(BaseModel):
+    session_id: str
+    completed: bool = True
+    interrupted: bool = False
+    env: str = "LIVE"
+
+
 class EscalationResolveBody(BaseModel):
     decision: str
     decided_by: str
@@ -238,12 +245,34 @@ def list_sessions_route(
     status: Optional[str] = Query(None),
     q: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    since: Optional[str] = Query(None, description="ISO lower bound on first-active time (inclusive)"),
+    until: Optional[str] = Query(None, description="ISO upper bound on first-active time (exclusive)"),
     with_counts: bool = Query(False),
 ) -> dict[str, Any]:
-    out: dict[str, Any] = {"sessions": cal.list_sessions(env=env, status=status, q=q, limit=limit)}
+    out: dict[str, Any] = {
+        "sessions": cal.list_sessions(env=env, status=status, q=q, limit=limit, since=since, until=until)
+    }
     if with_counts:
         out["counts"] = cal.session_counts(env=env)
     return out
+
+
+@router.get("/daily-report/stats")
+def daily_report_stats_route(
+    env: str = Query("LIVE"),
+    since: str = Query(..., description="ISO lower bound (inclusive), e.g. 2026-07-01T00:00:00.000Z"),
+    until: str = Query(..., description="ISO upper bound (exclusive)"),
+    limit: int = Query(200, ge=1, le=500),
+) -> dict[str, Any]:
+    """One-shot aggregate for the daily report (PR-daily-fix).
+
+    Returns processed sessions in the window (server-side date filter on
+    first-active time, full limit — not the legacy 50-row page), escalations
+    counted by ``created_at`` (not snapshot status), and the set of session
+    ids that fired a ``draft_saved`` event (fallback for the draft_source
+    tracking bug). Single call → consistent snapshot.
+    """
+    return cal.daily_report_stats(env=env, since=since, until=until, limit=limit)
 
 
 @router.get("/sessions/{quickcep_session_id}/workbench")
@@ -985,7 +1014,13 @@ def relaunch_session_route(
     body: SessionRelaunchBody,
     x_bridge_key: Annotated[Optional[str], Header()] = None,
 ) -> dict[str, Any]:
-    """Re-trigger gateway process run for failed or stuck sessions."""
+    """Re-trigger gateway processing for failed or stuck sessions.
+
+    Auto-routes: if the session has an escalation with a recorded expert answer
+    (resume failure), the call is redirected to escalation resume retry instead
+    of a fresh inbound run. Falls through to the normal inbound relaunch when no
+    such escalation exists.
+    """
     _require_bridge_key(x_bridge_key)
     from .email_channel import session_is_email
     from .gateway_client import GatewayClient
@@ -996,6 +1031,29 @@ def relaunch_session_route(
     sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=body.env)
     if not sess:
         raise HTTPException(status_code=404, detail="session not found")
+
+    # Resume retry routing — MUST come before the awaiting_expert 409 check:
+    # ESC36/37 failures leave the session in `awaiting_expert`, and the 409
+    # would block the operator from reaching the retry path. The function's
+    # internal guard ensures sessions without an expert answer still fall
+    # through to the 409 below.
+    from .escalation_resume import retry_resume_for_session
+
+    retry = retry_resume_for_session(quickcep_session_id=quickcep_session_id, env=body.env)
+    if retry.get("kind") == "resume_retry":
+        if not retry.get("ok"):
+            raise HTTPException(
+                status_code=502,
+                detail=retry.get("error") or "resume retry failed",
+            )
+        return {
+            "ok": True,
+            "run_id": retry.get("run_id"),
+            "kind": "resume_retry",
+            "escalation_id": retry.get("escalation_id"),
+        }
+
+    # No resume escalation with expert answer — fall through to inbound relaunch.
     if sess["status"] == "awaiting_expert":
         raise HTTPException(status_code=409, detail=f"session busy: {sess['status']}")
     msg_id = body.message_id or sess.get("last_message_id") or "manual-relaunch"
@@ -1010,6 +1068,29 @@ def relaunch_session_route(
         cal.update_session_status(session_row_id=sess["id"], status="failed")
         raise HTTPException(status_code=502, detail="gateway launch failed")
     return {"ok": True, "run_id": outcome.run_id}
+
+
+@router.post("/internal/run-finished")
+def run_finished_route(
+    body: RunFinishedBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Internal endpoint called by the cs-bridge-agent-guard ``on_session_end`` hook.
+
+    The gateway plugin fires a fire-and-forget HTTP POST here when any CS agent
+    run ends. The bridge checks whether a resuming escalation is still stuck
+    (handoff not applied) and notifies the operator if so. This is the detection
+    path for the ESC36/37 failure mode where the agent produced gibberish and
+    treated it as completion without calling ``apply-handoff``.
+    """
+    _require_bridge_key(x_bridge_key)
+    from .escalation_resume import handle_resume_run_finished
+
+    return handle_resume_run_finished(
+        session_id=body.session_id,
+        completed=body.completed,
+        env=body.env,
+    )
 
 
 # ── Autopilot (PR2) ────────────────────────────────────────────────────

@@ -288,7 +288,18 @@ def list_sessions(
     status: Optional[str] = None,
     q: Optional[str] = None,
     limit: int = 50,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
 ) -> list[dict[str, Any]]:
+    """List sessions with optional server-side filtering.
+
+    ``since`` / ``until`` are inclusive-exclusive ISO bounds applied to the
+    session's first-active timestamp. v5 prefers ``processing_started_at``
+    (stamped the first time a session leaves ``pending``) and falls back to
+    ``created_at`` for pre-v5 rows that never got stamped. This lets the daily
+    report bucket sessions by the day they were actually worked instead of by
+    the volatile ``updated_at`` (which flips on every follow-up / retry).
+    """
     limit = max(1, min(int(limit), 200))
     with _connect() as conn:
         sql = """SELECT * FROM cs_session WHERE env=?"""
@@ -300,6 +311,12 @@ def list_sessions(
             like = f"%{q.strip()}%"
             sql += " AND (quickcep_session_id LIKE ? OR customer_email LIKE ? OR chat_session_id LIKE ?)"
             params.extend([like, like, like])
+        if since:
+            sql += " AND COALESCE(processing_started_at, created_at) >= ?"
+            params.append(since)
+        if until:
+            sql += " AND COALESCE(processing_started_at, created_at) < ?"
+            params.append(until)
         sql += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(sql, params).fetchall()
@@ -335,6 +352,87 @@ def session_counts(*, env: str = "LIVE") -> dict[str, int]:
     counts = {r["status"]: int(r["n"]) for r in rows}
     counts["total"] = sum(counts.values())
     return counts
+
+
+def escalations_in_window(
+    *,
+    env: str = "LIVE",
+    since: str,
+    until: str,
+) -> dict[str, Any]:
+    """Escalations created in [since, until) — the daily-report-correct count.
+
+    The daily report previously counted ``status == 'awaiting_expert'`` as
+    "升级到专家", which is a *snapshot* of currently-pending escalations and
+    misses every escalation that was already answered the same day. Counting
+    ``cs_escalations.created_at`` in the report window instead captures every
+    escalation that fired that day regardless of whether the expert has since
+    replied.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT e.*, s.quickcep_session_id, s.customer_email, s.customer_name
+               FROM cs_escalations e
+               INNER JOIN cs_session s ON s.id = e.session_id AND s.env = e.env
+               WHERE e.env=? AND e.created_at >= ? AND e.created_at < ?
+               ORDER BY e.created_at ASC""",
+            (env, since, until),
+        ).fetchall()
+    items = [dict(r) for r in rows]
+    return {"count": len(items), "items": items}
+
+
+def draft_saved_session_ids(
+    *,
+    env: str = "LIVE",
+    since: str,
+    until: str,
+) -> set[int]:
+    """CAL row ids of sessions that had a ``draft_saved`` event in [since, until).
+
+    Used by the daily report as a fallback signal for "AI generated a draft"
+    when ``draft_source`` is missing (a known tracking bug — some runs saved a
+    draft but never stamped ``cs_session.draft_source``). Cross-referencing the
+    event ledger catches those runs so AI-draft counts are not under-reported.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT e.session_id FROM cs_conversation_events e
+               INNER JOIN cs_session s ON s.id = e.session_id AND s.env = e.env
+               WHERE e.env=? AND e.event_type='draft_saved'
+                 AND e.created_at >= ? AND e.created_at < ?""",
+            (env, since, until),
+        ).fetchall()
+    return {int(r["session_id"]) for r in rows}
+
+
+def daily_report_stats(
+    *,
+    env: str = "LIVE",
+    since: str,
+    until: str,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """One-shot aggregate the daily report needs — avoids N+1 / multi-call drift.
+
+    Bundles three reads the daily report used to do separately (and
+    inconsistently): the processed-session window (server-side date filter +
+    full limit, not the legacy client-side `updated_at >= today` over a 50-row
+    page), the escalation count by ``created_at`` (not by snapshot status),
+    and the ``draft_saved`` event set for ``draft_source`` fallback. The report
+    script makes a single call and gets a consistent snapshot.
+    """
+    sessions = list_sessions(env=env, since=since, until=until, limit=limit)
+    escalations = escalations_in_window(env=env, since=since, until=until)
+    draft_saved_ids = draft_saved_session_ids(env=env, since=since, until=until)
+    return {
+        "since": since,
+        "until": until,
+        "env": env,
+        "sessions": sessions,
+        "escalations": escalations,
+        "draft_saved_session_ids": sorted(draft_saved_ids),
+    }
 
 
 def _latest_autopilot_job(conn: sqlite3.Connection, session_id: int, env: str) -> Optional[dict[str, Any]]:
@@ -796,11 +894,24 @@ def update_session_chat_id(*, session_row_id: int, chat_session_id: str) -> None
 def update_session_status(*, session_row_id: int, status: str) -> None:
     if status not in SESSION_STATUSES:
         raise ValueError(f"invalid status: {status}")
+    now = _now()
     with _connect() as conn:
-        conn.execute(
-            "UPDATE cs_session SET status=?, updated_at=? WHERE id=?",
-            (status, _now(), session_row_id),
-        )
+        # v5: stamp processing_started_at the first time a session leaves
+        # `pending` for any active state. COALESCE keeps the original value
+        # on subsequent transitions so the daily report can bucket by the
+        # first-active day rather than by the volatile `updated_at`.
+        if status != "pending":
+            conn.execute(
+                "UPDATE cs_session SET status=?, "
+                "processing_started_at=COALESCE(processing_started_at, ?), "
+                "updated_at=? WHERE id=?",
+                (status, now, now, session_row_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE cs_session SET status=?, updated_at=? WHERE id=?",
+                (status, now, session_row_id),
+            )
         conn.commit()
 
 
@@ -1271,6 +1382,87 @@ def get_resuming_escalation_for_session(
         out["resume_context"] = json.loads(out.pop("resume_context_json") or "{}")
         out["session"] = dict(sess)
         return out
+
+
+def get_latest_escalation_with_operator_answer(
+    *,
+    quickcep_session_id: str,
+    env: str = "LIVE",
+) -> Optional[dict[str, Any]]:
+    """Return the latest escalation with a recorded expert answer for a session.
+
+    Prefers a ``resuming`` row (stuck retry candidate) over any other state.
+    Falls back to the most recent escalation that has ``operator_answer_raw``
+    in its resume_context (covers ``resolved`` rows from prior failures).
+    """
+    resuming = get_resuming_escalation_for_session(
+        quickcep_session_id=quickcep_session_id, env=env,
+    )
+    if resuming:
+        return resuming
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT * FROM cs_escalations
+               WHERE session_id=? AND env=?
+                 AND json_extract(resume_context_json, '$.operator_answer_raw') != ''
+               ORDER BY CASE WHEN state='resuming' THEN 0 ELSE 1 END, id DESC
+               LIMIT 1""",
+            (sess["id"], env),
+        ).fetchone()
+        if not row:
+            return None
+        out = dict(row)
+        out["resume_context"] = json.loads(out.pop("resume_context_json") or "{}")
+        out["session"] = dict(sess)
+        return out
+
+
+def reopen_escalation_for_resume(*, escalation_id: int) -> bool:
+    """Atomically reset an escalation to ``resuming`` for manual retry.
+
+    Clears resume run / failure / Feishu-done markers from resume_context
+    while preserving ``operator_answer_raw`` and attachments. Resets
+    ``resume_launched_at`` to now so the 4h resuming-timeout anchor restarts
+    (otherwise the timeout checker would immediately re-close the escalation).
+    Sets ``retried_at`` so the Feishu DONE message can show a retry tag.
+    """
+    now = _now()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT resume_context_json FROM cs_escalations WHERE id=?",
+            (escalation_id,),
+        ).fetchone()
+        if not row:
+            return False
+        ctx = json.loads(row["resume_context_json"] or "{}")
+        for key in (
+            "resume_run_id",
+            "resume_launched_at",
+            "feishu_done_notified",
+            "feishu_done_message_id",
+            "resuming_timeout_handled",
+            "resume_failed_detected",
+            "resume_failed_notified",
+            "resume_fail_notified_at",
+            "resume_fail_reason",
+        ):
+            ctx.pop(key, None)
+        ctx["resume_launched_at"] = now
+        ctx["retried_at"] = now
+        cur = conn.execute(
+            """UPDATE cs_escalations SET
+                   state='resuming',
+                   decision='claim',
+                   resume_context_json=?,
+                   updated_at=?
+               WHERE id=?""",
+            (json.dumps(ctx), now, escalation_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
 
 
 def claim_escalation_reply(

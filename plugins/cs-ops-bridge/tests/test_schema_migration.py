@@ -27,6 +27,7 @@ def _load_schema():
 schema = _load_schema()
 SCHEMA_VERSION = schema.SCHEMA_VERSION
 _SESSION_V3_COLUMNS = schema._SESSION_V3_COLUMNS
+_SESSION_V5_COLUMNS = schema._SESSION_V5_COLUMNS
 recreate_all = schema.recreate_all
 
 
@@ -64,6 +65,8 @@ def test_fresh_db_has_v3_columns_and_tables():
         cols = _column_names(conn, "cs_session")
         for name, _ in _SESSION_V3_COLUMNS:
             assert name in cols, f"fresh cs_session missing {name}"
+        for name, _ in _SESSION_V5_COLUMNS:
+            assert name in cols, f"fresh cs_session missing {name}"
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "cs_autopilot_jobs" in tables
@@ -87,6 +90,8 @@ def test_v2_db_migrates_to_v3():
         cols_after = _column_names(conn, "cs_session")
         for name, _ in _SESSION_V3_COLUMNS:
             assert name in cols_after, f"migrated cs_session missing {name}"
+        for name, _ in _SESSION_V5_COLUMNS:
+            assert name in cols_after, f"migrated cs_session missing {name}"
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "cs_autopilot_jobs" in tables
@@ -94,7 +99,7 @@ def test_v2_db_migrates_to_v3():
         version = conn.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()[0]
-        assert int(version) == 3
+        assert int(version) == SCHEMA_VERSION
         conn.close()
 
 
@@ -105,6 +110,8 @@ def test_migration_is_idempotent():
         recreate_all(conn)  # second run must not raise on duplicate ALTER
         cols = _column_names(conn, "cs_session")
         for name, _ in _SESSION_V3_COLUMNS:
+            assert name in cols
+        for name, _ in _SESSION_V5_COLUMNS:
             assert name in cols
         conn.close()
 
@@ -121,12 +128,65 @@ def test_existing_v2_row_survives_migration():
         conn.commit()
         recreate_all(conn)
         row = conn.execute(
-            "SELECT quickcep_session_id, status, draft_html, customer_name FROM cs_session"
+            "SELECT quickcep_session_id, status, draft_html, customer_name, processing_started_at "
+            "FROM cs_session"
         ).fetchone()
         assert row[0] == "qc-1"
         assert row[1] == "draft_ready"
         assert row[2] is None
         assert row[3] is None
+        # v5 column exists and is NULL for the pre-v5 row (no backfill — the
+        # daily report falls back to created_at at query time).
+        assert row[4] is None
+        conn.close()
+
+
+def test_v4_db_migrates_to_v5_adds_processing_started_at():
+    """A v4-era DB (has sent_draft_* but not processing_started_at) migrates cleanly."""
+    with tempfile.TemporaryDirectory() as td:
+        conn = sqlite3.connect(Path(td) / "v4.db")
+        # Build a v4-shaped cs_session: v3 cols + v4 snapshot cols, no v5 col.
+        conn.executescript(
+            """
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE cs_session (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                quickcep_session_id TEXT NOT NULL,
+                chat_session_id TEXT,
+                customer_email TEXT,
+                last_message_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                env TEXT NOT NULL DEFAULT 'LIVE',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                customer_name TEXT, customer_company TEXT, locale TEXT,
+                email_subject TEXT, last_message_preview TEXT, intention_tags TEXT,
+                draft_html TEXT, draft_attachments TEXT, draft_updated_at TEXT,
+                draft_source TEXT,
+                sent_draft_html TEXT, sent_draft_source TEXT, sent_draft_at TEXT,
+                UNIQUE (quickcep_session_id, env)
+            );
+            INSERT INTO schema_meta(key, value) VALUES('schema_version', '4');
+            INSERT INTO cs_session(quickcep_session_id, status, env, created_at, updated_at)
+            VALUES ('qc-v4', 'operator_replied', 'LIVE', '2026-06-29T00:00:00+00:00',
+                    '2026-06-29T00:00:00+00:00');
+            """
+        )
+        conn.commit()
+        assert "processing_started_at" not in _column_names(conn, "cs_session")
+        recreate_all(conn)
+        cols = _column_names(conn, "cs_session")
+        assert "processing_started_at" in cols
+        version = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        assert int(version) == SCHEMA_VERSION
+        # Existing row survives; v5 column is NULL (backfill is the report's job).
+        row = conn.execute(
+            "SELECT quickcep_session_id, processing_started_at FROM cs_session"
+        ).fetchone()
+        assert row[0] == "qc-v4"
+        assert row[1] is None
         conn.close()
 
 
