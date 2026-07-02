@@ -486,6 +486,17 @@ def reload_skills() -> Dict[str, Any]:
     # (the skill file is gone so we can't re-read it).
     removed = [{"name": n, "description": before[n]} for n in removed_names]
 
+    # Purge the skill_view session cache so edited SKILL.md files are
+    # re-read from disk on the next skill_view call. Without this, a
+    # SKILL.md edited mid-session keeps serving the stale cached copy
+    # until the gateway session changes.
+    try:
+        from tools.skills_tool import _purge_all_skill_view_cache
+
+        _purge_all_skill_view_cache()
+    except Exception:
+        pass
+
     return {
         "added": added,
         "removed": removed,

@@ -303,11 +303,25 @@ def _cmd_upload_file(args: argparse.Namespace) -> None:
 
 
 def _cmd_draft_save(args: argparse.Namespace) -> None:
-    """Wrap quickcep_cli draft-save with join-chat + canonical profile skill path."""
+    """Save a reply draft.
+
+    Default (PR1.3 / §4.13): persist to CAL via PUT /sessions/{id}/draft — no
+    QuickCEP write, no joinChat, eliminating the ownerId draft-visibility problem.
+    The agent contract (command name, params, order) is unchanged.
+
+    Legacy fallback (``--legacy-quickcep-draft`` or env
+    ``CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP=1``): wrap quickcep_cli draft-save with
+    join-chat, writing the draft into QuickCEP (kept for transition/incident).
+    """
+    legacy = bool(getattr(args, "legacy_quickcep_draft", False)) or os.environ.get(
+        "CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP", ""
+    ).strip().lower() in ("1", "true", "yes")
+
     cli = _quickcep_cli_path()
-    if not cli.exists():
+    if legacy and not cli.exists():
         print_json({"error": f"quickcep_cli not found: {cli}"})
         sys.exit(2)
+
     if args.content_file:
         content_path = Path(args.content_file)
         if not content_path.is_file():
@@ -347,51 +361,57 @@ def _cmd_draft_save(args: argparse.Namespace) -> None:
 
     # Internal domain guard — block drafts containing internal/backend URLs
     try:
-        from internal_domain_guard import guard_draft  # noqa: E402 — plugin root on sys.path
+        from draft_guard import guard_draft_content  # noqa: E402 — plugin root on sys.path
     except ImportError:
-        guard_draft = None
-    if guard_draft is not None:
-        guard_result = guard_draft(content, getattr(args, "attachments", None))
-        if guard_result["blocked"]:
+        guard_draft_content = None  # type: ignore[assignment]
+    if guard_draft_content is not None:
+        attachments_json_for_guard = getattr(args, "attachments", None)
+        if not isinstance(attachments_json_for_guard, str):
+            attachments_json_for_guard = None
+        allowed_urls = _fetch_allowed_attachment_urls(args)
+        guard_result = guard_draft_content(
+            content, attachments_json_for_guard, allowed_attachment_urls=allowed_urls
+        )
+        if guard_result and guard_result.get("blocked"):
             print_json(
                 {
-                    "error": guard_result["error"],
-                    "error_detail": f"Matched: {', '.join(guard_result['matches'])}",
-                    "source": guard_result["source"],
-                    "snippet": guard_result["snippet"],
+                    "error": guard_result.get("error", "draft blocked"),
+                    "error_detail": guard_result.get("error_detail", ""),
+                    "source": guard_result.get("source", ""),
+                    "snippet": guard_result.get("snippet", ""),
+                    "blocked_kind": guard_result.get("blocked_kind", ""),
                     "session_id": args.session_id,
                 }
             )
             sys.exit(2)
 
-    # PDF attachment guard — only vault-sourced PDFs on escalation resume
-    try:
-        from draft_attachment_guard import attachments_contain_pdf, guard_draft_attachments  # noqa: E402
-    except ImportError:
-        attachments_contain_pdf = None  # type: ignore[assignment,misc]
-        guard_draft_attachments = None  # type: ignore[assignment,misc]
     attachments_json = getattr(args, "attachments", None)
     if not isinstance(attachments_json, str):
         attachments_json = None
-    if attachments_contain_pdf is not None and guard_draft_attachments is not None:
-        if attachments_contain_pdf(attachments_json):
-            allowed_urls = _fetch_allowed_attachment_urls(args)
-            att_guard = guard_draft_attachments(
-                attachments_json,
-                allowed_attachment_urls=allowed_urls,
-            )
-            if att_guard["blocked"]:
-                print_json(
-                    {
-                        "error": att_guard["error"],
-                        "error_detail": att_guard.get("error_detail", ""),
-                        "source": att_guard.get("source", "attachments"),
-                        "blocked_kind": att_guard.get("blocked_kind", ""),
-                        "session_id": args.session_id,
-                    }
-                )
-                sys.exit(2)
 
+    # ---- CAL path (default) ----
+    if not legacy:
+        attachments_list: list = []
+        if attachments_json:
+            try:
+                attachments_list = json.loads(attachments_json)
+            except (json.JSONDecodeError, TypeError):
+                attachments_list = []
+        result = client_from_args(args).request(
+            "PUT",
+            f"/sessions/{args.session_id}/draft",
+            body={
+                "env": args.env,
+                "draft_html": content,
+                "attachments": attachments_list,
+                "source": "agent",
+                "subject": args.subject,
+            },
+        )
+        print_json(result)
+        return
+
+    # ---- Legacy QuickCEP path (transition/incident fallback) ----
     join_chat = _join_chat_before_draft(cli, args.session_id)
 
     draft_argv = [
@@ -416,6 +436,7 @@ def _cmd_draft_save(args: argparse.Namespace) -> None:
         print_json(result)
     except json.JSONDecodeError:
         print(proc.stdout, flush=True)
+
 
 
 def _cmd_apply_handoff(args: argparse.Namespace) -> None:
@@ -547,8 +568,9 @@ def _build_parser() -> argparse.ArgumentParser:
     o.add_argument("--resume-context", default="{}")
     o.set_defaults(func=_cmd_open_escalation)
 
-    ds = sub.add_parser("draft-save", help="Save QuickCEP draft (wraps quickcep_cli draft-save)")
+    ds = sub.add_parser("draft-save", help="Save reply draft to CAL (wraps PUT /draft); --legacy-quickcep-draft writes to QuickCEP instead")
     add_env_arg(ds)
+    add_common_args(ds)
     ds.add_argument("--session-id", required=True)
     content_src = ds.add_mutually_exclusive_group(required=True)
     content_src.add_argument(
@@ -565,6 +587,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--attachments",
         default=None,
         help='JSON array of attachment objects (same as quickcep_cli draft-save --attachments)',
+    )
+    ds.add_argument(
+        "--legacy-quickcep-draft",
+        action="store_true",
+        help="Write the draft to QuickCEP (legacy path with joinChat) instead of CAL.",
     )
     ds.set_defaults(func=_cmd_draft_save)
 

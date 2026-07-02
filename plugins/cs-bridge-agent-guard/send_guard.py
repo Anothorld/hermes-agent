@@ -40,6 +40,20 @@ _EXECUTE_CODE_BRIDGE_BLOCK_MESSAGE = (
 
 _CS_BRIDGE_TOOL_COMMAND_RE = re.compile(r"(?is)cs_bridge_tool(?:\.py)?\b")
 
+# PR3: edit_memory runs inherit the reply-generation context but are restricted
+# to hindsight memory tools only — every other tool is blocked so the agent can
+# only analyze the operator's edit and retain facts, never act on the customer.
+EDIT_MEMORY_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    "hindsight_retain",
+    "hindsight_recall",
+    "hindsight_reflect",
+})
+EDIT_MEMORY_BLOCK_MESSAGE = (
+    "edit_memory run is restricted to hindsight memory tools "
+    "(hindsight_retain, hindsight_recall, hindsight_reflect); "
+    "all other tools are blocked for this run kind."
+)
+
 
 def guard_enabled() -> bool:
     return os.environ.get("CS_BRIDGE_AGENT_GUARD", "1").strip().lower() not in (
@@ -137,7 +151,19 @@ def pre_tool_block(
     args: dict,
     task_id: str = "",
     session_id: str = "",
+    run_kind: str = "",
 ) -> Optional[dict[str, str]]:
+    # PR3: edit_memory whitelist — only hindsight memory tools allowed.
+    if run_kind == "edit_memory":
+        if tool_name in EDIT_MEMORY_ALLOWED_TOOLS:
+            return None
+        return {
+            "action": "block",
+            "message": EDIT_MEMORY_BLOCK_MESSAGE,
+            "blocked_by": "cs-bridge-agent-guard",
+            "via": f"edit_memory_whitelist:{tool_name}",
+        }
+
     if not guard_enabled():
         return None
     if not cs_automation_session(session_id, task_id):

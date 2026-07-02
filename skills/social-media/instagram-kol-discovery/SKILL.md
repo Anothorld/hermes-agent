@@ -156,11 +156,14 @@ Handles **below 100k** after normalization are hard discards — do not queue th
 
 ## Run bootstrap (STEP −1 — gateway-enforced)
 
-Before **any** `browser_navigate`, `browser_snapshot`, or `veedcrawl_*` call, run these three bridge CLI commands for **this session's** `--env` and `--campaign-id` (the guard blocks browser tools until all three complete):
+Before **any** `browser_navigate`, `browser_snapshot`, or `veedcrawl_*` call, run these bridge CLI commands for **this session's** `--env` and `--campaign-id` (the guard blocks browser tools until the three required steps — `list-candidates`, `list-discovery-skip-handles`, `list-outreach-cooldown-handles` — complete; `list-candidate-handles` below is an additional read that the guard ignores but the agent needs for status-bucketed exclusion):
 
 ```bash
 python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
   list-candidates --env <TEST|LIVE> --campaign-id <campaign_id>
+
+python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
+  list-candidate-handles --env <TEST|LIVE> --campaign-id <campaign_id> --plain --with-status
 
 python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
   list-discovery-skip-handles --env <TEST|LIVE>
@@ -169,10 +172,40 @@ python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
   list-outreach-cooldown-handles --env <TEST|LIVE> --plain
 ```
 
-In your **next assistant message after bootstrap**, print exclusion stats:
+The `--plain --with-status` flag on `list-candidate-handles` emits
+`<handle>\t<candidate_status>` TSV rows (e.g. `newdarlings\tselected_for_outreach`).
+Parse each line into `(handle, status)` and build a **status-bucketed** in-memory map;
+do NOT only keep `discovered` rows — every status is exclusion-relevant.
+
+In your **next assistant message after bootstrap**, print exclusion stats AND the
+merged exclusion set construction:
 - CAL candidate count (from `list-candidates`)
+- per-status breakdown from `list-candidate-handles --with-status`
+  (e.g. `discovered=N, selected_for_outreach=N, rejected=N, shortlisted=N`)
 - skip-handle count (from `list-discovery-skip-handles` `items` length)
 - cooldown handle count (lines from `--plain`)
+
+**Exclusion set merge (hard rule):**
+
+```
+exclusion_set = skip_handles ∪ cooldown_handles
+              ∪ {h for h, status in candidate_handles
+                 if status in (discovered, selected_for_outreach,
+                               shortlisted, rejected, needs_review)}
+```
+
+That is — **every** handle already in CAL is excluded from re-discovery, regardless of
+status. A handle that is `selected_for_outreach` (already in outreach queue) or
+`rejected` (operator removed) is NOT a new candidate; navigating to its IG profile
+wastes a profile-visit slot and a tool turn.
+
+**Surfaced-handle pre-check (hard):** before any `browser_navigate` to
+`https://www.instagram.com/<handle>/`, look the handle up in `exclusion_set`. On hit,
+log `already_in_pool:<status>: @handle` (use the mapped status, not a guess) and move
+on. Do NOT spend tool turns on handles already in CAL. The bridge also hard-rejects
+`ingest-confirmed-candidate` with HTTP 409 `discovery_skip_active` for skip-list
+handles, but it does **not** block re-ingest of `selected_for_outreach` / `rejected`
+handles — the exclusion is your responsibility here.
 
 **Campaign binding (hard):** never pass a different `--campaign-id` than the session (e.g. session `kol-campaign:LIVE:SEB8010-…` must not call `list-candidates` for `POVISON-TS-8319-…`). The gateway guard rejects mismatches.
 
@@ -273,6 +306,12 @@ If no `# prior_runs` block is present, this is round 1 of the generation — pro
 ## Discovery
 Maintain a prioritized queue and cover at least **2 discovery surfaces** unless blocked.
 
+- **Curated-list surfaces (FeedSpot / Influencer Hero / "Top N" blog lists) — small-batch forced-conclusion quota (hard).** These lists surface many names cheaply but invite the failure mode of batch-opening 8 profiles in 2 minutes with zero persist/discard records. Rules:
+  - Per Run, extract at most **5 handles** from any single curated list into the verification queue. If the list has more promising names, carry the rest into `next_round_focus` with ` — from <list name>, surfaced not yet verified` as the rationale.
+  - **One-at-a-time with conclusion**: each extracted handle must complete `ingest-confirmed-candidate` OR an explicit DISCARD (with reason in `visited_handles:`) before you open the next handle's `browser_navigate`. Forbidden: opening 5 profiles back-to-back then "deciding later".
+  - **List browsing ≠ profile visiting**: while reading the list page itself (e.g. FeedSpot HTML), only record candidate name + stated follower count + one-sentence angle in your in-memory queue. Do NOT `browser_navigate` to IG during list browsing. Profile-visit quota (≤40/run) starts counting only when you navigate to `instagram.com/<handle>/`.
+  - Rationale: a 2-minute list scan that consumes 8 profile slots and produces 0 candidates is a pure waste; the small-batch rule forces every slot to either pay off or be reclaimed with a discard reason.
+
 - **Hashtags**: generate 12-16 dynamic seeds, split into THREE buckets with HARD QUOTAS to prevent filter-bubble collapse. The two non-product buckets are mandatory, NOT "when relevant" suggestions:
   - **Product / category seeds (4-5, easy):** home/decor/category vocabulary tied to the driver — e.g. `#sectionalcouch`, `#mediaconsole`, `#diningtablestyling`. These mostly surface home/design creators; that's fine but it's also the bubble's gravity well, so don't stop here.
   - **Buyer-moment seeds (4-5, MANDATORY):** anchor on the life moment where the product appears, NOT on the product itself. These cut across verticals by pulling creators who never tag furniture. Examples: `#firstapartment`, `#movingvlog`, `#newlywedhome`, `#datenightin`, `#movienightin`, `#postpartumlife`, `#hostingseason`, `#emptynesthome`, `#wfhlife`. Pick from the buyer's life stage in the Campaign Context.
@@ -366,6 +405,25 @@ When the handle is already ingested, add CAL attribution:
 
 See `references/veedcrawl-tools.md` for parameters, cache semantics, and failure examples.
 
+**Surface health early-stop decision tree (hard).** Repeatedly hammering a
+broken surface is the second-biggest token sink after profile-visit drift.
+Track per-surface failure streaks and lock the surface for the rest of this
+run once the threshold hits — do NOT keep retrying the same surface hoping
+it recovers mid-run:
+
+| Surface | Failure signal | Lock threshold | On lock |
+|---------|----------------|----------------|---------|
+| IG hashtag explore | `browser_navigate` to `instagram.com/explore/...` returns only footer / empty grid (no Reel cards render) | 2 consecutive seeds | Mark `ig_hashtag_locked_this_run: true` in `attempted_angles`; switch to public-web + Veedcrawl for the rest of this run. |
+| Veedcrawl `search_social_videos` | Returns 0 candidates that are both ≥100K followers AND North American AND home/furniture-relevant | 2 consecutive queries | Mark `veedcrawl_locked_this_run: true`; switch to browser hashtag + public web. |
+| Public web (Google) | 3 consecutive queries surface no new handle outside `exclusion_set` | 3 consecutive queries | Set `floor_unmet_reason: "排除集 ~N handles + niche 枯竭，3 个 surface 均无新候选"` and prepare to end the run with current persisted count rather than burn more queries. |
+
+When all three surfaces are locked in the same run, do NOT keep issuing
+exploration calls — emit the structured diagnostics block with
+`floor_unmet_reason` citing all three lock reasons and end. The console's
+early-escalation path (see `MAX_CONSECUTIVE_ZERO_NEW_RUNS` in the discovery
+gate) will route the campaign to operator review instead of auto-retrying
+into the same exhausted niche.
+
 Lateral expansion from seed results is capped at **3 hops**. One failed hashtag, browser session, selector, or extraction call never ends the run; switch surface or seed.
 
 ## Persistence And Run
@@ -387,6 +445,57 @@ Forbidden pattern: browsing/LLM-summarizing 5-20 candidates first and
 batch-writing at the end of the run. If a run crashes midway, all
 already-qualified candidates must already be durable in CAL.
 
+**Visit-conclusion rule (hard).** Every handle you visit via
+`browser_navigate("https://www.instagram.com/<handle>/")` in this run MUST end
+the run in exactly one of three terminal states — no "visited but undecided"
+gray zone:
+
+1. **Ingested** — `ingest-confirmed-candidate` returned 200 with a `candidate_id`.
+2. **`pending_ingests`** — qualified-but-not-ingested, listed in the structured
+   diagnostics block below with a one-sentence reason (e.g.
+   `reels_render_failed`, `iteration_limit`, `json_validation`).
+3. **DISCARD with reason** — explicit disqualification written into the run
+   answer prose (e.g. "DISCARD @handle — followers 85K < 100K hard threshold")
+   AND, if the handle had partial signal worth revisiting, also mirrored into
+   `next_round_focus` per the rule in **next_round_focus rules** below.
+
+Run summary must include a `visited_handles:` block (one line per visited
+handle) so the operator and the next round can audit what happened to each
+profile slot consumed:
+
+```
+visited_handles:
+  - "@handle1 — ingested (candidate_id=480)"
+  - "@handle2 — DISCARD: 粉丝 85K < 100K 门槛"
+  - "@handle3 — pending_ingests: Reels 渲染失败"
+  - "@handle4 — DISCARD: Bangalore, 非 US 区域"
+```
+
+A run that opens N profiles but only concludes < N entries in `visited_handles`
+is a failure mode — the missing handles burned profile-visit slots and tool
+turns without producing signal for the next round. This rule eliminates the
+"FeedSpot batch-browse then drift" pattern where 8 profiles open in 2 minutes
+with zero persist / discard records.
+
+**Token-budget awareness (hard).** Each API call log line carries
+`in=<prompt_tokens>`; the model context length is logged once at run start
+(`defaulting to 256,000 tokens` or `hardcoded context length N for model 'glm-4.7'`).
+Track `used = sum of in=` across calls vs `context_length` and follow this
+decision table after every API call — do NOT wait for context compression to
+force-end the run (compression drops in-flight candidate state and is the
+root cause of "visited but undecided" handles):
+
+| Remaining budget (`context_length − used`) | Required behavior |
+|-------------------------------------------|-------------------|
+| > 50% | Normal exploration; open new surfaces freely. |
+| 30–50% | Stop opening NEW discovery surfaces (no new hashtags/lists/Google queries). Finish persisting handles already in the verification queue. |
+| < 30% | Stop `browser_navigate` to any NEW profile. For every handle already visited but not yet ingested this run: either `ingest-confirmed-candidate` now, or append to `pending_ingests` with reason. Begin writing the Run summary. |
+| < 10% | Hard stop. No new tool calls. Emit the structured diagnostics block + `visited_handles:` + `pending_ingests` immediately, even if mid-profile. |
+
+Rationale: a run that hits compression mid-profile loses the partial Reel
+evidence it was holding; the budget tiers force a graceful shutdown that
+preserves every visited handle as either persisted or `pending_ingests`.
+
 **Structured diagnostics (mandatory in EVERY final answer).** Every run — whether you hit the floor or not — MUST end with the following YAML block so the backend can persist it for future rounds. The console parser keys on these exact field names; do not rename them.
 
 ```
@@ -407,6 +516,9 @@ next_round_focus:
 pending_ingests:
   - "<handle> — <why not ingested; e.g. iteration_limit, json_validation, bridge_error>"
   - ...
+visited_handles:
+  - "@<handle> — <ingested (candidate_id=N) | DISCARD: <reason> | pending_ingests: <reason>>"
+  - ...
 ```
 
 **Do NOT** use a prose-only `### Next round should:` numbered list — the console parser only reads the YAML field names above.
@@ -422,6 +534,16 @@ pending_ingests:
 - Each item MUST end with ` — <why>`: the one-sentence rationale that tells the next round why this beats fresh exploration. A bare handle without rationale is useless context.
 - Max **10 items**. If you have more candidates than that, pick the 10 with the highest expected payoff. The composer hard-caps at 10 anyway; items 11+ are dropped silently.
 - Emit at least 1 item whenever you have ANY honest lead — even a single qualified-but-uncrawled handle is signal. Only emit an empty list when you genuinely have nothing actionable for the next round (rare; usually means you should report a hard blocker via `floor_unmet_reason`).
+- **Visited-but-undecided forced回流 (hard).** Any handle you visited via
+  `browser_navigate("https://www.instagram.com/<handle>/")` this round that did
+  NOT end in a successful ingest AND was NOT given an explicit DISCARD reason
+  in `visited_handles:` MUST appear in `next_round_focus`. Format:
+  `"<@handle> — 访问未完成判定，已观察 <X> Reel / 赞数 Y / <one-sentence what's left to check>"`.
+  Rationale: profile-visit slots are scarce (≤40/run); burning one and leaving
+  the next round no breadcrumb is how `ready.set.dad` / `thankfulhomemaking` /
+  `bobby`-style drops happen. The next round's `# resume_directives` STEP_0
+  reads these entries and MUST re-process them before opening any new
+  `browser_navigate` for fresh exploration (see **Prior runs handling** rule 0).
 
 When you stopped short of the quantity floor OR landed outside the active designer range, also include these fields in the same block (already specified in "Quantity floor" and "Vertical diversity floor" below):
 
@@ -617,6 +739,25 @@ Rules:
   non-empty values in the same payload; partial bundles return 422. Omit
   the entire brief bundle when generation fails (profile URL ingest still
   succeeds).
+
+**Ingest payload self-check (hard — run before writing `/tmp/ingest_*.json`).**
+These five rules cover the validation errors that historically caused the most
+retry churn (linktree host, `*_source=llm_analysis`, missing recommendation_reason
+provenance, content_pillars count, partial brief bundle). Walk the table below
+against your drafted JSON **before** the first `ingest-confirmed-candidate` call
+for each handle; fix in-place rather than "try once then fix":
+
+| Field | Rule | On violation |
+|-------|------|--------------|
+| `identity.linktree_url` | host ∈ {`linktr.ee`, `beacons.ai`, `bio.link`, `lnk.bio`, `solo.to`, `linkin.bio`} | Move to `identity.personal_site_url` (if creator-owned) or drop the field |
+| `identity.*_source` | value ∉ `llm_analysis`; must be one of `google_search_result`, `linktree`, `ig_bio`, `facebook_about`, `fb_creator_profile`, `personal_site`, `media_kit`, `agency_page`, `ig_profile_and_reels`, `ig_reel_pick`, `llm_summary` | Replace with the correct provenance from the list above |
+| `identity.recommendation_reason` | same `identity_facts` object MUST also carry `recommendation_reason_source` + `recommendation_reason_discovered_at` + `recommendation_reason_discovered_url` | Add the three provenance keys, or drop `recommendation_reason` entirely |
+| `identity.content_pillars` | `list[str]` with length ∈ [2, 4] | Pad to ≥ 2 from bio/Reel themes, or trim to ≤ 4 |
+| creator brief bundle (6 keys) | either all 6 present + each with its provenance triple, or all 6 absent | Drop the entire bundle if any one key fails to generate |
+
+Forbidden pattern: writing the JSON, calling ingest, reading the 400, then patching
+one field and retrying — this wastes a tool turn per retry. Self-check first, ingest
+once.
 
 **IG profile URL persistence (included in ingest payload).** Every handle that survives qualification has by definition been visited at `https://www.instagram.com/<handle>/`. Include profile URL + creator brief facts in the same `identity_facts` object passed to `ingest-confirmed-candidate` (legacy separate `upsert-identity` → `write-facts-multi` → `add-candidate` chain is deprecated for this skill).
 

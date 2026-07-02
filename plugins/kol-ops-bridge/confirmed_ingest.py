@@ -120,7 +120,25 @@ ALLOWED_IDENTITY_FACT_KEYS: Final[frozenset[str]] = frozenset(
 
 
 class IngestValidationError(ValueError):
-    """Client-side payload validation failure."""
+    """Client-side payload validation failure.
+
+    Carries optional structured fields so the HTTP 400 response can tell
+    the agent exactly which fields to fix, instead of a single string the
+    agent must trial-and-error against.
+    """
+
+    def __init__(
+        self,
+        msg: str,
+        *,
+        code: str | None = None,
+        missing_fields: list[str] | None = None,
+        invalid_fields: list[dict] | None = None,
+    ) -> None:
+        super().__init__(msg)
+        self.code = code
+        self.missing_fields = missing_fields or []
+        self.invalid_fields = invalid_fields or []
 
 
 def _ingest_state_path() -> Path:
@@ -247,6 +265,8 @@ def ingest_confirmed_candidate(
             raise IngestValidationError(
                 "creator brief bundle incomplete; include all 6 identity.* brief "
                 f"keys together or omit the bundle entirely: {brief_missing}",
+                code="creator_brief_incomplete",
+                missing_fields=brief_missing,
             )
         validate_identity_facts(facts_in)
 
@@ -329,7 +349,38 @@ def ingest_confirmed_candidate(
                     env=env,
                 )
             except cal.FactNamespaceError as exc:
-                raise IngestValidationError(str(exc)) from exc
+                # Wrap the low-level cal validation error into a structured
+                # IngestValidationError so the HTTP 400 can carry field-level
+                # hints. Parse the error message for the offending fields.
+                msg = str(exc)
+                code = "fact_validation"
+                missing: list[str] = []
+                invalid: list[dict] = []
+                if "voice_descriptors must contain 2-3" in msg:
+                    code = "voice_descriptors_count"
+                    invalid = [{"field": "identity.voice_descriptors",
+                                "reason": "must contain 2-3 items"}]
+                elif "requires provenance keys" in msg:
+                    code = "provenance_missing"
+                    # cal.py message lists the missing keys after the colon.
+                    import re as _re
+                    m = _re.search(r":\s*(.+)$", msg)
+                    if m:
+                        missing = [s.strip().strip("`'\"")
+                                   for s in m.group(1).split(",") if s.strip()]
+                elif "hero_post_url must be canonical" in msg:
+                    code = "hero_post_url_not_canonical"
+                    invalid = [{"field": "identity.hero_post_url",
+                                "reason": "must be canonical /reel/<id>/ or /p/<id>/"}]
+                elif "hero_post_url_discovered_url" in msg:
+                    code = "hero_post_url_discovered_url_mismatch"
+                    invalid = [{"field": "identity.hero_post_url_discovered_url",
+                                "reason": "must be the creator's instagram profile URL"}]
+                elif "disallowed keys" in msg:
+                    code = "disallowed_fact_keys"
+                raise IngestValidationError(
+                    msg, code=code, missing_fields=missing, invalid_fields=invalid,
+                ) from exc
             written_facts = sorted(to_write.keys())
 
     candidate_id = cal.upsert_candidate(

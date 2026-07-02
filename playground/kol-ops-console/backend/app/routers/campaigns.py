@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -104,6 +105,8 @@ from ..run_registry import (
 )
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+
+logger = logging.getLogger(__name__)
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[5])
 _KOL_ORCHESTRATOR_SESSIONS = Path.home() / ".hermes/profiles/kol-orchestrator/sessions"
@@ -810,6 +813,10 @@ async def start(
     gateway: GatewayClient = Depends(get_gateway),
     force: bool = Query(False, description="Override duplicate-campaign guard."),
 ) -> dict:
+    logger.info(
+        "launch_path=start campaign=%s env=%s force=%s user=%s",
+        campaign_id, body.env, force, user.get("email"),
+    )
     product = conn.execute(
         "SELECT sku, name, url, tags_json, notes, pitch_md, selling_points, variants_json "
         "FROM products WHERE sku=?",
@@ -910,6 +917,30 @@ async def start(
                 f"(campaign_id={active['campaign_id']}, run_id={active['run_id']}); "
                 "close it first or pass ?force=true",
             )
+
+    # Gateway-level in-flight guard. The DB status check above catches the
+    # common case, but ``force=true`` and stale ``status='running'`` rows
+    # (gateway already terminal, console not yet synced) can let a second
+    # launch slip through and spawn a parallel run on the same campaign.
+    # ``_campaign_run_in_flight`` consults the gateway directly and treats
+    # an open discovery gate (``gate_run_id`` set) as in-flight too.
+    in_flight, cur_run, cur_state = await _campaign_run_in_flight(
+        conn, gateway, campaign_id=campaign_id, env=body.env,
+    )
+    if in_flight:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "code": "campaign_run_in_flight",
+                "message": (
+                    "another agent run is still active for this campaign on "
+                    "the gateway — Stop + close it (or wait for terminal "
+                    "state) before starting again"
+                ),
+                "run_id": cur_run,
+                "run_state": cur_state,
+            },
+        )
 
     selected_variants = _selected_variants(product, body.product_variant_ids)
     whitelist_ids = [str(v["id"]) for v in selected_variants]
@@ -1384,6 +1415,10 @@ async def rediscover(
       return 409 ``rediscover_inflight``. Cheap defense against rapid
       double-clicks given the agent's slow startup.
     """
+    logger.info(
+        "launch_path=rediscover campaign=%s env=%s additional=%s user=%s",
+        campaign_id, body.env, body.additional_count, user.get("email"),
+    )
     row = conn.execute(
         "SELECT sku, test_mode_to FROM product_campaigns "
         "WHERE campaign_id=? AND env=?",

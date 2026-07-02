@@ -1696,7 +1696,14 @@ def ingest_confirmed_candidate(
             ingest_id=body.ingest_id,
         )
     except confirmed_ingest.IngestValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail: dict[str, Any] = {"message": str(exc)}
+        if exc.code:
+            detail["code"] = exc.code
+        if exc.missing_fields:
+            detail["missing_fields"] = exc.missing_fields
+        if exc.invalid_fields:
+            detail["invalid_fields"] = exc.invalid_fields
+        raise HTTPException(status_code=400, detail=detail) from exc
     except discovery_skip.DiscoverySkipActive as exc:
         raise HTTPException(
             status_code=409,

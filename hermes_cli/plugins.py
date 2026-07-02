@@ -143,6 +143,13 @@ VALID_HOOKS: Set[str] = {
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    # Fired by agent/conversation_compression.py immediately before context
+    # is summarised and the session rotated. Observer-only (return values
+    # ignored); plugins use it to snapshot soon-to-be-discarded state, e.g.
+    # kol-discovery-precompress-guard persists visited-but-unconfirmed IG
+    # handles so the next rediscover round can recover them.
+    # Kwargs: session_id: str, task_id: str, messages: list[dict].
+    "pre_compress",
     "subagent_start",
     "subagent_stop",
     # Gateway pre-dispatch hook. Fired once per incoming MessageEvent

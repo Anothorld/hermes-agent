@@ -115,6 +115,33 @@ def test_collect_operator_replies_excludes_winning_and_system():
     assert [m["message_id"] for m in replies] == ["om_win", "om_late"]
 
 
+def test_list_chat_messages_since_stops_at_cutoff(monkeypatch):
+    mod = _load()
+    pages = [
+        [
+            {"message_id": "m3", "create_time": "3000", "parent_id": "om_root"},
+            {"message_id": "m2", "create_time": "2000", "parent_id": "om_noise"},
+        ],
+        [
+            {"message_id": "m1", "create_time": "1000", "parent_id": "om_root"},
+        ],
+    ]
+
+    def _fake_since(**kwargs):
+        idx = _fake_since.calls
+        _fake_since.calls += 1
+        if idx < len(pages):
+            return pages[idx], idx + 1
+        return [], idx + 1
+
+    _fake_since.calls = 0
+    monkeypatch.setattr(mod, "list_container_messages_since", _fake_since)
+
+    messages, fetched = mod._list_chat_messages(token="tok", chat_id="chat", since_ms=1500)
+    assert fetched == 1
+    assert [m["message_id"] for m in messages] == ["m3", "m2"]
+
+
 def test_ensure_lock_notified_is_idempotent(monkeypatch):
     mod = _load()
     calls: list[int] = []

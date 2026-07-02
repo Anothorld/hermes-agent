@@ -219,25 +219,70 @@ def upload_page_html(*, escalation_id: int, token: str, error: str = "") -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>ESC:{escalation_id} 附件上传</title>
 <style>
-body {{ font-family: system-ui, sans-serif; max-width: 520px; margin: 2rem auto; padding: 0 1rem; }}
-h1 {{ font-size: 1.25rem; }}
-.note {{ color: #555; font-size: 0.9rem; }}
-input[type=file] {{ margin: 1rem 0; width: 100%; }}
-button {{ background: #1677ff; color: #fff; border: none; padding: 0.6rem 1.2rem; border-radius: 6px; cursor: pointer; }}
+body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 640px; margin: 1.5rem auto; padding: 0 1rem; color: #1d1d1f; }}
+h1 {{ font-size: 1.2rem; }}
+.note {{ color: #555; font-size: 0.85rem; line-height: 1.5; }}
+#drop {{ border: 1.5px dashed #c7c7cc; border-radius: 12px; padding: 1.2rem; text-align: center; color: #86868b; margin: 1rem 0; cursor: pointer; transition: border-color .15s, background .15s; }}
+#drop.hover {{ border-color: #1677ff; background: #f0f6ff; }}
+#drop input {{ display: none; }}
+.btn {{ background: #1677ff; color: #fff; border: none; padding: 0.5rem 1.1rem; border-radius: 8px; cursor: pointer; font-size: 0.9rem; }}
+.btn:disabled {{ opacity: .5; cursor: not-allowed; }}
+.btn.ghost {{ background: #fff; color: #1d1d1f; border: 1px solid #d2d2d7; }}
+#list {{ display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }}
+.file {{ display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid #e5e5ea; border-radius: 10px; background: #fff; }}
+.file .thumb {{ width: 40px; height: 40px; border-radius: 6px; object-fit: cover; background: #f2f2f7; flex: none; }}
+.file .thumb.ico {{ display: flex; align-items: center; justify-content: center; font-size: 1.2rem; }}
+.file .meta {{ flex: 1; min-width: 0; }}
+.file .meta .fn {{ font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.file .meta .sub {{ font-size: 0.72rem; color: #86868b; }}
+.file .acts {{ display: flex; gap: 6px; flex: none; }}
+.file .acts a, .file .acts button {{ font-size: 0.78rem; }}
+.file .rm {{ background: none; border: none; color: #ff3b30; cursor: pointer; padding: 2px 6px; border-radius: 6px; }}
+.file .rm:hover {{ background: #fff0f0; }}
+.tag {{ font-size: 0.68rem; padding: 1px 6px; border-radius: 4px; background: #e8f0ff; color: #1677ff; }}
+.err {{ color: #ff3b30; font-size: 0.8rem; }}
+#overlay {{ position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 999; padding: 24px; }}
+#overlay.show {{ display: flex; }}
+#overlay .box {{ background: #fff; border-radius: 14px; max-width: 90vw; max-height: 88vh; overflow: auto; position: relative; padding: 12px; }}
+#overlay .box img, #overlay .box iframe {{ max-width: 86vw; max-height: 80vh; border: 0; }}
+#overlay .close {{ position: absolute; top: 6px; right: 10px; background: none; border: none; font-size: 1.4rem; cursor: pointer; color: #86868b; }}
+.spinner {{ width: 16px; height: 16px; border: 2px solid #d2d2d7; border-top-color: #1677ff; border-radius: 50%; animation: sp .7s linear infinite; display: inline-block; vertical-align: middle; }}
+@keyframes sp {{ to {{ transform: rotate(360deg); }} }}
 </style>
 </head>
 <body>
-<h1>升级 ESC:{escalation_id} — 上传附件</h1>
-<p class="note">支持 PDF、JPG、PNG 等。<strong>请先完成上传，再在飞书回复文字</strong>（先回复后上传的附件无法自动带入草稿）。</p>
+<h1>升级 ESC:{escalation_id} — 附件上传</h1>
+<p class="note">支持 PDF、JPG、PNG、WEBP、GIF 等。可一次选择<strong>多个文件</strong>，上传后可预览与移除。<strong>请先完成上传，再在飞书回复文字</strong>（先回复后上传的附件无法自动带入草稿）。</p>
 {err_block}
-<form method="post" action="{base}/escalations/{escalation_id}/vault?token={token}" enctype="multipart/form-data">
-<label>选择文件（最多 {MAX_FILES} 个，单文件 ≤ {MAX_BYTES // (1024*1024)}MB）</label><br/>
-<input type="file" name="file" required accept=".pdf,.jpg,.jpeg,.png,.webp,.gif"/>
-<br/>
-<label>上传者（可选）</label><br/>
-<input type="text" name="uploaded_by" placeholder="姓名"/>
-<br/><br/>
-<button type="submit">上传</button>
-</form>
+<div id="drop">
+  <input type="file" id="finput" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.doc,.docx,.xls,.xlsx,.txt" />
+  点击或拖拽文件到此处上传（最多 {MAX_FILES} 个，单文件 ≤ {MAX_BYTES // (1024*1024)}MB）
+</div>
+<div id="list"></div>
+<div id="overlay"><div class="box"><button class="close" onclick="closeOv()">×</button><div id="ovBody"></div></div></div>
+<script>
+const ESC={escalation_id}, TOKEN="{token}", BASE="{base}";
+function esc(s){{return String(s==null?'':s).replace(/[&<>"]/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]));}}
+function kindOf(ct,name){{ct=ct||'';name=(name||'').toLowerCase();if(ct.startsWith('image/')||/\\.(png|jpe?g|webp|gif|bmp)$/.test(name))return'image';if(ct==='application/pdf'||name.endsWith('.pdf'))return'pdf';return'other';}}
+function sizeStr(n){{n=+n||0;if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(0)+' KB';return(n/1048576).toFixed(1)+' MB';}}
+function contentUrl(id){{return BASE+'/escalations/'+ESC+'/vault/'+encodeURIComponent(id)+'/content?token='+TOKEN;}}
+function openPreview(f){{const ov=document.getElementById('overlay'),b=document.getElementById('ovBody');const k=f.kind,u=contentUrl(f.id);if(k==='image'){{b.innerHTML='<img src="'+esc(u)+'" />';}}else if(k==='pdf'){{b.innerHTML='<iframe src="'+esc(u)+'"></iframe>';}}else{{b.innerHTML='<a href="'+esc(u)+'" target="_blank">此文件类型无法在线预览，点此下载</a>';}}ov.classList.add('show');}}
+function closeOv(){{document.getElementById('overlay').classList.remove('show');document.getElementById('ovBody').innerHTML='';}}
+document.getElementById('overlay').addEventListener('click',e=>{{if(e.target.id==='overlay')closeOv();}});
+async function load(){{try{{const r=await fetch(BASE+'/escalations/'+ESC+'/vault?token='+TOKEN);const j=await r.json();render(j.files||[]);}}catch(e){{}}}}
+let CUR=[];
+const LIST_EL=document.getElementById('list');
+function render(files){{CUR=files;if(!files.length){{LIST_EL.innerHTML='<p class="note">尚未上传附件</p>';return;}}LIST_EL.innerHTML=files.map((f,i)=>{{const k=f.kind||kindOf(f.content_type,f.original_name);const thumb=k==='image'?'<img class="thumb" src="'+esc(contentUrl(f.id))+'"/>':'<div class="thumb ico">'+(k==='pdf'?'📄':'📎')+'</div>';return '<div class="file" data-idx="'+i+'">'+thumb+'<div class="meta"><div class="fn">'+esc(f.original_name||'文件')+'</div><div class="sub">'+sizeStr(f.size_bytes)+' · '+(f.uploaded_by||'—')+' · <span class="tag">'+k+'</span></div></div><div class="acts"><button class="btn ghost" data-act="prev">预览</button><button class="rm" data-act="del">移除</button></div></div>';}}).join('');}}
+LIST_EL.addEventListener('click',function(e){{const row=e.target.closest('.file');if(!row)return;const f=CUR[+row.dataset.idx];if(!f)return;if(e.target.dataset.act==='prev')openPreview(f);else if(e.target.dataset.act==='del')del(f.id);}});
+async function del(id){{if(!confirm('确认移除该附件？'))return;try{{await fetch(BASE+'/escalations/'+ESC+'/vault/'+encodeURIComponent(id)+'?token='+TOKEN,{{method:'DELETE'}});await load();}}catch(e){{alert('移除失败');}}}}
+const drop=document.getElementById('drop'),finput=document.getElementById('finput');
+drop.addEventListener('click',()=>finput.click());
+drop.addEventListener('dragover',e=>{{e.preventDefault();drop.classList.add('hover');}});
+drop.addEventListener('dragleave',()=>drop.classList.remove('hover'));
+drop.addEventListener('drop',e=>{{e.preventDefault();drop.classList.remove('hover');if(e.dataTransfer.files)upload(e.dataTransfer.files);}});
+finput.addEventListener('change',()=>{{if(finput.files)upload(finput.files);finput.value='';}});
+async function upload(files){{for(const file of Array.from(files)){{const fd=new FormData();fd.append('file',file);const row=document.createElement('div');row.className='file';row.innerHTML='<div class="thumb ico"><span class="spinner"></span></div><div class="meta"><div class="fn">'+esc(file.name)+'</div><div class="sub sub">上传中…</div></div>';document.getElementById('list').appendChild(row);try{{const r=await fetch(BASE+'/escalations/'+ESC+'/vault?token='+TOKEN,{{method:'POST',body:fd}});const j=await r.json();if(!r.ok)throw new Error(j.detail||'上传失败');row.querySelector('.sub').textContent='已上传 ✓';}}catch(e){{row.querySelector('.sub').innerHTML='<span class="err">'+esc(e.message)+'</span>';}}}}await load();}}
+load();
+</script>
 </body>
 </html>"""

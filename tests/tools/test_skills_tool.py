@@ -1411,3 +1411,65 @@ def test_skill_view_cache_rotates_on_session_change(tmp_path, monkeypatch):
     keys = list(skills_tool_module._SKILL_VIEW_SESSION_CACHE)
     assert all(k[0] == "sess-b" for k in keys)
     assert len(keys) == 1
+
+
+def test_skill_view_cache_invalidates_on_mtime_change(tmp_path, monkeypatch):
+    """When the SKILL.md file is edited on disk (mtime changes), the session
+    cache entry must be dropped so the next skill_view re-reads from disk.
+    """
+    import time
+
+    skills_dir = tmp_path / "skills"
+    skill_dir = _make_skill(skills_dir, "mtime-skill", body="Version 1.")
+    skill_md = skill_dir / "SKILL.md"
+    monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", skills_dir)
+    skills_tool_module._SKILL_VIEW_SESSION_CACHE.clear()
+    skills_tool_module._SKILL_VIEW_CACHE_MTIME.clear()
+    skills_tool_module._SKILL_VIEW_CACHE_ACTIVE_SESSION = None
+
+    from tools.skills_tool import _skill_view_with_bump
+
+    with patch("tools.skill_usage.bump_view"), patch("tools.skill_usage.bump_use"):
+        first = json.loads(
+            _skill_view_with_bump({"name": "mtime-skill"}, task_id="sess-mtime")
+        )
+        assert "Version 1." in first["content"]
+        assert not first.get("cached_in_session")
+
+        # Edit the SKILL.md on disk (ensure mtime advances).
+        time.sleep(0.05)
+        skill_md.write_text("# mtime-skill\n\nVersion 2 — edited.")
+        os.utime(skill_md, None)  # bump mtime
+
+        second = json.loads(
+            _skill_view_with_bump({"name": "mtime-skill"}, task_id="sess-mtime")
+        )
+    assert not second.get("cached_in_session"), "stale cache served after mtime change"
+    assert "Version 2" in second["content"]
+
+
+def test_purge_all_skill_view_cache_clears_everything(tmp_path, monkeypatch):
+    """_purge_all_skill_view_cache (called by /reload-skills) must clear
+    both the session cache and the mtime dict regardless of session id.
+    """
+    skills_dir = tmp_path / "skills"
+    _make_skill(skills_dir, "purge-skill", body="Body.")
+    monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", skills_dir)
+    skills_tool_module._SKILL_VIEW_SESSION_CACHE.clear()
+    skills_tool_module._SKILL_VIEW_CACHE_MTIME.clear()
+    skills_tool_module._SKILL_VIEW_CACHE_ACTIVE_SESSION = None
+
+    from tools.skills_tool import _skill_view_with_bump, _purge_all_skill_view_cache
+
+    with patch("tools.skill_usage.bump_view"), patch("tools.skill_usage.bump_use"):
+        _skill_view_with_bump({"name": "purge-skill"}, task_id="sess-1")
+        _skill_view_with_bump({"name": "purge-skill"}, task_id="sess-2")
+
+    assert len(skills_tool_module._SKILL_VIEW_SESSION_CACHE) > 0
+    assert len(skills_tool_module._SKILL_VIEW_CACHE_MTIME) > 0
+
+    _purge_all_skill_view_cache()
+
+    assert len(skills_tool_module._SKILL_VIEW_SESSION_CACHE) == 0
+    assert len(skills_tool_module._SKILL_VIEW_CACHE_MTIME) == 0
+    assert skills_tool_module._SKILL_VIEW_CACHE_ACTIVE_SESSION is None

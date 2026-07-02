@@ -1604,6 +1604,7 @@ registry.register(
     emoji="📚",
 )
 _SKILL_VIEW_SESSION_CACHE: dict[tuple[str, str, str], str] = {}
+_SKILL_VIEW_CACHE_MTIME: dict[tuple[str, str, str], float] = {}
 _SKILL_VIEW_CACHE_ACTIVE_SESSION: str | None = None
 _SKILL_VIEW_CACHE_MAX_ENTRIES = 256
 
@@ -1612,6 +1613,30 @@ def _purge_skill_view_cache_for_session(session_id: str) -> None:
     stale = [k for k in _SKILL_VIEW_SESSION_CACHE if k[0] == session_id]
     for key in stale:
         del _SKILL_VIEW_SESSION_CACHE[key]
+        _SKILL_VIEW_CACHE_MTIME.pop(key, None)
+
+
+def _purge_all_skill_view_cache() -> None:
+    """Clear every session's skill_view cache. Used by /reload-skills."""
+    _SKILL_VIEW_SESSION_CACHE.clear()
+    _SKILL_VIEW_CACHE_MTIME.clear()
+    global _SKILL_VIEW_CACHE_ACTIVE_SESSION
+    _SKILL_VIEW_CACHE_ACTIVE_SESSION = None
+
+
+def _skill_view_source_mtime(skill_dir: str | None, file_path: str | None) -> float | None:
+    """Return the mtime of the skill file backing a cache entry, or ``None``
+    when it cannot be stat'd. Used to invalidate the session cache when a
+    SKILL.md (or linked file) is edited on disk mid-session.
+    """
+    if not skill_dir:
+        return None
+    try:
+        base = Path(skill_dir)
+        target = base / (file_path or "SKILL.md")
+        return target.stat().st_mtime
+    except Exception:
+        return None
 
 
 def _rotate_skill_view_cache(session_id: str | None) -> None:
@@ -1626,6 +1651,7 @@ def _rotate_skill_view_cache(session_id: str | None) -> None:
     while len(_SKILL_VIEW_SESSION_CACHE) > _SKILL_VIEW_CACHE_MAX_ENTRIES:
         oldest = next(iter(_SKILL_VIEW_SESSION_CACHE))
         del _SKILL_VIEW_SESSION_CACHE[oldest]
+        _SKILL_VIEW_CACHE_MTIME.pop(oldest, None)
 
 
 def _resolve_skill_view_session_id(task_id: str | None) -> str | None:
@@ -1666,8 +1692,20 @@ def _skill_view_with_bump(args, **kw):
         try:
             cached = json.loads(_SKILL_VIEW_SESSION_CACHE[cache_key])
             if isinstance(cached, dict) and cached.get("success"):
-                cached = {**cached, "cached_in_session": True}
-                return json.dumps(cached, ensure_ascii=False)
+                # mtime invalidation: if the backing SKILL.md / linked file
+                # changed on disk since we cached, drop the entry and re-read
+                # so edits to SKILL.md take effect without a gateway restart.
+                cached_mtime = _SKILL_VIEW_CACHE_MTIME.get(cache_key)
+                live_mtime = _skill_view_source_mtime(
+                    cached.get("skill_dir"), file_path,
+                )
+                if live_mtime is not None and cached_mtime is not None \
+                        and live_mtime != cached_mtime:
+                    del _SKILL_VIEW_SESSION_CACHE[cache_key]
+                    _SKILL_VIEW_CACHE_MTIME.pop(cache_key, None)
+                else:
+                    cached = {**cached, "cached_in_session": True}
+                    return json.dumps(cached, ensure_ascii=False)
         except Exception:
             pass
     result = skill_view(
@@ -1678,6 +1716,11 @@ def _skill_view_with_bump(args, **kw):
         if isinstance(parsed, dict) and parsed.get("success"):
             if cache_key:
                 _SKILL_VIEW_SESSION_CACHE[cache_key] = result
+                mtime = _skill_view_source_mtime(
+                    parsed.get("skill_dir"), file_path,
+                )
+                if mtime is not None:
+                    _SKILL_VIEW_CACHE_MTIME[cache_key] = mtime
             # Use the resolved skill name from the payload when present —
             # qualified forms ("plugin:skill") return with the canonical name.
             resolved = parsed.get("name") or name

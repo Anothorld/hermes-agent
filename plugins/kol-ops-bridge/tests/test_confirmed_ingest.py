@@ -262,3 +262,58 @@ def test_buffer_crash_recovery_still_replayable(cal_db, tmp_path, monkeypatch):
     pending = buf_mod.list_pending(buf_path)
     assert len(pending) == 1
     assert pending[0]["fact_id"] == "buffer-frank-1"
+
+
+# ---------------------------------------------------------------------------
+# Round-2: structured IngestValidationError fields
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_validation_error_carries_structured_fields():
+    """IngestValidationError must carry code/missing_fields/invalid_fields
+    so the HTTP 400 can tell the agent exactly what to fix.
+    """
+    ci = sys.modules["kol_ops_bridge_pkg.confirmed_ingest"]
+    exc = ci.IngestValidationError(
+        "creator brief bundle incomplete",
+        code="creator_brief_incomplete",
+        missing_fields=["hero_post_url", "hero_post_note"],
+        invalid_fields=[{"field": "identity.voice_descriptors", "reason": "2-3"}],
+    )
+    assert exc.code == "creator_brief_incomplete"
+    assert exc.missing_fields == ["hero_post_url", "hero_post_note"]
+    assert len(exc.invalid_fields) == 1
+    assert str(exc) == "creator brief bundle incomplete"
+
+
+def test_ingest_brief_bundle_400_has_missing_fields(cal_db, tmp_path, monkeypatch):
+    """A partial creator brief bundle must raise IngestValidationError with
+    code='creator_brief_incomplete' and missing_fields listing the absent keys.
+    """
+    ci = _ingest(cal_db, tmp_path, monkeypatch)
+    cal = cal_db
+    _seed_campaign(cal)
+
+    # Include voice_descriptors but omit the other 5 brief keys -> partial bundle.
+    facts = {
+        "identity.instagram_profile_url": "https://www.instagram.com/partial_kol/",
+        "identity.instagram_profile_url_source": "ig_bio",
+        "identity.instagram_profile_url_discovered_at": "2026-06-01T09:00:00+00:00",
+        "identity.instagram_profile_url_discovered_url": "https://www.instagram.com/partial_kol/",
+        "identity.voice_descriptors": ["warm"],
+        "identity.voice_descriptors_source": "ig_profile",
+        "identity.voice_descriptors_discovered_at": "2026-06-01T09:00:00+00:00",
+        "identity.voice_descriptors_discovered_url": "https://www.instagram.com/partial_kol/",
+    }
+    with pytest.raises(ci.IngestValidationError) as exc_info:
+        ci.ingest_confirmed_candidate(
+            campaign_id=CAMPAIGN,
+            env="TEST",
+            source="tool:cdp-ingest",
+            identity={"primary_handle": "partial_kol", "platform": "instagram"},
+            candidate={"source": "discovery", "payload": {}},
+            identity_facts=facts,
+        )
+    assert exc_info.value.code == "creator_brief_incomplete"
+    assert len(exc_info.value.missing_fields) > 0
+    assert "identity.content_pillars" in exc_info.value.missing_fields

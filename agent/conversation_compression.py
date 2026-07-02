@@ -450,6 +450,23 @@ def compress_context(
         except Exception:
             pass
 
+    # Plugin hook: pre_compress. Side-effect-only (e.g. the
+    # kol-discovery-precompress-guard plugin walks ``messages`` for
+    # browser_navigate instagram.com URLs and persists a "visited but
+    # undecided" handle snapshot to /tmp so the next rediscover round's
+    # resume_directives STEP_0 can recover them). Return values are
+    # ignored; failures are logged but never block compression.
+    try:
+        from hermes_cli.plugins import invoke_hook as _invoke_hook
+        _invoke_hook(
+            "pre_compress",
+            session_id=agent.session_id or "",
+            task_id=task_id,
+            messages=list(messages),
+        )
+    except Exception:
+        logger.exception("pre_compress hook failed")
+
     try:
         compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
     except TypeError:

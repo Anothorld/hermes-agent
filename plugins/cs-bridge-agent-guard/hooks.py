@@ -30,6 +30,7 @@ def pre_tool_call(
     task_id: str = "",
     session_id: str = "",
     tool_call_id: str = "",
+    run_kind: str = "",
     **_: Any,
 ) -> HookResult:
     return _send_guard().pre_tool_block(
@@ -37,4 +38,5 @@ def pre_tool_call(
         args=args,
         task_id=task_id,
         session_id=session_id,
+        run_kind=run_kind,
     )

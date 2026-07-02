@@ -778,6 +778,146 @@ def test_sync_gate_escalates_when_run_evicted_max_retries() -> None:
     assert row["gate_run_id"] is None
 
 
+def test_early_escalation_after_consecutive_zero_new() -> None:
+    """Two consecutive auto-retry rounds produce zero net-new candidates:
+    gate escalates immediately instead of firing a third auto-retry,
+    even though retry_count < MAX_AUTO_RETRIES.
+
+    Reproduces the SSF8033-20260609 2026-07-01 failure mode where 5 zero-new
+    rounds burned ~5.2M tokens before escalation.
+    """
+    import json as _json
+
+    from app.discovery_gate import MAX_CONSECUTIVE_ZERO_NEW_RUNS
+
+    assert MAX_CONSECUTIVE_ZERO_NEW_RUNS == 2, (
+        "test assumes the configured threshold is 2"
+    )
+
+    conn = _seed_conn()
+    # retry_count=1 means this is the 2nd auto-retry; with the pre-seeded
+    # diagnostics history below, the streak will reach 2 after the current
+    # round appends its own zero-growth entry.
+    _seed_campaign(
+        conn,
+        run_id="run-retry-2",
+        gate_run_id="run-retry-2",
+        target_floor=10,
+        status="running",
+        retry_count=1,
+    )
+    # Pre-seed diagnostics_history with two prior rounds both stuck at
+    # persisted_count_at_end=3 (zero new between them). The current round
+    # will also report 3 visible candidates, so the streak hits 2 and
+    # early-escalation fires.
+    prior_history = [
+        {
+            "round_index": 1,
+            "run_id": "run-initial",
+            "target_floor": 10,
+            "persisted_count_at_end": 3,
+            "is_auto_retry": False,
+        },
+        {
+            "round_index": 2,
+            "run_id": "run-retry-1",
+            "target_floor": 10,
+            "persisted_count_at_end": 3,
+            "is_auto_retry": True,
+        },
+    ]
+    conn.execute(
+        "UPDATE product_campaigns SET diagnostics_history=? "
+        "WHERE campaign_id='CID-1' AND env='TEST'",
+        (_json.dumps(prior_history),),
+    )
+
+    bridge = _StubBridge()
+    # 3 visible candidates — same as the prior two rounds → zero new.
+    bridge.candidates = [
+        {"identity_id": 1, "primary_handle": "a",
+         "candidate_status": "discovered"},
+        {"identity_id": 2, "primary_handle": "b",
+         "candidate_status": "discovered"},
+        {"identity_id": 3, "primary_handle": "c",
+         "candidate_status": "discovered"},
+    ]
+    gateway = _StubGateway()
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).get("/products/SKU-1/campaigns?env=TEST")
+    assert r.status_code == 200, r.text
+
+    # Early-escalation: NO auto-retry fired even though retry_count(1) <
+    # MAX_AUTO_RETRIES(5).
+    assert gateway.runs_started == [], (
+        "early-escalation must not fire another auto-retry"
+    )
+    # Escalation opened with the zero-new reason.
+    assert len(bridge.escalations) == 1
+    esc = bridge.escalations[0]
+    assert esc["reason"] == "discovery_floor_unmet"
+    assert "0 新增" in esc["question_to_operator"]
+    # gate_run_id cleared.
+    row = conn.execute(
+        "SELECT gate_run_id, floor_unmet_reason FROM product_campaigns "
+        "WHERE campaign_id='CID-1' AND env='TEST'"
+    ).fetchone()
+    assert row["gate_run_id"] is None
+    assert row["floor_unmet_reason"] is not None
+
+
+def test_no_early_escalation_when_latest_round_grew_pool() -> None:
+    """Sanity guard: if the most recent round DID add candidates, the
+    zero-new streak is broken and early-escalation must NOT fire — the
+    gate falls through to the normal auto-retry path.
+    """
+    import json as _json
+
+    conn = _seed_conn()
+    _seed_campaign(
+        conn,
+        run_id="run-retry-2",
+        gate_run_id="run-retry-2",
+        target_floor=10,
+        status="running",
+        retry_count=1,
+    )
+    # Prior rounds: 3 → 3 (one zero-new transition). Current round will
+    # report 5 → streak breaks at 1 (< MAX_CONSECUTIVE_ZERO_NEW_RUNS=2).
+    prior_history = [
+        {"round_index": 1, "run_id": "run-initial",
+         "persisted_count_at_end": 3, "is_auto_retry": False},
+        {"round_index": 2, "run_id": "run-retry-1",
+         "persisted_count_at_end": 3, "is_auto_retry": True},
+    ]
+    conn.execute(
+        "UPDATE product_campaigns SET diagnostics_history=? "
+        "WHERE campaign_id='CID-1' AND env='TEST'",
+        (_json.dumps(prior_history),),
+    )
+
+    bridge = _StubBridge()
+    bridge.candidates = [
+        {"identity_id": i, "primary_handle": f"h{i}",
+         "candidate_status": "discovered"}
+        for i in range(1, 6)  # 5 visible — grew from 3
+    ]
+    gateway = _StubGateway()
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).get("/products/SKU-1/campaigns?env=TEST")
+    assert r.status_code == 200, r.text
+
+    # Streak broken → normal auto-retry path, NOT early-escalation.
+    assert len(bridge.escalations) == 0, (
+        "no early-escalation when the latest round grew the pool"
+    )
+    assert len(gateway.runs_started) == 1, (
+        "normal auto-retry should fire when streak < threshold"
+    )
+
+
 def test_sync_row_status_flips_to_closed_when_run_id_evicted() -> None:
     """Row has ``status='running'`` and a ``run_id`` the gateway has
     evicted (returns None). Status flips to ``closed`` so /start and the
@@ -804,3 +944,179 @@ def test_sync_row_status_flips_to_closed_when_run_id_evicted() -> None:
         "WHERE campaign_id='CID-1' AND env='TEST'"
     ).fetchone()
     assert row["status"] == "closed"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 optimizations: /start mutex, auto-retry in-flight guard,
+# precompress snapshot injection, hard_rules block, visited_handles recovery
+# ---------------------------------------------------------------------------
+
+
+def test_start_409_when_gate_run_id_set() -> None:
+    """/start must return 409 campaign_run_in_flight when a discovery gate
+    is active (gate_run_id set), mirroring /rediscover's mutex.
+    """
+    conn = _seed_conn()
+    _seed_campaign(conn, campaign_id="CID-1", env="LIVE",
+                   run_id="run-discovery", gate_run_id="run-discovery",
+                   status="running")
+    conn.execute(
+        "UPDATE products SET url='https://example.com' WHERE sku='SKU-1'"
+    )
+    bridge = _StubBridge()
+    gateway = _StubGateway()
+    gateway.states["run-discovery"] = {"status": "running"}
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).post(
+        "/campaigns/CID-1/start?force=true",
+        json={
+            "env": "LIVE",
+            "product_sku": "SKU-1",
+            "product_display_name": "Widget",
+            "headcount_target": 3,
+            "budget_per_kol": 100.0,
+            "budget_total": 1000.0,
+            "absolute_floor": 5.0,
+            "deliverable_platforms": ["instagram"],
+        },
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "campaign_run_in_flight"
+    assert gateway.runs_started == []
+
+
+def test_evaluate_gate_skips_auto_retry_when_in_flight() -> None:
+    """When evaluate_gate_after_terminal detects an in-flight run (e.g.
+    operator fired /rediscover between terminal sync and gate evaluation),
+    it must skip the auto-retry instead of stacking a parallel run.
+    """
+    import asyncio
+
+    from app.discovery_gate import evaluate_gate_after_terminal
+    from app.bridge_agent_contract_loader import gateway_contract_for_brief
+
+    conn = _seed_conn()
+    _seed_campaign(
+        conn, run_id="run-old", gate_run_id="run-old",
+        target_floor=10, status="running", retry_count=0,
+    )
+    bridge = _StubBridge()
+    bridge.candidates = []  # current=0 < target_floor=10
+    gateway = _StubGateway()
+    # The old discovery run is terminal...
+    gateway.states["run-old"] = {"status": "completed"}
+    # ...but the operator already fired a rediscover that is now running.
+    gateway.states["run-operator"] = {"status": "running"}
+    conn.execute(
+        "UPDATE product_campaigns SET run_id='run-operator', "
+        "gate_run_id='run-operator' WHERE campaign_id='CID-1' AND env='TEST'"
+    )
+
+    instructions = gateway_contract_for_brief(compact=True)
+    result = asyncio.run(evaluate_gate_after_terminal(
+        bridge=bridge, gateway=gateway, conn=conn,
+        campaign_id="CID-1", env="TEST",
+        target_floor=10, retry_count=0,
+        run_info={"status": "completed", "output": ""},
+        rediscovery_instructions=instructions,
+        gate_run_id="run-old",  # stale — row now has run-operator
+    ))
+    # gate_run_id mismatch -> skipped_stale_gate_run_id (the in-flight guard
+    # is a secondary defense; the primary stale check fires first here).
+    assert result["ok"] is True
+    assert result["outcome"] in (
+        "skipped_stale_gate_run_id", "skipped_in_flight_on_terminal",
+    )
+    assert gateway.runs_started == []
+
+
+def test_compose_rediscover_brief_includes_hard_rules() -> None:
+    """The brief must inline the # hard_rules block so the agent sees the
+    bootstrap / ingest-self-check / visit-conclusion rules even when its
+    skill_view cache serves a stale SKILL.md.
+    """
+    from app.discovery_gate import _compose_rediscover_brief
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE products (sku TEXT, name TEXT, url TEXT, tags_json TEXT, "
+        "notes TEXT, pitch_md TEXT, selling_points TEXT, variants_json TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO products VALUES (?,?,?,?,?,?,?,?)",
+        ("SKU-1", "Widget", "https://example.com", "[]", "", "", "", "[]"),
+    )
+    product = conn.execute("SELECT * FROM products WHERE sku='SKU-1'").fetchone()
+    brief = _compose_rediscover_brief(
+        campaign_id="CID-1", env="LIVE", product=product,
+        additional_count=5, excluded_handles=["foo", "bar"],
+        test_mode_to=None, prior_diagnostics=None,
+    )
+    assert "# hard_rules" in brief
+    assert "--with-status" in brief
+    assert "voice_descriptors" in brief
+    assert "visited_handles" in brief
+    conn.close()
+
+
+def test_compose_rediscover_brief_injects_precompress_snapshot(
+    tmp_path, monkeypatch,
+) -> None:
+    """When a precompress snapshot exists on disk, its handles are merged
+    into # resume_directives even without prior_diagnostics.
+    """
+    import json as _json
+    import tempfile
+
+    from app.discovery_gate import _compose_rediscover_brief
+
+    sid = "kol-campaign:LIVE:CID-1"
+    safe = sid.replace(":", "_")
+    snap = tmp_path / f"precompress_pending_{safe}.json"
+    snap.write_text(_json.dumps({
+        "session_id": sid,
+        "pending_handles": ["snap_handle1", "snap_handle2"],
+    }))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE products (sku TEXT, name TEXT, url TEXT, tags_json TEXT, "
+        "notes TEXT, pitch_md TEXT, selling_points TEXT, variants_json TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO products VALUES (?,?,?,?,?,?,?,?)",
+        ("SKU-1", "Widget", "", "[]", "", "", "", "[]"),
+    )
+    product = conn.execute("SELECT * FROM products WHERE sku='SKU-1'").fetchone()
+    brief = _compose_rediscover_brief(
+        campaign_id="CID-1", env="LIVE", product=product,
+        additional_count=3, excluded_handles=[],
+        test_mode_to=None, prior_diagnostics=None,
+    )
+    assert "# resume_directives" in brief
+    assert "snap_handle1" in brief
+    assert "snap_handle2" in brief
+    conn.close()
+
+
+def test_extract_visited_handles_heuristic_recovers_from_prose() -> None:
+    """When the agent omits visited_handles YAML, the heuristic should
+    recover handles mentioned near DISCARD / ingest signals.
+    """
+    from app.discovery_gate import _extract_visited_handles_heuristic
+
+    text = (
+        "I visited @building_a_barndo but it's below 100K - DISCARD.\n"
+        "Successfully ingested `carson.roney` (candidate_id 485).\n"
+        "Also checked @vda_designs."
+    )
+    result = _extract_visited_handles_heuristic(text)
+    assert result is not None
+    handles = {item.split(" — ")[0] for item in result}
+    assert "building_a_barndo" in handles
+    assert "carson.roney" in handles
+    assert "vda_designs" in handles

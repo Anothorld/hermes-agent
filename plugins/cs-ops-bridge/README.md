@@ -189,6 +189,9 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 | GET | `/sessions/{id}/attachment-guard-context` | — | PDF guard allow list for draft-save |
 | POST | `/escalations/{id}/resume` | key | Launch gateway + resolve |
 | POST | `/sessions/{id}/relaunch` | key | Retry failed/stuck session |
+| POST | `/sessions/{id}/close` | key | QuickCEP `leave-chat` + optional CAL `reviewed` (Console **结束工单**) |
+
+**Close confirmation:** Email sessions record `leaveChat` in message history; live chat uses `chat_end`. Bridge `close_session.py` and profile `quickcep_cli leave-chat` accept both; legacy CLI-only `chat_end` checks caused false `chat_end_not_confirmed`.
 
 Operator UI: `playground/povison-cs-console/` (port 8092).
 

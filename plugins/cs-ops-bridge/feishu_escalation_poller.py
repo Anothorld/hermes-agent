@@ -14,7 +14,12 @@ from typing import Any
 
 from . import cal
 from .escalation_resume import resume_escalation
-from .feishu_client import escalation_chat_id, list_container_messages, tenant_access_token
+from .feishu_client import (
+    escalation_chat_id,
+    list_container_messages,
+    list_container_messages_since,
+    tenant_access_token,
+)
 from .feishu_notify import is_system_escalation_message, notify_escalation_locked
 
 log = logging.getLogger(__name__)
@@ -22,7 +27,7 @@ log = logging.getLogger(__name__)
 _ENV = os.environ.get("CS_OPS_ENV", "LIVE")
 _POLL_SEC = int(os.environ.get("CS_OPS_FEISHU_POLL_INTERVAL_SEC", "30"))
 _CHAT_PAGE_SIZE = int(os.environ.get("CS_OPS_FEISHU_CHAT_PAGE_SIZE", "50"))
-_CHAT_MAX_PAGES = int(os.environ.get("CS_OPS_FEISHU_CHAT_LIST_MAX_PAGES", "5"))
+_CHAT_MAX_PAGES = int(os.environ.get("CS_OPS_FEISHU_CHAT_LIST_MAX_PAGES", "30"))
 _THREAD_PAGE_SIZE = int(os.environ.get("CS_OPS_FEISHU_THREAD_PAGE_SIZE", "20"))
 _THREAD_MAX_PAGES = int(os.environ.get("CS_OPS_FEISHU_THREAD_LIST_MAX_PAGES", "5"))
 
@@ -42,14 +47,25 @@ def _list_thread_messages(*, token: str, thread_id: str) -> list[dict[str, Any]]
     )
 
 
-def _list_chat_messages(*, token: str, chat_id: str) -> list[dict[str, Any]]:
-    return list_container_messages(
+def _list_chat_messages(*, token: str, chat_id: str, since_ms: int = 0) -> tuple[list[dict[str, Any]], int]:
+    """Fetch group chat messages back to since_ms so busy chats do not hide older replies."""
+    if since_ms > 0:
+        return list_container_messages_since(
+            token=token,
+            container_id_type="chat",
+            container_id=chat_id,
+            since_ms=since_ms,
+            page_size=_CHAT_PAGE_SIZE,
+            max_pages=_CHAT_MAX_PAGES,
+        )
+    messages = list_container_messages(
         token=token,
         container_id_type="chat",
         container_id=chat_id,
         page_size=_CHAT_PAGE_SIZE,
         max_pages=_CHAT_MAX_PAGES,
     )
+    return messages, 0
 
 
 def _replies_to_root(messages: list[dict[str, Any]], root_message_id: str) -> list[dict[str, Any]]:
@@ -71,6 +87,8 @@ def _list_escalation_reply_messages(
     feishu_chat_id: str,
     feishu_message_id: str,
     feishu_thread_id: str,
+    esc_created_ms: int = 0,
+    escalation_id: int | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Return candidate reply messages and the listing strategy used."""
     if feishu_thread_id and _is_topic_thread_id(feishu_thread_id):
@@ -81,8 +99,50 @@ def _list_escalation_reply_messages(
     if not chat_id or not root_id:
         return [], "missing_chat_or_root"
 
-    chat_messages = _list_chat_messages(token=token, chat_id=chat_id)
-    return _replies_to_root(chat_messages, root_id), "chat_parent"
+    chat_messages, pages_fetched = _list_chat_messages(
+        token=token,
+        chat_id=chat_id,
+        since_ms=esc_created_ms,
+    )
+    replies = _replies_to_root(chat_messages, root_id)
+    # #region agent log
+    try:
+        import urllib.request as _ur
+
+        _payload = json.dumps(
+            {
+                "sessionId": "f4b5a4",
+                "runId": "post-fix",
+                "hypothesisId": "D",
+                "location": "feishu_escalation_poller.py:_list_escalation_reply_messages",
+                "message": "chat_parent reply scan",
+                "data": {
+                    "escalation_id": escalation_id,
+                    "root_id": root_id,
+                    "since_ms": esc_created_ms,
+                    "pages_fetched": pages_fetched,
+                    "chat_messages": len(chat_messages),
+                    "replies_under_root": len(replies),
+                    "reply_ids": [str(m.get("message_id") or "") for m in replies],
+                },
+                "timestamp": int(time.time() * 1000),
+            },
+            ensure_ascii=False,
+        ).encode()
+        _req = _ur.Request(
+            "http://127.0.0.1:7411/ingest/32e61462-f4f7-4538-9c62-3cdb124b8dba",
+            data=_payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Debug-Session-Id": "f4b5a4",
+            },
+            method="POST",
+        )
+        _ur.urlopen(_req, timeout=1).read()
+    except Exception:
+        pass
+    # #endregion
+    return replies, "chat_parent"
 
 
 def _message_text(item: dict[str, Any]) -> str:
@@ -213,6 +273,8 @@ def _poll_resuming_escalations(
                 feishu_chat_id=feishu_chat_id,
                 feishu_message_id=feishu_message_id,
                 feishu_thread_id=feishu_thread_id,
+                esc_created_ms=_escalation_created_ms(esc),
+                escalation_id=int(eid),
             )
         except urllib.error.HTTPError as exc:
             log.warning("feishu list messages failed resuming esc=%s: %s", eid, exc)
@@ -302,6 +364,8 @@ def poll_once() -> dict[str, Any]:
                 feishu_chat_id=feishu_chat_id,
                 feishu_message_id=feishu_message_id,
                 feishu_thread_id=feishu_thread_id,
+                esc_created_ms=_escalation_created_ms(esc),
+                escalation_id=int(eid),
             )
         except urllib.error.HTTPError as exc:
             log.warning("feishu list messages failed esc=%s: %s", eid, exc)

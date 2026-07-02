@@ -6,7 +6,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from .bridge_agent_contract import process_instructions, resume_instructions
+from .bridge_agent_contract import process_instructions, resume_instructions, edit_memory_instructions
 from .gateway_launch import (
     drain_run_events,
     launch_dedup_key,
@@ -108,6 +108,42 @@ class GatewayClient:
             dedup_message_id=f"resume:{escalation_id}",
         )
 
+    def start_edit_memory_run(
+        self,
+        *,
+        quickcep_session_id: str,
+        env: str,
+        ai_draft_html: str,
+        operator_draft_html: str,
+        operator_id: str = "",
+    ) -> LaunchOutcome:
+        """Launch an edit-memory run that inherits the reply context (PR3).
+
+        The run is guard-locked to hindsight memory tools via ``run_kind:
+        "edit_memory"`` (forwarded by the gateway to the cs-bridge-agent-guard
+        pre_tool_call hook, which switches to whitelist mode). The agent
+        analyzes the operator's edit and retains product/policy corrections.
+        """
+        session_id = gateway_session_id(env=env, quickcep_session_id=quickcep_session_id)
+        brief = (
+            f"# operator_edit_memory\n"
+            f"hermes_profile: {session_id.split(':')[0]}\n"
+            f"env: {env}\n"
+            f"quickcep_session_id: {quickcep_session_id}\n"
+            f"operator_id: {operator_id}\n\n"
+            f"## original AI draft\n{ai_draft_html}\n\n"
+            f"## operator-edited draft (sent to customer)\n{operator_draft_html}\n\n"
+            "Analyze the diff and retain ONLY product/policy factual corrections into Hindsight. "
+            "This run is restricted to hindsight tools — do not call any other tool."
+        )
+        return self._start_run(
+            input_text=brief,
+            instructions=edit_memory_instructions(),
+            session_id=session_id,
+            dedup_message_id=f"edit_memory:{quickcep_session_id}",
+            run_kind="edit_memory",
+        )
+
     def _start_run(
         self,
         *,
@@ -115,6 +151,7 @@ class GatewayClient:
         instructions: str,
         session_id: str,
         dedup_message_id: str,
+        run_kind: str = "",
     ) -> LaunchOutcome:
         dedup = launch_dedup_key(session_id, dedup_message_id)
         if not try_acquire_launch(dedup):
@@ -129,6 +166,8 @@ class GatewayClient:
             }
             if _gateway_yolo_enabled():
                 body["yolo"] = True
+            if run_kind:
+                body["run_kind"] = run_kind
             out = post_run_with_retry(base=self.base, api_key=self.api_key, body=body)
             if not out:
                 return LaunchOutcome(run_id=None)

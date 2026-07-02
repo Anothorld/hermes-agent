@@ -99,8 +99,16 @@ def cmd_list_candidate_handles(args: argparse.Namespace) -> None:
         params={"env": args.env},
     )
     if args.plain:
-        for handle in data.get("handles", []):
-            print(handle)
+        items = data.get("items") or []
+        if args.with_status:
+            for item in items:
+                handle = item.get("handle")
+                if not handle:
+                    continue
+                print(f"{handle}\t{item.get('candidate_status', '')}")
+        else:
+            for handle in data.get("handles", []):
+                print(handle)
         return
     print_json(data)
 
@@ -269,6 +277,13 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_env_arg(p)
     p.add_argument("--campaign-id", required=True)
     p.add_argument("--plain", action="store_true", help="Print one handle per line.")
+    p.add_argument(
+        "--with-status",
+        action="store_true",
+        help=("With --plain, print '<handle>\\t<candidate_status>' TSV rows "
+              "so callers can build a status-bucketed exclusion set without "
+              "pulling the full JSON items array."),
+    )
     p.set_defaults(func=cmd_list_candidate_handles)
 
     p = sub.add_parser(

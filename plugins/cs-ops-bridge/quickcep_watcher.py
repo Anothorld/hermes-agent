@@ -216,6 +216,24 @@ def _record_followup_while_busy(*, session_id: str, message_id: str, status: str
     )
 
 
+def _visitor_name(visitor_info: Any) -> Optional[str]:
+    """Best-effort display name from a QuickCEP visitorInfo dict."""
+    if not isinstance(visitor_info, dict):
+        return None
+    for key in ("firstName", "lastName", "nickname", "name"):
+        val = str(visitor_info.get(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _visitor_locale(visitor_info: Any) -> Optional[str]:
+    if not isinstance(visitor_info, dict):
+        return None
+    val = str(visitor_info.get("country") or visitor_info.get("locale") or "").strip()
+    return val or None
+
+
 def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     session_id = str(info.get("chatSubSessionId") or "")
     message_id = str(info.get("id") or info.get("lastMsgTime") or time.time())
@@ -233,6 +251,23 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     email = info.get("email")
     if not email and isinstance(info.get("visitorInfo"), dict):
         email = info["visitorInfo"].get("email")
+
+    # ── Internal email blocklist ──────────────────────────────────
+    # Skip processing when the sender (customer email) or any
+    # recipient address matches an internal Povison mailbox.
+    _INTERNAL_EMAIL_BLOCKLIST = frozenset({
+        "chenyaozhuang@povison-inc.com",
+        "liujinli@povison-inc.com",
+        "logistics@povison-inc.com",
+    })
+    email_lower = str(email or "").lower().strip()
+    if email_lower in _INTERNAL_EMAIL_BLOCKLIST:
+        log.info(
+            "skip launch session %s internal_email_blocklist sender=%s",
+            session_id,
+            email_lower,
+        )
+        return None
 
     gate = check_intent_gate(
         session_id,
@@ -269,6 +304,13 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         customer_email=email,
         message_id=message_id,
         env=_ENV,
+        email_subject=(info.get("email_subject") or None),
+        last_message_preview=(info.get("content_preview") or None),
+        intention_tags=(
+            list(info["intentionTags"]) if info.get("intentionTags") else None
+        ),
+        customer_name=_visitor_name(info.get("visitorInfo")),
+        locale=_visitor_locale(info.get("visitorInfo")),
     )
     if result.get("deduped"):
         log.info("deduped session %s message %s", session_id, message_id)
@@ -426,6 +468,7 @@ def run_rest_reconcile_once() -> dict[str, Any]:
             "intentionTags": row.get("intentionTags"),
             "channel": row.get("channel") or "email",
             "operatorIds": row.get("operatorIds"),
+            "visitorInfo": vi,
         }
         if not inbound_payload_is_email(info):
             continue

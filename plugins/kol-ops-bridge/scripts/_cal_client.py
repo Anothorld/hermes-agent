@@ -155,6 +155,12 @@ class CALClient:
                 "detail": detail,
                 "path": path,
             }
+            # Parse structured 400 detail (dict with code/missing_fields/
+            # invalid_fields) so the agent can programmatically fix the
+            # payload instead of trial-and-erroring against a string.
+            structured = _parse_structured_detail(detail)
+            if structured:
+                fields["structured"] = structured
             hint = _http_error_hint(detail)
             if hint:
                 fields["hint"] = hint
@@ -195,6 +201,28 @@ _JSON_FIELD_HINTS: dict[str, str] = {
     "primary_goal": "Goal from dispatch context (e.g. outreach, compensation_negotiation).",
     "latest_email": "Thread anchor {thread_id, message_id, subject}.",
 }
+
+
+def _parse_structured_detail(detail: str) -> Optional[dict[str, Any]]:
+    """Extract structured fields from a JSON 400 detail body.
+
+    The bridge's ingest-confirmed-candidate endpoint now returns a dict
+    with ``code``, ``missing_fields``, ``invalid_fields`` alongside
+    ``message``. Parse and surface them so the agent can read the exact
+    fields to fix without regex-parsing the message string.
+    """
+    try:
+        parsed = json.loads(detail)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in ("code", "missing_fields", "invalid_fields", "message"):
+        val = parsed.get(key)
+        if val is not None:
+            out[key] = val
+    return out or None
 
 
 def _http_error_hint(detail: str) -> Optional[str]:

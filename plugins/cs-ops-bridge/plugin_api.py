@@ -94,6 +94,19 @@ class EscalationResumeBody(BaseModel):
     env: str = "LIVE"
 
 
+class ConsoleEscalationReplyBody(BaseModel):
+    operator_answer: str
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    env: str = "LIVE"
+
+
+class AutopilotSettingsBody(BaseModel):
+    enabled: Optional[bool] = None
+    send_after_sec: Optional[int] = None
+    updated_by: str = "console"
+
+
 class SessionRelaunchBody(BaseModel):
     env: str = "LIVE"
     message_id: Optional[str] = None
@@ -130,6 +143,23 @@ class HandoffBody(BaseModel):
             allowed = ", ".join(sorted(HANDOFF_PHASES))
             raise ValueError(f"invalid handoff phase {value!r}; allowed: {allowed}")
         return phase
+
+
+class DraftBody(BaseModel):
+    env: str = "LIVE"
+    draft_html: str
+    attachments: list[Any] = Field(default_factory=list)
+    source: str = "agent"
+    subject: Optional[str] = None
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+
+    @field_validator("source")
+    @classmethod
+    def _validate_source(cls, value: str) -> str:
+        if value not in ("agent", "operator_edit", "resume_agent"):
+            raise ValueError(f"invalid draft source {value!r}; allowed: agent, operator_edit, resume_agent")
+        return value
 
 
 @router.get("/health")
@@ -208,8 +238,255 @@ def list_sessions_route(
     status: Optional[str] = Query(None),
     q: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    with_counts: bool = Query(False),
 ) -> dict[str, Any]:
-    return {"sessions": cal.list_sessions(env=env, status=status, q=q, limit=limit)}
+    out: dict[str, Any] = {"sessions": cal.list_sessions(env=env, status=status, q=q, limit=limit)}
+    if with_counts:
+        out["counts"] = cal.session_counts(env=env)
+    return out
+
+
+@router.get("/sessions/{quickcep_session_id}/workbench")
+def get_session_workbench(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+) -> dict[str, Any]:
+    """L1 pure-CAL aggregate for the Console workbench (PR1.4). Zero QuickCEP calls."""
+    result = cal.get_workbench(quickcep_session_id=quickcep_session_id, env=env)
+    if result is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return result
+
+
+@router.get("/sessions/{quickcep_session_id}/state")
+def get_session_state_route(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+) -> dict[str, Any]:
+    """L3 lightweight poll payload (PR1.4)."""
+    result = cal.get_session_state(quickcep_session_id=quickcep_session_id, env=env)
+    if result is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return result
+
+
+@router.get("/sessions/{quickcep_session_id}/messages")
+def get_session_messages(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+    since: Optional[str] = Query(None, description="return only messages after this message id"),
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """L2 live message history (PR1.5). Incremental via ``since``."""
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_session(quickcep_session_id=quickcep_session_id, env=env):
+        raise HTTPException(status_code=404, detail="session not found")
+    from .quickcep_live import fetch_messages
+
+    return fetch_messages(quickcep_session_id=quickcep_session_id, since=since)
+
+
+@router.get("/sessions/{quickcep_session_id}/tags")
+def get_session_tags(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """L2 session tags reverse-resolved to names, 300s cache (PR1.5)."""
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_session(quickcep_session_id=quickcep_session_id, env=env):
+        raise HTTPException(status_code=404, detail="session not found")
+    from .quickcep_live import fetch_session_tags
+
+    return fetch_session_tags(quickcep_session_id=quickcep_session_id)
+
+
+@router.get("/sessions/{quickcep_session_id}/orders")
+def get_session_orders(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """L2 customer orders + intention_tags, 60s cache (PR1.5)."""
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_session(quickcep_session_id=quickcep_session_id, env=env):
+        raise HTTPException(status_code=404, detail="session not found")
+    from .quickcep_live import fetch_session_orders
+
+    return fetch_session_orders(quickcep_session_id=quickcep_session_id, env=env)
+
+
+class NoteBody(BaseModel):
+    env: str = "LIVE"
+    chat_session_id: Optional[str] = None
+    text: str
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+
+
+class SendReplyBody(BaseModel):
+    env: str = "LIVE"
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    subject: Optional[str] = None
+
+
+class CloseSessionBody(BaseModel):
+    env: str = "LIVE"
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    note: str = ""
+    mark_reviewed: bool = True
+
+
+@router.post("/sessions/{quickcep_session_id}/send-reply")
+def send_session_reply(
+    quickcep_session_id: str,
+    body: SendReplyBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Send the CAL-stored draft to the customer (PR1.6).
+
+    Service-initiated send (sanctioned guard bypass via scoped subprocess env).
+    Reads draft from CAL, runs guards, calls quickcep_cli send-email, backfills
+    the outbound message_id, and applies operator_sent handoff.
+    """
+    _require_bridge_key(x_bridge_key)
+    from .send_reply import send_reply
+
+    result = send_reply(
+        quickcep_session_id=quickcep_session_id,
+        env=body.env,
+        operator_id=body.operator_id,
+        operator_name=body.operator_name,
+        subject_override=body.subject,
+    )
+    if result.get("error") == "session not found":
+        raise HTTPException(status_code=404, detail="session not found")
+    if result.get("error") == "no_draft":
+        raise HTTPException(status_code=409, detail=result.get("error_detail", "no draft"))
+    if result.get("error") == "guard_blocked":
+        raise HTTPException(status_code=422, detail=result.get("error_detail"))
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@router.post("/sessions/{quickcep_session_id}/close")
+def close_session_route(
+    quickcep_session_id: str,
+    body: CloseSessionBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """End the QuickCEP chat session (chat_end) and optionally mark CAL reviewed."""
+    _require_bridge_key(x_bridge_key)
+    from .close_session import close_session
+
+    result = close_session(
+        quickcep_session_id=quickcep_session_id,
+        env=body.env,
+        operator_id=body.operator_id,
+        operator_name=body.operator_name,
+        mark_reviewed=body.mark_reviewed,
+        note=body.note,
+    )
+    if result.get("error") == "quickcep_cli_not_found":
+        raise HTTPException(status_code=500, detail=result)
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@router.post("/sessions/{quickcep_session_id}/attachments/upload")
+async def upload_session_attachment(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+    file: UploadFile = File(...),
+    feature: str = Form("email"),
+    operator_id: Optional[str] = Form(None),
+    operator_name: Optional[str] = Form(None),
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Upload an attachment to QuickCEP CDN (PR1.7).
+
+    Multipart upload → saved to a session-scoped temp path →
+    quickcep_cdn.upload_file_to_cdn → returns the attachment object
+    ({fileName, fileSize, url}) the FE attaches to the draft.
+    """
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_session(quickcep_session_id=quickcep_session_id, env=env):
+        raise HTTPException(status_code=404, detail="session not found")
+    import tempfile
+    import uuid
+
+    from .quickcep_cdn import upload_file_to_cdn
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty file")
+    original = file.filename or "upload.bin"
+    suffix = Path(original).suffix
+    with tempfile.NamedTemporaryFile(
+        delete=False, prefix=f"attach-{quickcep_session_id}-{uuid.uuid4().hex[:8]}-",
+        suffix=suffix,
+    ) as tmp:
+        tmp.write(data)
+        tmp_path = Path(tmp.name)
+    try:
+        result = upload_file_to_cdn(tmp_path, feature=feature)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "upload failed")
+    cal.write_event(
+        quickcep_session_id=quickcep_session_id,
+        env=env,
+        event_type="attachment_uploaded",
+        payload={
+            "fileName": result.get("fileName"),
+            "fileSize": result.get("fileSize"),
+            "url": result.get("url"),
+            "operator_id": operator_id,
+            "operator_name": operator_name,
+        },
+    )
+    return result
+
+
+@router.post("/sessions/{quickcep_session_id}/note")
+def add_session_note(
+    quickcep_session_id: str,
+    body: NoteBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Add a QuickCEP internal note (PR1.5). Reuses session_handoff.apply_quickcep_note."""
+    _require_bridge_key(x_bridge_key)
+    sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=body.env)
+    if not sess:
+        raise HTTPException(status_code=404, detail="session not found")
+    chat_session_id = body.chat_session_id or sess.get("chat_session_id") or ""
+    if not chat_session_id:
+        raise HTTPException(status_code=400, detail="chat_session_id required (not on session row)")
+    from .quickcep_live import add_note, invalidate_cache
+
+    result = add_note(
+        quickcep_session_id=quickcep_session_id,
+        chat_session_id=chat_session_id,
+        text=body.text,
+    )
+    # Record an audit event + drop caches (note add bumps session activity).
+    cal.write_event(
+        quickcep_session_id=quickcep_session_id,
+        env=body.env,
+        event_type="operator_note_added",
+        payload={"text": body.text, "operator_id": body.operator_id,
+                 "operator_name": body.operator_name, "ok": result.get("ok")},
+    )
+    invalidate_cache(quickcep_session_id)
+    return result
 
 
 @router.post("/sessions/{quickcep_session_id}/handoff")
@@ -244,6 +521,46 @@ def apply_session_handoff(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result.get("ok") and result.get("error") == "session not found":
         raise HTTPException(status_code=404, detail="session not found")
+    return result
+
+
+@router.put("/sessions/{quickcep_session_id}/draft")
+def save_session_draft(
+    quickcep_session_id: str,
+    body: DraftBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Persist a reply draft to CAL (PR1.3 / §4.13).
+
+    Replaces writing drafts to QuickCEP. The agent (via cs_bridge_tool draft-save)
+    and the Console composer both write through this endpoint. Autopilot lock
+    enforcement (PR2) is applied via cal.save_draft's lock_check hook.
+    """
+    _require_bridge_key(x_bridge_key)
+    from .autopilot import autopilot_lock_check
+    from .draft_guard import guard_draft_content
+
+    # Server-side guard for Console-originated drafts (agent path guards in
+    # cs_bridge_tool; both must enforce the same policy — PR1.9).
+    block = guard_draft_content(body.draft_html, body.attachments)
+    if block:
+        raise HTTPException(status_code=422, detail=block)
+
+    result = cal.save_draft(
+        quickcep_session_id=quickcep_session_id,
+        draft_html=body.draft_html,
+        attachments=body.attachments,
+        source=body.source,
+        subject=body.subject,
+        env=body.env,
+        operator_id=body.operator_id,
+        operator_name=body.operator_name,
+        lock_check=autopilot_lock_check,
+    )
+    if not result.get("success") and result.get("error") == "session not found":
+        raise HTTPException(status_code=404, detail="session not found")
+    if not result.get("success") and result.get("error") == "draft_locked_autopilot":
+        raise HTTPException(status_code=409, detail=result.get("error_detail", "draft locked by autopilot"))
     return result
 
 
@@ -296,6 +613,15 @@ def update_session_status(
     sess = cal.get_session(quickcep_session_id=body.quickcep_session_id, env=body.env)
     if not sess:
         raise HTTPException(status_code=404, detail="session not found")
+    # Bridge guard (§4.13 B): refuse direct draft_ready status set without a CAL
+    # draft (agent contract step 10 fallback must not bypass the draft-save guard).
+    if body.status == "draft_ready":
+        from .session_handoff import _legacy_draft_mode
+        if not _legacy_draft_mode() and not (sess.get("draft_html") or "").strip():
+            raise HTTPException(
+                status_code=409,
+                detail="draft_ready_requires_cal_draft: 先 cs_bridge_tool draft-save 保存草稿到 CAL，再设置 draft_ready。",
+            )
     cal.update_session_status(session_row_id=sess["id"], status=body.status)
     return {"ok": True}
 
@@ -440,12 +766,23 @@ async def vault_upload_file(
     return result
 
 
+def _auth_vault(x_bridge_key: Optional[str], token: Optional[str], escalation_id: int) -> None:
+    """Allow either a valid bridge key (console/ops) or a signed upload token
+    (public Feishu upload page scoped to this escalation)."""
+    from .escalation_attachment_vault import verify_upload_token
+
+    if token and verify_upload_token(escalation_id=escalation_id, token=token):
+        return
+    _require_bridge_key(x_bridge_key)
+
+
 @router.get("/escalations/{escalation_id}/vault")
 def vault_list_files(
     escalation_id: int,
     x_bridge_key: Annotated[Optional[str], Header()] = None,
+    token: Optional[str] = Query(None, description="Signed upload token (public page)"),
 ) -> dict[str, Any]:
-    _require_bridge_key(x_bridge_key)
+    _auth_vault(x_bridge_key, token, escalation_id)
     from .escalation_attachment_vault import list_vault_files
 
     return {"escalation_id": escalation_id, "files": list_vault_files(escalation_id=escalation_id)}
@@ -456,13 +793,46 @@ def vault_delete_file(
     escalation_id: int,
     link_id: str,
     x_bridge_key: Annotated[Optional[str], Header()] = None,
+    token: Optional[str] = Query(None, description="Signed upload token (public page)"),
 ) -> dict[str, Any]:
-    _require_bridge_key(x_bridge_key)
+    _auth_vault(x_bridge_key, token, escalation_id)
     links = cal.list_vault_links_for_escalation(escalation_id=escalation_id)
     if not any(str(l.get("id")) == link_id for l in links):
         raise HTTPException(status_code=404, detail="vault link not found")
     ok = cal.delete_vault_link(link_id=link_id)
     return {"ok": ok, "link_id": link_id}
+
+
+@router.get("/escalations/{escalation_id}/vault/{link_id}/content")
+def vault_file_content(
+    escalation_id: int,
+    link_id: str,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+    token: Optional[str] = Query(None, description="Signed upload token (public page)"),
+):
+    """Stream the raw bytes of a vault file for inline preview/download."""
+    _auth_vault(x_bridge_key, token, escalation_id)
+    from fastapi.responses import Response
+
+    from .escalation_attachment_vault import resolve_blob_bytes
+
+    links = cal.list_vault_links_for_escalation(escalation_id=escalation_id)
+    link = next((l for l in links if str(l.get("id")) == link_id), None)
+    if not link:
+        raise HTTPException(status_code=404, detail="vault link not found")
+    blob_md5 = link.get("blob_md5") or ""
+    data = resolve_blob_bytes(blob_md5=blob_md5)
+    if data is None:
+        raise HTTPException(status_code=404, detail="blob not found")
+    content_type = link.get("content_type") or "application/octet-stream"
+    name = link.get("original_name") or "file"
+    inline_types = ("image/", "application/pdf", "text/")
+    disposition = "inline" if any(content_type.startswith(t) for t in inline_types) else "attachment"
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": f'{disposition}; filename="{name}"'},
+    )
 
 
 @router.post("/escalations")
@@ -578,6 +948,37 @@ def resume_escalation_route(
     return result
 
 
+@router.post("/escalations/{escalation_id}/console-reply")
+def console_escalation_reply_route(
+    escalation_id: int,
+    body: ConsoleEscalationReplyBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Console-originated escalation reply (PR1.8).
+
+    Atomic first-wins claim (awaiting_answer → resuming), [ESC-LOCK] Feishu
+    notice, gateway resume run, audit event. Loses the first-wins race with a
+    409 ``already_claimed``.
+    """
+    _require_bridge_key(x_bridge_key)
+    from .escalation_resume import console_reply_escalation
+
+    result = console_reply_escalation(
+        escalation_id=escalation_id,
+        operator_answer=body.operator_answer,
+        operator_id=body.operator_id,
+        operator_name=body.operator_name,
+        env=body.env,
+    )
+    if result.get("error") == "escalation not found":
+        raise HTTPException(status_code=404, detail="escalation not found")
+    if result.get("error") == "already_claimed":
+        raise HTTPException(status_code=409, detail=result.get("error_detail", "already claimed"))
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
 @router.post("/sessions/{quickcep_session_id}/relaunch")
 def relaunch_session_route(
     quickcep_session_id: str,
@@ -609,6 +1010,78 @@ def relaunch_session_route(
         cal.update_session_status(session_row_id=sess["id"], status="failed")
         raise HTTPException(status_code=502, detail="gateway launch failed")
     return {"ok": True, "run_id": outcome.run_id}
+
+
+# ── Autopilot (PR2) ────────────────────────────────────────────────────
+
+
+@router.get("/autopilot/settings")
+def get_autopilot_settings(
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    from .autopilot import get_settings
+
+    return get_settings()
+
+
+@router.put("/autopilot/settings")
+def update_autopilot_settings(
+    body: AutopilotSettingsBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    from .autopilot import update_settings
+
+    return update_settings(
+        enabled=body.enabled,
+        send_after_sec=body.send_after_sec,
+        updated_by=body.updated_by,
+    )
+
+
+@router.get("/sessions/{quickcep_session_id}/autopilot")
+def get_session_autopilot_route(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_session(quickcep_session_id=quickcep_session_id, env=env):
+        raise HTTPException(status_code=404, detail="session not found")
+    from .autopilot import get_session_autopilot
+
+    job = get_session_autopilot(quickcep_session_id=quickcep_session_id, env=env)
+    return {"autopilot": job}
+
+
+@router.post("/sessions/{quickcep_session_id}/autopilot/cancel")
+def cancel_session_autopilot_route(
+    quickcep_session_id: str,
+    env: str = Query("LIVE"),
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    _require_bridge_key(x_bridge_key)
+    if not cal.get_session(quickcep_session_id=quickcep_session_id, env=env):
+        raise HTTPException(status_code=404, detail="session not found")
+    from .autopilot import cancel_session_autopilot
+
+    result = cancel_session_autopilot(quickcep_session_id=quickcep_session_id, env=env)
+    if result.get("error") == "no_autopilot_job":
+        raise HTTPException(status_code=404, detail="no autopilot job for this session")
+    return result
+
+
+@router.post("/autopilot/tick")
+def autopilot_tick_route(
+    env: str = Query("LIVE"),
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Run one autopilot worker tick (claim + send due jobs). For cron/manual trigger."""
+    _require_bridge_key(x_bridge_key)
+    from .autopilot import run_autopilot_tick
+
+    return run_autopilot_tick(env=env)
 
 
 @router.get("/watcher/status")

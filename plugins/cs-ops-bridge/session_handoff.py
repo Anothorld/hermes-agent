@@ -110,10 +110,10 @@ _CATEGORY_ZH: dict[str, str] = {
 
 # Replace common English tokens agents paste into handoff fields (longest match first).
 _NOTE_TERM_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\bescalation resume\s*\+\s*draft-save\b", re.I), "专家回复已合并并保存草稿"),
-    (re.compile(r"\bMerged Feishu expert answer;\s*draft-save\b", re.I), "已合并飞书专家答复并保存草稿"),
-    (re.compile(r"\bdraft-save\b", re.I), "草稿已保存"),
-    (re.compile(r"\bdraft save\b", re.I), "草稿已保存"),
+    (re.compile(r"\bescalation resume\s*\+\s*draft-save\b", re.I), "专家回复已合并并生成草稿"),
+    (re.compile(r"\bMerged Feishu expert answer;\s*draft-save\b", re.I), "已合并飞书专家答复并生成草稿"),
+    (re.compile(r"\bdraft-save\b", re.I), "草稿已生成"),
+    (re.compile(r"\bdraft save\b", re.I), "草稿已生成"),
     (re.compile(r"\binbound\b", re.I), "客户来信"),
     (re.compile(r"\bConsole\b"), "工单列表"),
     (re.compile(r"\bgateway\b", re.I), "自动处理"),
@@ -195,6 +195,16 @@ def _handoff_stale_for_session(*, phase: str, session_status: str) -> bool:
     current_rank = _STATUS_ORDER.get(session_status, 0)
     phase_rank = _phase_status_rank(phase)
     return current_rank >= 40 and phase_rank < current_rank
+
+
+def _legacy_draft_mode() -> bool:
+    """M3 transition mode: drafts written to QuickCEP (not CAL).
+
+    When true, ``draft_ready`` without a CAL draft is legitimate (the draft lives
+    in QuickCEP). Gated by the same env that switches ``draft-save`` to the legacy
+    QuickCEP path (§4.13 "仍需坚守: 过渡期 M3 模式").
+    """
+    return os.environ.get("CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP", "").strip().lower() in ("1", "true", "yes")
 
 
 def _quickcep_handoff_side_effect_skip_reason(*, phase: str, session_status: str) -> Optional[str]:
@@ -466,13 +476,13 @@ def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> 
         esc = _business_id(tag_map, "escalation")
         if esc:
             tags_remove.append(esc)
-        actions = actions_taken or "已查询相关信息并保存回复草稿"
+        actions = actions_taken or "已查询相关信息并生成回复草稿"
         note_body = _compose_standard_note(
             phase_label=PHASE_LABELS[phase],
             customer_need=customer_need,
             actions_taken=actions,
-            follow_up=follow_up or "请核对草稿内容后发送给客户",
-            operator_hint=operator_hint or "回复草稿已备好，请审阅后发送",
+            follow_up=follow_up or "草稿已在工单台生成，请审阅后发送",
+            operator_hint=operator_hint or "草稿已在工单台生成，请审阅后发送",
         )
 
     elif phase == "awaiting_expert":
@@ -722,7 +732,57 @@ def apply_handoff(
             out["escalation_completion"] = completion_result
         return out
 
+    # Bridge guard (§4.13 B): draft_ready requires a CAL draft — the agent must
+    # call draft-save (contract step 5) before apply-handoff draft_ready (step 6).
+    # Refuse when cs_session.draft_html is empty so Console always has a draft to
+    # show. Skipped in M3 legacy mode (drafts written to QuickCEP, not CAL).
+    if phase == "draft_ready" and not _legacy_draft_mode():
+        if not (sess.get("draft_html") or "").strip():
+            log.warning(
+                "block draft_ready handoff: no CAL draft session=%s (agent skipped draft-save)",
+                quickcep_session_id,
+            )
+            return {
+                "ok": False,
+                "error": "draft_ready_requires_cal_draft",
+                "error_detail": (
+                    "apply-handoff --phase draft_ready 前必须先 cs_bridge_tool draft-save 把草稿保存到 CAL；"
+                    "当前 cs_session.draft_html 为空，Console 无草稿可展示。请先执行 draft-save 再重试 draft_ready。"
+                ),
+                "session_id": quickcep_session_id,
+            }
+
     plan = compose_handoff(phase, context)
+
+    # PR1.2: persist the classify dict {category, route, confidence, urgency} to
+    # cs_facts so the workbench L1 aggregate can surface it without a QuickCEP call.
+    try:
+        _ctx = context or {}
+        classify = _ctx.get("classify")
+        if isinstance(classify, str):
+            classify = json.loads(classify)
+        if isinstance(classify, dict) and classify:
+            cal.write_facts(
+                quickcep_session_id=quickcep_session_id,
+                namespaces={"classify": {
+                    "category": classify.get("category"),
+                    "route": classify.get("route"),
+                    "confidence": classify.get("confidence"),
+                    "urgency": classify.get("urgency"),
+                }},
+                env=env,
+            )
+    except Exception as exc:
+        log.debug("classify fact write failed session=%s: %s", quickcep_session_id, exc)
+
+    # PR2: schedule an Autopilot send job on draft_ready (no-op when disabled).
+    if phase == "draft_ready":
+        try:
+            from .autopilot import on_draft_ready
+
+            on_draft_ready(quickcep_session_id=quickcep_session_id, env=env)
+        except Exception as exc:
+            log.debug("autopilot on_draft_ready failed session=%s: %s", quickcep_session_id, exc)
 
     chat_id = chat_session_id or sess.get("chat_session_id")
     chat_id = _resolve_chat_session_id(

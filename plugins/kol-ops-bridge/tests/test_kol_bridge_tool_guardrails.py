@@ -163,3 +163,90 @@ def test_root_shim_forwards_to_scripts_cli():
     )
     assert proc.returncode == 0
     assert "get-escalation" in proc.stdout
+
+
+def test_list_candidate_handles_help_advertises_with_status():
+    proc = subprocess.run(
+        [sys.executable, str(CLI), "list-candidate-handles", "--help"],
+        cwd=PLUGIN_ROOT.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert "--with-status" in proc.stdout
+    assert "--plain" in proc.stdout
+
+
+def test_list_candidate_handles_plain_with_status_emits_tsv(capsys, monkeypatch):
+    """`--plain --with-status` prints `<handle>\\t<candidate_status>` rows."""
+    import argparse
+
+    import _subcmd_campaigns as mod  # noqa: E402  (scripts dir on path via PLUGIN_ROOT)
+
+    fake_items = [
+        {"handle": "alpha", "candidate_status": "selected_for_outreach"},
+        {"handle": "beta", "candidate_status": "rejected"},
+        {"handle": "gamma", "candidate_status": "discovered"},
+        {"handle": "", "candidate_status": "discovered"},  # filtered out
+    ]
+    fake_data = {
+        "handles": [it["handle"] for it in fake_items if it["handle"]],
+        "count": 3,
+        "items": fake_items,
+    }
+
+    class _FakeClient:
+        def request(self, method, path, params=None):
+            assert method == "GET"
+            assert path.endswith("/candidate-handles")
+            return fake_data
+
+    monkeypatch.setattr(mod, "client_from_args", lambda args: _FakeClient())
+
+    args = argparse.Namespace(
+        campaign_id="SSF8033-20260609",
+        env="LIVE",
+        plain=True,
+        with_status=True,
+    )
+    mod.cmd_list_candidate_handles(args)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out == [
+        "alpha\tselected_for_outreach",
+        "beta\trejected",
+        "gamma\tdiscovered",
+    ]
+
+
+def test_list_candidate_handles_plain_without_status_still_handles_only(capsys, monkeypatch):
+    """`--plain` without `--with-status` preserves the legacy handle-only output."""
+    import argparse
+
+    import _subcmd_campaigns as mod  # noqa: E402
+
+    fake_data = {
+        "handles": ["alpha", "beta", "gamma"],
+        "count": 3,
+        "items": [
+            {"handle": "alpha", "candidate_status": "selected_for_outreach"},
+            {"handle": "beta", "candidate_status": "rejected"},
+            {"handle": "gamma", "candidate_status": "discovered"},
+        ],
+    }
+
+    class _FakeClient:
+        def request(self, method, path, params=None):
+            return fake_data
+
+    monkeypatch.setattr(mod, "client_from_args", lambda args: _FakeClient())
+
+    args = argparse.Namespace(
+        campaign_id="SSF8033-20260609",
+        env="LIVE",
+        plain=True,
+        with_status=False,
+    )
+    mod.cmd_list_candidate_handles(args)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out == ["alpha", "beta", "gamma"]

@@ -1,0 +1,7 @@
+name: kol-discovery-precompress-guard
+version: 1.0.0
+description: "Snapshot visited-but-unconfirmed IG handles before context compression discards them on kol-campaign discovery sessions, so the next rediscover round can recover them."
+author: kol-ops
+kind: backend
+provides_hooks:
+  - pre_compress

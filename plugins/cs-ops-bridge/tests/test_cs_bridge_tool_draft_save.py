@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,12 +51,15 @@ def test_draft_save_calls_join_chat_before_save(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tool, "_run_quickcep_cli", fake_run)
 
+    # Explicitly exercise the legacy QuickCEP path (default now writes to CAL).
     args = MagicMock(
         session_id="sess-1",
         content="Hello",
         content_file=None,
         subject="Re: test",
         receiver="a@b.com",
+        env="LIVE",
+        legacy_quickcep_draft=True,
     )
     with patch.object(tool, "print_json") as mock_print:
         tool._cmd_draft_save(args)
@@ -66,6 +70,50 @@ def test_draft_save_calls_join_chat_before_save(tmp_path, monkeypatch):
     mock_print.assert_called_once()
     out = mock_print.call_args[0][0]
     assert out["join_chat"]["result_code"] == 200
+    assert out["success"] is True
+
+
+def test_draft_save_default_writes_to_cal_via_http(tmp_path, monkeypatch):
+    """PR1.3: default draft-save writes to CAL via PUT /draft (no joinChat, no QC)."""
+    tool = _load_cs_bridge_tool()
+    cli = tmp_path / "quickcep_cli.py"
+    cli.write_text("# stub", encoding="utf-8")
+    monkeypatch.setattr(tool, "_quickcep_cli_path", lambda: cli)
+
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def request(self, method, path, *, body=None, query=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return {"action": "draft_save", "success": True, "stored": "cal",
+                    "session_id": "sess-cal", "source": "agent", "attachments": 0}
+
+    monkeypatch.setattr(tool, "client_from_args", lambda _args: FakeClient())
+
+    args = MagicMock(
+        session_id="sess-cal",
+        content="<p>Hello</p>",
+        content_file=None,
+        subject="Re: order",
+        receiver=None,
+        attachments=None,
+        env="LIVE",
+        legacy_quickcep_draft=False,
+    )
+    # Ensure the CAL branch is taken (MagicMock auto-attrs are truthy, so pin False).
+    args.legacy_quickcep_draft = False
+    with patch.object(tool, "print_json") as mock_print:
+        tool._cmd_draft_save(args)
+
+    assert captured["method"] == "PUT"
+    assert captured["path"] == "/sessions/sess-cal/draft"
+    assert captured["body"]["draft_html"] == "<p>Hello</p>"
+    assert captured["body"]["source"] == "agent"
+    assert captured["body"]["env"] == "LIVE"
+    out = mock_print.call_args[0][0]
+    assert out["stored"] == "cal"
     assert out["success"] is True
 
 

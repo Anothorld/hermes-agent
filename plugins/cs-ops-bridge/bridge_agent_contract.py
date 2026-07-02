@@ -62,7 +62,7 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
 5. (auto_handle) product/logistics lookup skills → terminal: python3 {cli} draft-save --env {env} --session-id {quickcep_session_id} --content-file {draft_path} --subject "Re: <subject>" --receiver "<customer email>"
    draft-save auto-calls join-chat before QuickCEP save. If using --content inline in shell, wrap in **single quotes** when text contains $ (e.g. --content 'refund $200 after delivery'). Double quotes mangle $200 → 00.
    **Internal domain guard**: draft-save automatically blocks drafts containing internal/backend URLs (OSS buckets, localhost, feishu.cn, internal IPs/ports). If blocked, strip internal links and retry. Never put internal system URLs in customer-facing drafts.
-6. (auto_handle) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase draft_ready --actions-taken "已查询并保存回复草稿" --operator-hint "<中文：操作员接手要点>"
+6. (auto_handle) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase draft_ready --actions-taken "已查询并生成回复草稿" --operator-hint "<中文：操作员接手要点>"
 6.5. (escalate candidate) **Check Hindsight** before escalating — call hindsight_recall(query="<product slug> <problem keywords>"), then IMMEDIATELY record to tracker:
    terminal: python3 {tracker_script} record --session-id {quickcep_session_id} --query "<recall query>" --result hit|miss|error --outcome auto_handled|escalated --reason "<if escalated, why>" --product-slug "<slug>" --category "<category>" --num-results <N>
    See §Hindsight Knowledge Recall in povison-cs-orchestrator-flow skill for full procedure. If Hindsight hit → auto_handle (skip to step 5/6). If miss/error → proceed to step 7.
@@ -98,7 +98,7 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
 6. terminal: python3 {cli} draft-save --env {env} --session-id <quickcep_session_id> --content-file /tmp/draft-<quickcep_session_id>.html --subject "Re: ..." --receiver "<email>" (never send-email; join-chat is automatic)
    If get-escalation resume_context includes operator_attachments, pass them via --attachments with the JSON array (fileName, fileSize, url). PDF attachments must be vault-sourced — draft-save attachment guard blocks assembly/static.povison PDFs.
    **Internal domain guard**: draft-save blocks drafts with internal URLs (OSS buckets, localhost, feishu.cn, internal IPs/ports). If blocked, strip internal links and retry.
-7. terminal: python3 {cli} apply-handoff --env {env} --session-id <quickcep_session_id> --phase draft_ready --actions-taken "已合并飞书专家答复并保存草稿" --operator-hint "<中文：操作员接手要点>"
+7. terminal: python3 {cli} apply-handoff --env {env} --session-id <quickcep_session_id> --phase draft_ready --actions-taken "已合并飞书专家答复并生成草稿" --operator-hint "<中文：操作员接手要点>"
 8. terminal: python3 {cli} write-event --env {env} --session-id <quickcep_session_id> --event-type escalation_resumed --json '{{...}}'
 9. terminal: python3 {cli} update-session-status --env {env} --session-id <quickcep_session_id> --status draft_ready
 """
@@ -162,4 +162,24 @@ def resume_instructions() -> str:
         "This enables future auto-handling of identical questions without re-escalation. "
         "When resume_context includes operator_attachments, include them in draft-save --attachments. "
         "Only vault-uploaded PDFs may be attached — product assembly PDFs must be text in the body."
+    )
+
+
+def edit_memory_instructions() -> str:
+    return (
+        "You are running the operator-edit-memory step. The operator has reviewed and edited the "
+        "AI-generated reply draft, then sent it to the customer. Your ONLY job is to analyze what "
+        "the operator changed versus the original AI draft and record any **product/policy information** "
+        "corrections into Hindsight memory so future replies reflect the operator's factual fix.\n\n"
+        "You inherit the full reply-generation context (this conversation). Compare the AI draft against "
+        "the operator-edited draft provided in the input. Focus ONLY on factual corrections about "
+        "products, policies, specs, pricing, shipping, returns, or warranty — ignore tone/style edits, "
+        "greetings, typos, and formatting changes.\n\n"
+        "STRICT TOOL CONSTRAINT: this run is guard-locked to hindsight memory tools only. You may call "
+        "hindsight_recall to check what's already known, hindsight_retain to persist each factual "
+        "correction as a distinct memory, and hindsight_reflect to consolidate. You MUST NOT call any "
+        "other tool — no terminal, no execute_code, no cs_bridge_tool, no send_message. If no factual "
+        "product/policy change exists, retain nothing and finish.\n\n"
+        "When retaining, write concise, self-contained facts (e.g. \"产品X的承重为150kg，非200kg\"), "
+        "tagged with the product/SKU context when available. Never retain PII or customer-specific details."
     )

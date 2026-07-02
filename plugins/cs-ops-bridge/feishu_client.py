@@ -116,6 +116,43 @@ def send_group_text(*, chat_id: str, text: str, token: Optional[str] = None) -> 
     )
 
 
+def _message_create_time_ms(item: dict[str, Any]) -> int:
+    raw = item.get("create_time") or item.get("created_at") or "0"
+    try:
+        return int(str(raw))
+    except ValueError:
+        return 0
+
+
+def _fetch_container_message_page(
+    *,
+    token: str,
+    container_id_type: str,
+    container_id: str,
+    page_size: int,
+    page_token: Optional[str] = None,
+    sort_type: str = "ByCreateTimeDesc",
+) -> tuple[list[dict[str, Any]], Optional[str], bool]:
+    params: dict[str, str] = {
+        "container_id_type": container_id_type,
+        "container_id": container_id,
+        "page_size": str(page_size),
+        "sort_type": sort_type,
+    }
+    if page_token:
+        params["page_token"] = page_token
+    url = "https://open.feishu.cn/open-apis/im/v1/messages?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode())
+    items = data.get("data", {}).get("items") or []
+    page_items = items if isinstance(items, list) else []
+    page_data = data.get("data") or {}
+    next_token = str(page_data.get("page_token") or "") or None
+    has_more = bool(page_data.get("has_more"))
+    return page_items, next_token, has_more
+
+
 def list_container_messages(
     *,
     token: str,
@@ -124,32 +161,56 @@ def list_container_messages(
     page_size: int = 50,
     max_pages: int = 5,
 ) -> list[dict[str, Any]]:
-    """List Feishu IM messages with page_token pagination (newest page first per API)."""
+    """List Feishu IM messages with page_token pagination (newest page first)."""
     all_items: list[dict[str, Any]] = []
     page_token: Optional[str] = None
     pages = max(1, max_pages)
     for _ in range(pages):
-        params: dict[str, str] = {
-            "container_id_type": container_id_type,
-            "container_id": container_id,
-            "page_size": str(page_size),
-        }
-        if page_token:
-            params["page_token"] = page_token
-        url = "https://open.feishu.cn/open-apis/im/v1/messages?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode())
-        items = data.get("data", {}).get("items") or []
-        if isinstance(items, list):
+        items, page_token, has_more = _fetch_container_message_page(
+            token=token,
+            container_id_type=container_id_type,
+            container_id=container_id,
+            page_size=page_size,
+            page_token=page_token,
+        )
+        if items:
             all_items.extend(items)
-        page_data = data.get("data") or {}
-        if not page_data.get("has_more"):
-            break
-        page_token = str(page_data.get("page_token") or "") or None
-        if not page_token:
+        if not has_more or not page_token:
             break
     return all_items
+
+
+def list_container_messages_since(
+    *,
+    token: str,
+    container_id_type: str,
+    container_id: str,
+    since_ms: int,
+    page_size: int = 50,
+    max_pages: int = 30,
+) -> tuple[list[dict[str, Any]], int]:
+    """Paginate chat history back to since_ms (inclusive). Returns (messages, pages_fetched)."""
+    all_items: list[dict[str, Any]] = []
+    page_token: Optional[str] = None
+    pages_fetched = 0
+    pages = max(1, max_pages)
+    for _ in range(pages):
+        items, page_token, has_more = _fetch_container_message_page(
+            token=token,
+            container_id_type=container_id_type,
+            container_id=container_id,
+            page_size=page_size,
+            page_token=page_token,
+        )
+        pages_fetched += 1
+        if not items:
+            break
+        all_items.extend(items)
+        if since_ms and min(_message_create_time_ms(item) for item in items) <= since_ms:
+            break
+        if not has_more or not page_token:
+            break
+    return all_items, pages_fetched
 
 
 def reply_to_message(*, message_id: str, text: str, token: Optional[str] = None) -> FeishuSendResult:

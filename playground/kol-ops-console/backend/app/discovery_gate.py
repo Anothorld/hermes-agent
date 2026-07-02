@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ from .bridge_client import BridgeClient, BridgeError
 from .nox_gate import materialize_discovery_nox_config
 from .bridge_runtime import ensure_gateway_bridge_key
 from .campaign_locks import campaign_lock
-from .gateway_client import GatewayClient, GatewayError
+from .gateway_client import GatewayClient, GatewayError, RUNNING_STATES
 from .bridge_agent_contract_loader import (
     discovery_cli_rules,
     gateway_contract_for_brief,
@@ -58,6 +59,19 @@ MAX_AUTO_RETRIES = 5
 
 Counts ONLY auto-retries; operator-initiated /start and /rediscover do not
 consume retry budget. Resets to 0 on operator-initiated runs.
+"""
+
+MAX_CONSECUTIVE_ZERO_NEW_RUNS = 2
+"""Early-escalation threshold: after this many consecutive auto-retries that
+produce ZERO new persisted candidates, escalate to the operator instead of
+firing another auto-retry. Avoids burning the full ``MAX_AUTO_RETRIES`` budget
+when the niche is clearly exhausted (e.g. SSF8033 on 2026-07-01 ran 5 zero-new
+retries costing ~5.2M tokens before escalation).
+
+A "zero-new" run is one whose ``persisted_count_at_end`` equals the previous
+round's ``persisted_count_at_end`` (no net-new candidates survived). The
+operator can still manually /rediscover after early escalation if they want
+to try a different angle.
 """
 
 
@@ -269,6 +283,7 @@ def _compose_rediscover_brief(
     for handle in excluded_handles:
         lines.append(f"  - {handle}")
 
+    pending_for_resume: list[str] = []
     if prior_diagnostics:
         lines.extend([
             "",
@@ -306,9 +321,7 @@ def _compose_rediscover_brief(
 
         pending_for_resume = _collect_pending_ingests_for_resume(
             prior_diagnostics, excluded_handles
-        )
-        if pending_for_resume:
-            lines.extend(_render_resume_directives_block(pending_for_resume))
+        )  # merged with precompress snapshot below
 
         lines.extend([
             "",
@@ -330,6 +343,34 @@ def _compose_rediscover_brief(
             "   that fill the most recent round's underserved_verticals.",
         ])
 
+    # Merge precompress snapshot handles (visited-but-not-ingested captured
+    # by kol-discovery-precompress-guard before the last context compression)
+    # into the resume queue. Works even when prior_diagnostics is empty — a
+    # first-run compression can still leave pending handles.
+    snapshot_handles = _read_precompress_snapshot(env, campaign_id)
+    excluded_lower = {_normalize_handle(h) for h in excluded_handles}
+    snap_pending: list[str] = []
+    seen_handles: set[str] = set()
+    for h in snapshot_handles:
+        norm = _normalize_handle(h)
+        if norm in excluded_lower or norm in seen_handles:
+            continue
+        seen_handles.add(norm)
+        snap_pending.append(h)
+    # Merge snapshot handles into pending_for_resume (dedup by handle).
+    if snap_pending:
+        existing_handles = {
+            _normalize_handle(_handle_from_pending_item(item))
+            for item in pending_for_resume
+        }
+        for h in snap_pending:
+            norm = _normalize_handle(h)
+            if norm not in existing_handles:
+                pending_for_resume.append(h)
+                existing_handles.add(norm)
+    if pending_for_resume:
+        lines.extend(_render_resume_directives_block(pending_for_resume))
+
     pitch = (product["pitch_md"] or "").strip()
     if pitch:
         lines.extend([
@@ -346,6 +387,32 @@ def _compose_rediscover_brief(
             "nox_discovery_enabled: true",
             f"campaign_config_file: {nox_cfg_path}",
         ])
+    # Hard rules inlined into the brief so they are seen even when the
+    # agent's skill_view cache serves a stale SKILL.md. These mirror the
+    # P0 skill rules from instagram-kol-discovery/SKILL.md but are
+    # guaranteed fresh because they ride in the run input, not a cache.
+    lines.extend([
+        "",
+        "# hard_rules (override any cached skill version — obey verbatim)",
+        "1. Bootstrap the exclusion set with:",
+        "   list-candidate-handles --env <env> --campaign-id <cid> --with-status --plain",
+        "   Treat EVERY handle in the output as off-limits for browser_navigate.",
+        "2. Before writing /tmp/ingest_<handle>.json, self-check the payload:",
+        "   - creator brief bundle: all 6 keys present together or all absent",
+        "     (content_pillars, signature_hooks, voice_descriptors, hero_post_url,",
+        "     hero_post_note, recommendation_reason).",
+        "   - voice_descriptors: a list of 2-3 items.",
+        "   - hero_post_url: canonical instagram.com/reel/<id>/ or /p/<id>/.",
+        "   - recommendation_reason: include _source, _discovered_at, _discovered_url.",
+        "   - hero_post_url_discovered_url: the creator's instagram profile URL.",
+        "   Fix the JSON in-place before calling ingest-confirmed-candidate.",
+        "3. Visit-conclusion rule (hard): every handle you browser_navigate to",
+        "   must end with exactly one of:",
+        "   (a) ingest-confirmed-candidate success,",
+        "   (b) listed in pending_ingests in the run summary, or",
+        "   (c) an explicit visited_handles: YAML entry with 'DISCARD: <reason>'.",
+        "   No visited-but-undecided handles may remain at run end.",
+    ])
     return "\n".join(lines)
 
 
@@ -480,6 +547,13 @@ _DIAG_LIST_KEYS = (
     # Qualified handles not yet ingested into CAL — each item
     # ``<handle> — <why not ingested>``; drives # resume_directives on retry.
     "pending_ingests",
+    # Every IG handle visited via browser_navigate this run + its terminal
+    # state (ingested / DISCARD: <reason> / pending_ingests: <reason>).
+    # Enforces the SKILL.md "visit-conclusion rule" — no visited-but-
+    # undecided gray zone. Operator-auditable; also recovered by the
+    # kol-discovery-precompress-guard plugin when compression cuts a run
+    # short. See SKILL.md "Visit-conclusion rule (hard)".
+    "visited_handles",
 )
 
 _NEXT_ROUND_FOCUS_CAP = 10
@@ -578,6 +652,25 @@ def _merge_pending_ingests(
     return merged or None
 
 
+def _read_precompress_snapshot(env: str, campaign_id: str) -> list[str]:
+    """Read handles visited-but-not-ingested captured by the
+    ``kol-discovery-precompress-guard`` plugin before the last context
+    compression. Returns an empty list when no snapshot exists or it is
+    unreadable. The snapshot is written to ``/tmp/precompress_pending_<sid>.json``
+    where ``<sid>`` is the session id with non-alphanumeric chars replaced
+    by ``_`` — matching ``plugins/kol-discovery-precompress-guard/hooks.py``.
+    """
+    sid = f"kol-campaign:{env}:{campaign_id}"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", sid)
+    path = os.path.join(tempfile.gettempdir(), f"precompress_pending_{safe}.json")
+    try:
+        data = json.loads(Path(path).read_text())
+        handles = data.get("pending_handles") or []
+        return [str(h).strip() for h in handles if str(h).strip()]
+    except Exception:
+        return []
+
+
 def _collect_pending_ingests_for_resume(
     prior_diagnostics: list[dict[str, Any]] | None,
     excluded_handles: list[str],
@@ -643,6 +736,55 @@ def _parse_yaml_list(text: str, key: str) -> list[str] | None:
     return items or None
 
 
+# Heuristic recovery for visited_handles when the agent omits the YAML
+# block. Looks for @handle / `handle` mentions paired with visit/ingest/
+# discard signals in the final answer prose.
+_VISITED_HANDLE_RE = re.compile(
+    r"(?:@([a-zA-Z0-9._]{2,40})|`([a-zA-Z0-9._]{2,40})`)"
+)
+_DISCARD_SIGNAL_RE = re.compile(
+    r"(?i)\b(DISCARD|not\s+qualified|不符合|skip|below\s+\d|already\s+(in|persisted)|"
+    r"不\s*可\s*ingest|门槛|cooldown|excluded|reject)"
+)
+_INGESTED_SIGNAL_RE = re.compile(
+    r"(?i)\b(ingest(?:ed)?|candidate_id|persisted|入库|持久化)"
+)
+
+
+def _extract_visited_handles_heuristic(text: str) -> list[str] | None:
+    """Recover visited handles from final-answer prose when the agent did
+    not emit a ``visited_handles:`` YAML block.
+
+    Scans for @handle / ``handle`` mentions near DISCARD or ingest signals
+    and returns entries in the SKILL.md ``<handle> — <conclusion>`` form so
+    the diagnostics consumer can treat them uniformly. Returns ``None`` when
+    nothing plausible is found.
+    """
+    if not text:
+        return None
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _VISITED_HANDLE_RE.finditer(text):
+        handle = (m.group(1) or m.group(2) or "").lower().rstrip(".")
+        if not handle or handle in seen:
+            continue
+        # Snippet window around the mention to classify the conclusion.
+        start = max(0, m.start() - 120)
+        end = min(len(text), m.end() + 120)
+        window = text[start:end]
+        if _DISCARD_SIGNAL_RE.search(window):
+            conclusion = "DISCARD: heuristic (disqualify signal in context)"
+        elif _INGESTED_SIGNAL_RE.search(window):
+            conclusion = "ingested: heuristic (ingest signal in context)"
+        else:
+            # Mention only, no clear conclusion — still record so the
+            # visit-conclusion rule can flag it as undecided next round.
+            conclusion = "undecided: heuristic (no conclusion signal found)"
+        seen.add(handle)
+        out.append(f"{handle} — {conclusion}")
+    return out or None
+
+
 def _extract_run_diagnostics(output: Any) -> dict[str, Any]:
     """Best-effort scan for SKILL-contract diagnostic fields in the agent's
     final answer. Returns a dict with all known keys present; any field the
@@ -668,6 +810,10 @@ def _extract_run_diagnostics(output: Any) -> dict[str, Any]:
         diag["pending_ingests"] = _merge_pending_ingests(
             diag.get("pending_ingests"), _extract_pending_ingests_heuristic(text)
         )
+    # Recover visited_handles from prose when the agent omitted the YAML
+    # block, so the visit-conclusion rule still has an auditable trail.
+    if not diag.get("visited_handles"):
+        diag["visited_handles"] = _extract_visited_handles_heuristic(text)
     return diag
 
 
@@ -703,6 +849,12 @@ async def _trigger_rediscover_internal(
     """
     if is_auto_retry and new_retry_count is None:
         raise ValueError("new_retry_count is required when is_auto_retry=True")
+
+    logger.info(
+        "launch_path=trigger_rediscover campaign=%s env=%s auto_retry=%s retry_count=%s",
+        campaign_id, env, is_auto_retry,
+        new_retry_count if is_auto_retry else 0,
+    )
 
     if is_auto_retry:
         dedup_key = f"auto-retry:{env}:{campaign_id}:{new_retry_count}"
@@ -1005,6 +1157,40 @@ def _read_diagnostics_history(
     return parsed if isinstance(parsed, list) else []
 
 
+def _count_consecutive_zero_new(diagnostics_history: list[dict[str, Any]]) -> int:
+    """Count trailing rounds in ``diagnostics_history`` with no net-new
+    persisted candidates.
+
+    Walks from the end of the list backward; for each adjacent pair
+    ``(entry[i], entry[i-1])`` where
+    ``entry[i].persisted_count_at_end == entry[i-1].persisted_count_at_end``
+    (i.e. the later round added zero candidates vs the prior round), increments
+    the streak. Stops at the first round that DID grow the pool.
+
+    Returns 0 when fewer than 2 entries exist (no streak possible) or when the
+    most recent round grew the pool.
+
+    ``diagnostics_history`` MUST already include the just-terminated round's
+    entry (caller appends it via ``_append_diagnostics_entry`` before invoking
+    this helper).
+    """
+    if len(diagnostics_history) < 2:
+        return 0
+    streak = 0
+    for i in range(len(diagnostics_history) - 1, 0, -1):
+        prev = diagnostics_history[i - 1]
+        curr = diagnostics_history[i]
+        prev_count = prev.get("persisted_count_at_end")
+        curr_count = curr.get("persisted_count_at_end")
+        if prev_count is None or curr_count is None:
+            break
+        if curr_count == prev_count:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def _append_diagnostics_entry(
     conn: sqlite3.Connection,
     *,
@@ -1088,6 +1274,11 @@ async def evaluate_gate_after_terminal(
     # observe the same running→terminal flip.
     lock = await campaign_lock(env, campaign_id)
     async with lock:
+        logger.info(
+            "launch_path=gate_after_terminal campaign=%s env=%s retry=%s "
+            "gate_run_id=%s current_floor_target=%s",
+            campaign_id, env, retry_count, gate_run_id, target_floor,
+        )
         # Re-check ``gate_run_id`` under the lock — another concurrent
         # gate evaluation may have already cleared it (or replaced it
         # with a new auto-retry's run). If gate_run_id no longer matches
@@ -1137,6 +1328,60 @@ async def evaluate_gate_after_terminal(
             _clear_gate_run_id(conn, campaign_id=campaign_id, env=env)
             return {"ok": True, "outcome": "floor_met", "current": current,
                     "target_floor": target_floor}
+
+        # Early-escalation: if the last MAX_CONSECUTIVE_ZERO_NEW_RUNS rounds
+        # all produced zero net-new persisted candidates, the niche is almost
+        # certainly exhausted and another auto-retry will burn tokens for
+        # nothing. Escalate to the operator now instead of firing retry N+1.
+        # Only triggers for auto-retry rounds (retry_count > 0); the initial
+        # operator-launched run is never early-escalated on its own.
+        if retry_count > 0:
+            history_after_append = _read_diagnostics_history(
+                conn, campaign_id=campaign_id, env=env,
+            )
+            zero_new_streak = _count_consecutive_zero_new(history_after_append)
+            if zero_new_streak >= MAX_CONSECUTIVE_ZERO_NEW_RUNS:
+                early_reason = (
+                    reason
+                    or f"consecutive_zero_new_runs={zero_new_streak}"
+                )
+                conn.execute(
+                    "UPDATE product_campaigns SET floor_unmet_reason=? "
+                    "WHERE campaign_id=? AND env=?",
+                    (early_reason, campaign_id, env),
+                )
+                try:
+                    await bridge.open_escalation({
+                        "env": env,
+                        "campaign_id": campaign_id,
+                        "reason": "discovery_floor_unmet",
+                        "question_to_operator": (
+                            f"连续 {zero_new_streak} 轮 auto-retry 0 新增候选，"
+                            f"当前 {current}/{target_floor}。"
+                            f"niche 可能已枯竭（排除集大 / surface 反复失败）。"
+                            f"建议人工介入：放宽门槛 / 调整 driver / 清理排除集，"
+                            f"或手动 /rediscover 换角度。原因：{early_reason}。"
+                        ),
+                    })
+                except BridgeError as exc:
+                    logger.warning(
+                        "gate: early open_escalation failed for %s/%s: %s",
+                        campaign_id, env, exc,
+                    )
+                    return {"ok": False, "skipped": "escalation_failed",
+                            "current": current, "target_floor": target_floor}
+                _clear_gate_run_id(conn, campaign_id=campaign_id, env=env)
+                logger.info(
+                    "gate: early-escalated %s/%s after %d consecutive zero-new "
+                    "rounds (current=%d target=%d retry=%d)",
+                    campaign_id, env, zero_new_streak, current,
+                    target_floor, retry_count,
+                )
+                return {
+                    "ok": True, "outcome": "early_escalation_zero_new",
+                    "current": current, "target_floor": target_floor,
+                    "zero_new_streak": zero_new_streak, "reason": early_reason,
+                }
 
         # Resolve the product row for brief composition.
         row = conn.execute(
@@ -1193,6 +1438,38 @@ async def evaluate_gate_after_terminal(
                     "target_floor": target_floor, "reason": final_reason}
 
         additional = max(1, target_floor - current)
+        # Defensive in-flight guard: even though we hold ``campaign_lock``
+        # and re-checked ``gate_run_id``, an operator may have fired
+        # ``/start`` or ``/rediscover`` in the window between the terminal
+        # sync that called us and now. We check the row's ``run_id`` (NOT
+        # ``gate_run_id`` — that's our own pointer and is always set here)
+        # against the gateway: if the row's run_id differs from the
+        # gate_run_id we were called for AND that run is non-terminal,
+        # someone else launched something and we should not stack on top.
+        op_row = conn.execute(
+            "SELECT run_id FROM product_campaigns "
+            "WHERE campaign_id=? AND env=?",
+            (campaign_id, env),
+        ).fetchone()
+        op_run_id = str(op_row["run_id"]) if op_row and op_row["run_id"] else None
+        if op_run_id and op_run_id != gate_run_id:
+            try:
+                op_info = await gateway.get_run(op_run_id)
+            except GatewayError:
+                op_info = None
+            op_state = str((op_info or {}).get("status") or "").lower()
+            if op_state in RUNNING_STATES:
+                logger.info(
+                    "gate: skipping auto-retry for %s/%s — independent "
+                    "in-flight run (run_id=%s state=%s) at retry=%d",
+                    campaign_id, env, op_run_id, op_state, retry_count,
+                )
+                _clear_gate_run_id(conn, campaign_id=campaign_id, env=env)
+                return {
+                    "ok": True, "outcome": "skipped_in_flight_on_terminal",
+                    "current": current, "target_floor": target_floor,
+                    "in_flight_run_id": op_run_id, "in_flight_state": op_state,
+                }
         try:
             out = await _trigger_rediscover_internal(
                 bridge=bridge,

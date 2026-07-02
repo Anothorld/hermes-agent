@@ -99,11 +99,14 @@ def test_compose_unknown_phase_raises():
 
 def test_apply_handoff_writes_cal_events(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.delenv("CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP", raising=False)
     cal = _load_pkg_module("cal")
     cal._DB_PATH = tmp_path / "cal.db"
     sh = _load_pkg_module("session_handoff")
     cal.enqueue_session(quickcep_session_id="sess-1", message_id="m1", env="LIVE", chat_session_id="chat-1")
     cal.update_session_status(session_row_id=1, status="draft_ready")
+    # §4.13 B guard: draft_ready handoff requires a CAL draft.
+    cal.save_draft(quickcep_session_id="sess-1", draft_html="<p>draft</p>", source="agent", env="LIVE")
 
     with patch.object(sh, "apply_quickcep_tags", return_value=[]), patch.object(
         sh, "apply_quickcep_note", return_value={"ok": True}
@@ -329,7 +332,7 @@ def test_localize_agent_english_phrases():
             "actions_taken": "draft-save",
             "operator_hint": "Console relaunch if needed",
         })
-    assert "草稿已保存" in plan.note_body
+    assert "草稿已生成" in plan.note_body
     assert "工单列表" in plan.note_body
     assert "draft-save" not in plan.note_body.lower()
     assert "Console" not in plan.note_body
@@ -369,3 +372,71 @@ def test_failed_default_operator_hint_is_business_facing():
     assert "桥接服务" not in plan.note_body
     assert "日志" not in plan.note_body
     assert "人工" in plan.note_body
+
+
+# ── §4.13 B bridge guard: draft_ready requires a CAL draft ──────────────
+
+def test_draft_ready_blocked_without_cal_draft(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.delenv("CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP", raising=False)
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id="sess-guard", message_id="m1", env="LIVE", chat_session_id="c1")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
+
+    out = sh.apply_handoff(
+        quickcep_session_id="sess-guard",
+        phase="draft_ready",
+        env="LIVE",
+        context={"customer_need": "need"},
+        skip_quickcep=True,
+    )
+    assert out["ok"] is False
+    assert out["error"] == "draft_ready_requires_cal_draft"
+    # status must NOT have advanced to draft_ready
+    assert cal.get_session(quickcep_session_id="sess-guard", env="LIVE")["status"] == "processing"
+
+
+def test_draft_ready_allowed_with_cal_draft(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.delenv("CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP", raising=False)
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id="sess-guard-ok", message_id="m1", env="LIVE", chat_session_id="c1")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
+    cal.save_draft(quickcep_session_id="sess-guard-ok", draft_html="<p>hi</p>", source="agent", env="LIVE")
+
+    with patch.object(sh, "apply_quickcep_tags", return_value=[]), patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+        out = sh.apply_handoff(
+            quickcep_session_id="sess-guard-ok",
+            phase="draft_ready",
+            env="LIVE",
+            context={"customer_need": "need"},
+            skip_quickcep=True,
+        )
+    assert out["ok"] is True
+    assert cal.get_session(quickcep_session_id="sess-guard-ok", env="LIVE")["status"] == "draft_ready"
+
+
+def test_draft_ready_guard_bypassed_in_legacy_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP", "1")  # M3: drafts in QuickCEP, not CAL
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id="sess-legacy", message_id="m1", env="LIVE", chat_session_id="c1")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
+    # no CAL draft — but legacy mode allows it
+
+    with patch.object(sh, "apply_quickcep_tags", return_value=[]), patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+        out = sh.apply_handoff(
+            quickcep_session_id="sess-legacy",
+            phase="draft_ready",
+            env="LIVE",
+            context={"customer_need": "need"},
+            skip_quickcep=True,
+        )
+    assert out["ok"] is True
+    assert cal.get_session(quickcep_session_id="sess-legacy", env="LIVE")["status"] == "draft_ready"

@@ -9,7 +9,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .schema import ESCALATION_STATES, SESSION_STATUSES, recreate_all
 from .pii_sanitize import mask_string, sanitize_mapping, sanitize_namespaces
@@ -23,6 +23,8 @@ _DB_PATH = Path(
     )
 )
 _DEBUG_LOG_PATH = Path("/Users/arnold/agent_prj/.cursor/debug-922c3e.log")
+_DEBUG_SESSION_LOG_PATH = Path("/Users/arnold/.cursor/debug-logs/debug-eb3761.log")
+_TERMINAL_DRAFT_STATUSES = frozenset({"operator_replied", "reviewed", "skipped"})
 
 
 def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
@@ -43,6 +45,33 @@ def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, 
     except OSError:
         pass
     # #endregion
+
+
+def _debug_session_log(*, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "eb3761",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+        }
+        with _DEBUG_SESSION_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # #endregion
+
+
+def _is_effectively_empty_draft(html: str) -> bool:
+    import re
+
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    text = text.replace("\xa0", " ").strip()
+    return not text
 
 
 def _now() -> str:
@@ -102,10 +131,25 @@ def enqueue_session(
     customer_email: Optional[str] = None,
     message_id: str,
     env: str = "LIVE",
+    customer_name: Optional[str] = None,
+    customer_company: Optional[str] = None,
+    locale: Optional[str] = None,
+    email_subject: Optional[str] = None,
+    last_message_preview: Optional[str] = None,
+    intention_tags: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    """Idempotent enqueue; returns ``created`` flag and session row."""
+    """Idempotent enqueue; returns ``created`` flag and session row.
+
+    Optional visitor/draft-preview fields (PR1.2) are persisted with COALESCE
+    so a re-enqueue for a follow-up message never wipes previously stored values.
+    """
     dedup_key = f"{env}:{quickcep_session_id}:{message_id}"
     now = _now()
+    tags_json = (
+        json.dumps([str(t) for t in intention_tags if str(t).strip()], ensure_ascii=False)
+        if intention_tags
+        else None
+    )
     with _connect() as conn:
         existing = conn.execute(
             "SELECT 1 FROM cs_message_dedup WHERE dedup_key=?",
@@ -126,17 +170,28 @@ def enqueue_session(
         conn.execute(
             """INSERT INTO cs_session(
                    quickcep_session_id, chat_session_id, customer_email,
-                   last_message_id, status, env, created_at, updated_at
-               ) VALUES (?,?,?,?, 'pending', ?, ?, ?)
+                   last_message_id, status, env, created_at, updated_at,
+                   customer_name, customer_company, locale,
+                   email_subject, last_message_preview, intention_tags
+               ) VALUES (?,?,?,?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(quickcep_session_id, env) DO UPDATE SET
                    chat_session_id=COALESCE(excluded.chat_session_id, chat_session_id),
                    customer_email=COALESCE(excluded.customer_email, customer_email),
                    last_message_id=excluded.last_message_id,
                    status=CASE WHEN status IN ('draft_ready','operator_replied','skipped','failed','reviewed') THEN 'pending'
                             ELSE status END,
-                   updated_at=excluded.updated_at
+                   updated_at=excluded.updated_at,
+                   customer_name=COALESCE(excluded.customer_name, customer_name),
+                   customer_company=COALESCE(excluded.customer_company, customer_company),
+                   locale=COALESCE(excluded.locale, locale),
+                   email_subject=COALESCE(excluded.email_subject, email_subject),
+                   last_message_preview=COALESCE(excluded.last_message_preview, last_message_preview),
+                   intention_tags=COALESCE(excluded.intention_tags, intention_tags)
             """,
-            (quickcep_session_id, chat_session_id, customer_email, message_id, env, now, now),
+            (
+                quickcep_session_id, chat_session_id, customer_email, message_id, env, now, now,
+                customer_name, customer_company, locale, email_subject, last_message_preview, tags_json,
+            ),
         )
         row = conn.execute(
             "SELECT * FROM cs_session WHERE quickcep_session_id=? AND env=?",
@@ -167,6 +222,64 @@ def enqueue_session(
             "session": session,
         }
         return result
+
+
+# Columns updatable by enrich_session (PR1.2). Each maps field -> column name.
+_ENRICHABLE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("customer_email", "customer_email"),
+    ("customer_name", "customer_name"),
+    ("customer_company", "customer_company"),
+    ("locale", "locale"),
+    ("email_subject", "email_subject"),
+    ("last_message_preview", "last_message_preview"),
+    ("intention_tags", "intention_tags"),
+    ("draft_html", "draft_html"),
+    ("draft_attachments", "draft_attachments"),
+    ("draft_source", "draft_source"),
+)
+
+
+def enrich_session(
+    *,
+    quickcep_session_id: str,
+    env: str = "LIVE",
+    intention_tags: Optional[list[str]] = None,
+    **fields: Any,
+) -> bool:
+    """Update visitor/draft-preview columns on an existing session row.
+
+    Only non-None values are written (COALESCE-style: never overwrite an
+    existing value with NULL). ``intention_tags`` is accepted as a list and
+    serialized to JSON. Returns True if the session was found.
+    """
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return False
+    if intention_tags is not None:
+        fields["intention_tags"] = json.dumps(
+            [str(t) for t in intention_tags if str(t).strip()], ensure_ascii=False
+        )
+    sets: list[str] = []
+    params: list[Any] = []
+    for field, col in _ENRICHABLE_COLUMNS:
+        val = fields.get(field)
+        if val is None:
+            continue
+        # COALESCE keeps the existing column value when the new one is NULL-ish;
+        # since we skip None above, this mainly guards against empty strings.
+        sets.append(f"{col}=COALESCE(NULLIF(?, ''), {col})")
+        params.append(val)
+    if not sets:
+        return True
+    params.extend([_now(), quickcep_session_id, env])
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE cs_session SET {', '.join(sets)}, updated_at=? "
+            f"WHERE quickcep_session_id=? AND env=?",
+            params,
+        )
+        conn.commit()
+    return True
 
 
 def list_sessions(
@@ -200,6 +313,420 @@ def get_session(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict
             (quickcep_session_id, env),
         ).fetchone()
         return dict(row) if row else None
+
+
+def _parse_json_col(row: dict[str, Any], col: str, default: Any) -> Any:
+    raw = row.get(col)
+    if raw is None or raw == "":
+        return default
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def session_counts(*, env: str = "LIVE") -> dict[str, int]:
+    """Count of sessions per status + total, for the sessions list header (PR1.4)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM cs_session WHERE env=? GROUP BY status",
+            (env,),
+        ).fetchall()
+    counts = {r["status"]: int(r["n"]) for r in rows}
+    counts["total"] = sum(counts.values())
+    return counts
+
+
+def _latest_autopilot_job(conn: sqlite3.Connection, session_id: int, env: str) -> Optional[dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM cs_autopilot_jobs WHERE session_id=? AND env=? ORDER BY id DESC LIMIT 1",
+        (session_id, env),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_workbench(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict[str, Any]]:
+    """L1 pure-CAL aggregate for the Console workbench (PR1.4).
+
+    Zero QuickCEP calls. Combines: session row + parsed draft/attachments +
+    intention_tags + classify fact + latest escalation + recent events +
+    latest autopilot job.
+    """
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return None
+    sid = sess["id"]
+    with _connect() as conn:
+        facts_rows = conn.execute(
+            "SELECT namespace, fact_key, fact_value_json FROM cs_facts WHERE session_id=? AND env=?",
+            (sid, env),
+        ).fetchall()
+        events = conn.execute(
+            """SELECT event_type, payload_json, created_at FROM cs_conversation_events
+               WHERE session_id=? AND env=? ORDER BY id DESC LIMIT 30""",
+            (sid, env),
+        ).fetchall()
+        esc = conn.execute(
+            "SELECT * FROM cs_escalations WHERE session_id=? AND env=? ORDER BY id DESC LIMIT 1",
+            (sid, env),
+        ).fetchone()
+        esc_rows = conn.execute(
+            "SELECT * FROM cs_escalations WHERE session_id=? AND env=? ORDER BY id ASC",
+            (sid, env),
+        ).fetchall()
+        ap_job = _latest_autopilot_job(conn, sid, env)
+    facts_map: dict[str, dict[str, Any]] = {}
+    for f in facts_rows:
+        facts_map.setdefault(f["namespace"], {})[f["fact_key"]] = json.loads(f["fact_value_json"])
+
+    session_out = dict(sess)
+    session_out["intention_tags"] = _parse_json_col(sess, "intention_tags", [])
+    session_out["draft_attachments"] = _parse_json_col(sess, "draft_attachments", [])
+
+    return {
+        "session": session_out,
+        "draft": {
+            "html": sess.get("draft_html"),
+            "attachments": _parse_json_col(sess, "draft_attachments", []),
+            "source": sess.get("draft_source"),
+            "updated_at": sess.get("draft_updated_at"),
+        },
+        "classify": facts_map.get("classify", {}),
+        "intention_tags": _parse_json_col(sess, "intention_tags", []),
+        "latest_escalation": (dict(esc) if esc else None),
+        "escalations": [dict(r) for r in esc_rows],
+        "autopilot_job": (dict(ap_job) if ap_job else None),
+        "recent_events": [
+            {"event_type": e["event_type"], "payload": json.loads(e["payload_json"] or "{}"),
+             "created_at": e["created_at"]}
+            for e in events
+        ],
+    }
+
+
+def get_session_state(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict[str, Any]]:
+    """L3 lightweight poll payload for the Console (PR1.4).
+
+    Only the fields the FE polls frequently to detect changes: status, latest
+    escalation state, autopilot send_at, last_message_id, draft source/updated.
+    """
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return None
+    sid = sess["id"]
+    with _connect() as conn:
+        esc = conn.execute(
+            "SELECT state FROM cs_escalations WHERE session_id=? AND env=? ORDER BY id DESC LIMIT 1",
+            (sid, env),
+        ).fetchone()
+        ap_job = _latest_autopilot_job(conn, sid, env)
+    return {
+        "status": sess["status"],
+        "last_message_id": sess.get("last_message_id"),
+        "updated_at": sess.get("updated_at"),
+        "draft_source": sess.get("draft_source"),
+        "draft_updated_at": sess.get("draft_updated_at"),
+        "escalation_state": esc["state"] if esc else None,
+        "autopilot": {
+            "status": ap_job["status"] if ap_job else None,
+            "send_at": ap_job["send_at"] if ap_job else None,
+        } if ap_job else None,
+    }
+
+
+# ── Autopilot settings + job CRUD (PR2) ────────────────────────────────
+
+
+def get_setting(key: str, *, default: Any = None) -> Any:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value_json FROM cs_settings WHERE key=?", (key,),
+        ).fetchone()
+    if not row:
+        return default
+    try:
+        return json.loads(row["value_json"])
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def set_setting(key: str, value: Any, *, updated_by: str = "system") -> None:
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO cs_settings(key, value_json, updated_at, updated_by)
+               VALUES(?,?,?,?)
+               ON CONFLICT(key) DO UPDATE SET
+                   value_json=excluded.value_json,
+                   updated_at=excluded.updated_at,
+                   updated_by=excluded.updated_by""",
+            (key, json.dumps(value, ensure_ascii=False), _now(), updated_by),
+        )
+        conn.commit()
+
+
+def get_all_settings() -> dict[str, Any]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT key, value_json FROM cs_settings").fetchall()
+    out: dict[str, Any] = {}
+    for r in rows:
+        try:
+            out[r["key"]] = json.loads(r["value_json"])
+        except (json.JSONDecodeError, TypeError):
+            out[r["key"]] = None
+    return out
+
+
+def create_autopilot_job(
+    *,
+    quickcep_session_id: str,
+    env: str,
+    send_at: str,
+    baseline_hash: str,
+) -> Optional[dict[str, Any]]:
+    """Schedule an autopilot send job. Returns the job row or None on conflict."""
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return None
+    now = _now()
+    with _connect() as conn:
+        try:
+            conn.execute(
+                """INSERT INTO cs_autopilot_jobs(
+                       session_id, env, baseline_hash, send_at, status, created_at, updated_at
+                   ) VALUES(?,?,?,?, 'scheduled', ?, ?)""",
+                (sess["id"], env, baseline_hash, send_at, now, now),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            # UNIQUE(session_id, env) — a job already exists for this session.
+            return None
+    return get_latest_autopilot_job(quickcep_session_id=quickcep_session_id, env=env)
+
+
+def get_latest_autopilot_job(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict[str, Any]]:
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM cs_autopilot_jobs WHERE session_id=? AND env=? ORDER BY id DESC LIMIT 1",
+            (sess["id"], env),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def claim_scheduled_autopilot_jobs(*, now_iso: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Atomically claim due scheduled jobs (scheduled → sending). Returns claimed rows."""
+    claimed: list[dict[str, Any]] = []
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT j.*, s.quickcep_session_id, s.draft_html, s.draft_source
+               FROM cs_autopilot_jobs j
+               INNER JOIN cs_session s ON s.id = j.session_id AND s.env = j.env
+               WHERE j.status='scheduled' AND j.send_at <= ?
+               ORDER BY j.send_at ASC LIMIT ?""",
+            (now_iso, limit),
+        ).fetchall()
+        for r in rows:
+            cur = conn.execute(
+                "UPDATE cs_autopilot_jobs SET status='sending', claimed_at=?, updated_at=? "
+                "WHERE id=? AND status='scheduled'",
+                (_now(), _now(), r["id"]),
+            )
+            if cur.rowcount == 1:
+                claimed.append(dict(r))
+        conn.commit()
+    return claimed
+
+
+def finalize_autopilot_job(*, job_id: int, status: str, message_id: str = "") -> bool:
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE cs_autopilot_jobs SET status=?, updated_at=? WHERE id=?",
+            (status, _now(), job_id),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def cancel_autopilot_job(*, quickcep_session_id: str, env: str = "LIVE", reason: str = "operator_cancelled") -> dict[str, Any]:
+    """Cancel a scheduled/sending autopilot job for a session (operator override)."""
+    job = get_latest_autopilot_job(quickcep_session_id=quickcep_session_id, env=env)
+    if not job:
+        return {"ok": False, "error": "no_autopilot_job"}
+    if job["status"] in ("sent", "cancelled", "failed"):
+        return {"ok": False, "skipped": True, "reason": f"job already {job['status']}"}
+    finalize_autopilot_job(job_id=job["id"], status="cancelled")
+    write_event(
+        quickcep_session_id=quickcep_session_id,
+        env=env,
+        event_type="autopilot_cancelled",
+        payload={"reason": reason, "job_id": job["id"]},
+    )
+    return {"ok": True, "job_id": job["id"], "status": "cancelled"}
+
+
+def save_draft(
+    *,
+    quickcep_session_id: str,
+    draft_html: str,
+    attachments: Optional[list[Any]] = None,
+    source: str = "agent",
+    subject: Optional[str] = None,
+    env: str = "LIVE",
+    operator_id: Optional[str] = None,
+    operator_name: Optional[str] = None,
+    lock_check: Optional[Callable[[dict[str, Any]], Optional[str]]] = None,
+) -> dict[str, Any]:
+    """Persist a reply draft to CAL (cs_session.draft_html + draft_*).
+
+    Replaces writing drafts to QuickCEP (PR1.3 / §4.13). The agent contract
+    (cs_bridge_tool draft-save command) is unchanged — only the storage target
+    moves from QuickCEP to CAL, eliminating the ownerId draft-visibility problem.
+
+    ``lock_check`` (used by Autopilot, PR2) may return a lock-reason string; when
+    non-None the write is refused with a 409-style ``draft_locked`` result.
+
+    Returns a dict shaped for compatibility with the legacy quickcep_cli
+    draft-save response: ``{action, success, stored, ...}``.
+    """
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return {"action": "draft_save", "success": False, "error": "session not found"}
+    session_status = str(sess.get("status") or "")
+    if source == "operator_edit" and (
+        session_status in _TERMINAL_DRAFT_STATUSES or sess.get("draft_source") == "sent"
+    ):
+        if _is_effectively_empty_draft(draft_html):
+            _debug_session_log(
+                hypothesis_id="H4",
+                location="cal.py:save_draft",
+                message="skip ghost draft save after send",
+                data={
+                    "quickcep_session_id": quickcep_session_id,
+                    "session_status": session_status,
+                    "draft_source": sess.get("draft_source"),
+                },
+            )
+            return {
+                "action": "draft_save",
+                "success": True,
+                "stored": "skipped",
+                "reason": "terminal_empty_draft",
+                "session_id": quickcep_session_id,
+            }
+    if (sess.get("draft_html") or "") == draft_html and (sess.get("draft_source") or "") == source:
+        _debug_session_log(
+            hypothesis_id="H2",
+            location="cal.py:save_draft",
+            message="skip unchanged draft save",
+            data={"quickcep_session_id": quickcep_session_id, "source": source},
+        )
+        return {
+            "action": "draft_save",
+            "success": True,
+            "stored": "unchanged",
+            "session_id": quickcep_session_id,
+            "source": source,
+        }
+    if lock_check is not None:
+        reason = lock_check(sess)
+        if reason:
+            return {
+                "action": "draft_save",
+                "success": False,
+                "error": "draft_locked_autopilot",
+                "error_detail": reason,
+                "session_id": quickcep_session_id,
+            }
+    now = _now()
+    att_json = json.dumps(attachments or [], ensure_ascii=False) if attachments is not None else None
+    # PR3: when an operator edit overwrites the agent draft, snapshot the AI
+    # baseline so the edit-memory run can diff the two drafts. Only snapshot
+    # when there is an actual prior agent draft and the new content differs.
+    if source == "operator_edit" and (sess.get("draft_source") == "agent") and sess.get("draft_html"):
+        if (sess.get("draft_html") or "") != draft_html:
+            write_facts(
+                quickcep_session_id=quickcep_session_id,
+                env=env,
+                namespaces={"edit_memory": {"ai_baseline_html": sess.get("draft_html")}},
+            )
+    with _connect() as conn:
+        sets = [
+            "draft_html=?",
+            "draft_attachments=COALESCE(?, draft_attachments)",
+            "draft_source=?",
+            "draft_updated_at=?",
+            "updated_at=?",
+        ]
+        params: list[Any] = [draft_html, att_json, source, now, now]
+        if subject:
+            sets.append("email_subject=COALESCE(NULLIF(?, ''), email_subject)")
+            params.append(subject)
+        params.extend([quickcep_session_id, env])
+        conn.execute(
+            f"UPDATE cs_session SET {', '.join(sets)} WHERE quickcep_session_id=? AND env=?",
+            params,
+        )
+        conn.execute(
+            """INSERT INTO cs_conversation_events(session_id, event_type, payload_json, env, created_at)
+               VALUES (?,?,?,?,?)""",
+            (
+                sess["id"],
+                "draft_saved",
+                json.dumps({
+                    "source": source,
+                    "attachments": len(attachments or []),
+                    "subject": subject,
+                    "operator_id": operator_id,
+                    "operator_name": operator_name,
+                }),
+                env,
+                now,
+            ),
+        )
+        conn.commit()
+    return {
+        "action": "draft_save",
+        "success": True,
+        "stored": "cal",
+        "session_id": quickcep_session_id,
+        "source": source,
+        "attachments": len(attachments or []),
+    }
+
+
+def clear_draft(*, quickcep_session_id: str, env: str = "LIVE") -> None:
+    """Clear the CAL draft after a successful send (the reply is no longer pending).
+
+    Snapshots the current draft into sent_draft_html / sent_draft_source so the
+    daily report can still compute adoption rates after the composer is cleared.
+    Sets draft_html/draft_attachments to empty and draft_source to "sent" so a
+    workbench reload does not re-show the just-sent content in the composer.
+    """
+    sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return
+    now = _now()
+    prior_html = sess.get("draft_html") or ""
+    prior_source = sess.get("draft_source") or ""
+    with _connect() as conn:
+        # Snapshot the draft that was actually sent (only if it was AI-generated
+        # and not already a "sent" placeholder from a prior clear).
+        if prior_html and prior_source in ("agent", "operator_edit", "resume_agent"):
+            conn.execute(
+                "UPDATE cs_session SET sent_draft_html=?, sent_draft_source=?, sent_draft_at=?, "
+                "draft_html='', draft_attachments='[]', draft_source='sent', "
+                "draft_updated_at=?, updated_at=? WHERE quickcep_session_id=? AND env=?",
+                (prior_html, prior_source, now, now, now, quickcep_session_id, env),
+            )
+        else:
+            conn.execute(
+                "UPDATE cs_session SET draft_html='', draft_attachments='[]', draft_source='sent', "
+                "draft_updated_at=?, updated_at=? WHERE quickcep_session_id=? AND env=?",
+                (now, now, quickcep_session_id, env),
+            )
+        conn.commit()
 
 
 def session_has_event(*, session_row_id: int, event_type: str) -> bool:
@@ -277,12 +804,16 @@ def update_session_status(*, session_row_id: int, status: str) -> None:
         conn.commit()
 
 
-def _fetch_visitor_orders(quickcep_session_id: str) -> dict[str, Any]:
+def _fetch_visitor_orders(quickcep_session_id: str, env: str = "LIVE") -> dict[str, Any]:
     """Fetch customer orders from QuickCEP getOrderList API.
 
     Uses the same quickcep_cli import pattern as email_channel.fetch_email_session_row.
     Returns {"orders": [...], "userUUID": str|None, "customer_email": str|None, "source": str}.
     Best-effort: on any failure returns empty orders list.
+
+    As a side effect (PR1.2), enriches the CAL session row with visitorInfo
+    name/locale and intentionTags when they are missing — the SIO enqueue path
+    does not carry these, so the first dispatch-context fetch backfills them.
     """
     import argparse as _ap
     import sys as _sys
@@ -315,6 +846,28 @@ def _fetch_visitor_orders(quickcep_session_id: str) -> dict[str, Any]:
         intention_tags = []
     user_uuid = vi.get("userUUID")
     customer_email = vi.get("email")
+
+    # PR1.2: backfill visitor name/locale + intentionTags on the CAL session row.
+    try:
+        visitor_name = None
+        for key in ("firstName", "lastName", "nickname", "name"):
+            val = str(vi.get(key) or "").strip()
+            if val:
+                visitor_name = val
+                break
+        visitor_locale = str(vi.get("country") or vi.get("locale") or "").strip() or None
+        enrich_session(
+            quickcep_session_id=quickcep_session_id,
+            env=env,
+            customer_name=visitor_name,
+            customer_company=None,
+            locale=visitor_locale,
+            customer_email=(customer_email or None),
+            intention_tags=intention_tags or None,
+        )
+    except Exception:
+        log.debug("enrich_session side effect failed for %s", quickcep_session_id, exc_info=True)
+
     if not user_uuid:
         return {
             "orders": [],
