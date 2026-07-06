@@ -79,7 +79,7 @@ See `schemas.py` for the canonical pydantic models. Highlights:
 
 - `intents`: list of `IntentItem` (multi-intent, each with its own `in_scope`).
 - `in_scope` (top-level) = `any(item.in_scope)` — gate passes if any intent is in AI scope.
-- `customer_region`: `{country, province_state, source, confidence}` with source priority `order_address > visitor_geo > email_mention > email_tld > unknown`. The bridge seam fetches country from the Povison order-track API (order_address) + visitorInfo.country (visitor_geo); province_state is not available from order-track (its state/city are warehouse origin).
+- `customer_region`: `{country, province_state, source, confidence}` with source priority `order_address > visitor_geo > email_mention > email_tld > unknown`. The bridge seam fetches country from the Povison order-track API + province_state from QuickCEP `getOrderDetail.billingAddress` (parsed from the `street,city,state,country` string). The order-track API's own `state`/`city` fields are warehouse location (not customer) so they are not used.
 - `uncertain_fields` / `null_fields`: explicit no-fabrication labeling.
 - `fabrication_guard`: bool self-assertion; HTTP 422 when it can't be asserted.
 
