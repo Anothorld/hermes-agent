@@ -728,26 +728,6 @@ def cancel_autopilot_job(*, quickcep_session_id: str, env: str = "LIVE", reason:
     return {"ok": True, "job_id": job["id"], "status": "cancelled"}
 
 
-def _dbg_log_230991(message: str, data: dict[str, Any]) -> None:
-    # #region agent log
-    try:
-        payload = {
-            "sessionId": "230991",
-            "id": f"log_{int(time.time() * 1000)}_{data.get('hypothesisId', 'X')}",
-            "timestamp": int(time.time() * 1000),
-            "location": str(data.pop("location", "cal.py")),
-            "message": message,
-            "data": data,
-            "runId": data.pop("runId", "pre-fix"),
-            "hypothesisId": data.pop("hypothesisId", "X"),
-        }
-        with open("/Users/arnold/agent_prj/.cursor/debug-230991.log", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-    # #endregion
-
-
 def save_draft(
     *,
     quickcep_session_id: str,
@@ -775,20 +755,6 @@ def save_draft(
     sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
         return {"action": "draft_save", "success": False, "error": "session not found"}
-    _dbg_log_230991(
-        "save_draft ENTRY",
-        {
-            "hypothesisId": "H1",
-            "location": "cal.py:save_draft:entry",
-            "quickcep_session_id": quickcep_session_id,
-            "source": source,
-            "incoming_attachments_count": len(attachments or []),
-            "sess_draft_source": sess.get("draft_source"),
-            "sess_draft_html_len": len(sess.get("draft_html") or ""),
-            "incoming_draft_html_len": len(draft_html or ""),
-            "sess_draft_attachments_raw": sess.get("draft_attachments"),
-        },
-    )
     session_status = str(sess.get("status") or "")
     if source == "operator_edit" and (
         session_status in _TERMINAL_DRAFT_STATUSES or sess.get("draft_source") == "sent"
@@ -832,24 +798,6 @@ def save_draft(
             message="skip unchanged draft save",
             data={"quickcep_session_id": quickcep_session_id, "source": source},
         )
-        _dbg_log_230991(
-            "save_draft unchanged-check SHORT-CIRCUIT — attachments NOT persisted",
-            {
-                "hypothesisId": "H1",
-                "location": "cal.py:save_draft:unchanged_check",
-                "quickcep_session_id": quickcep_session_id,
-                "source": source,
-                "sess_draft_source": sess.get("draft_source"),
-                "draft_html_eq": (sess.get("draft_html") or "") == draft_html,
-                "incoming_attachments_count": len(attachments or []),
-                "sess_draft_attachments_raw": sess.get("draft_attachments"),
-                "atts_unchanged": atts_unchanged,
-                "incoming_attachments_preview": [
-                    {"name": a.get("name") or a.get("fileName"), "url": (a.get("url") or a.get("downloadUrl") or "")[:80]}
-                    for a in (attachments or [])[:5]
-                ],
-            },
-        )
         return {
             "action": "draft_save",
             "success": True,
@@ -857,19 +805,6 @@ def save_draft(
             "session_id": quickcep_session_id,
             "source": source,
         }
-    _dbg_log_230991(
-        "save_draft unchanged-check PASSED — proceeding to persist",
-        {
-            "hypothesisId": "H1",
-            "location": "cal.py:save_draft:unchanged_check_pass",
-            "quickcep_session_id": quickcep_session_id,
-            "source": source,
-            "draft_html_eq": (sess.get("draft_html") or "") == draft_html,
-            "source_eq": (sess.get("draft_source") or "") == source,
-            "atts_unchanged": atts_unchanged,
-            "incoming_attachments_count": len(attachments or []),
-        },
-    )
     if lock_check is not None:
         reason = lock_check(sess)
         if reason:
@@ -927,17 +862,6 @@ def save_draft(
             ),
         )
         conn.commit()
-    _dbg_log_230991(
-        "save_draft PERSISTED to CAL",
-        {
-            "hypothesisId": "H1",
-            "location": "cal.py:save_draft:persisted",
-            "quickcep_session_id": quickcep_session_id,
-            "source": source,
-            "attachments_count": len(attachments or []),
-            "att_json_len": len(att_json or "") if att_json else 0,
-        },
-    )
     return {
         "action": "draft_save",
         "success": True,
