@@ -385,6 +385,7 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         info.get("intentionTags"),
         customer_email=str(email) if email else None,
         env=_ENV,
+        info=info,
     )
     if not gate.allowed:
         log.info(

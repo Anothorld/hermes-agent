@@ -88,9 +88,12 @@ def test_switch_on_classifier_in_scope(monkeypatch):
 def test_switch_on_classifier_out_of_scope(monkeypatch):
     ig = _load("intent_gate")
     monkeypatch.setenv("CS_INTENT_ENABLED", "true")
-    with patch.object(ig, "_classifier_gate", return_value=ig.IntentGateResult(False, "classifier:after_sale_issue:out_of_scope", ())):
+    # out_of_scope must return a reason starting with intention_not_allowed so
+    # the watcher's permanent-skip check enqueues it into CAL (not transient).
+    with patch.object(ig, "_classifier_gate", return_value=ig.IntentGateResult(False, "intention_not_allowed (classifier:after_sale_issue:out_of_scope)", ())):
         res = ig.check_intent_gate("s4", intention_tags=["产品咨询"], fetch_if_missing=False, env="TEST")
     assert res.allowed is False
+    assert res.reason.startswith("intention_not_allowed")
     assert "out_of_scope" in res.reason
 
 
@@ -115,3 +118,19 @@ def test_switch_enabled_env_flag():
     finally:
         del os.environ["CS_INTENT_ENABLED"]
     assert ig._cs_intent_enabled() is False
+
+
+def test_extract_message_text_string_content():
+    ig = _load("intent_gate")
+    assert ig._extract_message_text({"content": "hello world"}) == "hello world"
+
+
+def test_extract_message_text_dict_content_html():
+    ig = _load("intent_gate")
+    msg = {"contentType": "html", "content": {"content": "plain body text", "subject": "Re: order"}}
+    assert ig._extract_message_text(msg) == "plain body text"
+
+
+def test_extract_message_text_falls_back_to_body():
+    ig = _load("intent_gate")
+    assert ig._extract_message_text({"body": "fallback text"}) == "fallback text"

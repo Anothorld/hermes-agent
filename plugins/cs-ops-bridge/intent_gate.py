@@ -223,7 +223,11 @@ def _classifier_gate(
 
     subject = (info or {}).get("email_subject") or ""
     visitor_info = (info or {}).get("visitorInfo") or {}
+    # QuickCEP visitorInfo has no `.geo` sub-dict; fall back to the `country`
+    # locale field as a medium-confidence region signal.
     visitor_geo = visitor_info.get("geo") if isinstance(visitor_info, dict) else None
+    if not visitor_geo and isinstance(visitor_info, dict) and visitor_info.get("country"):
+        visitor_geo = {"country": visitor_info.get("country"), "province_state": None}
 
     # Pre-fetch full body + dispatch-context (orders + addresses).
     body, order_addresses = _prefetch_body_and_orders(session_id=session_id, env=env)
@@ -281,8 +285,32 @@ def _classifier_gate(
     ge = data.get("gate_extract") or {}
     in_scope = bool(ge.get("in_scope"))
     primary = ge.get("primary_intent") or "unknown"
-    reason = f"classifier:{primary}:{'in_scope' if in_scope else 'out_of_scope'}"
+    if in_scope:
+        reason = f"classifier:{primary}:in_scope"
+    else:
+        # Prefix with intention_not_allowed so the watcher's existing permanent-skip
+        # check (gate.reason.startswith("intention_not_allowed")) enqueues it into CAL
+        # with status=skipped — matching the legacy out-of-allowlist behavior. Without
+        # this the out_of_scope result would be transient (log-only) and retried every
+        # REST tick, wasting classifier calls and never recording the skip.
+        reason = f"intention_not_allowed (classifier:{primary}:out_of_scope)"
     return IntentGateResult(in_scope, reason, ())
+
+
+def _extract_message_text(msg: dict[str, Any]) -> str:
+    """Extract plain text body from a QuickCEP message record.
+
+    QuickCEP html messages store `content` as a dict (parsed JSON) with the
+    inner text under `content.content`; text messages store it as a string.
+    The CLI's `--plain` (default) already html_to_plain'd the inner text.
+    """
+    content = msg.get("content")
+    if isinstance(content, dict):
+        # html contentType: {"content": "<plain text>", "subject": "...", ...}
+        return str(content.get("content") or content.get("text") or "")
+    if isinstance(content, str):
+        return content
+    return str(msg.get("body") or msg.get("text") or "")
 
 
 def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[str], list[dict[str, Any]]]:
@@ -298,7 +326,8 @@ def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[st
     body: Optional[str] = None
     order_addresses: list[dict[str, Any]] = []
 
-    # 1. get-messages → latest email body
+    # 1. get-messages → latest email body (chronological order is the CLI default,
+    #    so messages[-1] is the newest inbound).
     try:
         out = subprocess.run(
             ["python3", cli, "get-messages", "--env", env, "--session-id", session_id],
@@ -311,7 +340,7 @@ def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[st
             messages = data.get("messages") or []
             if messages:
                 last = messages[-1] if isinstance(messages, list) else messages
-                body = (last.get("content") or last.get("body") or "")
+                body = _extract_message_text(last)
     except Exception as exc:
         log.warning("prefetch get-messages failed session=%s: %s", session_id, exc)
         return None, []
