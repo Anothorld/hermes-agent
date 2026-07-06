@@ -542,6 +542,36 @@ def _llm_config() -> dict[str, str]:
     }
 
 
+def _augment_prompt_with_learning(prompt: str, *, env: str) -> str:
+    """Append T2 few-shot + T3 policy blocks to the base prompt.
+
+    Lazy-imports ``learning`` to keep classifier.py importable standalone (the
+    learning module pulls in db which needs the sqlite path resolved). Both
+    blocks are best-effort: empty/missing blocks are silently skipped so the
+    classifier still works before any corrections/policy exist.
+    """
+    try:
+        from . import learning
+    except Exception:
+        return prompt
+    extras: list[str] = []
+    try:
+        fs = learning.build_few_shot_block(env=env)
+        if fs:
+            extras.append(fs)
+    except Exception as exc:  # noqa: BLE001 — learning must never break classify
+        log.debug("few-shot block build failed: %s", exc)
+    try:
+        pol = learning.build_policy_rules_block()
+        if pol:
+            extras.append(pol)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("policy block build failed: %s", exc)
+    if not extras:
+        return prompt
+    return prompt + "\n\n" + "\n\n".join(extras)
+
+
 def llm_classify(
     *,
     subject: str,
@@ -553,6 +583,11 @@ def llm_classify(
     If no LLM is configured (missing api_key/model), returns a conservative
     `review` gate_extract so the gate does not falsely pass or block. This keeps
     the module testable without an LLM key.
+
+    The system prompt is augmented with two learning-loop blocks (when present):
+    - T2 few-shot: recent operator corrections injected as in-context examples.
+    - T3 policy: distilled rules from config/intent_policy.md.
+    Both are built dynamically at call time so promotions take effect immediately.
     """
     cfg = _llm_config()
     if not cfg["api_key"] or not cfg["model"]:
@@ -560,6 +595,7 @@ def llm_classify(
         return _conservative_review(subject=subject, body=body, metadata=metadata)
 
     prompt = _load_prompt()
+    prompt = _augment_prompt_with_learning(prompt, env=str(metadata.get("env") or "LIVE"))
     user_msg = json.dumps(
         {"subject": subject, "body": body, "metadata": _sanitize_metadata(metadata)},
         ensure_ascii=False,

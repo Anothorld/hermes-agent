@@ -185,3 +185,44 @@ def fetch_tracking_prefill(order_ids: Iterable[str], *, max_orders: int = _MAX_O
         "summaries": summaries,
         "errors": errors,
     }
+
+
+def fetch_order_countries(order_ids: Iterable[str], *, max_orders: int = _MAX_ORDERS) -> list[dict[str, Any]]:
+    """Fetch customer country per order from the Povison order-track API.
+
+    Used by the cs-intent-classifier seam to populate ``customer_region`` with
+    the ``order_address`` source (high confidence). Unlike
+    ``fetch_tracking_prefill`` this is **not** gated on 物流咨询 intent — it
+    runs at gate time for any session with order IDs. Reuses the same circuit
+    breaker + retry as tracking prefill.
+
+    Returns ``[{order_id, country, province_state}]`` where province_state is
+    None (the order-track API's ``state``/``city`` are warehouse origin, not
+    customer address — see pitfalls.md). country is None when the API didn't
+    return one or the call failed.
+    """
+    ids = _coerce_order_ids(order_ids)[: max(1, int(max_orders))]
+    if not ids or _cb_is_open():
+        return []
+    out: list[dict[str, Any]] = []
+    for order_id in ids:
+        last_err = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            payload, err = _fetch_one(order_id)
+            if payload is not None:
+                info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                records = info.get("records") if isinstance(info.get("records"), list) else []
+                record = records[0] if records and isinstance(records[0], dict) else {}
+                country = str(record.get("country") or "").strip() or None
+                out.append({"order_id": order_id, "country": country, "province_state": None})
+                _cb_mark_success()
+                last_err = None
+                break
+            last_err = err or "unknown_error"
+            if attempt < _MAX_ATTEMPTS:
+                time.sleep(_RETRY_BACKOFF_S * attempt)
+        if last_err:
+            _cb_mark_failure()
+            out.append({"order_id": order_id, "country": None, "province_state": None})
+            log.debug("order country fetch failed order=%s err=%s", order_id, last_err)
+    return out

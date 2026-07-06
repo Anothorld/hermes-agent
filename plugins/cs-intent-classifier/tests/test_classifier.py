@@ -154,3 +154,33 @@ def test_classify_falls_through_to_llm_when_keyword_misses(monkeypatch):
     ge = classifier.classify(subject="Hi", body="Just checking in", metadata={})
     assert ge["route"] == "review"
     assert ge["classifier_source"] == "keyword"  # conservative review stamps keyword
+
+
+def test_augment_prompt_with_learning_appends_blocks(monkeypatch):
+    # When policy + few-shot have content, both are appended to the base prompt.
+    from cs_intent_classifier_pkg import learning  # type: ignore[attr-defined]
+    monkeypatch.setattr(learning, "build_few_shot_block", lambda env, n=0: "## Few-shot corrections\n- a→b\n")
+    monkeypatch.setattr(learning, "build_policy_rules_block", lambda: "## Distilled policy rules\n- ADJUST: foo\n")
+    out = classifier._augment_prompt_with_learning("BASE PROMPT", env="TEST")
+    assert "BASE PROMPT" in out
+    assert "Few-shot corrections" in out
+    assert "Distilled policy rules" in out
+
+
+def test_augment_prompt_no_blocks_returns_base(monkeypatch):
+    from cs_intent_classifier_pkg import learning  # type: ignore[attr-defined]
+    monkeypatch.setattr(learning, "build_few_shot_block", lambda env, n=0: "")
+    monkeypatch.setattr(learning, "build_policy_rules_block", lambda: "")
+    out = classifier._augment_prompt_with_learning("BASE", env="TEST")
+    assert out == "BASE"
+
+
+def test_augment_prompt_learning_failure_does_not_break(monkeypatch):
+    # If learning raises, the prompt is returned unchanged (classify never breaks).
+    from cs_intent_classifier_pkg import learning  # type: ignore[attr-defined]
+    def boom(env, n=0):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(learning, "build_few_shot_block", boom)
+    monkeypatch.setattr(learning, "build_policy_rules_block", lambda: "")
+    out = classifier._augment_prompt_with_learning("BASE", env="TEST")
+    assert out == "BASE"

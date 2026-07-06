@@ -134,3 +134,31 @@ def test_extract_message_text_dict_content_html():
 def test_extract_message_text_falls_back_to_body():
     ig = _load("intent_gate")
     assert ig._extract_message_text({"body": "fallback text"}) == "fallback text"
+
+
+def test_seam_timeout_falls_back_to_legacy(monkeypatch):
+    # When the seam work exceeds CS_INTENT_SEAM_TIMEOUT, the gate returns None
+    # (→ legacy fallback) instead of blocking the watcher thread indefinitely.
+    ig = _load("intent_gate")
+    monkeypatch.setenv("CS_INTENT_ENABLED", "true")
+    monkeypatch.setenv("CS_INTENT_SEAM_TIMEOUT", "0.1")
+
+    def slow_work(**kwargs):
+        import time
+
+        time.sleep(0.5)  # exceeds the 0.1s cap
+        return ig.IntentGateResult(True, "classifier:logistics_inquiry:in_scope", ())
+
+    monkeypatch.setattr(ig, "_classifier_gate_work", slow_work)
+    # The seam submits to a real executor, so patch the work fn on the module
+    # the executor calls. Since _classifier_gate references _classifier_gate_work
+    # at call time via the module global, patching the module attribute works.
+    res = ig.check_intent_gate("s-timeout", intention_tags=["产品咨询"], fetch_if_missing=False, env="TEST")
+    # Timed out → None → fallthrough to legacy → 产品咨询 allowed
+    assert res.allowed is True
+    assert res.reason == "allowed"
+
+
+def test_seam_timeout_env_default():
+    ig = _load("intent_gate")
+    assert ig._seam_timeout() == 8.0

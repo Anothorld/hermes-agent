@@ -204,6 +204,23 @@ def _cs_intent_enabled() -> bool:
     return _truthy(os.environ.get("CS_INTENT_ENABLED"), default=False)
 
 
+# Thread pool for the async seam — caps SIO/REST callback blocking at
+# CS_INTENT_SEAM_TIMEOUT so a slow classifier can't stall the watcher's
+# single-threaded event loops. Two workers handle the rare overlap of an
+# SIO event arriving during a REST reconcile classify.
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
+
+_SEAM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cs-intent-seam")
+
+
+def _seam_timeout() -> float:
+    """Hard cap for the whole classify seam (pre-fetch + POST). Default 8s."""
+    try:
+        return float(os.environ.get("CS_INTENT_SEAM_TIMEOUT", "8"))
+    except ValueError:
+        return 8.0
+
+
 def _classifier_gate(
     *,
     session_id: str,
@@ -215,9 +232,41 @@ def _classifier_gate(
 
     Pre-fetches full email body + dispatch-context (orders + shipping addresses),
     assembles the classify request metadata, and POSTs to the classifier.
-    Returns None when the classifier is unreachable so the caller falls back
-    to the legacy QuickCEP-tag gate.
+    Returns None when the classifier is unreachable (or the seam exceeds
+    ``CS_INTENT_SEAM_TIMEOUT``) so the caller falls back to the legacy
+    QuickCEP-tag gate. The blocking work runs in ``_SEAM_EXECUTOR`` so the
+    watcher's SIO/REST thread is never blocked longer than the timeout.
     """
+    future = _SEAM_EXECUTOR.submit(
+        _classifier_gate_work,
+        session_id=session_id,
+        env=env,
+        customer_email=customer_email,
+        info=info,
+    )
+    try:
+        return future.result(timeout=_seam_timeout())
+    except _FutureTimeout:
+        log.warning(
+            "cs-intent-classifier seam timed out after %.1fs for session %s — falling back to QuickCEP gate",
+            _seam_timeout(),
+            session_id,
+        )
+        future.cancel()
+        return None
+    except Exception as exc:
+        log.warning("cs-intent-classifier seam failed for session %s: %s", session_id, exc)
+        return None
+
+
+def _classifier_gate_work(
+    *,
+    session_id: str,
+    env: str,
+    customer_email: str | None,
+    info: Optional[dict[str, Any]],
+) -> Optional[IntentGateResult]:
+    """Blocking body of the classifier seam (runs inside _SEAM_EXECUTOR)."""
     import urllib.error
     import urllib.request
 
@@ -345,7 +394,10 @@ def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[st
         log.warning("prefetch get-messages failed session=%s: %s", session_id, exc)
         return None, []
 
-    # 2. get-dispatch-context → orders + shipping addresses
+    # 2. get-dispatch-context → order IDs (the order objects from QuickCEP
+    #    getOrderList do NOT carry shipping address; country is fetched
+    #    separately from the Povison order-track API below).
+    order_ids: list[str] = []
     try:
         out = subprocess.run(
             ["python3", cli, "get-dispatch-context", "--env", env, "--session-id", session_id],
@@ -355,18 +407,31 @@ def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[st
         )
         if out.returncode == 0:
             data = json.loads(out.stdout)
-            for order in data.get("orders") or []:
-                if isinstance(order, dict):
-                    addr = order.get("shipping_address") or order.get("address") or {}
-                    if isinstance(addr, dict) and addr.get("country"):
-                        order_addresses.append(
-                            {
-                                "order_id": str(order.get("id") or order.get("order_id") or ""),
-                                "country": addr.get("country"),
-                                "province_state": addr.get("province_state") or addr.get("state"),
-                            }
-                        )
+            # dispatch-context returns {"orders": {"orders": [...], ...}, ...}
+            # (the inner dict is _fetch_visitor_orders' return value).
+            orders_field = data.get("orders") or {}
+            orders_list = (
+                orders_field.get("orders") if isinstance(orders_field, dict) else orders_field
+            )
+            if isinstance(orders_list, list):
+                for order in orders_list:
+                    if isinstance(order, dict):
+                        oid = str(order.get("orderId") or order.get("id") or order.get("order_id") or "").strip()
+                        if oid:
+                            order_ids.append(oid)
     except Exception as exc:
         log.debug("prefetch get-dispatch-context failed session=%s: %s", session_id, exc)
+
+    # 3. Povison order-track API → customer country per order (high-confidence
+    #    region source). Reuses the order_tracking circuit breaker + retry.
+    #    province_state is not available (order-track state/city are warehouse
+    #    origin, not customer address).
+    if order_ids:
+        try:
+            from . import order_tracking
+
+            order_addresses = order_tracking.fetch_order_countries(order_ids)
+        except Exception as exc:
+            log.debug("order_tracking.fetch_order_countries failed session=%s: %s", session_id, exc)
 
     return body, order_addresses
