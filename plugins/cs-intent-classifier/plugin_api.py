@@ -133,14 +133,24 @@ def patch_intent(
     session_id: str,
     body: CorrectionRequest,
 ) -> IntentReadResponse:
-    """Record an operator correction. Does NOT auto-relaunch (per confirmed decision)."""
+    """Record an operator correction. Does NOT auto-relaunch (per confirmed decision).
+
+    Allows correction even when no AI prediction exists (e.g. the session was
+    launched before CS_INTENT_ENABLED, or the classifier was unreachable at
+    inbound time). In that case the correction becomes an operator ground-truth
+    label — predicted is stored as {} and the corrected gate_extract is built
+    from the operator's chosen primary_intent.
+    """
     if body.env != "LIVE" and body.env != "TEST":
         raise HTTPException(status_code=400, detail="env must be LIVE or TEST")
     row = db.latest_classification(session_id=session_id, env=body.env)
-    if not row:
-        raise HTTPException(status_code=404, detail="no prediction to correct")
-    predicted = row["gate_extract"]
-    corrected = _apply_correction(predicted, body)
+    if row:
+        predicted = row["gate_extract"]
+        corrected = _apply_correction(predicted, body)
+    else:
+        # No AI prediction — record an operator ground-truth label.
+        predicted = {}
+        corrected = _build_label_only_correction(body)
     db.insert_correction(
         session_id=session_id,
         env=body.env,
@@ -152,6 +162,58 @@ def patch_intent(
     )
     # Re-read to return fresh state
     return get_intent(session_id, env=body.env)
+
+
+def _build_label_only_correction(body: CorrectionRequest) -> dict[str, Any]:
+    """Build a minimal corrected gate_extract when no AI prediction existed.
+
+    The operator's chosen primary_intent becomes the label; in_scope is derived
+    from the intent scope config so the label carries the same scope semantics
+    as a real classification.
+    """
+    from .classifier import _load_scope, _current_model_version
+
+    primary = body.primary_intent or "spam_irrelevant"
+    scope = _load_scope()
+    in_scope = bool(scope.get(primary, False))
+    return {
+        "intents": [
+            {
+                "intent": primary,
+                "in_scope": in_scope,
+                "confidence": "high",
+                "related_orders": [],
+                "related_products": [],
+                "post_sale_signal": None,
+                "urgency": "medium",
+                "snippet": "",
+            }
+        ],
+        "primary_intent": primary,
+        "in_scope": in_scope,
+        "route": "auto_handle" if in_scope else "escalate",
+        "urgency": "medium",
+        "emotion": {"value": "neutral", "confidence": "low"},
+        "language": {"value": "en", "confidence": 0.5},
+        "products": [],
+        "orders": [],
+        "customer_region": {"country": None, "province_state": None, "source": "unknown", "confidence": "low"},
+        "customer_segment": "unknown",
+        "summary_zh": "",
+        "hindsight_keywords": [],
+        "conversation_stage": "unknown",
+        "response_template_hint": None,
+        "attachment_hint": False,
+        "pii_flag": False,
+        "ambiguous": False,
+        "needs_clarification": None,
+        "threat_signal": None,
+        "model_version": _current_model_version(),
+        "classifier_source": "operator_label",
+        "uncertain_fields": [],
+        "null_fields": ["customer_region"],
+        "fabrication_guard": True,
+    }
 
 
 def _apply_correction(predicted: dict[str, Any], body: CorrectionRequest) -> dict[str, Any]:

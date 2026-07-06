@@ -108,7 +108,7 @@ class GateExtract(BaseModel):
 
     # Provenance + no-fabrication
     model_version: str = "v1"
-    classifier_source: str = Field(default="keyword", pattern="^(keyword|llm)$")
+    classifier_source: str = Field(default="keyword", pattern="^(keyword|llm|operator_label)$")
     uncertain_fields: list[str] = Field(default_factory=list)
     null_fields: list[str] = Field(default_factory=list)
     fabrication_guard: bool = True

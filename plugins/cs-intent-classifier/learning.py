@@ -106,10 +106,17 @@ def build_few_shot_block(*, env: str, n: int = 0) -> str:
     lines = ["## Few-shot corrections (recent operator overrides — learn from these)"]
     for ex in examples:
         subj = f' subject="{ex["subject"]}"' if ex["subject"] else ""
-        intents_str = f' intents={ex["predicted_intents"]}' if ex["predicted_intents"] else ""
-        lines.append(
-            f'-{subj} predicted_primary={ex["predicted_primary"]}{intents_str} → corrected_primary={ex["corrected_primary"]}'
-        )
+        pred_prim = ex["predicted_primary"]
+        if pred_prim:
+            intents_str = f' intents={ex["predicted_intents"]}' if ex["predicted_intents"] else ""
+            lines.append(
+                f'-{subj} predicted_primary={pred_prim}{intents_str} → corrected_primary={ex["corrected_primary"]}'
+            )
+        else:
+            # Label-only correction (no AI prediction existed) — a ground-truth label.
+            lines.append(
+                f'-{subj} operator_label_primary={ex["corrected_primary"]} (no AI prediction was stored for this email)'
+            )
     return "\n".join(lines) + "\n"
 
 

@@ -70,6 +70,24 @@ def test_few_shot_block_includes_subject_and_intents():
     assert "intents=" in block
 
 
+def test_few_shot_block_handles_label_only_correction():
+    # A correction with no AI prediction (predicted={}) renders as an operator
+    # label example, not a predicted→corrected pair.
+    db.insert_correction(
+        session_id="s-lab",
+        env="TEST",
+        predicted={},
+        corrected={"primary_intent": "product_inquiry"},
+        reason="",
+        operator_id="op",
+        subject="Swatch request",
+    )
+    block = learning.build_few_shot_block(env="TEST", n=4)
+    assert "Swatch request" in block
+    assert "operator_label_primary=product_inquiry" in block
+    assert "no AI prediction" in block
+
+
 def test_weekly_trend_insufficient_when_no_snapshots():
     t = learning.latest_weekly_trend(env="TEST", weeks=2)
     assert t["direction"] == "insufficient"

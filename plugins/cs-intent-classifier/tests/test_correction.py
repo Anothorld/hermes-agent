@@ -56,14 +56,22 @@ def test_classify_then_correct(client):
     assert out["corrections"][0]["operator_id"] == "op1"
 
 
-def test_correct_missing_prediction_404(client):
+def test_correct_without_prediction_creates_label(client):
+    # No prior classification → correction becomes an operator ground-truth label
+    # (predicted={}, corrected built from operator's chosen primary_intent).
     r = client.patch("/intent/nope", json={
         "env": "TEST",
         "operator_id": "op1",
         "primary_intent": "product_inquiry",
         "reason": "x",
+        "subject": "Question about a sofa",
     })
-    assert r.status_code == 404
+    assert r.status_code == 200
+    out = r.json()
+    assert out["corrected"]["primary_intent"] == "product_inquiry"
+    assert out["corrected"]["classifier_source"] == "operator_label"
+    assert out["corrections"][0]["predicted"] == {}
+    assert out["corrections"][0]["subject"] == "Question about a sofa"
 
 
 def test_get_intent_returns_predicted_only_when_no_correction(client):
@@ -84,6 +92,32 @@ def test_get_intent_returns_predicted_only_when_no_correction(client):
 def test_gate_extract_404_when_unclassified(client):
     r = client.get("/gate-extract/never", params={"env": "TEST"})
     assert r.status_code == 404
+
+
+def test_batch_intent_codes(client):
+    client.post("/classify", json={
+        "session_id": "batch-a",
+        "env": "TEST",
+        "subject": "Where is my order?",
+        "body": "Where is my order #11223344?",
+        "metadata": {},
+    })
+    client.post("/classify", json={
+        "session_id": "batch-b",
+        "env": "TEST",
+        "subject": "Sofa dimensions",
+        "body": "What are the dimensions of SF8268?",
+        "metadata": {},
+    })
+    r = client.post("/intents/batch", json={
+        "env": "TEST",
+        "session_ids": ["batch-a", "batch-b", "missing"],
+    })
+    assert r.status_code == 200
+    by_session = r.json()["intents_by_session"]
+    assert "logistics_inquiry" in by_session["batch-a"]
+    assert "product_inquiry" in by_session["batch-b"]
+    assert "missing" not in by_session
 
 
 def test_health(client):
