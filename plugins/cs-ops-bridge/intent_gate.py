@@ -214,11 +214,12 @@ _SEAM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cs-intent
 
 
 def _seam_timeout() -> float:
-    """Hard cap for the whole classify seam (pre-fetch + POST). Default 8s."""
+    """Hard cap for the whole classify seam (pre-fetch + POST). Default 45s
+    (30s LLM + ~10s pre-fetch buffer); tune down for faster endpoints."""
     try:
-        return float(os.environ.get("CS_INTENT_SEAM_TIMEOUT", "8"))
+        return float(os.environ.get("CS_INTENT_SEAM_TIMEOUT", "45"))
     except ValueError:
-        return 8.0
+        return 45.0
 
 
 def _classifier_gate(

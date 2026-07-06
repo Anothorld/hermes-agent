@@ -542,6 +542,15 @@ def _llm_config() -> dict[str, str]:
     }
 
 
+def _llm_timeout() -> float:
+    """LLM call timeout. Default 30s (classification prompts can be slow on
+    self-hosted endpoints). Override via CS_INTENT_LLM_TIMEOUT."""
+    try:
+        return float(os.environ.get("CS_INTENT_LLM_TIMEOUT", "30"))
+    except ValueError:
+        return 30.0
+
+
 def _augment_prompt_with_learning(prompt: str, *, env: str) -> str:
     """Append T2 few-shot + T3 policy blocks to the base prompt.
 
@@ -604,7 +613,8 @@ def llm_classify(
         {"role": "system", "content": prompt},
         {"role": "user", "content": user_msg},
     ]
-    raw = _call_llm(cfg, messages, timeout=5.0)
+    llm_timeout = _llm_timeout()
+    raw = _call_llm(cfg, messages, timeout=llm_timeout)
     if not raw:
         log.warning("LLM call failed — returning conservative review gate_extract")
         return _conservative_review(subject=subject, body=body, metadata=metadata)
@@ -620,12 +630,73 @@ def llm_classify(
     if not parsed.get("intents"):
         raise FabricationError("LLM returned empty intents")
 
+    # Coerce null → schema defaults. The LLM correctly returns null for fields
+    # it cannot determine (no-fabrication), but pydantic rejects null for list/
+    # model fields. Normalize before validation.
+    parsed = _coerce_llm_nulls(parsed)
+
     # Stamp provenance
     parsed["model_version"] = _current_model_version()
     parsed["classifier_source"] = "llm"
     # Validate via pydantic
     ge = GateExtract.model_validate(parsed)
     return ge.model_dump()
+
+
+def _coerce_llm_nulls(d: dict[str, Any]) -> dict[str, Any]:
+    """Convert LLM null outputs to schema-safe defaults (no-fabrication tolerant).
+
+    The LLM returns null for unknown list/dict/sub-model fields. The pydantic
+    schema requires list/dict types. This coerces null → empty list / default
+    model so the no-fabrication behavior (null when unknown) flows through
+    validation. Also coerces nested nulls inside each intent item.
+    """
+    # top-level list/dict fields that the LLM may null out
+    for key in ("products", "orders", "hindsight_keywords", "uncertain_fields", "null_fields", "intents"):
+        if d.get(key) is None:
+            d[key] = []
+    if d.get("customer_region") is None:
+        d["customer_region"] = {"country": None, "province_state": None, "source": "unknown", "confidence": "low"}
+        if "customer_region" not in (d.get("null_fields") or []):
+            d.setdefault("null_fields", []).append("customer_region")
+    if d.get("emotion") is None:
+        d["emotion"] = {"value": "neutral", "confidence": "low"}
+    if d.get("language") is None:
+        d["language"] = {"value": "en", "confidence": 0.5}
+    # string-with-default fields that the LLM may null out
+    for key, default in (
+        ("customer_segment", "unknown"),
+        ("conversation_stage", "unknown"),
+        ("primary_intent", "spam_irrelevant"),
+        ("route", "review"),
+        ("urgency", "medium"),
+        ("summary_zh", ""),
+        ("model_version", "v1"),
+        ("classifier_source", "llm"),
+    ):
+        if d.get(key) is None:
+            d[key] = default
+    # language.confidence may come back as "low" string instead of float
+    lang = d.get("language") or {}
+    if isinstance(lang, dict):
+        conf = lang.get("confidence")
+        if isinstance(conf, str):
+            try:
+                lang["confidence"] = float(conf)
+            except (ValueError, TypeError):
+                lang["confidence"] = 0.5
+        elif conf is None:
+            lang["confidence"] = 0.5
+        d["language"] = lang
+    # coerce nulls inside intent items
+    for i, it in enumerate(d.get("intents") or []):
+        if isinstance(it, dict):
+            for key in ("related_orders", "related_products"):
+                if it.get(key) is None:
+                    it[key] = []
+            if it.get("post_sale_signal") is None:
+                pass  # already Optional
+    return d
 
 
 class FabricationError(Exception):

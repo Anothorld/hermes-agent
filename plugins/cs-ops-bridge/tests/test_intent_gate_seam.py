@@ -161,4 +161,4 @@ def test_seam_timeout_falls_back_to_legacy(monkeypatch):
 
 def test_seam_timeout_env_default():
     ig = _load("intent_gate")
-    assert ig._seam_timeout() == 8.0
+    assert ig._seam_timeout() == 45.0

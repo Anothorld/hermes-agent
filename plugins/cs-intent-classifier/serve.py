@@ -22,6 +22,27 @@ _PLUGIN_ROOT = Path(__file__).resolve().parent
 _PKG_NAME = "cs_intent_classifier_pkg"
 
 
+def _load_env() -> None:
+    """Load CS_INTENT_* secrets from a plugin-local .env (gitignored).
+
+    Keeps the module self-contained — does NOT read the povison-cs profile
+    .env. Only loads keys starting with CS_INTENT_ so unrelated shell env is
+    untouched. Existing env vars win (file does not override).
+    """
+    env_path = _PLUGIN_ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key.startswith("CS_INTENT_") and key not in os.environ:
+            os.environ[key] = val
+
+
 def _load_pkg() -> "object":
     """Load the plugin modules as a synthetic package (mirrors cs-ops-bridge)."""
     import importlib.util
@@ -64,6 +85,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    _load_env()
     log = logging.getLogger("cs-intent-classifier")
     log.info(
         "starting host=%s port=%s model=%s llm_configured=%s",

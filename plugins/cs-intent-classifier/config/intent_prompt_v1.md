@@ -53,7 +53,11 @@ Return ONLY a JSON object matching the `gate_extract` schema. No prose, no markd
 4. **order_management** — customer wants to cancel/modify an unshipped order, change address, fix payment. `in_scope=false`.
 5. **spam_irrelevant** — B2B pitches, verification codes, bounce notifications, no-content replies, chat trigger words. `in_scope=false`.
 
+**Spam is STRICT:** only classify as spam_irrelevant when the email is clearly unsolicited marketing/B2B OR a genuine no-content reply (just "ok"/"thanks"/"hi" with NOTHING else). A short subject like "Re: Question" or "Re: Swatches" is NOT spam — it is a customer reply in an existing thread. When in doubt between spam and a real intent, prefer the real intent. Never classify as spam if the subject mentions a product name, order number, delivery, swatch, dimensions, or any customer-service-relevant keyword.
+
 **Multi-intent:** an email can contain multiple intents (e.g., logistics tracking + after-sale damage). List each in `intents[]` in the order they appear. `primary_intent` = the dominant need. `in_scope = true` if ANY intent is in_scope.
+
+**Short input tolerance:** the body may be short or empty (the seam pre-fetches full body in production; tests may send subject only). Classify based on subject + whatever body is present. A non-empty subject with a customer-service keyword is NEVER spam.
 
 ## No-fabrication HARD contract (violation = classification failure)
 
