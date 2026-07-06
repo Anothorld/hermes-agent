@@ -70,9 +70,11 @@ def test_messages_endpoint_returns_filtered(monkeypatch, app):
     live = _load_pkg_module("quickcep_live")
     monkeypatch.setattr(
         live, "fetch_messages",
-        lambda *, quickcep_session_id, since: {
+        lambda *, quickcep_session_id, since=None, force_fresh=False,
+               page=0, page_size=10: {
             "ok": True, "session_id": quickcep_session_id, "total": 2,
-            "count": 1, "messages": [{"id": "m2", "content": "hi"}],
+            "count": 1, "page": page, "page_size": page_size,
+            "has_more": False, "messages": [{"id": "m2", "content": "hi"}],
         },
     )
     client = TestClient(app)
@@ -343,6 +345,162 @@ def test_live_endpoints_404_unknown_session(app):
     client = TestClient(app)
     r = client.get("/sessions/nope/messages", headers=_headers())
     assert r.status_code == 404
+
+
+# ── Paging: page/page_size passthrough & cache bypass for older pages ─────
+
+
+def test_fetch_messages_fresh_returns_paging_fields(monkeypatch):
+    """_fetch_messages_fresh echoes page/page_size and computes has_more."""
+    live = _load_pkg_module("quickcep_live")
+    live._messages_cache.clear()
+    captured = {}
+
+    def fake_cli(args):
+        captured["args"] = args
+        return 0, json.dumps({
+            "chatSubSessionId": "qc-pg",
+            "messages": [{"id": "m1"}, {"id": "m2"}],
+            "total": 25,
+        }), ""
+
+    monkeypatch.setattr(live, "_run_quickcep_cli", fake_cli)
+    r = live._fetch_messages_fresh(quickcep_session_id="qc-pg", page=2, page_size=10)
+    assert r["ok"] is True
+    assert r["page"] == 2
+    assert r["page_size"] == 10
+    assert r["count"] == 2
+    assert r["total"] == 25
+    # (2+1)*10 = 30 < 25 is False → has_more False
+    assert r["has_more"] is False
+    # CLI received the requested page/page-size.
+    assert "--page" in captured["args"] and "2" in captured["args"]
+    assert "--page-size" in captured["args"] and "10" in captured["args"]
+
+
+def test_fetch_messages_fresh_has_more_true_when_more_pages(monkeypatch):
+    live = _load_pkg_module("quickcep_live")
+    live._messages_cache.clear()
+
+    def fake_cli(args):
+        return 0, json.dumps({
+            "chatSubSessionId": "qc-pg2",
+            "messages": [{"id": "m1"}],
+            "total": 25,
+        }), ""
+
+    monkeypatch.setattr(live, "_run_quickcep_cli", fake_cli)
+    r = live._fetch_messages_fresh(quickcep_session_id="qc-pg2", page=0, page_size=10)
+    # (0+1)*10 = 10 < 25 → has_more True
+    assert r["has_more"] is True
+
+
+def test_older_page_bypasses_cache(monkeypatch):
+    """page>0 must NOT read from or write to the page-0 cache. Otherwise a
+    drift-shifted older page could be served stale, or a fresh older page
+    could pollute the page-0 cache entry."""
+    live = _load_pkg_module("quickcep_live")
+    live._messages_cache.clear()
+    calls = {"n": 0, "args": []}
+
+    def fake_cli(args):
+        calls["n"] += 1
+        calls["args"].append(args)
+        return 0, json.dumps({
+            "chatSubSessionId": "qc-old",
+            "messages": [{"id": "m1"}],
+            "total": 30,
+        }), ""
+
+    monkeypatch.setattr(live, "_run_quickcep_cli", fake_cli)
+    # Warm the page-0 cache.
+    live.fetch_messages(quickcep_session_id="qc-old")
+    assert calls["n"] == 1
+    assert "qc-old" in live._messages_cache
+    # Request page 1 → must hit CLI again (not served from cache).
+    r = live.fetch_messages(quickcep_session_id="qc-old", page=1, page_size=20)
+    assert calls["n"] == 2
+    assert r["page"] == 1
+    assert r["page_size"] == 20
+    # Page-1 result must NOT be written into the cache (cache still holds page 0).
+    cached = live._messages_cache.get("qc-old")
+    assert cached is not None
+    assert cached[1].get("page", 0) == 0
+    # The CLI was called with page 1 / page-size 20 for the second call.
+    assert "--page" in calls["args"][1] and "1" in calls["args"][1]
+    assert "--page-size" in calls["args"][1] and "20" in calls["args"][1]
+
+
+def test_page0_cache_path_unchanged_with_default_page_size(monkeypatch):
+    """page=0 with defaults still caches; default page_size is now 10 (was 50)."""
+    live = _load_pkg_module("quickcep_live")
+    live._messages_cache.clear()
+    calls = {"n": 0, "args": []}
+
+    def fake_cli(args):
+        calls["n"] += 1
+        calls["args"].append(args)
+        return 0, json.dumps({
+            "chatSubSessionId": "qc-p0",
+            "messages": [{"id": "m1"}],
+            "total": 1,
+        }), ""
+
+    monkeypatch.setattr(live, "_run_quickcep_cli", fake_cli)
+    r1 = live.fetch_messages(quickcep_session_id="qc-p0")
+    r2 = live.fetch_messages(quickcep_session_id="qc-p0")  # cache hit
+    assert calls["n"] == 1
+    assert r2["count"] == 1
+    # Default page size is 10.
+    assert "--page-size" in calls["args"][0] and "10" in calls["args"][0]
+
+
+def test_messages_endpoint_passes_page_and_page_size(monkeypatch, app):
+    """The HTTP route forwards page/page_size to fetch_messages."""
+    live = _load_pkg_module("quickcep_live")
+    captured = {}
+
+    def fake_fetch(*, quickcep_session_id, since=None, force_fresh=False,
+                   page=0, page_size=10):
+        captured.update(page=page, page_size=page_size, since=since)
+        return {"ok": True, "session_id": quickcep_session_id, "total": 5,
+                "count": 2, "page": page, "page_size": page_size,
+                "has_more": False, "messages": [{"id": "m1"}, {"id": "m2"}]}
+
+    monkeypatch.setattr(live, "fetch_messages", fake_fetch)
+    client = TestClient(app)
+    r = client.get(
+        "/sessions/qc-live/messages",
+        params={"page": 1, "page_size": 20},
+        headers=_headers(),
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["page"] == 1
+    assert body["page_size"] == 20
+    assert captured["page"] == 1
+    assert captured["page_size"] == 20
+
+
+def test_messages_endpoint_older_page_has_longer_browser_cache(monkeypatch, app):
+    """page>0 gets a 60s browser cache; page=0 keeps the 5s+SWR cache."""
+    live = _load_pkg_module("quickcep_live")
+    monkeypatch.setattr(
+        live, "fetch_messages",
+        lambda *, quickcep_session_id, since=None, force_fresh=False,
+               page=0, page_size=10: {
+            "ok": True, "session_id": quickcep_session_id, "total": 1,
+            "count": 1, "page": page, "page_size": page_size,
+            "has_more": False, "messages": [{"id": "m1"}],
+        },
+    )
+    client = TestClient(app)
+    r0 = client.get("/sessions/qc-live/messages", params={"page": 0}, headers=_headers())
+    r1 = client.get("/sessions/qc-live/messages", params={"page": 1}, headers=_headers())
+    cc0 = r0.headers.get("cache-control", "")
+    cc1 = r1.headers.get("cache-control", "")
+    assert "max-age=5" in cc0 and "stale-while-revalidate" in cc0
+    assert "max-age=60" in cc1 and "stale-while-revalidate" not in cc1
 
 
 if __name__ == "__main__":

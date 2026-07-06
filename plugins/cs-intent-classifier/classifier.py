@@ -74,7 +74,29 @@ _PRODUCT_PATTERNS: tuple[str, ...] = (
 _SPAM_PATTERNS: tuple[str, ...] = (
     r"\b(guest post|seo service|backlink|partnership proposal)\b",
     r"\b(we are a (supplier|manufacturer|factory))\b",
-    r"^(hi|hello|ok|yes|no problem|thank you)\s*\.?\s*$",
+    r"^(hi|hello|ok|yes|no problem)\s*\.?\s*$",
+)
+
+# Conversation-closing patterns → is_conversation_closing=true, in_scope=true.
+# Pure thank-you / acknowledgment with NO new question. Distinct from spam: a
+# closing email is from a real customer in an existing thread signaling "we're
+# done". The agent should send a brief "you're welcome" and close the session.
+# These patterns match the thank-you phrase; question-marker exclusion + length
+# cap in _is_closing_email ensures we don't misclassify a real inquiry.
+_CLOSING_PATTERNS: tuple[str, ...] = (
+    r"\b(thank you|thanks|thx|appreciate it|much appreciated|got it thanks|"
+    r"perfect thanks|that answers my question|that helps thanks|"
+    r"thank you for your help|thanks for the help|great thanks|"
+    r"you're welcome|no thanks needed)\b",
+)
+_CLOSING_MAX_LEN = 200  # closing emails are short; longer = likely a real inquiry
+# Question markers that disqualify closing detection (email has a new ask).
+_QUESTION_MARKERS = re.compile(
+    r"\b(how|what|when|where|why|which|can you|could you|would you|do you|"
+    r"is there|are there|will you|may i|can i|need|want|looking for|"
+    r"question|help me|issue|problem|order|tracking|refund|return|damage|"
+    r"cancel|change|update|missing|wrong|broken)\b",
+    re.I,
 )
 
 _ORDER_RE = re.compile(r"\b(?:order\s*#?\s*)(\d{6,})\b|#(\d{6,})\b", re.I)
@@ -263,6 +285,33 @@ def keyword_classify(
                 source="keyword",
             )
 
+    # Conversation-closing email (pure thank-you, no new question).
+    # Checked before spam so a real customer's "thanks" in a thread is handled
+    # as a closing acknowledgment, not discarded as spam.
+    if _is_closing_email(subject=subject, body=body):
+        intent = _mk_intent("spam_irrelevant", (subject + " " + body).strip()[:300], urgency="low")
+        return _assemble(
+            intents=[intent],
+            primary_intent="spam_irrelevant",
+            route="auto_handle",
+            urgency="low",
+            threat_signal=None,
+            emotion_value="grateful",
+            emotion_conf="high",
+            lang_val=lang_val,
+            lang_conf=lang_conf,
+            orders=orders,
+            skus=skus,
+            region=region,
+            uncertain=uncertain,
+            null_fields=null_fields,
+            summary_zh="客户表示感谢，话题结束",
+            hindsight_keywords=[],
+            metadata=metadata,
+            source="keyword",
+            is_conversation_closing=True,
+        )
+
     # Spam
     for pat in _SPAM_PATTERNS:
         if re.search(pat, lower):
@@ -407,6 +456,37 @@ def _snippet_match(text: str, pattern: str) -> str:
     return text[start:end].strip()
 
 
+def _is_closing_email(*, subject: str, body: str) -> bool:
+    """Detect a pure thank-you / closing email with no new question or request.
+
+    A closing email is a real customer's acknowledgment in an existing thread
+    (e.g. "Thank you so much for your help!"). It is NOT spam — the agent should
+    send a brief "you're welcome" and close the session. Returns False when the
+    email contains question markers or substantive requests, even if it starts
+    with "thanks".
+    """
+    # Check the body primarily (subject is usually "Re: ..." in a closing reply).
+    # Fall back to subject only when body is empty.
+    text = body.strip() if body.strip() else subject.strip()
+    if not text:
+        return False
+    # Closing emails are short; a long body likely contains a real inquiry.
+    if len(text) > _CLOSING_MAX_LEN:
+        return False
+    # Must match a closing pattern (thank-you / acknowledgment phrase).
+    if not any(re.search(pat, text, re.I) for pat in _CLOSING_PATTERNS):
+        return False
+    # Must NOT contain a question or new request. Check only the body (not the
+    # subject) — the subject of a closing reply is the thread context ("Re:
+    # Order #123") and naturally contains "order"/"tracking" etc.
+    if _QUESTION_MARKERS.search(text):
+        return False
+    # Must NOT contain a question mark (strong signal of a new ask).
+    if "?" in text:
+        return False
+    return True
+
+
 def _summary_zh(key: str, kind: str, orders: list[str], skus: list[str]) -> str:
     """Cheap deterministic Chinese summary for keyword-classified cases."""
     ord_str = f"订单#{','.join(orders)}" if orders else ""
@@ -460,8 +540,13 @@ def _assemble(
     hindsight_keywords: list[str],
     metadata: dict[str, Any],
     source: str,
+    is_conversation_closing: bool = False,
 ) -> dict[str, Any]:
     in_scope = any(i.get("in_scope") for i in intents)
+    # Conversation-closing emails: force in_scope=True so the gate passes and
+    # the agent sends an acknowledgment (not blocked as out-of-scope spam).
+    if is_conversation_closing:
+        in_scope = True
     products = [{"slug": s, "name": None, "line": None, "confidence": "high"} for s in skus]
     return {
         "intents": intents,
@@ -484,6 +569,7 @@ def _assemble(
         "ambiguous": False,
         "needs_clarification": None,
         "threat_signal": threat_signal,
+        "is_conversation_closing": is_conversation_closing,
         "model_version": _current_model_version(),
         "classifier_source": source,
         "uncertain_fields": uncertain,
@@ -661,6 +747,16 @@ def _coerce_llm_nulls(d: dict[str, Any]) -> dict[str, Any]:
             d.setdefault("null_fields", []).append("customer_region")
     if d.get("emotion") is None:
         d["emotion"] = {"value": "neutral", "confidence": "low"}
+    # Emotion sub-fields may be null even when the dict exists (LLM returns
+    # {"value": null, "confidence": null}). Coerce to defaults to prevent
+    # pydantic ValidationError crashes.
+    emo = d.get("emotion")
+    if isinstance(emo, dict):
+        if emo.get("value") is None:
+            emo["value"] = "neutral"
+        if emo.get("confidence") is None:
+            emo["confidence"] = "low"
+        d["emotion"] = emo
     if d.get("language") is None:
         d["language"] = {"value": "en", "confidence": 0.5}
     # string-with-default fields that the LLM may null out
@@ -676,6 +772,10 @@ def _coerce_llm_nulls(d: dict[str, Any]) -> dict[str, Any]:
     ):
         if d.get(key) is None:
             d[key] = default
+    # bool fields that the LLM may null out → default False
+    for key in ("is_conversation_closing", "ambiguous", "pii_flag", "attachment_hint", "fabrication_guard"):
+        if d.get(key) is None:
+            d[key] = False if key != "fabrication_guard" else True
     # language.confidence may come back as "low" string instead of float
     lang = d.get("language") or {}
     if isinstance(lang, dict):

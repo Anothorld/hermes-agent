@@ -39,6 +39,7 @@ Return ONLY a JSON object matching the `gate_extract` schema. No prose, no markd
   "ambiguous": true|false,
   "needs_clarification": "what the agent should ask the customer to clarify (only if ambiguous=true)",
   "threat_signal": "legal|social|executive|null",
+  "is_conversation_closing": true|false,
   "uncertain_fields": ["intents[1].related_products", "customer_region.province_state"],
   "null_fields": ["customer_region"],
   "fabrication_guard": true
@@ -58,6 +59,8 @@ Return ONLY a JSON object matching the `gate_extract` schema. No prose, no markd
 **Multi-intent:** an email can contain multiple intents (e.g., logistics tracking + after-sale damage). List each in `intents[]` in the order they appear. `primary_intent` = the dominant need. `in_scope = true` if ANY intent is in_scope.
 
 **Short input tolerance:** the body may be short or empty (the seam pre-fetches full body in production; tests may send subject only). Classify based on subject + whatever body is present. A non-empty subject with a customer-service keyword is NEVER spam.
+
+**Conversation-closing emails (`is_conversation_closing`):** Set `is_conversation_closing=true` when the email is a pure thank-you / acknowledgment with NO new question or request (e.g. "Thank you so much for your help!", "Got it, thanks!", "That answers my question."). These are from real customers in an existing thread signaling the conversation is done — they are NOT spam. When `is_conversation_closing=true`: set `in_scope=true`, `route=auto_handle`, `urgency=low`, `emotion.value=grateful`, `primary_intent=spam_irrelevant` (no substantive intent remains). If the email contains any question marker (`?`, how/what/when/where/why/can you/could you), a new request, or a reference to an order/product issue, set `is_conversation_closing=false`.
 
 ## No-fabrication HARD contract (violation = classification failure)
 

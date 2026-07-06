@@ -240,9 +240,11 @@ The Console Workbench's L2 live endpoints (`/messages`, `/tags`, `/orders`) hit 
 
 | Endpoint | TTL | Notes |
 |----------|-----|-------|
-| `GET /sessions/{id}/messages` | **15s** | Full page (`since=None`) cached; `since` filtering is applied in-memory. When `since` is absent from the cached page the call falls back to a fresh CLI fetch (never silently drops newer messages). Errors are not cached. |
+| `GET /sessions/{id}/messages` | **15s** (page 0 only) | Page 0 (`page=0`, the newest page) with `since=None` is cached; `since` filtering is applied in-memory. When `since` is absent from the cached page the call falls back to a fresh CLI fetch (never silently drops newer messages). **Older pages (`page>0`) bypass the cache entirely** — historical messages are stable, requested only on scroll-up, and caching them would risk serving a stale shifted page during `pageIndex` drift. Errors are not cached. |
 | `GET /sessions/{id}/tags` | 300s | tagIds reverse-resolved to names via the session tag map. |
 | `GET /sessions/{id}/orders` | 60s | Reuses `cal._fetch_visitor_orders`. |
+
+**Message pagination & drift handling:** `GET /messages` accepts `page` (0-based `pageIndex`, page 0 = newest) and `page_size` (default 10, max 100). QuickCEP paginates by offset in createTime-DESC order, so when new messages arrive page 0's content shifts down into page 1 — a naive prepend of page 1 would duplicate already-loaded messages. The Console FE dedups by QuickCEP message `id` (notes/systems by `when+kind+text` fingerprint) and, on a full-overlap page (0 new ids but `loadedCount < total`), continues to the next page (capped at 3 continuation pages) so older messages are never silently missed. A page returning 0 records is the hard stop. `since=<message_id>` returns only messages after that id and is used for 5s incremental polling instead of re-fetching the whole page 0.
 
 **Cache invalidation trigger points** (call `quickcep_live.invalidate_cache(session_id)`):
 
@@ -264,7 +266,8 @@ The following read-only routes set `Cache-Control` so the browser can serve repe
 |-------|-----------------|
 | `GET /sessions/{id}/state` | `public, max-age=2` |
 | `GET /sessions/{id}/workbench` | `private, max-age=2` |
-| `GET /sessions/{id}/messages` | `private, max-age=5, stale-while-revalidate=10` |
+| `GET /sessions/{id}/messages` (page 0) | `private, max-age=5, stale-while-revalidate=10` |
+| `GET /sessions/{id}/messages` (page > 0) | `private, max-age=60` (older pages are stable, not bridge-cached) |
 | `GET /sessions/{id}/tags` | `private, max-age=30, stale-while-revalidate=270` |
 | `GET /sessions/{id}/orders` | `private, max-age=30, stale-while-revalidate=30` |
 | `GET /sessions` | `private, max-age=3` |

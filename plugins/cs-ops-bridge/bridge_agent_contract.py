@@ -118,6 +118,7 @@ def _fetch_gate_extract(*, env: str, quickcep_session_id: str) -> dict | None:
 def _render_gate_extract_brief(ge: dict) -> str:
     """Render a gate_extract dict as the agent-facing markdown block."""
     intents = ge.get("intents") or []
+    is_closing = bool(ge.get("is_conversation_closing"))
     intent_lines = []
     for it in intents:
         scope_tag = "in_scope" if it.get("in_scope") else "out_of_scope, 转人工/escalate"
@@ -151,6 +152,11 @@ NEVER fabricate: fields listed in uncertain_fields / null_fields are unverified 
 
 primary_intent: {ge.get('primary_intent','?')}
 in_scope: {str(ge.get('in_scope')).lower()} (any in_scope → handle; out_of_scope parts → escalate/note)
+{f'''
+## ⚑ Conversation closing
+is_conversation_closing: true — 这是一封话题结束邮件（客户纯感谢/确认，无新问题）。
+请发送简短的感谢确认回复（如 "You're very welcome! Feel free to reach out if you need anything else."），然后关闭/标记会话为已解决。
+不要重新提问、不要尝试解决新问题、不要 escalate。''' if is_closing else ''}
 
 ## Customer & context
 - emotion: {emotion.get('value','neutral')} (confidence={emotion.get('confidence','medium')}) → 语气适配
@@ -185,6 +191,7 @@ in_scope: {str(ge.get('in_scope')).lower()} (any in_scope → handle; out_of_sco
 - pii_flag: {str(ge.get('pii_flag',False)).lower()} → 草稿中订单号/邮箱勿外泄给第三方
 - threat_signal: {ge.get('threat_signal') or 'none'}
 - ambiguous: {str(ge.get('ambiguous',False)).lower()}
+- is_conversation_closing: {str(is_closing).lower()}
 
 ## Uncertain商品/物流字段求证规则
 对于 uncertain_fields 中的商品/物流相关字段（intents[i].related_products/related_orders、products、orders、customer_region），若该信息被用于草稿回复，必须在草稿中向客户求证（如「Are you asking about order #12345?」「Are you located in CA, US?」），除非能通过 dispatch-context/get-messages 内部确证。

@@ -137,3 +137,73 @@ def test_render_gate_extract_brief_contains_confirmation_rule(monkeypatch):
     assert "求证规则" in block
     assert "uncertain_fields" in block.lower() or "Uncertain fields" in block
     assert "null_fields" in block.lower() or "Null fields" in block
+
+
+def test_render_gate_extract_brief_closing_email(monkeypatch):
+    """When is_conversation_closing=true, brief includes the closing instruction block."""
+    bac = _load("bridge_agent_contract")
+    ge = {
+        "intents": [{"intent": "spam_irrelevant", "in_scope": True, "confidence": "high", "urgency": "low", "snippet": "Thank you!"}],
+        "primary_intent": "spam_irrelevant",
+        "in_scope": True,
+        "route": "auto_handle",
+        "urgency": "low",
+        "emotion": {"value": "grateful", "confidence": "high"},
+        "language": {"value": "en", "confidence": 0.99},
+        "products": [],
+        "orders": [],
+        "customer_region": {"country": None, "province_state": None, "source": "unknown", "confidence": "low"},
+        "customer_segment": "returning",
+        "summary_zh": "客户表示感谢，话题结束",
+        "hindsight_keywords": [],
+        "conversation_stage": "follow_up",
+        "response_template_hint": "general",
+        "uncertain_fields": [],
+        "null_fields": ["customer_region"],
+        "fabrication_guard": True,
+        "model_version": "v1",
+        "classifier_source": "keyword",
+        "pii_flag": False,
+        "threat_signal": None,
+        "ambiguous": False,
+        "is_conversation_closing": True,
+    }
+    block = bac._render_gate_extract_brief(ge)
+    assert "Conversation closing" in block
+    assert "话题结束邮件" in block
+    assert "is_conversation_closing: true" in block
+    assert "感谢确认回复" in block
+
+
+def test_render_gate_extract_brief_no_closing_block_when_false(monkeypatch):
+    """When is_conversation_closing=false, no closing instruction block appears."""
+    bac = _load("bridge_agent_contract")
+    ge = {
+        "intents": [{"intent": "logistics_inquiry", "in_scope": True, "confidence": "high", "urgency": "medium", "snippet": "where is my order"}],
+        "primary_intent": "logistics_inquiry",
+        "in_scope": True,
+        "route": "auto_handle",
+        "urgency": "medium",
+        "emotion": {"value": "neutral", "confidence": "medium"},
+        "language": {"value": "en", "confidence": 0.99},
+        "products": [],
+        "orders": ["12345678"],
+        "customer_region": {"country": "US", "province_state": "CA", "source": "order_address", "confidence": "high"},
+        "customer_segment": "new",
+        "summary_zh": "客户询问物流",
+        "hindsight_keywords": ["tracking"],
+        "conversation_stage": "first_contact",
+        "response_template_hint": "logistics_tracking",
+        "uncertain_fields": [],
+        "null_fields": [],
+        "fabrication_guard": True,
+        "model_version": "v1",
+        "classifier_source": "keyword",
+        "pii_flag": True,
+        "threat_signal": None,
+        "ambiguous": False,
+        "is_conversation_closing": False,
+    }
+    block = bac._render_gate_extract_brief(ge)
+    assert "Conversation closing" not in block
+    assert "is_conversation_closing: false" in block

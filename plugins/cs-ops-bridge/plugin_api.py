@@ -324,20 +324,38 @@ def get_session_messages(
     quickcep_session_id: str,
     env: str = Query("LIVE"),
     since: Optional[str] = Query(None, description="return only messages after this message id"),
+    page: int = Query(0, ge=0, description="0-based QuickCEP pageIndex; page 0 = newest page"),
+    page_size: int = Query(10, ge=1, le=100, description="messages per page (first screen 10, scroll-up 20)"),
     x_bridge_key: Annotated[Optional[str], Header()] = None,
     response: Response = None,
 ) -> dict[str, Any]:
-    """L2 live message history (PR1.5). Incremental via ``since``."""
+    """L2 live message history (PR1.5). Incremental via ``since``; paged via ``page``.
+
+    Page 0 (newest) is cached 15s in the bridge and 5s in the browser. Older
+    pages (``page > 0``) bypass the bridge cache and get a longer browser
+    cache since historical messages are stable; the FE dedups by message id
+    to handle ``pageIndex`` drift when new messages arrive.
+    """
     _require_bridge_key(x_bridge_key)
     if not cal.get_session(quickcep_session_id=quickcep_session_id, env=env):
         raise HTTPException(status_code=404, detail="session not found")
     from .quickcep_live import fetch_messages
 
     if response is not None:
-        # Backend has a 15s cache; allow a 5s browser cache with SWR to mask
-        # repeated clicks without going stale beyond the backend TTL.
-        response.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=10"
-    return fetch_messages(quickcep_session_id=quickcep_session_id, since=since)
+        if page == 0:
+            # Backend has a 15s cache; allow a 5s browser cache with SWR to
+            # mask repeated clicks without going stale beyond the backend TTL.
+            response.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=10"
+        else:
+            # Older pages are stable and not bridge-cached; cache longer in
+            # the browser to make repeated scroll-up cheap.
+            response.headers["Cache-Control"] = "private, max-age=60"
+    return fetch_messages(
+        quickcep_session_id=quickcep_session_id,
+        since=since,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/sessions/{quickcep_session_id}/tags")

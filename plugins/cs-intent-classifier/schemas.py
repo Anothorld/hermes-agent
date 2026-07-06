@@ -105,6 +105,7 @@ class GateExtract(BaseModel):
     ambiguous: bool = False
     needs_clarification: Optional[str] = None
     threat_signal: Optional[str] = Field(default=None, pattern="^(legal|social|executive)$")
+    is_conversation_closing: bool = False
 
     # Provenance + no-fabrication
     model_version: str = "v1"

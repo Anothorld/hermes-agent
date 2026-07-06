@@ -1,0 +1,27 @@
+{
+  "fragment_mode": true,
+  "goal": "compensation_negotiation",
+  "skill": "kol-compensation-negotiator",
+  "fragment": "Thanks for sharing the full rate card. Because this is our first single-campaign category test, leadership has locked the one-time intro budget tightly, and the approved cash supplement ceiling for this round is only USD 320. The product itself carries meaningful value and will be sent at no cost, so we are evaluating only the incremental cash line here. If conversion from this single test meets baseline, you will be prioritized for future multi-campaign collaborations on our slate. Can we proceed at USD 320?",
+  "proposed_facts": {
+    "offer.compensation_mode": "paid",
+    "offer.proposed_amount": 320,
+    "offer.proposed_basis": "1x Instagram Reel / TikTok Video",
+    "offer.proposed_currency": "USD"
+  },
+  "proposed_amount": 320,
+  "branch": "A_draft",
+  "strategist": {
+    "mode_decided": "paid",
+    "target_number": 320,
+    "target_basis": "1x Instagram Reel / TikTok Video",
+    "target_currency": "USD",
+    "lower_bound": 200,
+    "upper_bound": 500,
+    "suggested_wording": "Because this is our first single-campaign category test, leadership has locked the one-time intro budget tightly — the approved cash supplement ceiling for this round is only USD 320. We'd like to advance this internally on our side. If conversion from this single test meets baseline, you'll be prioritized for future multi-campaign collaborations on our slate. Can we proceed at USD 320?",
+    "requires_human_gate": false,
+    "gate_reason": null,
+    "rationale_one_line": "Cash supplement counter at 320 (creator_tier=mid_tier; product gifted separately; cash ceiling 500.0).",
+    "negotiation_phase": "paid_counter"
+  }
+}

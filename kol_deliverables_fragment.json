@@ -1,0 +1,21 @@
+{
+  "fragment_mode": true,
+  "goal": "deliverables_scope",
+  "skill": "kol-deliverables-clarifier",
+  "fragment": "Great to hear you're interested in the Elara sofa! To keep things simple, we're thinking 1 post on each platform: Instagram, TikTok, and YouTube. Content would focus on comfort-first, movie-night use, and the modern Nordic aesthetic. Usage rights would be 30-day organic only. Does this framework work for you?",
+  "proposed_facts": [
+    {
+      "fact_type": "offer.deliverable_platforms",
+      "value": ["instagram", "tiktok", "youtube"]
+    },
+    {
+      "fact_type": "offer.deliverable_count_per_platform",
+      "value": 1
+    },
+    {
+      "fact_type": "offer.usage_rights_discussed",
+      "value": "30-day organic only"
+    }
+  ],
+  "branch": "clarification"
+}

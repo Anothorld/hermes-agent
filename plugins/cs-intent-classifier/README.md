@@ -68,6 +68,7 @@ Without an LLM configured, the classifier runs keyword-only and returns a conser
 | `POST` | `/classify` | cs-ops-bridge seam (inbound) |
 | `GET` | `/gate-extract/{session_id}?env=` | cs-ops-bridge seam (brief injection) |
 | `GET` | `/intent/{session_id}?env=` | Console (read predicted + corrected) |
+| `POST` | `/intents/batch` | Console session list (multi-intent chips, one call per page) |
 | `PATCH` | `/intent/{session_id}` | Console (operator correction) |
 | `GET` | `/learning/intent-metrics` | Console effect panel |
 | `GET` | `/learning/intent-trend` | Console pass-rate chart |
@@ -82,6 +83,7 @@ See `schemas.py` for the canonical pydantic models. Highlights:
 - `customer_region`: `{country, province_state, source, confidence}` with source priority `order_address > visitor_geo > email_mention > email_tld > unknown`. The bridge seam fetches country from the Povison order-track API + province_state from QuickCEP `getOrderDetail.billingAddress` (parsed from the `street,city,state,country` string). The order-track API's own `state`/`city` fields are warehouse location (not customer) so they are not used.
 - `uncertain_fields` / `null_fields`: explicit no-fabrication labeling.
 - `fabrication_guard`: bool self-assertion; HTTP 422 when it can't be asserted.
+- `is_conversation_closing`: `true` when the email is a pure thank-you / acknowledgment with no new question (e.g. "Thank you so much for your help!"). Distinct from spam — it's a real customer in an existing thread signaling the conversation is done. When `true`: `in_scope=true`, `route=auto_handle`, `urgency=low`, `emotion=grateful`. The agent brief includes a closing instruction block (send brief acknowledgment, close session). Detected by keyword layer (thank-you patterns + question-marker exclusion + length cap) and LLM layer (prompt rules).
 
 ## No-fabrication contract (enforced in `config/intent_prompt_v1.md`)
 

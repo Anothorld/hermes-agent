@@ -184,3 +184,85 @@ def test_augment_prompt_learning_failure_does_not_break(monkeypatch):
     monkeypatch.setattr(learning, "build_policy_rules_block", lambda: "")
     out = classifier._augment_prompt_with_learning("BASE", env="TEST")
     assert out == "BASE"
+
+
+# ── Conversation-closing detection ──
+
+def test_closing_email_pure_thanks():
+    ge = _kw("Re: Order tracking", "Thank you so much for your help!")
+    assert ge is not None
+    assert ge["is_conversation_closing"] is True
+    assert ge["in_scope"] is True
+    assert ge["route"] == "auto_handle"
+    assert ge["urgency"] == "low"
+    assert ge["emotion"]["value"] == "grateful"
+    assert ge["primary_intent"] == "spam_irrelevant"
+    # Must validate against schema
+    validated = GateExtract.model_validate(ge)
+    assert validated.is_conversation_closing is True
+
+
+def test_closing_email_got_it_thanks():
+    ge = _kw("Re: Swatches", "Got it thanks!")
+    assert ge is not None
+    assert ge["is_conversation_closing"] is True
+    assert ge["in_scope"] is True
+
+
+def test_closing_email_not_triggered_when_question_present():
+    # Thank-you + new question → NOT closing, falls through to other classification
+    ge = _kw("Re: Order", "Thank you for the update! When will my order #12345678 arrive?")
+    # Should be classified as logistics (question marker "when" + order number)
+    assert ge is not None
+    assert ge["is_conversation_closing"] is False
+    assert ge["primary_intent"] == "logistics_inquiry"
+
+
+def test_closing_email_not_triggered_with_question_mark():
+    ge = _kw("Re: Refund", "Thanks for the help? But I still need a refund.")
+    assert ge is not None
+    assert ge["is_conversation_closing"] is False
+
+
+def test_closing_email_with_issue_keyword_not_triggered():
+    # "thanks" + "damage" → has a real issue, not closing
+    ge = _kw("Re: Damaged sofa", "Thanks for reaching out, the damage is still an issue though.")
+    assert ge is not None
+    assert ge["is_conversation_closing"] is False
+
+
+def test_is_closing_email_helper_direct():
+    assert classifier._is_closing_email(subject="Re: Help", body="Thank you for your help!") is True
+    assert classifier._is_closing_email(subject="Re: Order", body="Thanks!") is True
+    assert classifier._is_closing_email(subject="Re: Q", body="Thank you, but when will it ship?") is False
+    assert classifier._is_closing_email(subject="", body="") is False
+
+
+def test_schema_includes_is_conversation_closing_default_false():
+    ge = _kw("Tracking", "Where is my order #11223344?")
+    assert ge is not None
+    assert ge["is_conversation_closing"] is False
+    validated = GateExtract.model_validate(ge)
+    assert validated.is_conversation_closing is False
+
+
+# ── Emotion null coercion (regression: LLM returns emotion sub-fields as null) ──
+
+def test_coerce_llm_nulls_emotion_subfields():
+    raw = {"emotion": {"value": None, "confidence": None}, "intents": [], "fabrication_guard": True}
+    out = classifier._coerce_llm_nulls(raw)
+    assert out["emotion"]["value"] == "neutral"
+    assert out["emotion"]["confidence"] == "low"
+
+
+def test_coerce_llm_nulls_is_conversation_closing():
+    raw = {"is_conversation_closing": None, "intents": [], "fabrication_guard": True}
+    out = classifier._coerce_llm_nulls(raw)
+    assert out["is_conversation_closing"] is False
+
+
+def test_coerce_llm_nulls_emotion_whole_dict_null():
+    raw = {"emotion": None, "intents": [], "fabrication_guard": True}
+    out = classifier._coerce_llm_nulls(raw)
+    assert out["emotion"]["value"] == "neutral"
+    assert out["emotion"]["confidence"] == "low"

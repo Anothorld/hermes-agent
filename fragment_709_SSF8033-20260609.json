@@ -1,0 +1,39 @@
+{
+  "fragment_mode": true,
+  "goal": "deliverables_scope",
+  "skill": "kol-deliverables-clarifier",
+  "fragment": "Hi Alina,\n\nThank you for your interest — we're excited about the possibility of working together!\n\nOn the budget question, we'll follow up with compensation details once we've aligned on scope, as that helps us structure the right offer. Totally understand you need that info to evaluate, and we'll get there shortly.\n\nIn the meantime, here's the deliverable framework we have in mind for the Elara Power Reclining Sofa collaboration:\n\n- 1 Instagram post (feed or Reel)\n- 1 TikTok video\n- 1 YouTube video (integrated or dedicated)\n\nUsage rights would be 30-day organic usage across your posted channels — no paid amplification or media spend without a separate sign-off from both sides.\n\nThe key creative beats we'd love to see featured: the dual-motor independent headrest and footrest adjustment, the zero-wall clearance design, and the overall aesthetic fit in a styled room setting — right in your wheelhouse.\n\nLet us know if this scope works for you, or if you'd like to adjust the platform mix or format. Once we're aligned here, we'll circle back on compensation.\n\nLooking forward to hearing your thoughts!\n\nBest,\nPOVISON Team",
+  "proposed_facts": [
+    {
+      "fact_key": "offer.deliverable_platforms",
+      "value": ["instagram", "tiktok", "youtube"],
+      "source": "fragment_proposed",
+      "confidence": 0.9
+    },
+    {
+      "fact_key": "offer.deliverable_count_per_platform",
+      "value": 1,
+      "source": "fragment_proposed",
+      "confidence": 0.9
+    },
+    {
+      "fact_key": "offer.usage_rights_discussed",
+      "value": true,
+      "source": "fragment_proposed",
+      "confidence": 0.9
+    },
+    {
+      "fact_key": "offer.usage_rights_terms",
+      "value": "30-day organic usage, no paid amplification without separate sign-off",
+      "source": "fragment_proposed",
+      "confidence": 0.85
+    },
+    {
+      "fact_key": "offer.budget_deferred",
+      "value": true,
+      "source": "fragment_proposed",
+      "confidence": 0.95
+    }
+  ],
+  "branch": "C"
+}

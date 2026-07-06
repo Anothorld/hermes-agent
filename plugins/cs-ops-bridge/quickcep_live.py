@@ -3,10 +3,12 @@
 These hit QuickCEP REST via ``quickcep_cli`` and are wrapped with short-lived
 in-memory caches so the FE can poll without hammering the platform:
 
-- messages: ``GET /messages?since=<message_id>`` — 15s cache on the full page;
-  ``since`` filtering is applied to the cached page, with a fresh-fetch
-  fallback when ``since`` is not found in the cached page. Callers that
-  require the latest state (e.g. send-reply message_id backfill) pass
+- messages: ``GET /messages?since=<message_id>`` — 15s cache on page 0 (the
+  newest page); ``since`` filtering is applied to the cached page, with a
+  fresh-fetch fallback when ``since`` is not found in the cached page. Older
+  pages (``page > 0``) bypass the cache and are fetched on scroll-up; the FE
+  dedups by message id to handle ``pageIndex`` drift. Callers that require
+  the latest state (e.g. send-reply message_id backfill) pass
   ``force_fresh=True`` to bypass the cache.
 - tags:     ``GET /tags`` — 300s cache (tagIds reverse-resolved to names via tag map)
 - orders:   ``GET /orders`` — 60s cache (reuses cal._fetch_visitor_orders)
@@ -43,10 +45,25 @@ def _error(source: str, exc: BaseException | str) -> dict[str, Any]:
     return {"ok": False, "source": source, "error": msg}
 
 
-def _fetch_messages_fresh(*, quickcep_session_id: str) -> dict[str, Any]:
-    """Hit quickcep_cli for the latest message page (no cache). Best-effort."""
+DEFAULT_MESSAGES_PAGE_SIZE = 10
+
+
+def _fetch_messages_fresh(
+    *,
+    quickcep_session_id: str,
+    page: int = 0,
+    page_size: int = DEFAULT_MESSAGES_PAGE_SIZE,
+) -> dict[str, Any]:
+    """Hit quickcep_cli for one message page (no cache). Best-effort.
+
+    ``page`` is the 0-based QuickCEP ``pageIndex`` (page 0 = newest page).
+    Older pages are fetched on user scroll-up; the caller is responsible for
+    drift handling (id-based dedup) since ``pageIndex`` is offset-based and
+    shifts when new messages arrive.
+    """
     code, out, err = _run_quickcep_cli([
-        "messages", quickcep_session_id, "--page", "0", "--page-size", "50", "--chronological",
+        "messages", quickcep_session_id,
+        "--page", str(page), "--page-size", str(page_size), "--chronological",
     ])
     if code != 0:
         return _error("messages", err or out)
@@ -55,11 +72,18 @@ def _fetch_messages_fresh(*, quickcep_session_id: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         return _error("messages", exc)
     messages = payload.get("messages") or []
+    total = payload.get("total", len(messages))
     return {
         "ok": True,
         "session_id": quickcep_session_id,
-        "total": payload.get("total", len(messages)),
+        "total": total,
         "count": len(messages),
+        "page": page,
+        "page_size": page_size,
+        # Whether older messages still exist beyond this page. The FE uses
+        # this as a hint; the authoritative stop signal is `loadedCount >=
+        # total` plus the "page returned 0 records" fallback.
+        "has_more": (page + 1) * page_size < total,
         "messages": messages,
     }
 
@@ -103,23 +127,31 @@ def fetch_messages(
     quickcep_session_id: str,
     since: Optional[str] = None,
     force_fresh: bool = False,
+    page: int = 0,
+    page_size: int = DEFAULT_MESSAGES_PAGE_SIZE,
 ) -> dict[str, Any]:
-    """Latest message page, optionally filtered to messages after ``since`` id.
+    """One message page, optionally filtered to messages after ``since`` id.
 
-    The full page (``since is None``) is cached for ``MESSAGES_CACHE_TTL_SEC``.
-    When ``since`` is supplied and the id is present in the cached page, the
-    filtering is applied in-memory; when it is absent (the cached page is
-    older than ``since``), the function falls back to a fresh CLI call so the
-    caller never silently drops newer messages.
+    Page 0 (the newest page) is cached for ``MESSAGES_CACHE_TTL_SEC`` when
+    fetched with ``since is None``. ``since`` filtering is applied to the
+    cached page in-memory; when the id is absent from the cached page, the
+    function falls back to a fresh CLI call so the caller never silently
+    drops newer messages.
+
+    Older pages (``page > 0``) are **never read from or written to the
+    cache**: they are stable historical data, requested rarely (only on
+    scroll-up), and caching them would risk serving a stale shifted page
+    during drift. The FE handles drift via id-based dedup.
 
     ``force_fresh=True`` bypasses the read cache and refreshes it with the
-    fresh result. Callers that need the latest state right after a mutation
-    (e.g. send-reply message_id backfill) should set this.
+    fresh result (page 0 only). Callers that need the latest state right
+    after a mutation (e.g. send-reply message_id backfill) should set this.
     """
     now = time.time()
     cached = _messages_cache.get(quickcep_session_id)
     use_cached = (
         not force_fresh
+        and page == 0
         and cached is not None
         and (now - cached[0]) < MESSAGES_CACHE_TTL_SEC
     )
@@ -135,10 +167,12 @@ def fetch_messages(
             return filtered
         # since id not in cached page → page is stale relative to since; fall through.
 
-    result = _fetch_messages_fresh(quickcep_session_id=quickcep_session_id)
-    # Only cache successful, full-page (since is None) results. Errors and
-    # since-filtered views are not stored.
-    if result.get("ok") and since is None:
+    result = _fetch_messages_fresh(
+        quickcep_session_id=quickcep_session_id, page=page, page_size=page_size,
+    )
+    # Only cache successful, full-page (since is None) page-0 results. Errors,
+    # since-filtered views, and older pages are not stored.
+    if result.get("ok") and since is None and page == 0:
         _messages_cache[quickcep_session_id] = (now, result)
     # Preserve the pre-cache "best-effort whole page when since not found"
     # behavior on fresh fetches too.

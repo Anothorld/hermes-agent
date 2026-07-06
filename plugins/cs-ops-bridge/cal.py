@@ -337,12 +337,57 @@ def enrich_session(
     return True
 
 
+def _sessions_list_filters(
+    *,
+    env: str,
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+) -> tuple[str, list[Any]]:
+    """Shared WHERE clause + params for session list/count queries."""
+    sql = " FROM cs_session WHERE env=?"
+    params: list[Any] = [env]
+    if status:
+        sql += " AND status=?"
+        params.append(status)
+    if q:
+        like = f"%{q.strip()}%"
+        sql += " AND (quickcep_session_id LIKE ? OR customer_email LIKE ? OR chat_session_id LIKE ?)"
+        params.extend([like, like, like])
+    if since:
+        sql += " AND COALESCE(processing_started_at, created_at) >= ?"
+        params.append(since)
+    if until:
+        sql += " AND COALESCE(processing_started_at, created_at) < ?"
+        params.append(until)
+    return sql, params
+
+
+def count_sessions(
+    *,
+    env: str = "LIVE",
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+) -> int:
+    """Count sessions matching the same filters as ``list_sessions``."""
+    where, params = _sessions_list_filters(
+        env=env, status=status, q=q, since=since, until=until,
+    )
+    with _connect() as conn:
+        row = conn.execute(f"SELECT COUNT(*) AS n{where}", params).fetchone()
+    return int(row["n"]) if row else 0
+
+
 def list_sessions(
     *,
     env: str = "LIVE",
     status: Optional[str] = None,
     q: Optional[str] = None,
     limit: int = 50,
+    offset: int = 0,
     since: Optional[str] = None,
     until: Optional[str] = None,
 ) -> list[dict[str, Any]]:
@@ -356,25 +401,15 @@ def list_sessions(
     the volatile ``updated_at`` (which flips on every follow-up / retry).
     """
     limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    where, params = _sessions_list_filters(
+        env=env, status=status, q=q, since=since, until=until,
+    )
     with _connect() as conn:
-        sql = """SELECT * FROM cs_session WHERE env=?"""
-        params: list[Any] = [env]
-        if status:
-            sql += " AND status=?"
-            params.append(status)
-        if q:
-            like = f"%{q.strip()}%"
-            sql += " AND (quickcep_session_id LIKE ? OR customer_email LIKE ? OR chat_session_id LIKE ?)"
-            params.extend([like, like, like])
-        if since:
-            sql += " AND COALESCE(processing_started_at, created_at) >= ?"
-            params.append(since)
-        if until:
-            sql += " AND COALESCE(processing_started_at, created_at) < ?"
-            params.append(until)
-        sql += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(limit)
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(
+            f"SELECT *{where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
         return [dict(r) for r in rows]
 
 
