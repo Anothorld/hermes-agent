@@ -119,7 +119,7 @@ QuickCEP auto-classifies each email session into **业务意图** labels stored 
 
 When the standalone [`cs-intent-classifier`](../cs-intent-classifier/README.md) plugin is enabled (`CS_INTENT_ENABLED=true`), the gate delegates to it instead of relying on QuickCEP tags:
 
-- `intent_gate.py` pre-fetches the full email body + dispatch-context (orders + shipping address), calls `POST /classify` on the classifier, and gates on the returned `gate_extract.in_scope`.
+- `intent_gate.py` pre-fetches the full email body + dispatch-context (orders + shipping address), calls `POST /classify` on the classifier, and gates on the returned `gate_extract.in_scope`. The pre-fetch selects the latest **`ownerType=visitor`** message from `get-messages` — QuickCEP inserts system rows (`chat_start`, `ruleAssignHumanQueue`, `assignChat`) after the customer email, so blindly taking `messages[-1]` feeds the system assignment notice to the LLM and causes real customer emails to be misclassified as `spam_irrelevant`. When no visitor row exists the body is `None` and the seam falls through to the legacy gate (no system noise is ever classified).
 - `bridge_agent_contract.py` injects a `# gate_extract` block into the agent brief (multi-intent, emotion, language, region, uncertain-field confirmation rules). The agent skips the legacy `classify-intent` step.
 - **Off by default** — `CS_INTENT_ENABLED=false` preserves today's QuickCEP-tag behavior with zero regression. The classifier service does not even need to be running.
 - **Graceful degradation** — if the classifier is unreachable, the seam falls back to the legacy QuickCEP-tag gate so inbound is never blocked by a classifier outage.

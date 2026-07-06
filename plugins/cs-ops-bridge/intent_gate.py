@@ -260,6 +260,49 @@ def _classifier_gate(
         return None
 
 
+def _gate_result_from_ge(ge: dict[str, Any]) -> IntentGateResult:
+    """Build an IntentGateResult from a gate_extract dict (shared by cache + POST paths)."""
+    in_scope = bool(ge.get("in_scope"))
+    primary = ge.get("primary_intent") or "unknown"
+    if in_scope:
+        reason = f"classifier:{primary}:in_scope"
+    else:
+        # Prefix with intention_not_allowed so the watcher's existing permanent-skip
+        # check (gate.reason.startswith("intention_not_allowed")) enqueues it into CAL
+        # with status=skipped — matching the legacy out-of-allowlist behavior. Without
+        # this the out_of_scope result would be transient (log-only) and retried every
+        # REST tick, wasting classifier calls and never recording the skip.
+        reason = f"intention_not_allowed (classifier:{primary}:out_of_scope)"
+    return IntentGateResult(in_scope, reason, ())
+
+
+def _fetch_cached_gate_extract(*, session_id: str, env: str) -> Optional[dict[str, Any]]:
+    """GET /gate-extract/{id} on the classifier. Returns cached gate_extract or None.
+
+    None when: never classified (404), classifier unreachable, or any error.
+    This is the idempotency check that prevents redundant LLM calls when a prior
+    POST /classify succeeded server-side but the client timed out before reading
+    the response (the classic "urlopen timed out but FastAPI kept running" race).
+    """
+    import urllib.error
+    import urllib.request
+
+    base = os.environ.get("CS_INTENT_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
+    url = f"{base}/gate-extract/{session_id}?env={env}"
+    try:
+        with urllib.request.urlopen(url, timeout=5.0) as resp:
+            raw = resp.read()
+        return json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None  # never classified — proceed to POST
+        log.debug("cache GET /gate-extract HTTP %s for session %s", exc.code, session_id)
+        return None
+    except Exception as exc:
+        log.debug("cache GET /gate-extract failed for session %s: %s", session_id, exc)
+        return None
+
+
 def _classifier_gate_work(
     *,
     session_id: str,
@@ -270,6 +313,25 @@ def _classifier_gate_work(
     """Blocking body of the classifier seam (runs inside _SEAM_EXECUTOR)."""
     import urllib.error
     import urllib.request
+
+    # ── Idempotency cache ──────────────────────────────────────────
+    # If the classifier already has a result for this session (e.g. a prior
+    # call succeeded server-side but the HTTP client timed out reading the
+    # response), reuse it instead of re-running the expensive LLM. Without
+    # this, a slow LLM endpoint causes unbounded retries: the client times
+    # out → graceful fallback → transient skip (no CAL dedup) → next REST
+    # tick re-POSTs → server runs LLM again → wasted call. The cache short
+    # -circuits this loop after the first successful server-side classify.
+    try:
+        cached = _fetch_cached_gate_extract(session_id=session_id, env=env)
+    except Exception as exc:
+        # Defensive: _fetch_cached_gate_extract already catches internally, but
+        # never let a cache-check crash propagate and block the gate.
+        log.debug("cache check crashed for session %s: %s", session_id, exc)
+        cached = None
+    if cached is not None:
+        log.info("cs-intent-classifier cache hit for session %s — skipping POST /classify", session_id)
+        return _gate_result_from_ge(cached)
 
     subject = (info or {}).get("email_subject") or ""
     visitor_info = (info or {}).get("visitorInfo") or {}
@@ -321,8 +383,15 @@ def _classifier_gate_work(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    # urlopen timeout must be >= the LLM timeout (CS_INTENT_LLM_TIMEOUT, default
+    # 30s) so the client doesn't give up before the server finishes. A 3s timeout
+    # here caused unbounded duplicate LLM calls: the client aborted at 3s, the
+    # FastAPI server kept running the LLM to completion (writing to cs_intent.db),
+    # the watcher fell back to "no_intention_tags" (transient skip, no CAL dedup),
+    # and the next REST tick re-POSTed — repeating the waste. Aligned to
+    # _seam_timeout() (default 45s) which is also the future.result cap.
     try:
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
+        with urllib.request.urlopen(req, timeout=_seam_timeout()) as resp:
             raw = resp.read()
         data = json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
@@ -333,18 +402,7 @@ def _classifier_gate_work(
         return None
 
     ge = data.get("gate_extract") or {}
-    in_scope = bool(ge.get("in_scope"))
-    primary = ge.get("primary_intent") or "unknown"
-    if in_scope:
-        reason = f"classifier:{primary}:in_scope"
-    else:
-        # Prefix with intention_not_allowed so the watcher's existing permanent-skip
-        # check (gate.reason.startswith("intention_not_allowed")) enqueues it into CAL
-        # with status=skipped — matching the legacy out-of-allowlist behavior. Without
-        # this the out_of_scope result would be transient (log-only) and retried every
-        # REST tick, wasting classifier calls and never recording the skip.
-        reason = f"intention_not_allowed (classifier:{primary}:out_of_scope)"
-    return IntentGateResult(in_scope, reason, ())
+    return _gate_result_from_ge(ge)
 
 
 def _extract_message_text(msg: dict[str, Any]) -> str:
@@ -363,6 +421,28 @@ def _extract_message_text(msg: dict[str, Any]) -> str:
     return str(msg.get("body") or msg.get("text") or "")
 
 
+def _latest_visitor_message(messages: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Pick the newest customer (`ownerType=visitor`) message from a QuickCEP list.
+
+    QuickCEP inserts system messages around the real email — `chat_start`,
+    `ruleAssignHumanQueue`, `assignChat` — all with `ownerType=system` and
+    JSON-action `content`. The CLI returns messages chronologically, so the
+    last list entry is often a system assignment message, NOT the customer's
+    email. Feeding that to the classifier made the LLM label real customer
+    emails as "系统自动分配通知" → spam_irrelevant (out_of_scope).
+
+    Only `ownerType=visitor` rows carry the actual customer text. We pick the
+    latest visitor message; if none exists (brand-new session with only
+    system rows, or operator-only thread) return None so the caller falls
+    through to the legacy gate instead of classifying system noise.
+    """
+    visitor = [
+        m for m in messages
+        if isinstance(m, dict) and str(m.get("ownerType") or "").lower() == "visitor"
+    ]
+    return visitor[-1] if visitor else None
+
+
 def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[str], list[dict[str, Any]]]:
     """Pre-fetch full latest email body + dispatch-context orders.
 
@@ -376,8 +456,11 @@ def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[st
     body: Optional[str] = None
     order_addresses: list[dict[str, Any]] = []
 
-    # 1. get-messages → latest email body (chronological order is the CLI default,
-    #    so messages[-1] is the newest inbound).
+    # 1. get-messages → latest CUSTOMER email body. The CLI returns messages
+    #    chronologically, but the last row is frequently a system message
+    #    (chat_start / ruleAssignHumanQueue / assignChat) inserted AFTER the
+    #    customer email. Filter to ownerType=visitor so the classifier sees
+    #    the real customer text, not the system assignment notice.
     try:
         out = subprocess.run(
             ["python3", cli, "get-messages", "--env", env, "--session-id", session_id],
@@ -388,9 +471,10 @@ def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[st
         if out.returncode == 0:
             data = json.loads(out.stdout)
             messages = data.get("messages") or []
-            if messages:
-                last = messages[-1] if isinstance(messages, list) else messages
-                body = _extract_message_text(last)
+            if isinstance(messages, list) and messages:
+                last = _latest_visitor_message(messages)
+                if last is not None:
+                    body = _extract_message_text(last)
     except Exception as exc:
         log.warning("prefetch get-messages failed session=%s: %s", session_id, exc)
         return None, []
