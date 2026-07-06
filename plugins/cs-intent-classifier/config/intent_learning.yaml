@@ -1,0 +1,19 @@
+# Learning loop configuration. Override via env vars CS_INTENT_*.
+
+# T3 offline distillation cadence (weekly by default).
+distill_period: 7d
+
+# T0 daily eval sampling cadence.
+eval_period: 1d
+
+# Candidate must be >= current accuracy by this delta to promote.
+# 0.0 = candidate >= current. Negative = allow small regression.
+promote_min_accuracy_delta: 0.0
+
+# Week-over-week pass-rate drop below this threshold triggers rebuild mode
+# instead of repair (e.g. -0.02 = 2 percentage points drop).
+rebuild_threshold: -0.02
+
+# T2 few-shot refresh cadence (higher frequency than distill).
+fewshot_period: 6h
+fewshot_sample_size: 8

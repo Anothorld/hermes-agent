@@ -1,0 +1,8 @@
+{
+  "name": "cs-intent-classifier",
+  "label": "CS Intent Classifier",
+  "description": "Independent, switchable intent/emotion/region classifier for Povison CS inbound gate. Self-contained DB, HTTP API, and learning loop. Decoupled from cs-ops-bridge except via CS_INTENT_ENABLED seam.",
+  "icon": "Tag",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

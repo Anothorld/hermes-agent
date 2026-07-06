@@ -115,6 +115,17 @@ Facts and event payloads are sanitized on write (`pii_sanitize.py`): emails, pho
 
 QuickCEP auto-classifies each email session into **业务意图** labels stored in `intentionTags` (not manual session tags). The watcher **only launches AI** when at least one tag matches the allowlist (default: **产品咨询**, **物流咨询**).
 
+### Intent classifier seam (`CS_INTENT_ENABLED`)
+
+When the standalone [`cs-intent-classifier`](../cs-intent-classifier/README.md) plugin is enabled (`CS_INTENT_ENABLED=true`), the gate delegates to it instead of relying on QuickCEP tags:
+
+- `intent_gate.py` pre-fetches the full email body + dispatch-context (orders + shipping address), calls `POST /classify` on the classifier, and gates on the returned `gate_extract.in_scope`.
+- `bridge_agent_contract.py` injects a `# gate_extract` block into the agent brief (multi-intent, emotion, language, region, uncertain-field confirmation rules). The agent skips the legacy `classify-intent` step.
+- **Off by default** — `CS_INTENT_ENABLED=false` preserves today's QuickCEP-tag behavior with zero regression. The classifier service does not even need to be running.
+- **Graceful degradation** — if the classifier is unreachable, the seam falls back to the legacy QuickCEP-tag gate so inbound is never blocked by a classifier outage.
+
+See `plugins/cs-intent-classifier/README.md` for the classifier's self-contained DB, LLM config, and learning loop.
+
 ## Email-only channel scope
 
 Automation listens to and processes **QuickCEP email sessions only**. Web chat, SMS, phone, and other channels are ignored at every entry point:

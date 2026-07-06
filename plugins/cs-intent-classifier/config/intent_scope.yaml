@@ -1,0 +1,11 @@
+# Intent in-scope whitelist.
+# Controls which intents the AI agent auto-handles. Out-of-scope intents are
+# identified by the classifier but left for human agents (or escalated).
+# To let AI handle after_sale/order_management later, flip the value here —
+# no classifier change needed.
+
+product_inquiry: true
+logistics_inquiry: true
+after_sale_issue: false
+order_management: false
+spam_irrelevant: false

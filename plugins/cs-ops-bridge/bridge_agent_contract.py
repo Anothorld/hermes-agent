@@ -47,7 +47,8 @@ def process_cli_checklist(*, env: str, quickcep_session_id: str) -> str:
     paths = agent_tool_paths()
     tracker_script = hindsight_recall_tracker_script()
     draft_path = f"/tmp/draft-{quickcep_session_id}.html"
-    return f"""# agent_tool_paths
+    gate_block = _gate_extract_block(env=env, quickcep_session_id=quickcep_session_id)
+    return f"""{gate_block}# agent_tool_paths
 cs_bridge_tool: {paths['cs_bridge_tool']}
 
 {_tool_rules_block()}
@@ -72,6 +73,122 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
 8. (escalate) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase awaiting_expert --feishu-thread-id "<thread from open-escalation response>"
 9. (failure) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase failed --error "<中文：面向客服的失败说明，勿写 CLI/系统日志>" --customer-need "<中文：客户诉求摘要>" --actions-taken "<中文：已尝试的业务动作，如「已查询订单但未能保存草稿」>"
 10. terminal: python3 {cli} update-session-status --env {env} --session-id {quickcep_session_id} --status draft_ready|awaiting_expert|failed
+"""
+
+
+def _gate_extract_block(*, env: str, quickcep_session_id: str) -> str:
+    """Build the `# gate_extract` brief block when CS_INTENT_ENABLED.
+
+    Fetches the latest gate_extract from the cs-intent-classifier service and
+    renders a human-readable markdown block with the agent behavior constraints
+    (no re-classify, in_scope handling, no-fabrication, uncertain-field
+    confirmation). Returns "" when the switch is off or the classifier is
+    unreachable — preserving the legacy brief unchanged.
+    """
+    import os
+
+    if os.environ.get("CS_INTENT_ENABLED", "false").strip().lower() not in ("1", "true", "yes", "on"):
+        return ""
+    ge = _fetch_gate_extract(env=env, quickcep_session_id=quickcep_session_id)
+    if not ge:
+        return ""
+    return _render_gate_extract_brief(ge) + "\n"
+
+
+def _fetch_gate_extract(*, env: str, quickcep_session_id: str) -> dict | None:
+    """GET /gate-extract/{id} on the classifier. None on 404/unreachable."""
+    import json
+    import os
+    import urllib.error
+    import urllib.request
+
+    base = os.environ.get("CS_INTENT_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
+    url = f"{base}/gate-extract/{quickcep_session_id}?env={env}"
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        return None
+    except Exception:
+        return None
+
+
+def _render_gate_extract_brief(ge: dict) -> str:
+    """Render a gate_extract dict as the agent-facing markdown block."""
+    intents = ge.get("intents") or []
+    intent_lines = []
+    for it in intents:
+        scope_tag = "in_scope" if it.get("in_scope") else "out_of_scope, 转人工/escalate"
+        orders = it.get("related_orders") or []
+        prods = it.get("related_products") or []
+        prod_str = ",".join(p.get("slug") or p.get("name") or "?" for p in prods) if prods else ""
+        snippet = (it.get("snippet") or "").replace("\n", " ").strip()
+        line = f"- [{scope_tag}] {it.get('intent','?')} — confidence={it.get('confidence','?')}, urgency={it.get('urgency','?')}"
+        if orders:
+            line += f", orders=[{','.join('#'+o for o in orders)}]"
+        if prod_str:
+            line += f", products=[{prod_str}]"
+        if snippet:
+            line += f"\n  > \"{snippet[:200]}\""
+        intent_lines.append(line)
+    intents_block = "\n".join(intent_lines) or "(none)"
+    region = ge.get("customer_region") or {}
+    region_line = f"country: {region.get('country') or 'unknown'} | province_state: {region.get('province_state') or 'unknown'} | source: {region.get('source','unknown')} | confidence: {region.get('confidence','low')}"
+    uncertain = ge.get("uncertain_fields") or []
+    null_fields = ge.get("null_fields") or []
+    uncertain_block = "\n".join(f"- {f}" for f in uncertain) if uncertain else "- (none)"
+    null_block = "\n".join(f"- {f}" for f in null_fields) if null_fields else "- (none)"
+    emotion = ge.get("emotion") or {}
+    language = ge.get("language") or {}
+    return f"""# gate_extract (pre-classified by cs-intent-classifier {ge.get('model_version','?')}, source={ge.get('classifier_source','?')})
+Use these signals. Do NOT re-run classify-intent (step 3) for this session — skip it. Handle in_scope items; for out_of_scope items, tell the customer in the draft that human colleagues will follow up, AND escalate.
+NEVER fabricate: fields listed in uncertain_fields / null_fields are unverified — verify via dispatch-context/get-messages, or ask the customer before acting on them.
+
+## Intents
+{intents_block}
+
+primary_intent: {ge.get('primary_intent','?')}
+in_scope: {str(ge.get('in_scope')).lower()} (any in_scope → handle; out_of_scope parts → escalate/note)
+
+## Customer & context
+- emotion: {emotion.get('value','neutral')} (confidence={emotion.get('confidence','medium')}) → 语气适配
+- language: {language.get('value','en')} (confidence={language.get('confidence',0.95)}) → 回复必须用此语言
+- urgency: {ge.get('urgency','medium')}
+- customer_segment: {ge.get('customer_segment','unknown')}
+- conversation_stage: {ge.get('conversation_stage','unknown')}
+- response_template_hint: {ge.get('response_template_hint') or 'general'}
+
+## Customer region
+- {region_line}
+  (if unknown → 询问客户或查 dispatch-context 订单地址；勿假设)
+
+## Pre-extracted entities
+- orders: {ge.get('orders') or []} → 已在 dispatch-context 提供，直接用
+- products: {[p.get('slug') or p.get('name') for p in (ge.get('products') or [])]} → 商品查询用此 slug
+- hindsight_keywords: {ge.get('hindsight_keywords') or []} → step 6.5 hindsight_recall 直接用此 query
+
+## Summary (中文，客户诉求概括)
+{ge.get('summary_zh') or '(none)'}
+
+## Uncertain fields (verify before acting — do NOT treat as fact)
+{uncertain_block}
+
+## Null fields (no reliable signal — ask customer if needed)
+{null_block}
+
+## Fabrication guard
+- {('passed: all values sourced from email content or metadata; nulls marked above' if ge.get('fabrication_guard') else 'FAILED — do not trust this gate_extract, fall back to classify-intent step 3')}
+
+## Notes
+- pii_flag: {str(ge.get('pii_flag',False)).lower()} → 草稿中订单号/邮箱勿外泄给第三方
+- threat_signal: {ge.get('threat_signal') or 'none'}
+- ambiguous: {str(ge.get('ambiguous',False)).lower()}
+
+## Uncertain商品/物流字段求证规则
+对于 uncertain_fields 中的商品/物流相关字段（intents[i].related_products/related_orders、products、orders、customer_region），若该信息被用于草稿回复，必须在草稿中向客户求证（如「Are you asking about order #12345?」「Are you located in CA, US?」），除非能通过 dispatch-context/get-messages 内部确证。
+
 """
 
 
