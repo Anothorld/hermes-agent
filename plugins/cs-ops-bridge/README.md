@@ -126,6 +126,8 @@ Automation listens to and processes **QuickCEP email sessions only**. Web chat, 
 
 Shared module: `email_channel.py` (`is_email_channel`, `inbound_payload_is_email`, `session_is_email`).
 
+Permanent inbound skips (PR3): `non_email` / `internal_email_blocklist` / `intent_gate: intention_not_allowed` / `ad` enqueue into CAL with `status=skipped` + an `inbound_skipped` event (payload `gate` field). Transient skips (`intent_gate: no_intention_tags` / `assigned_to_operators`) stay log-only to preserve REST reconcile retry — enqueuing would write `cs_message_dedup` and block later re-evaluation.
+
 - SIO `visitorSendMsg` and REST reconcile both pass through `intent_gate.check_intent_gate` before enqueue/launch.
 - Sessions with no `intentionTags` are skipped unless CAL already has another session for the same customer email (follow-up threads that QuickCEP opens as a new sub-session often lack AI intent tags).
 - Other sessions with no tags yet (classification pending) are skipped; REST reconcile retries on the next poll once QuickCEP assigns tags.
@@ -171,7 +173,7 @@ python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py apply-handoff \
 
 Phases: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `reviewed`, `followup_while_busy`, `operator_sent`.
 
-**Draft save:** `cs_bridge_tool draft-save` supports optional `--attachments` (JSON array, forwarded to QuickCEP). **PDF guard** blocks non-vault PDFs when `--attachments` contains `.pdf` (see `config/attachment_guard.yaml`). `upload-file` subcommand wraps QuickCEP CDN upload. Agents must use `cs_bridge_tool` only — not raw `quickcep_cli`. Before writing a draft it calls QuickCEP `joinChat` automatically:
+**Draft save:** `cs_bridge_tool draft-save` supports optional `--attachments` (JSON array, forwarded to QuickCEP). **PDF guard** blocks non-vault PDFs when `--attachments` contains `.pdf` (see `config/attachment_guard.yaml`). `upload-file` subcommand wraps QuickCEP CDN upload. Agents must use `cs_bridge_tool` only — not raw `quickcep_cli`. The **default** draft-save path writes to CAL (no QuickCEP `joinChat`); the **legacy** path (`--legacy-quickcep-draft` or `CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP=1`) writes to QuickCEP and calls `joinChat` first:
 
 | Step | Timeout | Retry |
 |------|---------|-------|
@@ -179,6 +181,13 @@ Phases: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `reviewed`, `f
 | `joinChat` | 60s | up to 2 retries (2s / 4s backoff) on HTTP timeout only |
 
 On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error_detail` for operators. Subprocess budget per attempt: 130s.
+
+**Launch joinChat:** when an inbound email passes all gates and the session enters `processing`, the watcher (and Console `relaunch`) call QuickCEP `joinChat` **before** the gateway launch — the AI account becomes visible to operators in QuickCEP during the lookup/draft phase. This is **fail-soft**: join failure logs a WARNING + writes a `quickcep_join_chat` CAL event but does **not** block the agent run; Console `send-email` still joins as a fallback. Default **1 attempt** (~60s) to avoid stalling the inbound path.
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| `CS_OPS_JOIN_CHAT_ON_LAUNCH` | `1` | `0`/`false` disables launch/relaunch join (rollback switch) |
+| `CS_OPS_LAUNCH_JOIN_MAX_ATTEMPTS` | `1` | Override attempt count for launch/relaunch join |
 
 **Draft HTML:** `draft-save` normalizes plain text and fake `<html><body>` wrappers into `<p>` / `<br>` so QuickCEP shows paragraph breaks. Prefer plain English in `--content-file`; avoid Markdown-only bold unless `**text**` (converted to `<strong>`).
 

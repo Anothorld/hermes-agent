@@ -110,3 +110,32 @@ def drain_run_events(*, base: str, api_key: Optional[str], run_id: str, timeout_
             resp.read(4096)
     except Exception as exc:
         log.debug("gateway drain skipped for %s: %s", run_id, exc)
+
+
+def get_run_status(*, base: str, api_key: Optional[str], run_id: str) -> Optional[dict]:
+    """Query gateway GET /v1/runs/{run_id} for pollable run status.
+
+    Returns the run status dict (contains ``status`` field like
+    ``completed``/``failed``/``running``/``queued``) or ``None`` on 404
+    (run cleaned up by gateway = assumed ended) or query failure.
+    """
+    rid = (run_id or "").strip()
+    if not rid:
+        return None
+    url = f"{base.rstrip('/')}/v1/runs/{rid}"
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read()
+        return json.loads(raw.decode("utf-8")) if raw else None
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        log.warning("get_run_status failed run=%s HTTP %s", rid, exc.code)
+        return None
+    except Exception as exc:
+        log.warning("get_run_status failed run=%s: %s", rid, exc)
+        return None

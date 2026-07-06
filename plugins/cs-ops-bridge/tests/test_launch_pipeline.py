@@ -161,7 +161,20 @@ def test_launch_skipped_when_intent_not_allowed(monkeypatch, tmp_path):
         }
     )
     assert run_id is None
-    assert cal.get_session(quickcep_session_id="sess-blocked", env="LIVE") is None
+    # PR3: permanent intent_gate skip now enqueues into CAL (status=skipped)
+    # with an inbound_skipped audit event, so the funnel denominator is queryable.
+    sess = cal.get_session(quickcep_session_id="sess-blocked", env="LIVE")
+    assert sess is not None
+    assert sess["status"] == "skipped"
+    with cal._connect() as conn:  # noqa: SLF001
+        ev = conn.execute(
+            "SELECT payload_json FROM cs_conversation_events "
+            "WHERE session_id=? AND event_type='inbound_skipped' ORDER BY id DESC LIMIT 1",
+            (sess["id"],),
+        ).fetchone()
+    assert ev is not None
+    payload = json.loads(ev[0])
+    assert payload["gate"] == "intent_gate"
 
 
 def test_launch_skipped_for_non_email_channel(monkeypatch, tmp_path):
@@ -180,4 +193,16 @@ def test_launch_skipped_for_non_email_channel(monkeypatch, tmp_path):
         }
     )
     assert run_id is None
-    assert cal.get_session(quickcep_session_id="sess-web", env="LIVE") is None
+    # PR3: permanent non_email skip now enqueues into CAL (status=skipped).
+    sess = cal.get_session(quickcep_session_id="sess-web", env="LIVE")
+    assert sess is not None
+    assert sess["status"] == "skipped"
+    with cal._connect() as conn:  # noqa: SLF001
+        ev = conn.execute(
+            "SELECT payload_json FROM cs_conversation_events "
+            "WHERE session_id=? AND event_type='inbound_skipped' ORDER BY id DESC LIMIT 1",
+            (sess["id"],),
+        ).fetchone()
+    assert ev is not None
+    payload = json.loads(ev[0])
+    assert payload["gate"] == "non_email"

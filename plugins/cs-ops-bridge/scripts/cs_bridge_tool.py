@@ -99,6 +99,7 @@ def _format_join_chat_failure(
     payload: dict,
     *,
     attempt: int,
+    max_attempts: int = JOIN_CHAT_MAX_ATTEMPTS,
 ) -> dict:
     failed_step = payload.get("failed_step")
     err = str(payload.get("error") or "join-chat failed")
@@ -107,7 +108,7 @@ def _format_join_chat_failure(
         "session_id": session_id,
         "exit_code": proc.returncode,
         "attempt": attempt,
-        "max_attempts": JOIN_CHAT_MAX_ATTEMPTS,
+        "max_attempts": max_attempts,
         "stderr": proc.stderr,
         "join_chat": payload,
     }
@@ -123,29 +124,45 @@ def _format_join_chat_failure(
 
 
 def _join_chat_before_draft(cli: Path, session_id: str) -> dict:
-    """QuickCEP requires joinChat before draftMessage/save (same as send-email)."""
-    last_failure: dict | None = None
-    for attempt in range(1, JOIN_CHAT_MAX_ATTEMPTS + 1):
-        if attempt > 1:
-            time.sleep(JOIN_CHAT_BACKOFF_BASE_S * (2 ** (attempt - 2)))
-        proc = _run_quickcep_cli(
-            cli,
-            ["join-chat", session_id],
-            timeout=JOIN_CHAT_SUBPROCESS_TIMEOUT,
-        )
-        payload = _parse_quickcep_cli_json(proc.stdout)
-        if proc.returncode == 0 and payload.get("result_code") in (200, None):
-            if not payload.get("failed_step"):
-                if attempt > 1:
-                    payload["join_chat_attempts"] = attempt
-                return payload
-        last_failure = _format_join_chat_failure(session_id, proc, payload, attempt=attempt)
-        if attempt < JOIN_CHAT_MAX_ATTEMPTS and _join_chat_error_is_retryable(payload, proc):
-            continue
-        break
+    """Legacy QuickCEP draft-save join precondition (fail-hard, 3 attempts).
 
-    print_json(last_failure or {"error": "join-chat failed before draft-save", "session_id": session_id})
-    sys.exit(last_failure.get("exit_code", 1) if last_failure else 1)
+    Thin wrapper over the shared ``quickcep_join.join_chat_session`` helper so
+    the policy lives in one place. On success returns the parsed QuickCEP CLI
+    payload (legacy contract); on failure prints the failure JSON and exits.
+    """
+    from quickcep_join import join_chat_session  # noqa: E402 — plugin root on sys.path
+
+    result = join_chat_session(
+        session_id,
+        max_attempts=JOIN_CHAT_MAX_ATTEMPTS,
+        raise_on_failure=False,
+        source="draft_save",
+    )
+    if result["ok"]:
+        # Preserve the legacy success shape: parsed CLI payload + attempts.
+        raw = dict(result.get("raw") or {})
+        if result.get("attempts", 1) > 1:
+            raw["join_chat_attempts"] = result["attempts"]
+        raw.setdefault("action", "join_chat")
+        raw.setdefault("result_code", result.get("result_code"))
+        return raw
+    # Fail-hard: print + exit (mirrors legacy behavior).
+    failure = {
+        "error": "join-chat failed before draft-save",
+        "session_id": session_id,
+        "exit_code": result.get("exit_code") or 1,
+        "attempt": result["attempts"],
+        "max_attempts": result.get("max_attempts", JOIN_CHAT_MAX_ATTEMPTS),
+        "stderr": result.get("stderr") or "",
+        "join_chat": result.get("raw") or {},
+    }
+    if result.get("failed_step"):
+        failure["failed_step"] = result["failed_step"]
+        failure["error_detail"] = result.get("error_detail") or ""
+    elif result.get("error_detail"):
+        failure["error_detail"] = result["error_detail"]
+    print_json(failure)
+    sys.exit(failure["exit_code"])
 
 
 def _cmd_health(args: argparse.Namespace) -> None:

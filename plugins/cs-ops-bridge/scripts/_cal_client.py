@@ -85,7 +85,7 @@ class BridgeClient:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=payload, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="replace")

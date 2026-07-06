@@ -19,6 +19,7 @@ FEISHU_SYSTEM_MESSAGE_PREFIXES: tuple[str, ...] = (
     "[ESC:",
     "[ESC-DONE:",
     "[ESC-LOCK:",
+    "[ESC-FAILED:",
 )
 
 
@@ -225,6 +226,7 @@ def notify_escalation_completed(
     outcome: str,
     operator_hint: str = "",
     feishu_chat_id: Optional[str] = None,
+    is_retry: bool = False,
 ) -> FeishuSendResult:
     """Standalone group notice after resume handoff — not a reply thread; poller ignores [ESC-DONE:]."""
     chat_id = (feishu_chat_id or escalation_chat_id() or DEFAULT_ESCALATION_CHAT).strip()
@@ -234,8 +236,9 @@ def notify_escalation_completed(
         status_line = "✅ 客服已在 QuickCEP 直接回复客户，升级关闭"
     else:
         status_line = "✅ 已处理完成，QuickCEP 草稿待审"
+    retry_tag = "（重试）" if is_retry else ""
     lines = [
-        f"[ESC-DONE:{escalation_id}] {status_line}",
+        f"[ESC-DONE:{escalation_id}]{retry_tag} {status_line}",
         "",
         f"QuickCEP 会话: {quickcep_session_id}",
     ]
@@ -244,3 +247,38 @@ def notify_escalation_completed(
         lines.extend(["", f"摘要: {hint}"])
     lines.extend(["", "🤖 系统通知 · 请勿回复本消息"])
     return send_group_text(chat_id=chat_id, text="\n".join(lines))
+
+
+def notify_escalation_resume_failed(
+    *,
+    escalation_id: int,
+    quickcep_session_id: str,
+    feishu_message_id: str = "",
+    reason: str = "",
+    is_retry: bool = False,
+) -> FeishuSendResult:
+    """Notify operators that a resume run ended without applying handoff.
+
+    Replies on the original escalation Feishu thread when ``feishu_message_id``
+    is available; otherwise the caller should rely solely on the CAL event
+    (console-only escalations have no Feishu thread).
+    """
+    retry_tag = "（重试后）" if is_retry else ""
+    text = (
+        f"[ESC-FAILED:{escalation_id}]{retry_tag} ⚠️ resume agent 未完成草稿生成"
+        f"（模型输出异常），需人工介入。\n\n"
+        f"原因: {reason or 'run ended without handoff'}\n"
+        f"QuickCEP 会话: {quickcep_session_id}\n\n"
+        "可在 Console 点「重新生成」重试。"
+    )
+    msg_id = (feishu_message_id or "").strip()
+    if not msg_id:
+        log.warning(
+            "notify_escalation_resume_failed: no feishu_message_id esc=%s — "
+            "skipping Feishu, relying on CAL event only",
+            escalation_id,
+        )
+        return FeishuSendResult(ok=False, message_id="", error="no_feishu_thread")
+    from .feishu_client import reply_to_message
+
+    return reply_to_message(message_id=msg_id, text=text)

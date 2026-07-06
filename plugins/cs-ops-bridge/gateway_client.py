@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 from .bridge_agent_contract import process_instructions, resume_instructions, edit_memory_instructions
 from .gateway_launch import (
@@ -183,3 +184,14 @@ class GatewayClient:
         from .gateway_launch import stop_run
 
         return stop_run(base=self.base, api_key=self.api_key, run_id=run_id)
+
+    def get_run_status(self, run_id: str) -> Optional[dict]:
+        """Query gateway run status (GET /v1/runs/{run_id}).
+
+        Returns the status dict or None if the run was not found / cleaned up.
+        Used by resume-failure detection to confirm a resume run has actually
+        ended before notifying the operator (false-positive guard).
+        """
+        from .gateway_launch import get_run_status as _get_run_status
+
+        return _get_run_status(base=self.base, api_key=self.api_key, run_id=run_id)

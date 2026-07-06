@@ -177,3 +177,167 @@ def console_reply_escalation(
         "escalation_id": escalation_id,
         "resume": resume,
     }
+
+
+# ---------------------------------------------------------------------------
+# Resume failure detection + manual retry (档位 B)
+# ---------------------------------------------------------------------------
+
+_RESUME_RETRY_ALLOWED_STATUSES = frozenset(
+    {"processing", "awaiting_expert", "draft_ready", "failed"}
+)
+
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
+
+
+def _parse_session_id(session_id: str) -> tuple[str, str] | None:
+    """Parse ``povison-cs:{env}:{qsid}`` → (env, qsid). Returns None if format mismatches."""
+    parts = (session_id or "").split(":", 2)
+    if len(parts) != 3:
+        return None
+    _profile, env, qsid = parts
+    if not env or not qsid:
+        return None
+    return env, qsid
+
+
+def handle_resume_run_finished(
+    *,
+    session_id: str,
+    completed: bool = True,
+    env: str = "LIVE",
+) -> dict[str, Any]:
+    """Detect resume runs that ended without applying handoff and notify operators.
+
+    Called by the bridge ``POST /internal/run-finished`` endpoint (triggered
+    by the gateway ``on_session_end`` hook). If the escalation is still
+    ``resuming`` after the run ended, the agent never called ``apply-handoff``
+    — the ESC36/37 failure mode. Writes a CAL event + Feishu notification so
+    the operator can manually retry via the Console「重新生成」button.
+    """
+    parsed = _parse_session_id(session_id)
+    if not parsed:
+        return {"ok": True, "action": "noop", "reason": "unparseable session_id"}
+    parsed_env, qsid = parsed
+
+    esc = cal.get_resuming_escalation_for_session(quickcep_session_id=qsid, env=parsed_env)
+    if not esc:
+        return {"ok": True, "action": "noop", "reason": "no resuming escalation"}
+
+    eid = int(esc["id"])
+    ctx = esc.get("resume_context") or {}
+
+    # Idempotent: don't notify twice for the same failure.
+    if ctx.get("resume_failed_notified"):
+        return {"ok": True, "action": "noop", "reason": "already notified"}
+
+    # False-positive guard: if the resume run is still running, this callback
+    # came from a different run (e.g. operator_edit_memory) — skip.
+    resume_run_id = str(ctx.get("resume_run_id") or "")
+    if resume_run_id:
+        try:
+            run_status = GatewayClient.from_env().get_run_status(resume_run_id)
+        except Exception as exc:
+            log.warning("handle_resume_run_finished: get_run_status failed esc=%s: %s", eid, exc)
+            run_status = None
+        if run_status and str(run_status.get("status", "")) not in _TERMINAL_RUN_STATUSES:
+            return {"ok": True, "action": "noop", "reason": "resume run still running"}
+
+    # --- Detection confirmed: run ended but escalation still resuming ---
+    reason = "run ended without handoff"
+    is_retry = bool(ctx.get("retried_at"))
+    cal.merge_escalation_resume_context(
+        escalation_id=eid,
+        patch={
+            "resume_failed_detected": True,
+            "resume_fail_reason": reason,
+            "resume_failed_notified": True,
+        },
+    )
+    cal.write_event(
+        quickcep_session_id=qsid,
+        env=parsed_env,
+        event_type="escalation_resume_failed",
+        payload={
+            "escalation_id": eid,
+            "reason": reason,
+            "run_id": resume_run_id,
+            "is_retry": is_retry,
+        },
+    )
+
+    # Feishu notification (skip if no Feishu thread — console-only escalation).
+    feishu_msg_id = str(esc.get("feishu_message_id") or "")
+    try:
+        from . import feishu_notify
+
+        feishu_notify.notify_escalation_resume_failed(
+            escalation_id=eid,
+            quickcep_session_id=qsid,
+            feishu_message_id=feishu_msg_id,
+            reason=reason,
+            is_retry=is_retry,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        log.warning("resume failed Feishu notify failed esc=%s: %s", eid, exc)
+
+    log.warning(
+        "resume failure detected esc=%s session=%s run=%s is_retry=%s",
+        eid, qsid, resume_run_id, is_retry,
+    )
+    return {"ok": True, "action": "notified", "escalation_id": eid}
+
+
+def retry_resume_for_session(*, quickcep_session_id: str, env: str) -> dict[str, Any]:
+    """Manually retry a failed resume from the operator's「重新生成」button.
+
+    Reuses the existing ``resume_escalation`` launch path after reopening the
+    escalation (clears ``resume_run_id``, resets the 4h timeout anchor, and
+    clears failure markers). Only triggers when the session has an escalation
+    with a recorded expert answer; otherwise returns ``no_resume`` so the
+    caller falls through to the normal inbound relaunch path.
+    """
+    sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
+    if not sess:
+        return {"ok": False, "kind": "no_resume"}
+    # Guard: don't redo resume when the operator already replied to the customer.
+    if str(sess.get("status")) not in _RESUME_RETRY_ALLOWED_STATUSES:
+        return {"ok": False, "kind": "no_resume"}
+
+    esc = cal.get_latest_escalation_with_operator_answer(
+        quickcep_session_id=quickcep_session_id, env=env,
+    )
+    if not esc:
+        return {"ok": False, "kind": "no_resume"}
+
+    eid = int(esc["id"])
+    ctx = esc.get("resume_context") or {}
+    old_run_id = str(ctx.get("resume_run_id") or "")
+
+    # 1. Best-effort stop the old run (it may have already ended — stop returns False).
+    if old_run_id:
+        try:
+            GatewayClient.from_env().stop_run(old_run_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            log.warning("stop old resume run failed esc=%s run=%s: %s", eid, old_run_id, exc)
+
+    # 2. Atomically reopen: any state → resuming, clear run_id + failure markers,
+    #    reset resume_launched_at=now (4h timeout anchor), set retried_at.
+    cal.reopen_escalation_for_resume(escalation_id=eid)
+
+    # 3. Do NOT change session status — let the resume agent's apply-handoff
+    #    drive the lifecycle naturally (avoids rank regression / stale interaction).
+
+    # 4. Relaunch the resume run (already claimed, skip attachment re-prepare).
+    answer = str(ctx.get("operator_answer_raw") or "").strip()
+    result = resume_escalation(
+        escalation_id=eid,
+        operator_answer=answer,
+        decided_by=str(esc.get("decided_by") or "console_retry"),
+        env=env,
+        already_claimed=True,
+        skip_attachment_prepare=True,
+    )
+    result["kind"] = "resume_retry"
+    result["escalation_id"] = eid
+    return result

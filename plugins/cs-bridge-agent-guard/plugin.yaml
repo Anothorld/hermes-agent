@@ -3,3 +3,4 @@ description: Block QuickCEP send-email in povison-cs agent runs.
 version: 0.2.0
 hooks:
   - pre_tool_call
+  - on_session_end

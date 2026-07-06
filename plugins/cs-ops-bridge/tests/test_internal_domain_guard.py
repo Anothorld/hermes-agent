@@ -206,12 +206,6 @@ def test_draft_save_proceeds_on_clean_content(tmp_path, monkeypatch):
     monkeypatch.setattr(tool, "_quickcep_cli_path", lambda: cli)
 
     def fake_run(_cli, argv, timeout=120):
-        if argv[0] == "join-chat":
-            return MagicMock(
-                returncode=0,
-                stdout=json.dumps({"action": "join_chat", "result_code": 200}),
-                stderr="",
-            )
         return MagicMock(
             returncode=0,
             stdout=json.dumps({"action": "draft_save", "success": True, "result_code": 200}),
@@ -220,16 +214,32 @@ def test_draft_save_proceeds_on_clean_content(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tool, "_run_quickcep_cli", fake_run)
 
-    args = MagicMock(
-        session_id="sess-clean",
-        content="<p>Hello! Visit https://www.povison.com for more info.</p>",
-        content_file=None,
-        subject="Re: test",
-        receiver="a@b.com",
-        attachments=None,
-    )
-    with patch.object(tool, "print_json") as mock_print:
-        tool._cmd_draft_save(args)
+    # Mock the shared join helper (legacy path delegates to quickcep_join).
+    if str(_PLUGIN_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PLUGIN_ROOT))
+    import quickcep_join as qj  # noqa: E402
+    join_result = {
+        "ok": True,
+        "source": "draft_save",
+        "session_id": "sess-clean",
+        "result_code": 200,
+        "attempts": 1,
+        "error": None,
+        "error_detail": None,
+        "failed_step": None,
+        "raw": {"action": "join_chat", "result_code": 200},
+    }
+    with patch.object(qj, "join_chat_session", return_value=join_result):
+        args = MagicMock(
+            session_id="sess-clean",
+            content="<p>Hello! Visit https://www.povison.com for more info.</p>",
+            content_file=None,
+            subject="Re: test",
+            receiver="a@b.com",
+            attachments=None,
+        )
+        with patch.object(tool, "print_json") as mock_print:
+            tool._cmd_draft_save(args)
 
     out = mock_print.call_args[0][0]
     assert out["success"] is True

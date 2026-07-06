@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Final
 
-SCHEMA_VERSION: Final[int] = 5
+SCHEMA_VERSION: Final[int] = 6
 
 SESSION_STATUSES: Final[tuple[str, ...]] = (
     "pending",
@@ -60,6 +60,7 @@ TABLES: dict[str, str] = {
             sent_draft_source     TEXT,
             sent_draft_at         TEXT,
             processing_started_at TEXT,
+            agent_processing_at   TEXT,
             UNIQUE (quickcep_session_id, env)
         )
     """,
@@ -175,6 +176,7 @@ INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_cs_escalations_state ON cs_escalations(state, env)",
     "CREATE INDEX IF NOT EXISTS idx_cs_events_session ON cs_conversation_events(session_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_cs_session_processing_started ON cs_session(processing_started_at, env)",
+    "CREATE INDEX IF NOT EXISTS idx_cs_session_agent_processing ON cs_session(agent_processing_at) WHERE agent_processing_at IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_cs_escalations_created ON cs_escalations(created_at, env)",
     "CREATE INDEX IF NOT EXISTS idx_vault_link_esc ON escalation_vault_link(escalation_id)",
     "CREATE INDEX IF NOT EXISTS idx_vault_link_blob ON escalation_vault_link(blob_md5)",
@@ -215,6 +217,16 @@ _SESSION_V5_COLUMNS: tuple[tuple[str, str], ...] = (
     ("processing_started_at", "TEXT"),
 )
 
+# Column added to cs_session by v5→v6 migration (agent-startup latency
+# measurement, §12.6): timestamp of the first time the agent called
+# ``apply-handoff --phase processing``. Distinct from
+# ``processing_started_at`` (which the watcher stamps immediately when it
+# sets status=processing). The gap between the two = agent startup +
+# first-model-response latency. Existing v5 rows have NULL.
+_SESSION_V6_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("agent_processing_at", "TEXT"),
+)
+
 
 def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     # PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
@@ -245,6 +257,14 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE cs_session ADD COLUMN {name} {coltype}")
 
 
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """Add cs_session.agent_processing_at (idempotent per column)."""
+    existing = _existing_columns(conn, "cs_session")
+    for name, coltype in _SESSION_V6_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE cs_session ADD COLUMN {name} {coltype}")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Run forward migrations based on the persisted schema_version."""
     row = conn.execute(
@@ -262,6 +282,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         _migrate_v3_to_v4(conn)
     if current < 5:
         _migrate_v4_to_v5(conn)
+    if current < 6:
+        _migrate_v5_to_v6(conn)
 
 
 def recreate_all(conn: sqlite3.Connection) -> None:

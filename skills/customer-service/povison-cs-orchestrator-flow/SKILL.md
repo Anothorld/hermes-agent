@@ -97,7 +97,7 @@ Bridge applies QuickCEP tags and `add-note` automatically — **do not** call `t
 
 **Direct quickcep_cli** — Forbidden in automation. Use `cs_bridge_tool get-messages` and `cs_bridge_tool draft-save`.
 
-**Skipping join-chat before draft** — Use **`cs_bridge_tool draft-save`** only; it calls `join-chat` automatically.
+**Skipping join-chat before draft** — `joinChat` is handled by the watcher at launch time (fail-soft); the agent does not need to call it manually. The default `draft-save` writes to CAL (no joinChat). The legacy QuickCEP path (`--legacy-quickcep-draft`) still auto-calls `join-chat` before save.
 
 **Shared temp draft path** — Never use `/tmp/draft.html` across sessions. Always use session-scoped paths like `/tmp/draft-<session_id>.html` to avoid cross-session draft contamination under concurrent runs.
 

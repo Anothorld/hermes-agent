@@ -1058,6 +1058,33 @@ def relaunch_session_route(
         raise HTTPException(status_code=409, detail=f"session busy: {sess['status']}")
     msg_id = body.message_id or sess.get("last_message_id") or "manual-relaunch"
     cal.update_session_status(session_row_id=sess["id"], status="processing")
+    # ── Relaunch joinChat (fail-soft) ────────────────────────────────
+    # Same fail-soft join as the inbound watcher launch path: make the AI
+    # account visible in QuickCEP as soon as the session re-enters processing.
+    # Failure is non-fatal — Console send-email still joins as a fallback.
+    from .quickcep_join import (
+        join_chat_on_launch_enabled,
+        join_chat_session,
+        launch_join_max_attempts,
+        record_join_chat_event,
+    )
+
+    if join_chat_on_launch_enabled():
+        try:
+            join_result = join_chat_session(
+                quickcep_session_id,
+                max_attempts=launch_join_max_attempts(),
+                raise_on_failure=False,
+                source="relaunch",
+            )
+            record_join_chat_event(
+                quickcep_session_id=quickcep_session_id,
+                join_result=join_result,
+                message_id=str(msg_id),
+                env=body.env,
+            )
+        except Exception as exc:
+            log.warning("relaunch joinChat error session=%s: %s", quickcep_session_id, exc)
     outcome = GatewayClient.from_env().start_process_run(
         quickcep_session_id=quickcep_session_id,
         env=body.env,

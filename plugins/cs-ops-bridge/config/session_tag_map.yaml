@@ -23,3 +23,5 @@ inquiry_by_category:
   vip_discount: '1715250949655814146'
   unclear: '1715240019366699009'
   forced: ''
+advertising:
+  ad_spam: '2072600617073577986'  # 广告 (Inquiry Nature → 广告)

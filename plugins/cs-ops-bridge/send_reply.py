@@ -29,6 +29,45 @@ log = logging.getLogger(__name__)
 
 SEND_EMAIL_SUBPROCESS_TIMEOUT = 150
 
+# ── Edit-memory bypass detection ──────────────────────────────────────────
+# When the operator sends a reply via Console, send_reply.py checks whether
+# the operator edited the AI draft (draft_source == "operator_edit") and, if
+# so, launches an edit-memory gateway run that retains factual product/policy
+# corrections to Hindsight.
+#
+# However, not every "operator_edit" session represents a genuine edit of the
+# AI draft. In practice, many operators use the Console send path to send a
+# completely different reply (live chat follow-up, escalation-time manual
+# reply, independent decision based on internal info). The draft_source is
+# still "operator_edit" because the operator touched the composer, but the
+# content similarity between AI draft and operator reply is near zero.
+#
+# Launching edit-memory on these bypass cases wastes compute and risks
+# extracting spurious "corrections" from an unrelated diff. We gate on a
+# similarity threshold: if the plain-text similarity between the AI baseline
+# and the operator's sent draft falls below BYPASS_SIMILARITY_THRESHOLD,
+# the edit-memory run is skipped.
+#
+# The 0.15 threshold is empirically derived from two days of data
+# (2026-07-01/02): similarity clusters bimodally — either ≥95% (directly
+# adopted) or ≤10% (complete bypass). The 15%–65% range is essentially empty.
+BYPASS_SIMILARITY_THRESHOLD = 0.15
+
+
+def _strip_html(html: str) -> str:
+    """Minimal HTML-to-plain-text for similarity comparison."""
+    import re
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"&[a-z]+;", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Ratio similarity between two plain-text strings (case-insensitive)."""
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
 
 def _quickcep_cli_path() -> Path:
     return quickcep_skill_dir() / "scripts" / "quickcep_cli.py"
@@ -160,6 +199,12 @@ def send_reply(
     # PR3: if the operator edited the AI draft, launch an edit-memory run that
     # inherits the reply context and retains product/policy corrections to
     # Hindsight. Guard-locked to hindsight tools via run_kind=edit_memory.
+    #
+    # Bypass gate (2026-07-03): skip edit-memory when the operator's sent draft
+    # bears no resemblance to the AI baseline (similarity < BYPASS_SIMILARITY_THRESHOLD).
+    # In these cases the operator sent a completely independent reply (live chat
+    # follow-up, escalation manual reply, etc.) — the diff is meaningless and
+    # would risk extracting spurious "corrections" from unrelated content.
     edit_memory_outcome = None
     if sess.get("draft_source") == "operator_edit":
         try:
@@ -169,23 +214,38 @@ def send_reply(
             facts = (ctx.get("facts") or {}) if isinstance(ctx, dict) else {}
             ai_baseline = ((facts.get("edit_memory") or {}).get("ai_baseline_html") or "") if isinstance(facts, dict) else ""
             if ai_baseline and ai_baseline != draft_html:
-                outcome = GatewayClient.from_env().start_edit_memory_run(
-                    quickcep_session_id=quickcep_session_id,
-                    env=env,
-                    ai_draft_html=ai_baseline,
-                    operator_draft_html=draft_html,
-                    operator_id=operator_id or "",
+                similarity = _text_similarity(
+                    _strip_html(ai_baseline), _strip_html(draft_html)
                 )
-                edit_memory_outcome = {
-                    "run_id": outcome.run_id,
-                    "dedup_skipped": outcome.dedup_skipped,
-                }
-                cal.write_event(
-                    quickcep_session_id=quickcep_session_id,
-                    env=env,
-                    event_type="edit_memory_run_launched",
-                    payload={"run_id": outcome.run_id, "operator_id": operator_id},
-                )
+                if similarity < BYPASS_SIMILARITY_THRESHOLD:
+                    log.info(
+                        "skip edit-memory: similarity %.0f%% (operator bypass) session=%s",
+                        similarity * 100, quickcep_session_id,
+                    )
+                    cal.write_event(
+                        quickcep_session_id=quickcep_session_id,
+                        env=env,
+                        event_type="edit_memory_skipped_bypass",
+                        payload={"similarity": round(similarity, 4)},
+                    )
+                else:
+                    outcome = GatewayClient.from_env().start_edit_memory_run(
+                        quickcep_session_id=quickcep_session_id,
+                        env=env,
+                        ai_draft_html=ai_baseline,
+                        operator_draft_html=draft_html,
+                        operator_id=operator_id or "",
+                    )
+                    edit_memory_outcome = {
+                        "run_id": outcome.run_id,
+                        "dedup_skipped": outcome.dedup_skipped,
+                    }
+                    cal.write_event(
+                        quickcep_session_id=quickcep_session_id,
+                        env=env,
+                        event_type="edit_memory_run_launched",
+                        payload={"run_id": outcome.run_id, "operator_id": operator_id},
+                    )
         except Exception as exc:  # noqa: BLE001 — best-effort, never block the send
             log.warning("edit-memory run launch failed session=%s: %s", quickcep_session_id, exc)
             edit_memory_outcome = {"error": str(exc)[:200]}

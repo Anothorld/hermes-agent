@@ -6,7 +6,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _PKG = "cs_ops_bridge_qw_test"
@@ -129,3 +129,169 @@ def test_rest_reconcile_skips_processing_sessions(monkeypatch, tmp_path):
     assert stats.get("skipped_busy") == 1
     assert stats.get("launched") == 0
     launch.assert_not_called()
+
+
+# ── Launch joinChat tests ───────────────────────────────────────────────
+
+
+def _ok_join_result(session_id: str) -> dict:
+    return {
+        "ok": True,
+        "source": "launch",
+        "session_id": session_id,
+        "result_code": 200,
+        "attempts": 1,
+        "error": None,
+        "error_detail": None,
+        "failed_step": None,
+        "raw": {"action": "join_chat", "result_code": 200},
+    }
+
+
+def _fail_join_result(session_id: str) -> dict:
+    return {
+        "ok": False,
+        "source": "launch",
+        "session_id": session_id,
+        "result_code": None,
+        "attempts": 1,
+        "error": "timed out",
+        "error_detail": "joinChat timed out (QuickCEP HTTP)",
+        "failed_step": "joinChat",
+        "max_attempts": 1,
+    }
+
+
+def test_launch_calls_join_before_gateway(monkeypatch, tmp_path):
+    """joinChat is called after processing status, before start_process_run."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
+    cal = _load("cal")
+    qw = _load("quickcep_watcher")
+    _load("quickcep_join")  # ensure quickcep_join is loaded for record_join_chat_event
+
+    call_order: list[str] = []
+
+    def fake_join(session_id, *, max_attempts=1, raise_on_failure=False, source="launch"):
+        call_order.append(f"join:{session_id}")
+        return _ok_join_result(session_id)
+
+    class FakeGW:
+        def start_process_run(self, **kw):
+            call_order.append(f"launch:{kw['quickcep_session_id']}")
+            return MagicMock(run_id="run-1", dedup_skipped=False)
+
+    with patch.object(qw, "join_chat_session", side_effect=fake_join), \
+         patch.object(qw, "GatewayClient") as mock_gw_cls:
+        mock_gw_cls.from_env.return_value = FakeGW()
+        run_id = qw._launch_for_message(
+            {
+                "chatSubSessionId": "s-join",
+                "chatSessionId": "chat-1",
+                "id": "m1",
+                "email": "visitor@example.com",
+                "channel": "email",
+            }
+        )
+
+    assert run_id == "run-1"
+    assert call_order[0] == "join:s-join"
+    assert call_order[1] == "launch:s-join"
+    # CAL has the join event (record_join_chat_event writes for real)
+    ctx = cal.get_dispatch_context(quickcep_session_id="s-join", env="LIVE") or {}
+    types = [e["event_type"] for e in ctx.get("recent_events", [])]
+    assert "quickcep_join_chat" in types
+
+
+def test_join_failure_still_launches(monkeypatch, tmp_path):
+    """joinChat failure must not block the gateway launch."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
+    cal = _load("cal")
+    qw = _load("quickcep_watcher")
+
+    launched = {"did": False}
+
+    class FakeGW:
+        def start_process_run(self, **kw):
+            launched["did"] = True
+            return MagicMock(run_id="run-2", dedup_skipped=False)
+
+    with patch.object(qw, "join_chat_session", return_value=_fail_join_result("s-fail")), \
+         patch.object(qw, "record_join_chat_event") as mock_record, \
+         patch.object(qw, "GatewayClient") as mock_gw_cls:
+        mock_gw_cls.from_env.return_value = FakeGW()
+        run_id = qw._launch_for_message(
+            {
+                "chatSubSessionId": "s-fail",
+                "chatSessionId": "chat-1",
+                "id": "m1",
+                "email": "visitor@example.com",
+                "channel": "email",
+            }
+        )
+
+    assert run_id == "run-2"
+    assert launched["did"] is True
+    # record_join_chat_event was still called (with the failure result)
+    mock_record.assert_called_once()
+    join_arg = mock_record.call_args.kwargs["join_result"]
+    assert join_arg["ok"] is False
+
+
+def test_busy_path_does_not_join(monkeypatch, tmp_path):
+    """Busy follow-up must NOT trigger joinChat."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
+    cal = _load("cal")
+    qw = _load("quickcep_watcher")
+
+    r1 = cal.enqueue_session(quickcep_session_id="s-busy-j", message_id="m1", env="LIVE")
+    cal.update_session_status(session_row_id=r1["session"]["id"], status="processing")
+
+    with patch.object(qw, "join_chat_session") as mock_join, \
+         patch.object(qw, "apply_handoff"):
+        qw._launch_for_message(
+            {
+                "chatSubSessionId": "s-busy-j",
+                "chatSessionId": "chat-1",
+                "id": "m2",
+                "email": "visitor@example.com",
+                "channel": "email",
+            }
+        )
+
+    mock_join.assert_not_called()
+
+
+def test_join_disabled_by_env(monkeypatch, tmp_path):
+    """CS_OPS_JOIN_CHAT_ON_LAUNCH=0 skips join entirely."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
+    monkeypatch.setenv("CS_OPS_JOIN_CHAT_ON_LAUNCH", "0")
+    cal = _load("cal")
+    qw = _load("quickcep_watcher")
+
+    class FakeGW:
+        def start_process_run(self, **kw):
+            return MagicMock(run_id="run-3", dedup_skipped=False)
+
+    with patch.object(qw, "join_chat_session") as mock_join, \
+         patch.object(qw, "GatewayClient") as mock_gw_cls:
+        mock_gw_cls.from_env.return_value = FakeGW()
+        run_id = qw._launch_for_message(
+            {
+                "chatSubSessionId": "s-no-join",
+                "chatSessionId": "chat-1",
+                "id": "m1",
+                "email": "visitor@example.com",
+                "channel": "email",
+            }
+        )
+
+    assert run_id == "run-3"
+    mock_join.assert_not_called()

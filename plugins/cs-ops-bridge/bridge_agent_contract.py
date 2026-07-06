@@ -60,7 +60,7 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
 3. terminal: python3 {cli} classify-intent --env {env} --subject "<subject>" --body "<body>"
 4. terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase processing --customer-need "<中文：客户诉求摘要>" --classify-json '<classify JSON>'
 5. (auto_handle) product/logistics lookup skills → terminal: python3 {cli} draft-save --env {env} --session-id {quickcep_session_id} --content-file {draft_path} --subject "Re: <subject>" --receiver "<customer email>"
-   draft-save auto-calls join-chat before QuickCEP save. If using --content inline in shell, wrap in **single quotes** when text contains $ (e.g. --content 'refund $200 after delivery'). Double quotes mangle $200 → 00.
+   draft-save default writes to CAL (no joinChat). Legacy QuickCEP path (--legacy-quickcep-draft) auto-calls join-chat before save. joinChat is also called by the watcher at launch time (fail-soft) so the AI account is already visible in QuickCEP. If using --content inline in shell, wrap in **single quotes** when text contains $ (e.g. --content 'refund $200 after delivery'). Double quotes mangle $200 → 00.
    **Internal domain guard**: draft-save automatically blocks drafts containing internal/backend URLs (OSS buckets, localhost, feishu.cn, internal IPs/ports). If blocked, strip internal links and retry. Never put internal system URLs in customer-facing drafts.
 6. (auto_handle) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase draft_ready --actions-taken "已查询并生成回复草稿" --operator-hint "<中文：操作员接手要点>"
 6.5. (escalate candidate) **Check Hindsight** before escalating — call hindsight_recall(query="<product slug> <problem keywords>"), then IMMEDIATELY record to tracker:

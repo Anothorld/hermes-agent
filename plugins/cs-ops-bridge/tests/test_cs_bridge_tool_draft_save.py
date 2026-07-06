@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -27,8 +28,20 @@ def _load_cs_bridge_tool():
     return mod
 
 
+def _load_quickcep_join():
+    """Load quickcep_join as a top-level module (matches cs_bridge_tool's import)."""
+    if "quickcep_join" in sys.modules:
+        return sys.modules["quickcep_join"]
+    # _PLUGIN_ROOT is on sys.path (cs_bridge_tool adds it), so import directly.
+    if str(_PLUGIN_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PLUGIN_ROOT))
+    import quickcep_join as qj  # noqa: E402
+    return qj
+
+
 def test_draft_save_calls_join_chat_before_save(tmp_path, monkeypatch):
     tool = _load_cs_bridge_tool()
+    qj = _load_quickcep_join()
     cli = tmp_path / "quickcep_cli.py"
     cli.write_text("# stub", encoding="utf-8")
     monkeypatch.setattr(tool, "_quickcep_cli_path", lambda: cli)
@@ -37,12 +50,6 @@ def test_draft_save_calls_join_chat_before_save(tmp_path, monkeypatch):
 
     def fake_run(_cli, argv, timeout=120):
         calls.append(list(argv))
-        if argv[0] == "join-chat":
-            return MagicMock(
-                returncode=0,
-                stdout=json.dumps({"action": "join_chat", "result_code": 200}),
-                stderr="",
-            )
         return MagicMock(
             returncode=0,
             stdout=json.dumps({"action": "draft_save", "success": True, "result_code": 200}),
@@ -51,22 +58,41 @@ def test_draft_save_calls_join_chat_before_save(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tool, "_run_quickcep_cli", fake_run)
 
-    # Explicitly exercise the legacy QuickCEP path (default now writes to CAL).
-    args = MagicMock(
-        session_id="sess-1",
-        content="Hello",
-        content_file=None,
-        subject="Re: test",
-        receiver="a@b.com",
-        env="LIVE",
-        legacy_quickcep_draft=True,
-    )
-    with patch.object(tool, "print_json") as mock_print:
-        tool._cmd_draft_save(args)
+    # Mock the shared join helper to return a legacy-compatible success result.
+    join_result = {
+        "ok": True,
+        "source": "draft_save",
+        "session_id": "sess-1",
+        "result_code": 200,
+        "attempts": 1,
+        "error": None,
+        "error_detail": None,
+        "failed_step": None,
+        "raw": {"action": "join_chat", "result_code": 200},
+    }
+    with patch.object(qj, "join_chat_session", return_value=join_result) as mock_join:
+        # Explicitly exercise the legacy QuickCEP path (default now writes to CAL).
+        args = MagicMock(
+            session_id="sess-1",
+            content="Hello",
+            content_file=None,
+            subject="Re: test",
+            receiver="a@b.com",
+            env="LIVE",
+            legacy_quickcep_draft=True,
+        )
+        with patch.object(tool, "print_json") as mock_print:
+            tool._cmd_draft_save(args)
 
-    assert calls[0] == ["join-chat", "sess-1"]
-    assert calls[1][0] == "draft-save"
-    assert calls[1][1] == "sess-1"
+    # join_chat_session was called before the draft-save CLI
+    mock_join.assert_called_once()
+    join_call_kwargs = mock_join.call_args.kwargs
+    assert join_call_kwargs["source"] == "draft_save"
+    assert join_call_kwargs["raise_on_failure"] is False
+    assert join_call_kwargs["max_attempts"] == tool.JOIN_CHAT_MAX_ATTEMPTS
+    # draft-save CLI was called after join
+    assert calls[0][0] == "draft-save"
+    assert calls[0][1] == "sess-1"
     mock_print.assert_called_once()
     out = mock_print.call_args[0][0]
     assert out["join_chat"]["result_code"] == 200
@@ -115,73 +141,6 @@ def test_draft_save_default_writes_to_cal_via_http(tmp_path, monkeypatch):
     out = mock_print.call_args[0][0]
     assert out["stored"] == "cal"
     assert out["success"] is True
-
-
-def test_join_chat_retries_on_timeout_then_succeeds(tmp_path, monkeypatch):
-    tool = _load_cs_bridge_tool()
-    cli = tmp_path / "quickcep_cli.py"
-    cli.write_text("# stub", encoding="utf-8")
-    monkeypatch.setattr(tool.time, "sleep", lambda _s: None)
-
-    attempts = {"n": 0}
-
-    def fake_run(_cli, argv, timeout=120):
-        attempts["n"] += 1
-        if attempts["n"] < 2:
-            return MagicMock(
-                returncode=1,
-                stdout=json.dumps(
-                    {
-                        "error": "<urlopen error timed out>",
-                        "failed_step": "joinChat",
-                        "command": "join-chat",
-                    }
-                ),
-                stderr="",
-            )
-        return MagicMock(
-            returncode=0,
-            stdout=json.dumps({"action": "join_chat", "result_code": 200}),
-            stderr="",
-        )
-
-    monkeypatch.setattr(tool, "_run_quickcep_cli", fake_run)
-    result = tool._join_chat_before_draft(cli, "sess-retry")
-    assert result["result_code"] == 200
-    assert result["join_chat_attempts"] == 2
-    assert attempts["n"] == 2
-
-
-def test_join_chat_failure_includes_failed_step(tmp_path, monkeypatch):
-    tool = _load_cs_bridge_tool()
-    cli = tmp_path / "quickcep_cli.py"
-    cli.write_text("# stub", encoding="utf-8")
-    monkeypatch.setattr(tool.time, "sleep", lambda _s: None)
-
-    def fake_run(_cli, argv, timeout=120):
-        return MagicMock(
-            returncode=1,
-            stdout=json.dumps(
-                {
-                    "error": "<urlopen error timed out>",
-                    "failed_step": "getUserInfo",
-                    "command": "join-chat",
-                }
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr(tool, "_run_quickcep_cli", fake_run)
-    with patch.object(tool, "print_json") as mock_print, patch.object(
-        tool.sys, "exit", side_effect=SystemExit(1)
-    ):
-        with pytest.raises(SystemExit):
-            tool._join_chat_before_draft(cli, "sess-fail")
-
-    err = mock_print.call_args[0][0]
-    assert err["failed_step"] == "getUserInfo"
-    assert "getUserInfo timed out" in err["error_detail"]
-    assert err["attempt"] == tool.JOIN_CHAT_MAX_ATTEMPTS
 
 
 def test_draft_save_rejects_shared_tmp_path(tmp_path, monkeypatch):

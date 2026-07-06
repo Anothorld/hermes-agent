@@ -206,5 +206,26 @@ def test_daily_report_stats_bundles_all_three_reads(cal):
     assert s["id"] in set(out["draft_saved_session_ids"])
 
 
+def test_daily_report_stats_excludes_skipped_sessions(cal, monkeypatch):
+    """PR3 fix: permanent-skip rows (status=skipped) must not inflate the daily report's processed count."""
+    _enqueue(cal, "qc-real")
+    s_real = cal.get_session(quickcep_session_id="qc-real")
+    cal.update_session_status(session_row_id=s_real["id"], status="processing")
+
+    _enqueue(cal, "qc-skipped")
+    s_skip = cal.get_session(quickcep_session_id="qc-skipped")
+    cal.update_session_status(session_row_id=s_skip["id"], status="skipped")
+
+    started = cal.get_session(quickcep_session_id="qc-real")["processing_started_at"]
+    from datetime import datetime, timezone, timedelta
+    lower = (datetime.fromisoformat(started) - timedelta(seconds=1)).isoformat()
+    upper = (datetime.fromisoformat(started) + timedelta(hours=1)).isoformat()
+
+    out = cal.daily_report_stats(env="LIVE", since=lower, until=upper)
+    qsids = {r["quickcep_session_id"] for r in out["sessions"]}
+    assert "qc-real" in qsids
+    assert "qc-skipped" not in qsids
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

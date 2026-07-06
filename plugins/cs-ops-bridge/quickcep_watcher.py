@@ -14,9 +14,16 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import cal
+from .ad_detector import detect_ad_from_info, parse_rest_last_msg_content, has_ad_tag, AD_TAG_ID
 from .email_channel import inbound_payload_is_email
 from .gateway_client import GatewayClient
 from .intent_gate import check_intent_gate
+from .quickcep_join import (
+    join_chat_on_launch_enabled,
+    join_chat_session,
+    launch_join_max_attempts,
+    record_join_chat_event,
+)
 from .session_handoff import handle_operator_send, apply_handoff
 from .operator_send_reconcile import reconcile_operator_sent_once
 
@@ -234,6 +241,81 @@ def _visitor_locale(visitor_info: Any) -> Optional[str]:
     return val or None
 
 
+def _enqueue_permanent_skip(
+    *,
+    session_id: str,
+    info: dict[str, Any],
+    gate: str,
+    extra_payload: Optional[dict[str, Any]] = None,
+) -> None:
+    """Enqueue a permanent inbound skip: session → status=skipped + inbound_skipped event.
+
+    Used by the 4 permanent skip gates (non_email, blocklist, intent_gate
+    not_allowed, ad). Transient skips (no_intention_tags, assigned_operators)
+    do NOT call this — they stay log-only to preserve REST reconcile retry.
+
+    The ``force_status`` busy guard in ``enqueue_session`` ensures an in-flight
+    session (processing/awaiting_expert/…) is never disrupted: only idle/new/
+    already-skipped sessions get marked skipped; busy sessions keep their status
+    but still receive the ``inbound_skipped`` audit event.
+    """
+    skip_payload = {"gate": gate}
+    if extra_payload:
+        skip_payload.update(extra_payload)
+    try:
+        cal.enqueue_session(
+            quickcep_session_id=session_id,
+            chat_session_id=str(info.get("chatSessionId") or "") or None,
+            customer_email=info.get("email") or None,
+            message_id=str(info.get("id") or ""),
+            env=_ENV,
+            email_subject=(info.get("email_subject") or None),
+            last_message_preview=(info.get("content_preview") or None),
+            force_status="skipped",
+            skip_event_payload=skip_payload,
+        )
+    except Exception as exc:
+        log.warning("inbound_skipped enqueue failed session=%s gate=%s: %s", session_id, gate, exc)
+
+
+def _tag_ad_and_skip(
+    *,
+    session_id: str,
+    info: dict[str, Any],
+    reason: str,
+) -> None:
+    """Tag an ad/spam session with 广告, write CAL audit events, and skip processing.
+
+    PR3: routes through ``_enqueue_permanent_skip`` (force_status=skipped) so the
+    busy guard applies — a `processing` session receiving an ad follow-up no
+    longer gets its status overwritten to `skipped` (the prior unconditional
+    ``update_session_status`` was a latent bug that orphaned in-flight runs).
+    The legacy ``ad_email_detected`` event is preserved for backward compat.
+    """
+    _enqueue_permanent_skip(
+        session_id=session_id,
+        info=info,
+        gate="ad",
+        extra_payload={"reason": reason, "subject": (info.get("email_subject") or "")[:200]},
+    )
+    # Apply the 广告 tag directly via QuickCEP CLI.
+    try:
+        from .session_handoff import _run_quickcep_cli
+        _run_quickcep_cli(["tags-add", session_id, AD_TAG_ID])
+    except Exception as exc:
+        log.warning("ad tag add failed session=%s: %s", session_id, exc)
+    # Legacy audit event (kept for backward compat with existing queries).
+    try:
+        cal.write_event(
+            quickcep_session_id=session_id,
+            env=_ENV,
+            event_type="ad_email_detected",
+            payload={"reason": reason, "subject": (info.get("email_subject") or "")[:200]},
+        )
+    except Exception as exc:
+        log.warning("ad event write failed session=%s: %s", session_id, exc)
+
+
 def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     session_id = str(info.get("chatSubSessionId") or "")
     message_id = str(info.get("id") or info.get("lastMsgTime") or time.time())
@@ -245,6 +327,12 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             "skip launch session %s non_email channel=%s",
             session_id,
             info.get("channel"),
+        )
+        _enqueue_permanent_skip(
+            session_id=session_id,
+            info=info,
+            gate="non_email",
+            extra_payload={"channel": info.get("channel")},
         )
         return None
 
@@ -267,6 +355,29 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             session_id,
             email_lower,
         )
+        _enqueue_permanent_skip(
+            session_id=session_id,
+            info=info,
+            gate="blocklist",
+            extra_payload={"sender": email_lower},
+        )
+        return None
+
+    # ── Ad / spam detection ─────────────────────────────────────────
+    # Check for unsolicited marketing, SEO, collaboration, guest-post,
+    # partnership, or tariff proposal emails.  When detected, tag the
+    # session with 广告 and skip AI processing entirely.
+    if detect_ad_from_info(info):
+        log.info(
+            "ad_email_detected session=%s subject=%s",
+            session_id,
+            (info.get("email_subject") or "")[:80],
+        )
+        _tag_ad_and_skip(
+            session_id=session_id,
+            info=info,
+            reason="advertisement keyword match",
+        )
         return None
 
     gate = check_intent_gate(
@@ -282,6 +393,17 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             gate.reason,
             list(gate.tags) or None,
         )
+        # Permanent skip: intent explicitly not in allowlist. Enqueue + skipped.
+        # Transient skip: no_intention_tags (QuickCEP classification pending) stays
+        # log-only — enqueuing would write cs_message_dedup and break REST retry
+        # when QuickCEP later assigns tags.
+        if gate.reason == "intention_not_allowed" or gate.reason.startswith("intention_not_allowed"):
+            _enqueue_permanent_skip(
+                session_id=session_id,
+                info=info,
+                gate="intent_gate",
+                extra_payload={"reason": gate.reason, "tags": list(gate.tags) or []},
+            )
         return None
 
     # Skip sessions already assigned to human operators (unless AI is actively processing)
@@ -340,6 +462,28 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         )
         return None
     cal.update_session_status(session_row_id=result["session"]["id"], status="processing")
+    # ── Launch joinChat (fail-soft) ─────────────────────────────────
+    # Join the QuickCEP session as soon as the inbound email has passed all
+    # gates and is confirmed for AI processing. This makes the AI account
+    # visible to operators in QuickCEP during the lookup/draft phase. Failure
+    # is non-fatal — the agent run proceeds and Console send-email still
+    # joins as a fallback.
+    if join_chat_on_launch_enabled():
+        try:
+            join_result = join_chat_session(
+                session_id,
+                max_attempts=launch_join_max_attempts(),
+                raise_on_failure=False,
+                source="launch",
+            )
+            record_join_chat_event(
+                quickcep_session_id=session_id,
+                join_result=join_result,
+                message_id=message_id,
+                env=_ENV,
+            )
+        except Exception as exc:
+            log.warning("launch joinChat error session=%s: %s", session_id, exc)
     gw = GatewayClient.from_env()
     outcome = gw.start_process_run(
         quickcep_session_id=session_id,
@@ -354,6 +498,19 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         return None
     cal.update_session_status(session_row_id=result["session"]["id"], status="failed")
     log.error("launch failed for session %s message %s", session_id, message_id)
+    try:
+        cal.write_event(
+            quickcep_session_id=session_id,
+            env=_ENV,
+            event_type="launch_failed",
+            payload={
+                "message_id": message_id,
+                "error": "gateway launch failed",
+                "run_id": None,
+            },
+        )
+    except Exception as exc:
+        log.warning("launch_failed event write failed session=%s: %s", session_id, exc)
     try:
         apply_handoff(
             quickcep_session_id=session_id,
@@ -455,11 +612,17 @@ def run_rest_reconcile_once() -> dict[str, Any]:
                     data={"session_id": sid, "last_message_id": busy_sess.get("last_message_id")},
                 )
             continue
+        # Skip sessions already tagged as 广告 in QuickCEP.
+        if has_ad_tag(row):
+            log.info("REST skip session %s ad_tagged", sid)
+            continue
         msg_id = rest_session_message_id(row)
         sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
         if sess and str(sess.get("last_message_id") or "") == msg_id:
             continue
         vi = row.get("visitorInfo") if isinstance(row.get("visitorInfo"), dict) else {}
+        # Extract email_subject and content from lastMsgContent for ad detection.
+        rest_subject, rest_content = parse_rest_last_msg_content(row)
         info = {
             "chatSubSessionId": sid,
             "chatSessionId": row.get("chatSessionId"),
@@ -469,6 +632,8 @@ def run_rest_reconcile_once() -> dict[str, Any]:
             "channel": row.get("channel") or "email",
             "operatorIds": row.get("operatorIds"),
             "visitorInfo": vi,
+            "email_subject": rest_subject,
+            "content_preview": rest_content[:300] if rest_content else "",
         }
         if not inbound_payload_is_email(info):
             continue

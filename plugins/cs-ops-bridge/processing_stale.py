@@ -85,6 +85,18 @@ def check_processing_stale_once() -> dict[str, Any]:
                 qsid,
                 elapsed_min,
             )
+            try:
+                cal.write_event(
+                    quickcep_session_id=qsid,
+                    env=_ENV,
+                    event_type="processing_stale_recovered",
+                    payload={
+                        "elapsed_min": elapsed_min,
+                        "threshold_min": _STALE_MIN,
+                    },
+                )
+            except Exception as exc:
+                log.warning("processing_stale_recovered event write failed session=%s: %s", qsid, exc)
         else:
             log.warning(
                 "processing stale handoff skipped/failed session=%s: %s",

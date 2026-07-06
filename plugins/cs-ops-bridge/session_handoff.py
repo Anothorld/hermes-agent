@@ -862,6 +862,11 @@ def apply_handoff(
             phase=phase,
         ):
             cal.update_session_status(session_row_id=sess["id"], status=plan.target_status)
+            if phase == "processing":
+                try:
+                    cal.stamp_agent_processing_at(session_row_id=sess["id"])
+                except Exception as exc:
+                    log.debug("stamp_agent_processing_at failed session=%s: %s", quickcep_session_id, exc)
         else:
             log.info(
                 "skip status regression %s -> %s session=%s phase=%s",
@@ -871,6 +876,19 @@ def apply_handoff(
                 phase,
             )
 
+    via_resume = False
+    escalation_id = None
+    if phase in ("draft_ready", "failed"):
+        try:
+            esc = cal.get_resuming_escalation_for_session(
+                quickcep_session_id=quickcep_session_id, env=env,
+            )
+            if esc:
+                via_resume = True
+                escalation_id = esc.get("id")
+        except Exception as exc:
+            log.debug("via_resume lookup failed session=%s: %s", quickcep_session_id, exc)
+
     handoff_payload = {
         "phase": phase,
         "note_text": plan.note_body,
@@ -879,6 +897,8 @@ def apply_handoff(
         "target_status": plan.target_status,
         "tag_results": tag_results,
         "note_result": note_result,
+        "via_resume": via_resume,
+        "escalation_id": escalation_id,
     }
     cal.write_event(
         quickcep_session_id=quickcep_session_id,

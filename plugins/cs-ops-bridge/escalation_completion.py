@@ -46,6 +46,7 @@ def complete_resuming_escalation_by_id(
         outcome=phase,
         operator_hint=operator_hint,
         feishu_chat_id=chat_id,
+        is_retry=bool(ctx.get("retried_at")),
     )
     if not send.ok:
         log.error("feishu escalation done notify failed esc=%s err=%s", eid, send.error)
@@ -119,6 +120,7 @@ def complete_resuming_escalation_superseded_by_operator(
         outcome="operator_manual_reply",
         operator_hint=hint,
         feishu_chat_id=chat_id,
+        is_retry=bool(ctx.get("retried_at")),
     )
     if not send.ok:
         log.error("feishu operator-supersede notify failed esc=%s err=%s", eid, send.error)

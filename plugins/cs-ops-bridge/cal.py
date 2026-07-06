@@ -25,6 +25,10 @@ _DB_PATH = Path(
 _DEBUG_LOG_PATH = Path("/Users/arnold/agent_prj/.cursor/debug-922c3e.log")
 _DEBUG_SESSION_LOG_PATH = Path("/Users/arnold/.cursor/debug-logs/debug-eb3761.log")
 _TERMINAL_DRAFT_STATUSES = frozenset({"operator_replied", "reviewed", "skipped"})
+# PR3: statuses that may be overridden by enqueue_session(force_status=...).
+# Busy statuses (processing/awaiting_expert/draft_ready/operator_replied/reviewed)
+# are excluded so an in-flight session is never disrupted by a skip event.
+_SKIPPABLE_STATUSES = frozenset({"pending", "failed", "skipped"})
 
 
 def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
@@ -137,11 +141,22 @@ def enqueue_session(
     email_subject: Optional[str] = None,
     last_message_preview: Optional[str] = None,
     intention_tags: Optional[list[str]] = None,
+    force_status: Optional[str] = None,
+    skip_event_payload: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Idempotent enqueue; returns ``created`` flag and session row.
 
     Optional visitor/draft-preview fields (PR1.2) are persisted with COALESCE
     so a re-enqueue for a follow-up message never wipes previously stored values.
+
+    ``force_status`` (PR3): when set (e.g. ``"skipped"`` for permanent inbound
+    skips), the session status is forced to that value **only if the current
+    status is skippable** (pending/failed/skipped). Busy statuses
+    (processing/awaiting_expert/draft_ready/operator_replied/reviewed) are
+    preserved so an in-flight session is never disrupted by a skip event.
+    When ``force_status`` is set, the event written is ``inbound_skipped``
+    (payload merged with ``skip_event_payload``) instead of the default
+    ``inbound_received`` / ``customer_followup_while_busy``.
     """
     dedup_key = f"{env}:{quickcep_session_id}:{message_id}"
     now = _now()
@@ -161,6 +176,17 @@ def enqueue_session(
                 (quickcep_session_id, env),
             ).fetchone()
             return {"created": False, "deduped": True, "should_launch": False, "session": dict(row) if row else None}
+
+        # Capture prior status before UPSERT so the inbound event can flag a
+        # reopen (terminal status rolled back to pending by a follow-up message).
+        prior_row = conn.execute(
+            "SELECT status FROM cs_session WHERE quickcep_session_id=? AND env=?",
+            (quickcep_session_id, env),
+        ).fetchone()
+        prior_status = str(prior_row[0]) if prior_row else None
+        is_reopen = prior_status in (
+            "draft_ready", "operator_replied", "skipped", "failed", "reviewed",
+        )
 
         conn.execute(
             "INSERT INTO cs_message_dedup(dedup_key, quickcep_session_id, message_id, env, created_at)"
@@ -199,17 +225,46 @@ def enqueue_session(
         ).fetchone()
         session = dict(row)
         status = session["status"]
+
+        # PR3: force_status busy guard. Only override when the current status
+        # is skippable (idle/already-skipped); never disrupt an in-flight session.
+        if force_status and status in _SKIPPABLE_STATUSES:
+            conn.execute(
+                "UPDATE cs_session SET status=?, updated_at=? WHERE id=?",
+                (force_status, now, session["id"]),
+            )
+            status = force_status
+            session["status"] = force_status
+
         should_launch = status == "pending"
-        event_type = "inbound_received"
-        if not should_launch:
-            event_type = "customer_followup_while_busy"
+        if force_status:
+            event_type = "inbound_skipped"
+            event_payload = {
+                "message_id": message_id,
+                "status": status,
+                "is_reopen": is_reopen,
+                "prior_status": prior_status,
+            }
+            if skip_event_payload:
+                event_payload.update(skip_event_payload)
+        else:
+            event_type = "inbound_received"
+            if not should_launch:
+                event_type = "customer_followup_while_busy"
+            event_payload = {
+                "message_id": message_id,
+                "status": status,
+                "is_reopen": is_reopen,
+                "prior_status": prior_status,
+            }
         conn.execute(
             """INSERT INTO cs_conversation_events(session_id, event_type, payload_json, env, created_at)
                VALUES (?,?,?,?,?)""",
             (
                 session["id"],
                 event_type,
-                json.dumps({"message_id": message_id, "status": status}),
+                # PR3: sanitize — inbound_skipped payloads may carry sender/subject PII.
+                json.dumps(sanitize_mapping(event_payload)),
                 env,
                 now,
             ),
@@ -421,8 +476,17 @@ def daily_report_stats(
     page), the escalation count by ``created_at`` (not by snapshot status),
     and the ``draft_saved`` event set for ``draft_source`` fallback. The report
     script makes a single call and gets a consistent snapshot.
+
+    PR3: permanent inbound skips (non_email/blocklist/intention_not_allowed/ad)
+    now create CAL rows with ``status=skipped``. The daily report skill defines
+    "processed" as ``status NOT IN (pending, failed)`` which would incorrectly
+    count skipped rows as processed. We filter them out server-side so the
+    headline "processed" metric is not inflated by skip audit rows. Direct SQL
+    queries on cs_session still see skipped rows (use ``status != 'skipped'``
+    when computing processed counts off the raw table).
     """
-    sessions = list_sessions(env=env, since=since, until=until, limit=limit)
+    all_sessions = list_sessions(env=env, since=since, until=until, limit=limit)
+    sessions = [s for s in all_sessions if s.get("status") != "skipped"]
     escalations = escalations_in_window(env=env, since=since, until=until)
     draft_saved_ids = draft_saved_session_ids(env=env, since=since, until=until)
     return {
@@ -664,6 +728,26 @@ def cancel_autopilot_job(*, quickcep_session_id: str, env: str = "LIVE", reason:
     return {"ok": True, "job_id": job["id"], "status": "cancelled"}
 
 
+def _dbg_log_230991(message: str, data: dict[str, Any]) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "230991",
+            "id": f"log_{int(time.time() * 1000)}_{data.get('hypothesisId', 'X')}",
+            "timestamp": int(time.time() * 1000),
+            "location": str(data.pop("location", "cal.py")),
+            "message": message,
+            "data": data,
+            "runId": data.pop("runId", "pre-fix"),
+            "hypothesisId": data.pop("hypothesisId", "X"),
+        }
+        with open("/Users/arnold/agent_prj/.cursor/debug-230991.log", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    # #endregion
+
+
 def save_draft(
     *,
     quickcep_session_id: str,
@@ -691,6 +775,20 @@ def save_draft(
     sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
         return {"action": "draft_save", "success": False, "error": "session not found"}
+    _dbg_log_230991(
+        "save_draft ENTRY",
+        {
+            "hypothesisId": "H1",
+            "location": "cal.py:save_draft:entry",
+            "quickcep_session_id": quickcep_session_id,
+            "source": source,
+            "incoming_attachments_count": len(attachments or []),
+            "sess_draft_source": sess.get("draft_source"),
+            "sess_draft_html_len": len(sess.get("draft_html") or ""),
+            "incoming_draft_html_len": len(draft_html or ""),
+            "sess_draft_attachments_raw": sess.get("draft_attachments"),
+        },
+    )
     session_status = str(sess.get("status") or "")
     if source == "operator_edit" and (
         session_status in _TERMINAL_DRAFT_STATUSES or sess.get("draft_source") == "sent"
@@ -713,12 +811,44 @@ def save_draft(
                 "reason": "terminal_empty_draft",
                 "session_id": quickcep_session_id,
             }
-    if (sess.get("draft_html") or "") == draft_html and (sess.get("draft_source") or "") == source:
+    # Unchanged-check must consider attachments too: an operator uploading a
+    # file without touching the draft body still needs the new attachment
+    # persisted. Compare normalized JSON of incoming vs stored draft_attachments.
+    incoming_atts_json = (
+        json.dumps(attachments or [], ensure_ascii=False, sort_keys=True)
+        if attachments is not None
+        else None
+    )
+    sess_atts_raw = sess.get("draft_attachments") or "[]"
+    atts_unchanged = incoming_atts_json is None or incoming_atts_json == sess_atts_raw
+    if (
+        (sess.get("draft_html") or "") == draft_html
+        and (sess.get("draft_source") or "") == source
+        and atts_unchanged
+    ):
         _debug_session_log(
             hypothesis_id="H2",
             location="cal.py:save_draft",
             message="skip unchanged draft save",
             data={"quickcep_session_id": quickcep_session_id, "source": source},
+        )
+        _dbg_log_230991(
+            "save_draft unchanged-check SHORT-CIRCUIT — attachments NOT persisted",
+            {
+                "hypothesisId": "H1",
+                "location": "cal.py:save_draft:unchanged_check",
+                "quickcep_session_id": quickcep_session_id,
+                "source": source,
+                "sess_draft_source": sess.get("draft_source"),
+                "draft_html_eq": (sess.get("draft_html") or "") == draft_html,
+                "incoming_attachments_count": len(attachments or []),
+                "sess_draft_attachments_raw": sess.get("draft_attachments"),
+                "atts_unchanged": atts_unchanged,
+                "incoming_attachments_preview": [
+                    {"name": a.get("name") or a.get("fileName"), "url": (a.get("url") or a.get("downloadUrl") or "")[:80]}
+                    for a in (attachments or [])[:5]
+                ],
+            },
         )
         return {
             "action": "draft_save",
@@ -727,6 +857,19 @@ def save_draft(
             "session_id": quickcep_session_id,
             "source": source,
         }
+    _dbg_log_230991(
+        "save_draft unchanged-check PASSED — proceeding to persist",
+        {
+            "hypothesisId": "H1",
+            "location": "cal.py:save_draft:unchanged_check_pass",
+            "quickcep_session_id": quickcep_session_id,
+            "source": source,
+            "draft_html_eq": (sess.get("draft_html") or "") == draft_html,
+            "source_eq": (sess.get("draft_source") or "") == source,
+            "atts_unchanged": atts_unchanged,
+            "incoming_attachments_count": len(attachments or []),
+        },
+    )
     if lock_check is not None:
         reason = lock_check(sess)
         if reason:
@@ -784,6 +927,17 @@ def save_draft(
             ),
         )
         conn.commit()
+    _dbg_log_230991(
+        "save_draft PERSISTED to CAL",
+        {
+            "hypothesisId": "H1",
+            "location": "cal.py:save_draft:persisted",
+            "quickcep_session_id": quickcep_session_id,
+            "source": source,
+            "attachments_count": len(attachments or []),
+            "att_json_len": len(att_json or "") if att_json else 0,
+        },
+    )
     return {
         "action": "draft_save",
         "success": True,
@@ -912,6 +1066,24 @@ def update_session_status(*, session_row_id: int, status: str) -> None:
                 "UPDATE cs_session SET status=?, updated_at=? WHERE id=?",
                 (status, now, session_row_id),
             )
+        conn.commit()
+
+
+def stamp_agent_processing_at(*, session_row_id: int) -> None:
+    """Stamp ``agent_processing_at`` once, when the agent first confirms processing.
+
+    Distinct from ``processing_started_at`` (which the watcher stamps when it
+    sets status=processing). The gap between the two = agent startup + first
+    model response latency. Idempotent: COALESCE keeps the earliest value so
+    repeat ``apply-handoff --phase processing`` calls do not overwrite.
+    """
+    now = _now()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE cs_session SET agent_processing_at=COALESCE(agent_processing_at, ?), "
+            "updated_at=? WHERE id=?",
+            (now, now, session_row_id),
+        )
         conn.commit()
 
 
@@ -1232,6 +1404,17 @@ def open_escalation(
     sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
         return None
+
+    # Dedup: if an escalation is already open for this session, return it instead
+    # of creating a duplicate. Prevents retry storms (e.g. client timeout + retry).
+    existing = list_escalations_for_session(
+        quickcep_session_id=quickcep_session_id,
+        states=("awaiting_answer", "resuming"),
+        env=env,
+    )
+    if existing:
+        return existing[0]["id"]
+
     now = _now()
     safe_resume = sanitize_mapping(dict(resume_context or {}))
     with _connect() as conn:
