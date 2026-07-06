@@ -77,7 +77,9 @@ def build_few_shot_block(*, env: str, n: int = 0) -> str:
     """Render recent high-confidence corrections as a few-shot prompt block.
 
     Injected into the classifier LLM prompt at call time. Returns "" when no
-    corrections are available.
+    corrections are available. Each example carries the email subject (so the
+    LLM sees text features, not just label↔label pairs) plus the full predicted
+    intents list (so multi-intent detection mistakes are visible to the model).
     """
     if n <= 0:
         n = int(_load_learning_config().get("fewshot_sample_size", 8))
@@ -89,10 +91,12 @@ def build_few_shot_block(*, env: str, n: int = 0) -> str:
         corr = c.get("corrected") or {}
         if (pred.get("primary_intent") or "") == (corr.get("primary_intent") or ""):
             continue
+        pred_intents = [i.get("intent") for i in (pred.get("intents") or [])]
         examples.append({
-            "subject": "",  # not stored in correction row; would need enrichment
-            "predicted": pred.get("primary_intent"),
-            "corrected": corr.get("primary_intent"),
+            "subject": (c.get("subject") or "").strip()[:120],
+            "predicted_primary": pred.get("primary_intent"),
+            "corrected_primary": corr.get("primary_intent"),
+            "predicted_intents": pred_intents,
             "reason": c.get("reason") or "",
         })
         if len(examples) >= n:
@@ -101,7 +105,11 @@ def build_few_shot_block(*, env: str, n: int = 0) -> str:
         return ""
     lines = ["## Few-shot corrections (recent operator overrides — learn from these)"]
     for ex in examples:
-        lines.append(f"- predicted={ex['predicted']} → corrected={ex['corrected']} ({ex['reason']})")
+        subj = f' subject="{ex["subject"]}"' if ex["subject"] else ""
+        intents_str = f' intents={ex["predicted_intents"]}' if ex["predicted_intents"] else ""
+        lines.append(
+            f'-{subj} predicted_primary={ex["predicted_primary"]}{intents_str} → corrected_primary={ex["corrected_primary"]}'
+        )
     return "\n".join(lines) + "\n"
 
 

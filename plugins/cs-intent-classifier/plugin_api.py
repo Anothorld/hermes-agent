@@ -111,6 +111,23 @@ def get_intent(
     )
 
 
+class IntentBatchRequest(BaseModel):
+    session_ids: list[str] = []
+    env: str = "LIVE"
+
+
+@router.post("/intents/batch")
+def batch_intent_codes(body: IntentBatchRequest) -> dict[str, Any]:
+    """Latest classifier intent codes for many sessions (Console list enrichment)."""
+    if body.env not in ("LIVE", "TEST"):
+        raise HTTPException(status_code=400, detail="env must be LIVE or TEST")
+    ids = body.session_ids[:200]
+    return {
+        "env": body.env,
+        "intents_by_session": db.latest_intent_codes_batch(session_ids=ids, env=body.env),
+    }
+
+
 @router.patch("/intent/{session_id}", response_model=IntentReadResponse)
 def patch_intent(
     session_id: str,
@@ -131,6 +148,7 @@ def patch_intent(
         corrected=corrected,
         reason=body.reason,
         operator_id=body.operator_id,
+        subject=body.subject,
     )
     # Re-read to return fresh state
     return get_intent(session_id, env=body.env)

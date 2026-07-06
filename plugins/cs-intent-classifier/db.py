@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS cs_intent_corrections (
     corrected_json TEXT NOT NULL,
     reason TEXT,
     operator_id TEXT,
+    subject TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -116,8 +117,18 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
     if key in _MIGRATED:
         return
     conn.executescript(_SCHEMA)
+    # Idempotent column adds for already-existing tables (older DBs).
+    _ensure_column(conn, "cs_intent_corrections", "subject", "TEXT")
     _MIGRATED.add(key)
     log.debug("cs_intent db migrated at %s", key)
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
+    """Add a column if missing. SQLite has no IF NOT EXISTS for ADD COLUMN."""
+    cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        log.info("added column %s.%s", table, column)
 
 
 # ── Classifications ──
@@ -158,6 +169,47 @@ def latest_classification(*, session_id: str, env: str) -> Optional[dict[str, An
     return d
 
 
+def latest_intent_codes_batch(*, session_ids: list[str], env: str) -> dict[str, list[str]]:
+    """Return latest classifier intent codes per session (multi-intent aware).
+
+    Used by the Console workbench list to show all detected intents without
+    N+1 HTTP calls to ``GET /intent/{id}``.
+    """
+    ids = [str(s).strip() for s in session_ids if str(s).strip()]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    with connect() as conn:
+        rows = conn.execute(
+            f"""SELECT c.session_id, c.gate_extract_json
+                FROM cs_intent_classifications c
+                INNER JOIN (
+                    SELECT session_id, MAX(classified_at) AS max_at
+                    FROM cs_intent_classifications
+                    WHERE env=? AND session_id IN ({placeholders})
+                    GROUP BY session_id
+                ) latest
+                  ON c.session_id = latest.session_id
+                 AND c.classified_at = latest.max_at
+                 AND c.env = ?""",
+            [env, *ids, env],
+        ).fetchall()
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        ge = json.loads(row["gate_extract_json"])
+        codes = [
+            str(it.get("intent")).strip()
+            for it in (ge.get("intents") or [])
+            if isinstance(it, dict) and str(it.get("intent") or "").strip()
+        ]
+        if not codes:
+            primary = str(ge.get("primary_intent") or "").strip()
+            if primary:
+                codes = [primary]
+        out[str(row["session_id"])] = codes
+    return out
+
+
 # ── Corrections ──
 
 
@@ -169,14 +221,19 @@ def insert_correction(
     corrected: dict[str, Any],
     reason: str,
     operator_id: str,
+    subject: str = "",
 ) -> int:
-    """Persist an operator correction. Returns the correction row id."""
+    """Persist an operator correction. Returns the correction row id.
+
+    ``subject`` is stored so the learning loop has email-text context for
+    few-shot examples (without it, few-shot only has label↔label pairs).
+    """
     ts = _utcnow()
     with connect() as conn:
         cur = conn.execute(
             """INSERT INTO cs_intent_corrections
-               (session_id, env, predicted_json, corrected_json, reason, operator_id, created_at)
-               VALUES (?,?,?,?,?,?,?)""",
+               (session_id, env, predicted_json, corrected_json, reason, operator_id, subject, created_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
             (
                 session_id,
                 env,
@@ -184,6 +241,7 @@ def insert_correction(
                 json.dumps(corrected, ensure_ascii=False),
                 reason,
                 operator_id,
+                subject,
                 ts,
             ),
         )

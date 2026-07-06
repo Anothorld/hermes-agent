@@ -151,6 +151,7 @@ class CorrectionRequest(BaseModel):
     primary_intent: Optional[str] = None
     intent_overrides: list[IntentOverrideItem] = Field(default_factory=list)
     reason: str = ""
+    subject: str = ""  # stored so the learning loop has email-text context
 
 
 class IntentReadResponse(BaseModel):

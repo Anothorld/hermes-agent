@@ -20,14 +20,18 @@ def _temp_db(tmp_path, monkeypatch):
     monkeypatch.setenv("CS_INTENT_DB_PATH", str(tmp_path / "test.db"))
 
 
-def _seed_correction(*, predicted: str, corrected: str, env: str = "TEST") -> None:
+def _seed_correction(*, predicted: str, corrected: str, env: str = "TEST", subject: str = "", predicted_intents: list = None) -> None:
+    pred = {"primary_intent": predicted}
+    if predicted_intents is not None:
+        pred["intents"] = [{"intent": i} for i in predicted_intents]
     db.insert_correction(
         session_id="s",
         env=env,
-        predicted={"primary_intent": predicted},
+        predicted=pred,
         corrected={"primary_intent": corrected},
         reason="test",
         operator_id="op",
+        subject=subject,
     )
 
 
@@ -48,6 +52,22 @@ def test_few_shot_skips_same_intent():
     _seed_correction(predicted="product_inquiry", corrected="product_inquiry")  # no change
     block = learning.build_few_shot_block(env="TEST", n=4)
     assert block == ""  # no real override → empty
+
+
+def test_few_shot_block_includes_subject_and_intents():
+    # The few-shot example should carry the email subject + the predicted intents
+    # list so the LLM sees text features + multi-intent detection context.
+    _seed_correction(
+        predicted="logistics_inquiry",
+        corrected="after_sale_issue",
+        subject="Where is my order + damaged sofa",
+        predicted_intents=["logistics_inquiry", "after_sale_issue"],
+    )
+    block = learning.build_few_shot_block(env="TEST", n=4)
+    assert "Where is my order + damaged sofa" in block
+    assert "logistics_inquiry" in block
+    assert "after_sale_issue" in block
+    assert "intents=" in block
 
 
 def test_weekly_trend_insufficient_when_no_snapshots():
