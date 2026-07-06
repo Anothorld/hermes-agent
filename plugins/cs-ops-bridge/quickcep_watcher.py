@@ -438,6 +438,17 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     if result.get("deduped"):
         log.info("deduped session %s message %s", session_id, message_id)
         return None
+    # Non-deduped inbound → a genuinely new message for this session. Drop the
+    # L2 caches (messages/tags/orders) so the Console's next GET sees the new
+    # content instead of a stale 15s/60s/300s entry. For brand-new sessions
+    # this is a no-op (cache empty). Watcher runs in-process alongside the
+    # bridge HTTP server (serve.py lifespan), so the dict invalidation is
+    # visible to the API routes immediately.
+    try:
+        from .quickcep_live import invalidate_cache
+        invalidate_cache(session_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        log.debug("watcher cache invalidate failed session=%s: %s", session_id, exc)
     if not result.get("should_launch", True):
         session_status = str((result.get("session") or {}).get("status") or "")
         log.info(

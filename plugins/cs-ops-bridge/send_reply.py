@@ -163,9 +163,11 @@ def send_reply(
                 "stderr": err, "stdout": out}
 
     # Backfill the outbound message_id by reading the latest messages.
+    # force_fresh=True bypasses the 15s messages cache so the just-sent
+    # outbound message is visible immediately (not deferred to TTL expiry).
     message_id = ""
     try:
-        msgs = fetch_messages(quickcep_session_id=quickcep_session_id)
+        msgs = fetch_messages(quickcep_session_id=quickcep_session_id, force_fresh=True)
         items = msgs.get("messages") or []
         if items:
             # Latest outbound = last operator/html message in chronological order.
@@ -182,6 +184,15 @@ def send_reply(
         "email_subject": subject,
     }
     handoff_result = handle_operator_send(info, env=env)
+
+    # Sending changes QuickCEP session state (new outbound, possible tag/lifecycle
+    # bumps). Drop the L2 caches for this session so the FE's post-send reload
+    # sees fresh messages/tags/orders instead of a stale 15s/60s/300s entry.
+    try:
+        from .quickcep_live import invalidate_cache
+        invalidate_cache(quickcep_session_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        log.debug("send-reply cache invalidate failed session=%s: %s", quickcep_session_id, exc)
 
     cal.write_event(
         quickcep_session_id=quickcep_session_id,

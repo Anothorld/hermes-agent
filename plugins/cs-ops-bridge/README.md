@@ -123,6 +123,7 @@ When the standalone [`cs-intent-classifier`](../cs-intent-classifier/README.md) 
 - `bridge_agent_contract.py` injects a `# gate_extract` block into the agent brief (multi-intent, emotion, language, region, uncertain-field confirmation rules). The agent skips the legacy `classify-intent` step.
 - **Off by default** — `CS_INTENT_ENABLED=false` preserves today's QuickCEP-tag behavior with zero regression. The classifier service does not even need to be running.
 - **Graceful degradation** — if the classifier is unreachable, the seam falls back to the legacy QuickCEP-tag gate so inbound is never blocked by a classifier outage.
+- **Idempotency cache** — before each `POST /classify`, the seam does a `GET /gate-extract/{session_id}` on the classifier. If a result already exists for the session (e.g. a prior call succeeded server-side but the HTTP client timed out reading the response), the cached result is reused and the expensive LLM call is skipped. This prevents unbounded duplicate LLM calls when the LLM endpoint is slow: without the cache, a client-side timeout → graceful fallback → transient skip (no CAL dedup) → next REST tick re-POSTs → server runs LLM again → wasted call, repeating every poll. The `urllib` timeout is aligned to `CS_INTENT_SEAM_TIMEOUT` (default 45s, ≥ the 30s LLM timeout) so the client never abandons a still-running LLM call.
 
 See `plugins/cs-intent-classifier/README.md` for the classifier's self-contained DB, LLM config, and learning loop.
 
@@ -218,7 +219,7 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| GET | `/sessions` | — | List/search sessions (supports `since`/`until` server-side date-window filter on `COALESCE(processing_started_at, created_at)`) |
+| GET | `/sessions` | — | List/search sessions (`limit`, `offset`, `total`, `has_more`; supports `since`/`until` server-side date-window filter on `COALESCE(processing_started_at, created_at)`) |
 | GET | `/daily-report/stats` | — | One-shot daily-report aggregate: processed sessions in window + escalation count by `created_at` + `draft_saved` event session-id set (schema v5+) |
 | GET | `/escalations/{id}/upload-link` | key | Signed upload URL (Feishu backfill) |
 | POST | `/escalations/{id}/feishu-upload-link` | key | Reply upload link on Feishu thread |
@@ -232,6 +233,43 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 | POST | `/sessions/{id}/close` | key | QuickCEP `leave-chat` + optional CAL `reviewed` (Console **结束工单**) |
 
 **Close confirmation:** Email sessions record `leaveChat` in message history; live chat uses `chat_end`. Bridge `close_session.py` and profile `quickcep_cli leave-chat` accept both; legacy CLI-only `chat_end` checks caused false `chat_end_not_confirmed`.
+
+### L2 live caches (Workbench read path)
+
+The Console Workbench's L2 live endpoints (`/messages`, `/tags`, `/orders`) hit QuickCEP via `quickcep_cli` and are wrapped with short-lived in-process caches so the FE can poll without hammering the platform. All caches are keyed by `quickcep_session_id` and live in `quickcep_live.py`.
+
+| Endpoint | TTL | Notes |
+|----------|-----|-------|
+| `GET /sessions/{id}/messages` | **15s** | Full page (`since=None`) cached; `since` filtering is applied in-memory. When `since` is absent from the cached page the call falls back to a fresh CLI fetch (never silently drops newer messages). Errors are not cached. |
+| `GET /sessions/{id}/tags` | 300s | tagIds reverse-resolved to names via the session tag map. |
+| `GET /sessions/{id}/orders` | 60s | Reuses `cal._fetch_visitor_orders`. |
+
+**Cache invalidation trigger points** (call `quickcep_live.invalidate_cache(session_id)`):
+
+| Trigger | Where | Why |
+|---------|-------|-----|
+| `POST /sessions/{id}/note` | `plugin_api.add_session_note` | Note add bumps session activity. |
+| `POST /sessions/{id}/send-reply` | `send_reply.send_reply` (success path) | New outbound changes messages/tags/lifecycle. |
+| Inbound watcher event | `quickcep_watcher._launch_for_message` (non-deduped) | New visitor message must be visible on next GET. |
+
+`send_reply` also passes `force_fresh=True` to `fetch_messages` when backfilling the outbound `message_id`, so the just-sent message is visible immediately without waiting for TTL expiry.
+
+Watcher runs in-process alongside the bridge HTTP server (`serve.py` lifespan), so the dict invalidation is visible to API routes immediately — no cross-process coordination needed.
+
+### HTTP cache headers on read-only GET
+
+The following read-only routes set `Cache-Control` so the browser can serve repeated clicks from its cache without re-hitting the bridge. `max-age` is always `≤` the backend cache TTL, so the browser never serves data older than the bridge would.
+
+| Route | `Cache-Control` |
+|-------|-----------------|
+| `GET /sessions/{id}/state` | `public, max-age=2` |
+| `GET /sessions/{id}/workbench` | `private, max-age=2` |
+| `GET /sessions/{id}/messages` | `private, max-age=5, stale-while-revalidate=10` |
+| `GET /sessions/{id}/tags` | `private, max-age=30, stale-while-revalidate=270` |
+| `GET /sessions/{id}/orders` | `private, max-age=30, stale-while-revalidate=30` |
+| `GET /sessions` | `private, max-age=3` |
+
+Mutation routes (POST/PUT/DELETE) intentionally do **not** set `Cache-Control`.
 
 Operator UI: `playground/povison-cs-console/` (port 8092).
 

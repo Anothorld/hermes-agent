@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Query, Response, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -245,15 +245,27 @@ def list_sessions_route(
     status: Optional[str] = Query(None),
     q: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     since: Optional[str] = Query(None, description="ISO lower bound on first-active time (inclusive)"),
     until: Optional[str] = Query(None, description="ISO upper bound on first-active time (exclusive)"),
     with_counts: bool = Query(False),
+    response: Response = None,
 ) -> dict[str, Any]:
+    sessions = cal.list_sessions(
+        env=env, status=status, q=q, limit=limit, offset=offset, since=since, until=until,
+    )
+    total = cal.count_sessions(env=env, status=status, q=q, since=since, until=until)
     out: dict[str, Any] = {
-        "sessions": cal.list_sessions(env=env, status=status, q=q, limit=limit, since=since, until=until)
+        "sessions": sessions,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(sessions) < total,
     }
     if with_counts:
         out["counts"] = cal.session_counts(env=env)
+    if response is not None:
+        response.headers["Cache-Control"] = "private, max-age=3"
     return out
 
 
@@ -279,11 +291,15 @@ def daily_report_stats_route(
 def get_session_workbench(
     quickcep_session_id: str,
     env: str = Query("LIVE"),
+    response: Response = None,
 ) -> dict[str, Any]:
     """L1 pure-CAL aggregate for the Console workbench (PR1.4). Zero QuickCEP calls."""
     result = cal.get_workbench(quickcep_session_id=quickcep_session_id, env=env)
     if result is None:
         raise HTTPException(status_code=404, detail="session not found")
+    if response is not None:
+        # Contains operator drafts (per-user); private, short browser cache.
+        response.headers["Cache-Control"] = "private, max-age=2"
     return result
 
 
@@ -291,11 +307,15 @@ def get_session_workbench(
 def get_session_state_route(
     quickcep_session_id: str,
     env: str = Query("LIVE"),
+    response: Response = None,
 ) -> dict[str, Any]:
     """L3 lightweight poll payload (PR1.4)."""
     result = cal.get_session_state(quickcep_session_id=quickcep_session_id, env=env)
     if result is None:
         raise HTTPException(status_code=404, detail="session not found")
+    if response is not None:
+        # Pure CAL, no per-user data → public 2s cache.
+        response.headers["Cache-Control"] = "public, max-age=2"
     return result
 
 
@@ -305,6 +325,7 @@ def get_session_messages(
     env: str = Query("LIVE"),
     since: Optional[str] = Query(None, description="return only messages after this message id"),
     x_bridge_key: Annotated[Optional[str], Header()] = None,
+    response: Response = None,
 ) -> dict[str, Any]:
     """L2 live message history (PR1.5). Incremental via ``since``."""
     _require_bridge_key(x_bridge_key)
@@ -312,6 +333,10 @@ def get_session_messages(
         raise HTTPException(status_code=404, detail="session not found")
     from .quickcep_live import fetch_messages
 
+    if response is not None:
+        # Backend has a 15s cache; allow a 5s browser cache with SWR to mask
+        # repeated clicks without going stale beyond the backend TTL.
+        response.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=10"
     return fetch_messages(quickcep_session_id=quickcep_session_id, since=since)
 
 
@@ -320,6 +345,7 @@ def get_session_tags(
     quickcep_session_id: str,
     env: str = Query("LIVE"),
     x_bridge_key: Annotated[Optional[str], Header()] = None,
+    response: Response = None,
 ) -> dict[str, Any]:
     """L2 session tags reverse-resolved to names, 300s cache (PR1.5)."""
     _require_bridge_key(x_bridge_key)
@@ -327,6 +353,9 @@ def get_session_tags(
         raise HTTPException(status_code=404, detail="session not found")
     from .quickcep_live import fetch_session_tags
 
+    if response is not None:
+        # Align with the 300s backend cache; 30s fresh + 270s SWR.
+        response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=270"
     return fetch_session_tags(quickcep_session_id=quickcep_session_id)
 
 
@@ -335,6 +364,7 @@ def get_session_orders(
     quickcep_session_id: str,
     env: str = Query("LIVE"),
     x_bridge_key: Annotated[Optional[str], Header()] = None,
+    response: Response = None,
 ) -> dict[str, Any]:
     """L2 customer orders + intention_tags, 60s cache (PR1.5)."""
     _require_bridge_key(x_bridge_key)
@@ -342,6 +372,9 @@ def get_session_orders(
         raise HTTPException(status_code=404, detail="session not found")
     from .quickcep_live import fetch_session_orders
 
+    if response is not None:
+        # Align with the 60s backend cache; 30s fresh + 30s SWR.
+        response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=30"
     return fetch_session_orders(quickcep_session_id=quickcep_session_id, env=env)
 
 

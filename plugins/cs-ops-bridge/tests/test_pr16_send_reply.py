@@ -84,7 +84,7 @@ def test_send_reply_invokes_send_email_with_scoped_env(send_module, monkeypatch,
     monkeypatch.setattr(send_module, "_guard_draft", lambda content, att: None)
     monkeypatch.setattr(
         send_module, "fetch_messages",
-        lambda *, quickcep_session_id: {"messages": [{"id": "outbound-1"}]},
+        lambda *, quickcep_session_id, **kwargs: {"messages": [{"id": "outbound-1"}]},
     )
     monkeypatch.setattr(send_module, "handle_operator_send", lambda info, env=None: {"ok": True})
 
@@ -152,7 +152,7 @@ def test_send_reply_records_audit_event(send_module, monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         send_module, "fetch_messages",
-        lambda *, quickcep_session_id: {"messages": [{"id": "out-2"}]},
+        lambda *, quickcep_session_id, **kwargs: {"messages": [{"id": "out-2"}]},
     )
     monkeypatch.setattr(send_module, "handle_operator_send", lambda info, env=None: {"ok": True})
 
@@ -171,6 +171,36 @@ def test_send_reply_records_audit_event(send_module, monkeypatch, tmp_path):
     assert payload["operator_name"] == "Alice"
     assert payload["message_id"] == "out-2"
     assert payload["attachments"] == 0
+
+
+def test_send_reply_calls_fetch_messages_with_force_fresh(send_module, monkeypatch, tmp_path):
+    """send_reply must bypass the 15s messages cache when backfilling the
+    outbound message_id, otherwise the just-sent message would not appear
+    until TTL expiry. Regression guard for the P1 cache rollout.
+    """
+    _stub_cli(tmp_path, monkeypatch, send_module)
+    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att: None)
+    monkeypatch.setattr(
+        send_module.subprocess, "run",
+        lambda argv, **kwargs: MagicMock(returncode=0, stdout='{"success":true}', stderr=""),
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_fetch(*, quickcep_session_id, **kwargs):
+        captured["force_fresh"] = kwargs.get("force_fresh")
+        return {"messages": [{"id": "fresh-out"}]}
+
+    monkeypatch.setattr(send_module, "fetch_messages", fake_fetch)
+    monkeypatch.setattr(send_module, "handle_operator_send", lambda info, env=None: {"ok": True})
+    # invalidate_cache is imported lazily inside send_reply; stub it on the
+    # quickcep_live module to avoid touching the real cache dict during this
+    # unit test.
+    live = _load_pkg_module("quickcep_live")
+    monkeypatch.setattr(live, "invalidate_cache", lambda *a, **kw: None)
+
+    res = send_module.send_reply(quickcep_session_id="qc-send", operator_id="op-9")
+    assert res["ok"] is True
+    assert captured["force_fresh"] is True
 
 
 if __name__ == "__main__":
