@@ -127,6 +127,7 @@ class ClassifyRequest(BaseModel):
     subject: str = ""
     body: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+    conversation_history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ClassifyResponse(BaseModel):

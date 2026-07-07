@@ -55,6 +55,7 @@ Without an LLM configured, the classifier runs keyword-only and returns a conser
 | `CS_INTENT_LLM_MODEL` | (empty) | Model name. |
 | `CS_INTENT_LLM_API_KEY` | (falls back to `OPENAI_API_KEY`) | LLM key. |
 | `CS_INTENT_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint. |
+| `CS_INTENT_CONTEXT_TURNS` | `3` | Number of recent messages (visitor+operator) to include as conversation context. Set `1` to disable history. Read by the cs-ops-bridge seam. |
 | `CS_INTENT_DISTILL_PERIOD` | `7d` | T3 distillation cadence. |
 | `CS_INTENT_EVAL_PERIOD` | `1d` | T0 eval cadence. |
 | `CS_INTENT_PROMOTE_MIN_ACCURACY_DELTA` | `0.0` | Candidate must beat current by this. |

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -341,8 +342,10 @@ def _classifier_gate_work(
     if not visitor_geo and isinstance(visitor_info, dict) and visitor_info.get("country"):
         visitor_geo = {"country": visitor_info.get("country"), "province_state": None}
 
-    # Pre-fetch full body + dispatch-context (orders + addresses).
-    body, order_addresses = _prefetch_body_and_orders(session_id=session_id, env=env)
+    # Pre-fetch full body + dispatch-context (orders + addresses) + conversation history.
+    body, order_addresses, conversation_history = _prefetch_body_and_orders(
+        session_id=session_id, env=env
+    )
     if body is None:
         # Pre-fetch failed → can't classify → fall through
         return None
@@ -373,6 +376,7 @@ def _classifier_gate_work(
             "subject": subject,
             "body": body,
             "metadata": metadata,
+            "conversation_history": conversation_history,
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -443,24 +447,129 @@ def _latest_visitor_message(messages: list[dict[str, Any]]) -> Optional[dict[str
     return visitor[-1] if visitor else None
 
 
-def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[str], list[dict[str, Any]]]:
-    """Pre-fetch full latest email body + dispatch-context orders.
+def _context_turns() -> int:
+    """Number of recent messages to include as conversation context. Default 3.
 
-    Returns (body, order_addresses). body is None on failure. Uses the bridge
-    CLI subprocess with a timeout — keeps the classifier decoupled from
-    QuickCEP internals (fetching stays in cs-ops-bridge's domain).
+    Set CS_INTENT_CONTEXT_TURNS=1 to disable history (only classify the last
+    email). Override via env var.
+    """
+    try:
+        return max(1, int(os.environ.get("CS_INTENT_CONTEXT_TURNS", "3")))
+    except ValueError:
+        return 3
+
+
+# ownerType values that are NOT conversation content (system actions, internal
+# notes, bot messages). These are filtered out when building conversation history.
+_NON_CONVERSATION_TYPES = frozenset({"system", "botsystem", "bot", "operatornote"})
+
+
+def _strip_quoted_reply(text: str) -> str:
+    """Remove quoted reply content from an email body.
+
+    Reply emails contain the previous message quoted below the new content.
+    Patterns handled (validated against real QuickCEP email data):
+
+    - Gmail reply: ``On [date] [name] <email> wrote:`` — cut everything after
+    - Forwarded: ``---------- Forwarded message ---------`` — cut after
+    - Outlook: ``-----Original Message-----`` — cut after
+    - Forwarded header block: ``From:`` followed by ``Subject:``/``Date:``/``To:``
+    - ``>`` prefixed lines (Outlook/Apple Mail style)
+    - HTML entities (``&lt;`` ``&gt;`` ``&nbsp;``) are decoded first
+
+    Returns the customer's actual new content with quotes stripped.
+    """
+    import html as _html
+
+    text = _html.unescape(text)
+    # Cut at the first quote marker — everything after is quoted/forwarded content.
+    markers = [
+        r"(?im)^\s*on\s.{5,200}?\swrote\s*:",  # Gmail: On [date] [name] wrote:
+        r"(?im)-{5,}\s*forwarded message\s*-{5,}",  # Gmail forwarded
+        r"(?im)-{2,}\s*original\s+message\s*-{2,}",  # Outlook original message
+        r"(?im)^\s*from\s*:.*\n(.*\n){0,5}(subject|date|to)\s*:",  # Forwarded header
+    ]
+    for pat in markers:
+        m = re.search(pat, text)
+        if m:
+            text = text[: m.start()].rstrip()
+    # Remove > prefixed quote lines (Outlook/Apple Mail style).
+    text = "\n".join(
+        line for line in text.splitlines() if not re.match(r"^\s*>", line)
+    )
+    return text.strip()
+
+
+def _extract_conversation_history(
+    messages: list[dict[str, Any]], max_turns: int
+) -> list[dict[str, str]]:
+    """Extract recent conversation history before the latest visitor message.
+
+    Returns a list of ``{role, text}`` dicts (oldest-first), excluding the
+    latest visitor message (which is passed separately as ``body``). Filters
+    out system/bot/internal-note messages. Each message's text is cleaned via
+    ``_strip_quoted_reply`` to remove quoted content. When fewer messages exist
+    than ``max_turns - 1``, returns as many as available.
+    """
+    # Keep only visitor (customer) and operator (agent reply) messages.
+    conversation = [
+        m
+        for m in messages
+        if isinstance(m, dict)
+        and str(m.get("ownerType") or "").lower() not in _NON_CONVERSATION_TYPES
+    ]
+    if not conversation:
+        return []
+
+    # Find the index of the latest visitor message (the one being classified).
+    last_visitor_idx = None
+    for i in range(len(conversation) - 1, -1, -1):
+        if str(conversation[i].get("ownerType") or "").lower() == "visitor":
+            last_visitor_idx = i
+            break
+    if last_visitor_idx is None or last_visitor_idx == 0:
+        return []
+
+    # History = everything before the latest visitor message, up to max_turns-1.
+    history_msgs = conversation[:last_visitor_idx]
+    take = max_turns - 1
+    if take > 0:
+        history_msgs = history_msgs[-take:]
+    else:
+        return []
+
+    out: list[dict[str, str]] = []
+    for m in history_msgs:
+        ot = str(m.get("ownerType") or "").lower()
+        role = "customer" if ot == "visitor" else "agent"
+        text = _strip_quoted_reply(_extract_message_text(m))
+        if text:
+            out.append({"role": role, "text": text})
+    return out
+
+
+def _prefetch_body_and_orders(
+    *, session_id: str, env: str
+) -> tuple[Optional[str], list[dict[str, Any]], list[dict[str, str]]]:
+    """Pre-fetch full latest email body + dispatch-context orders + conversation history.
+
+    Returns (body, order_addresses, conversation_history). body is None on
+    failure. Uses the bridge CLI subprocess with a timeout — keeps the
+    classifier decoupled from QuickCEP internals (fetching stays in
+    cs-ops-bridge's domain).
     """
     from .bridge_agent_contract import cs_bridge_cli_path
 
     cli = str(cs_bridge_cli_path())
     body: Optional[str] = None
     order_addresses: list[dict[str, Any]] = []
+    conversation_history: list[dict[str, str]] = []
 
-    # 1. get-messages → latest CUSTOMER email body. The CLI returns messages
-    #    chronologically, but the last row is frequently a system message
-    #    (chat_start / ruleAssignHumanQueue / assignChat) inserted AFTER the
-    #    customer email. Filter to ownerType=visitor so the classifier sees
-    #    the real customer text, not the system assignment notice.
+    # 1. get-messages → latest CUSTOMER email body + conversation history. The
+    #    CLI returns messages chronologically, but the last row is frequently a
+    #    system message (chat_start / ruleAssignHumanQueue / assignChat) inserted
+    #    AFTER the customer email. Filter to ownerType=visitor so the classifier
+    #    sees the real customer text, not the system assignment notice.
     try:
         out = subprocess.run(
             ["python3", cli, "get-messages", "--env", env, "--session-id", session_id],
@@ -475,9 +584,12 @@ def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[st
                 last = _latest_visitor_message(messages)
                 if last is not None:
                     body = _extract_message_text(last)
+                    conversation_history = _extract_conversation_history(
+                        messages, _context_turns()
+                    )
     except Exception as exc:
         log.warning("prefetch get-messages failed session=%s: %s", session_id, exc)
-        return None, []
+        return None, [], []
 
     # 2. get-dispatch-context → order IDs (the order objects from QuickCEP
     #    getOrderList do NOT carry shipping address; country is fetched
@@ -519,4 +631,4 @@ def _prefetch_body_and_orders(*, session_id: str, env: str) -> tuple[Optional[st
         except Exception as exc:
             log.debug("order_tracking.fetch_order_countries failed session=%s: %s", session_id, exc)
 
-    return body, order_addresses
+    return body, order_addresses, conversation_history

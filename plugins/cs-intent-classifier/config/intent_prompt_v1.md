@@ -97,10 +97,20 @@ Combine product slugs + problem keywords for Hindsight recall. E.g., `["SF8268",
 ## Input you receive
 
 - `subject`: email subject line
-- `body`: full email body (pre-fetched by the seam)
+- `body`: full email body (pre-fetched by the seam) — THIS is the email you classify
+- `conversation_history`: recent prior messages in the same thread, oldest-first.
+  Each item: `{role: "customer"|"agent", text: str}`. May be empty for first-contact emails.
+  Quotes and forwarded content have already been stripped from each message.
 - `metadata.customer_email`, `metadata.customer_locale`, `metadata.intention_tags` (QuickCEP tags, reference only)
 - `metadata.visitor_geo` ({country, province_state, ip})
 - `metadata.order_addresses` ([{order_id, country, province_state}])
 - `metadata.has_prior_session`, `metadata.prior_session_count` — for conversation_stage/customer_segment
+
+## Conversation history usage rules
+
+- **You always classify the LAST customer email** (`body` + `subject`). `conversation_history` is context only — never classify a historical message.
+- Use history to understand what the customer is replying to. E.g., if the agent said "your order ships July 10" and the customer replies "ok but I want to change the address", the intent is `order_management` (modify), not spam.
+- If `conversation_history` is empty, classify based on `body` + `subject` alone (first-contact or no prior context).
+- Do NOT quote or reference history messages in `snippet` — `snippet` must come from the last customer email (`body`).
 
 Return ONLY the JSON. No explanation.

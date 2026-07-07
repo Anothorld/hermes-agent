@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -266,3 +267,71 @@ def test_coerce_llm_nulls_emotion_whole_dict_null():
     out = classifier._coerce_llm_nulls(raw)
     assert out["emotion"]["value"] == "neutral"
     assert out["emotion"]["confidence"] == "low"
+
+
+# ── Conversation history passthrough ──
+
+def test_llm_classify_includes_conversation_history_in_user_msg(monkeypatch):
+    """conversation_history is injected into the LLM user message JSON."""
+    monkeypatch.setenv("CS_INTENT_LLM_API_KEY", "fake-key")
+    monkeypatch.setenv("CS_INTENT_LLM_MODEL", "fake-model")
+
+    captured = {}
+
+    def fake_call_llm(cfg, messages, timeout):
+        captured["messages"] = messages
+        # Return a valid minimal gate_extract JSON
+        return '{"intents":[{"intent":"order_management","in_scope":false,"confidence":"high","urgency":"medium","snippet":"change address"}],"primary_intent":"order_management","in_scope":false,"route":"escalate","urgency":"medium","emotion":{"value":"neutral","confidence":"medium"},"language":{"value":"en","confidence":0.95},"customer_region":{"country":null,"province_state":null,"source":"unknown","confidence":"low"},"summary_zh":"客户要求改地址","fabrication_guard":true}'
+
+    monkeypatch.setattr(classifier, "_call_llm", fake_call_llm)
+
+    history = [
+        {"role": "agent", "text": "Your order ships July 10."},
+        {"role": "customer", "text": "Ok, I want to change the address."},
+    ]
+    classifier.llm_classify(
+        subject="Re: Order", body="Ok change address please",
+        metadata={}, conversation_history=history,
+    )
+    user_msg = json.loads(captured["messages"][1]["content"])
+    assert "conversation_history" in user_msg
+    assert len(user_msg["conversation_history"]) == 2
+    assert user_msg["conversation_history"][0]["role"] == "agent"
+
+
+def test_keyword_classify_ignores_conversation_history():
+    """Keyword layer operates on subject+body only; history is not used."""
+    ge = classifier.keyword_classify(
+        subject="Where is my order #12345678?",
+        body="Tracking please",
+        metadata={},
+    )
+    assert ge is not None
+    assert ge["primary_intent"] == "logistics_inquiry"
+    # keyword_classify doesn't accept conversation_history — it's not in the signature
+
+
+def test_classify_passes_history_to_llm(monkeypatch):
+    """When keyword misses, classify() forwards conversation_history to llm_classify."""
+    monkeypatch.setenv("CS_INTENT_LLM_API_KEY", "fake-key")
+    monkeypatch.setenv("CS_INTENT_LLM_MODEL", "fake-model")
+
+    captured = {}
+
+    def fake_call_llm(cfg, messages, timeout):
+        captured["user_msg"] = messages[1]["content"]
+        return '{"intents":[{"intent":"order_management","in_scope":false,"confidence":"high","urgency":"medium","snippet":"x"}],"primary_intent":"order_management","in_scope":false,"route":"escalate","urgency":"medium","emotion":{"value":"neutral","confidence":"medium"},"language":{"value":"en","confidence":0.95},"customer_region":{"country":null,"province_state":null,"source":"unknown","confidence":"low"},"summary_zh":"x","fabrication_guard":true}'
+
+    monkeypatch.setattr(classifier, "_call_llm", fake_call_llm)
+
+    # Subject that won't match any keyword pattern → falls through to LLM
+    history = [{"role": "agent", "text": "Your order is confirmed."}]
+    classifier.classify(
+        subject="Re: Follow up",
+        body="Actually I changed my mind about this",
+        metadata={},
+        conversation_history=history,
+    )
+    user_msg = json.loads(captured["user_msg"])
+    assert len(user_msg["conversation_history"]) == 1
+    assert user_msg["conversation_history"][0]["role"] == "agent"

@@ -672,6 +672,7 @@ def llm_classify(
     subject: str,
     body: str,
     metadata: dict[str, Any],
+    conversation_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """LLM fallback classifier. Calls OpenAI-compatible chat completions.
 
@@ -683,7 +684,11 @@ def llm_classify(
     - T2 few-shot: recent operator corrections injected as in-context examples.
     - T3 policy: distilled rules from config/intent_policy.md.
     Both are built dynamically at call time so promotions take effect immediately.
+
+    ``conversation_history`` (recent prior messages in the thread) is injected
+    into the LLM user message so the model can understand reply context.
     """
+    conversation_history = conversation_history or []
     cfg = _llm_config()
     if not cfg["api_key"] or not cfg["model"]:
         log.warning("CS_INTENT_LLM not configured — returning conservative review gate_extract")
@@ -692,7 +697,12 @@ def llm_classify(
     prompt = _load_prompt()
     prompt = _augment_prompt_with_learning(prompt, env=str(metadata.get("env") or "LIVE"))
     user_msg = json.dumps(
-        {"subject": subject, "body": body, "metadata": _sanitize_metadata(metadata)},
+        {
+            "subject": subject,
+            "body": body,
+            "metadata": _sanitize_metadata(metadata),
+            "conversation_history": conversation_history,
+        },
         ensure_ascii=False,
     )
     messages = [
@@ -860,7 +870,13 @@ def _parse_llm_json(raw: str) -> Optional[dict[str, Any]]:
         return None
 
 
-def _conservative_review(*, subject: str, body: str, metadata: dict[str, Any]) -> dict[str, Any]:
+def _conservative_review(
+    *,
+    subject: str,
+    body: str,
+    metadata: dict[str, Any],
+    conversation_history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Fallback when LLM unavailable: review route, no false pass/block."""
     text = f"{subject}\n{body}"
     orders = _extract_orders(text)
@@ -920,13 +936,18 @@ def classify(
     subject: str,
     body: str,
     metadata: dict[str, Any],
+    conversation_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Hybrid classify: keyword first, LLM fallback. Returns a full gate_extract dict.
 
     The returned dict is validated against GateExtract and always has
     fabrication_guard=True. Raises FabricationError if the LLM output fails the
     no-fabrication contract and no conservative fallback is acceptable.
+
+    ``conversation_history`` is only used by the LLM layer (keyword matching
+    operates on the current email alone).
     """
+    conversation_history = conversation_history or []
     t0 = time.monotonic()
     try:
         kw = keyword_classify(subject=subject, body=body, metadata=metadata)
@@ -934,6 +955,11 @@ def classify(
             log.debug("keyword layer classified (source=keyword)")
             return kw
         log.debug("keyword layer miss → LLM fallback")
-        return llm_classify(subject=subject, body=body, metadata=metadata)
+        return llm_classify(
+            subject=subject,
+            body=body,
+            metadata=metadata,
+            conversation_history=conversation_history,
+        )
     finally:
         log.debug("classify elapsed %.3fs", time.monotonic() - t0)

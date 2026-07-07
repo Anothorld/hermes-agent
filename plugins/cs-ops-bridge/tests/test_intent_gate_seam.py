@@ -239,7 +239,7 @@ def test_cache_hit_skips_post_classify(monkeypatch):
 
     def fake_prefetch(*, session_id, env):
         post_calls.append("prefetch")
-        return "body", []
+        return "body", [], []
 
     def fake_urlopen(*args, **kwargs):
         post_calls.append("POST")
@@ -268,7 +268,7 @@ def test_cache_miss_proceeds_to_post(monkeypatch):
         return None  # 404 / never classified
 
     monkeypatch.setattr(ig, "_fetch_cached_gate_extract", fake_cache_get)
-    monkeypatch.setattr(ig, "_prefetch_body_and_orders", lambda *, session_id, env: ("body text", []))
+    monkeypatch.setattr(ig, "_prefetch_body_and_orders", lambda *, session_id, env: ("body text", [], []))
 
     # Stub urlopen to return a successful classify response.
     import io
@@ -307,7 +307,7 @@ def test_urlopen_timeout_matches_seam_timeout(monkeypatch):
     monkeypatch.setenv("CS_INTENT_ENABLED", "true")
     monkeypatch.setenv("CS_INTENT_SEAM_TIMEOUT", "60")
     monkeypatch.setattr(ig, "_fetch_cached_gate_extract", lambda *, session_id, env: None)
-    monkeypatch.setattr(ig, "_prefetch_body_and_orders", lambda *, session_id, env: ("body", []))
+    monkeypatch.setattr(ig, "_prefetch_body_and_orders", lambda *, session_id, env: ("body", [], []))
 
     captured = {}
 
@@ -338,7 +338,7 @@ def test_cache_unreachable_still_proceeds_to_post(monkeypatch):
         raise ConnectionError("boom")
 
     monkeypatch.setattr(ig, "_fetch_cached_gate_extract", fake_cache_get)
-    monkeypatch.setattr(ig, "_prefetch_body_and_orders", lambda *, session_id, env: ("body", []))
+    monkeypatch.setattr(ig, "_prefetch_body_and_orders", lambda *, session_id, env: ("body", [], []))
 
     def fake_urlopen(*args, **kwargs):
         raise ConnectionError("also down")
@@ -349,3 +349,169 @@ def test_cache_unreachable_still_proceeds_to_post(monkeypatch):
         session_id="s-down", env="TEST", customer_email=None, info={}
     )
     assert res is None  # both cache + POST failed → graceful None → legacy fallback
+
+
+# ── Conversation history extraction ──
+
+def _msg(ownerType, text):
+    """Helper: build a QuickCEP-like message dict."""
+    return {"ownerType": ownerType, "content": {"content": text}}
+
+
+def test_extract_conversation_history_basic():
+    """visitor + operator + visitor → history returns first 2, last visitor excluded."""
+    ig = _load("intent_gate")
+    messages = [
+        _msg("visitor", "Where is my order?"),
+        _msg("operator", "Your order ships July 10."),
+        _msg("visitor", "Ok but I want to change the address."),
+    ]
+    history = ig._extract_conversation_history(messages, max_turns=3)
+    assert len(history) == 2
+    assert history[0] == {"role": "customer", "text": "Where is my order?"}
+    assert history[1] == {"role": "agent", "text": "Your order ships July 10."}
+
+
+def test_extract_conversation_history_filters_system():
+    """system / botSystem / bot / operatorNote messages are filtered out."""
+    ig = _load("intent_gate")
+    messages = [
+        _msg("system", '{"action":"chat_start"}'),
+        _msg("visitor", "Hello"),
+        _msg("botSystem", "Thanks for chatting!"),
+        _msg("operator", "How can I help?"),
+        _msg("operatorNote", '{"noteContent":"internal note"}'),
+        _msg("system", '{"action":"ruleAssignHumanQueue"}'),
+        _msg("visitor", "I need a refund."),
+    ]
+    history = ig._extract_conversation_history(messages, max_turns=3)
+    assert len(history) == 2
+    assert history[0]["role"] == "customer"
+    assert history[0]["text"] == "Hello"
+    assert history[1]["role"] == "agent"
+    assert history[1]["text"] == "How can I help?"
+
+
+def test_extract_conversation_history_empty_for_first_contact():
+    """Only 1 visitor message → history is empty."""
+    ig = _load("intent_gate")
+    messages = [
+        _msg("system", '{"action":"chat_start"}'),
+        _msg("visitor", "I have a question about sofas."),
+    ]
+    history = ig._extract_conversation_history(messages, max_turns=3)
+    assert history == []
+
+
+def test_extract_conversation_history_fewer_than_max():
+    """Only 2 conversation messages → history takes 1 (no error)."""
+    ig = _load("intent_gate")
+    messages = [
+        _msg("operator", "Welcome! How can I help?"),
+        _msg("visitor", "I need tracking info."),
+    ]
+    history = ig._extract_conversation_history(messages, max_turns=3)
+    assert len(history) == 1
+    assert history[0]["role"] == "agent"
+
+
+def test_context_turns_default_and_override(monkeypatch):
+    ig = _load("intent_gate")
+    monkeypatch.delenv("CS_INTENT_CONTEXT_TURNS", raising=False)
+    assert ig._context_turns() == 3
+    monkeypatch.setenv("CS_INTENT_CONTEXT_TURNS", "1")
+    assert ig._context_turns() == 1
+    monkeypatch.setenv("CS_INTENT_CONTEXT_TURNS", "5")
+    assert ig._context_turns() == 5
+
+
+# ── _strip_quoted_reply (validated against real QuickCEP email data) ──
+
+def test_strip_quoted_reply_gmail_format():
+    """Real sample: Gmail 'On [date] [name] wrote:' quote marker."""
+    ig = _load("intent_gate")
+    text = (
+        "Hi. As it is within my 24 hour window, I would like to proceed with "
+        "order cancellation. Thank you.&nbsp;\n\n"
+        " \n \n  \n   On Sun, Jul 5, 2026 at 2:47 PM Divya Patel "
+        "&lt;divyapatelnyu@gmail.com&gt; wrote:\n\n"
+        "Hi! i placed the order below. I'm out of the country..."
+    )
+    result = ig._strip_quoted_reply(text)
+    assert "order cancellation" in result
+    assert "On Sun, Jul 5" not in result
+    assert "i placed the order" not in result
+
+
+def test_strip_quoted_reply_forwarded():
+    """Real sample: '---------- Forwarded message ---------' marker."""
+    ig = _load("intent_gate")
+    text = (
+        "Wondering if i could change this order to the mila instead\n\n"
+        "    ---------- Forwarded message ---------\n"
+        "    From: &lt;order1@order1.povison.com&gt;\n"
+        "    Date: Mon, Jul 6, 2026 at 9:33 PM\n"
+        "    Subject: Your POVISON Order is Confirmed!\n"
+        "    To: &lt;stacy.jung27@gmail.com&gt;\n\n"
+        "    Hi Stacy Jung, Thank you for choosing POVISON!"
+    )
+    result = ig._strip_quoted_reply(text)
+    assert "change this order to the mila" in result
+    assert "Forwarded message" not in result
+    assert "Hi Stacy Jung" not in result
+
+
+def test_strip_quoted_reply_nested_quotes():
+    """Multiple 'On ... wrote:' levels → cut at first occurrence."""
+    ig = _load("intent_gate")
+    text = (
+        "Reaching out again to confirm cancellation.\n\n"
+        "On Sun, Jul 5, 2026 at 7:52 PM Divya wrote:\n"
+        "  Hi. I would like to cancel.\n"
+        "  On Sun, Jul 5, 2026 at 2:47 PM Divya wrote:\n"
+        "    I placed the order below.\n"
+    )
+    result = ig._strip_quoted_reply(text)
+    assert "Reaching out again to confirm cancellation." in result
+    assert "I would like to cancel" not in result
+    assert "I placed the order" not in result
+
+
+def test_strip_quoted_reply_html_entities():
+    """HTML entities (&lt; &gt; &nbsp; &amp;) are decoded before stripping."""
+    ig = _load("intent_gate")
+    text = "Thanks for the update&amp;help.&nbsp;\n\nOn Mon, Jul 6, 2026 at 9:50 PM &lt;bot&gt; wrote:\n\nOld content"
+    result = ig._strip_quoted_reply(text)
+    assert "Thanks for the update&help." in result  # &amp; → &
+    assert "Old content" not in result
+
+
+def test_strip_quoted_reply_angle_brackets():
+    """> prefixed quote lines are removed; non-quote lines kept."""
+    ig = _load("intent_gate")
+    text = "Here is my new question.\n> This is a quoted line.\n> Another quote.\nThanks."
+    result = ig._strip_quoted_reply(text)
+    assert "Here is my new question." in result
+    assert "Thanks." in result
+    assert "quoted line" not in result
+    assert "Another quote" not in result
+
+
+def test_strip_quoted_reply_no_quote():
+    """Email without any quote markers is returned unchanged (minus entity decode)."""
+    ig = _load("intent_gate")
+    text = "Hello,\n\nI just made a purchase and want to know the delivery time.\n\nThank you,\nJessica"
+    result = ig._strip_quoted_reply(text)
+    assert "Hello" in result
+    assert "delivery time" in result
+    assert "Jessica" in result
+
+
+def test_strip_quoted_reply_original_message():
+    """'-----Original Message-----' marker cuts everything after."""
+    ig = _load("intent_gate")
+    text = "I want to change my address.\n\n-----Original Message-----\nFrom: support@povison.com\nTo: customer@gmail.com\nSubject: Order confirmed\n\nYour order is confirmed."
+    result = ig._strip_quoted_reply(text)
+    assert "I want to change my address." in result
+    assert "Original Message" not in result
+    assert "Your order is confirmed" not in result

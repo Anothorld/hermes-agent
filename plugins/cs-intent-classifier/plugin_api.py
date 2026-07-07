@@ -56,6 +56,7 @@ def classify_endpoint(req: ClassifyRequest) -> ClassifyResponse:
             subject=req.subject,
             body=req.body,
             metadata=req.metadata or {},
+            conversation_history=req.conversation_history or [],
         )
     except FabricationError as exc:
         raise HTTPException(
