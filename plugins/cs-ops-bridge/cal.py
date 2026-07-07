@@ -345,12 +345,23 @@ def _sessions_list_filters(
     since: Optional[str] = None,
     until: Optional[str] = None,
 ) -> tuple[str, list[Any]]:
-    """Shared WHERE clause + params for session list/count queries."""
+    """Shared WHERE clause + params for session list/count queries.
+
+    ``status`` accepts a comma-separated list (e.g. ``"operator_replied,reviewed"``)
+    so the workbench can fetch all CAL statuses that map to one display filter
+    (operator = operator_sent/operator_replied/reviewed; skipped = skipped/failed).
+    """
     sql = " FROM cs_session WHERE env=?"
     params: list[Any] = [env]
     if status:
-        sql += " AND status=?"
-        params.append(status)
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        if len(statuses) == 1:
+            sql += " AND status=?"
+            params.append(statuses[0])
+        elif statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            sql += f" AND status IN ({placeholders})"
+            params.extend(statuses)
     if q:
         like = f"%{q.strip()}%"
         sql += " AND (quickcep_session_id LIKE ? OR customer_email LIKE ? OR chat_session_id LIKE ?)"
@@ -442,6 +453,49 @@ def session_counts(*, env: str = "LIVE") -> dict[str, int]:
     counts = {r["status"]: int(r["n"]) for r in rows}
     counts["total"] = sum(counts.values())
     return counts
+
+
+def session_display_counts(*, env: str = "LIVE") -> dict[str, int]:
+    """Counts grouped by the *frontend display status* the workbench chips use.
+
+    Mirrors ``classify_intent``-side ``mapStatus``: ``draft_ready`` splits into
+    ``autopilot`` (latest autopilot job scheduled) vs ``draft``; ``operator`` =
+    operator_sent/operator_replied/reviewed; ``skipped`` = skipped/failed;
+    everything else collapses to ``processing``. ``all`` is the grand total.
+
+    This is the authoritative source for chip badges so they stay correct
+    regardless of which filter is active or how many rows are loaded.
+    """
+    sql = """
+        SELECT
+          CASE
+            WHEN s.status='draft_ready' AND (
+              SELECT j.status FROM cs_autopilot_jobs j
+              WHERE j.session_id=s.id AND j.env=s.env
+              ORDER BY j.id DESC LIMIT 1
+            )='scheduled' THEN 'autopilot'
+            WHEN s.status='draft_ready' THEN 'draft'
+            WHEN s.status='awaiting_expert' THEN 'escalating'
+            WHEN s.status IN ('operator_sent','operator_replied','reviewed') THEN 'operator'
+            WHEN s.status IN ('skipped','failed') THEN 'skipped'
+            ELSE 'processing'
+          END AS display,
+          COUNT(*) AS n
+        FROM cs_session s
+        WHERE s.env=?
+        GROUP BY display
+    """
+    with _connect() as conn:
+        rows = conn.execute(sql, (env,)).fetchall()
+    # Frontend chips expect every display-status key to be present. GROUP BY only
+    # emits groups with rows, so a 0-count status (e.g. no autopilot sessions)
+    # would be missing and the chip badge would keep its stale HTML placeholder.
+    counts = {k: 0 for k in ("draft", "autopilot", "operator", "escalating", "skipped", "processing")}
+    for r in rows:
+        counts[r["display"]] = int(r["n"])
+    counts["all"] = sum(v for k, v in counts.items() if k != "all")
+    return counts
+
 
 
 def escalations_in_window(
@@ -540,6 +594,36 @@ def _latest_autopilot_job(conn: sqlite3.Connection, session_id: int, env: str) -
         (session_id, env),
     ).fetchone()
     return dict(row) if row else None
+
+
+def attach_latest_autopilot_jobs(rows: list[dict[str, Any]], *, env: str) -> list[dict[str, Any]]:
+    """Attach each session's latest autopilot job as ``__ap_job`` (single query).
+
+    The list endpoint returns bare ``cs_session`` rows which cannot tell
+    ``draft_ready`` apart from ``autopilot``. The frontend ``mapRow`` reads
+    ``row.__ap_job`` to apply the same split as ``session_display_counts``
+    (latest job ``status='scheduled'`` => autopilot), so chip counts and the
+    filtered list stay consistent.
+    """
+    if not rows:
+        return rows
+    ids = [r["id"] for r in rows if r.get("id") is not None]
+    if not ids:
+        return rows
+    placeholders = ",".join("?" for _ in ids)
+    with _connect() as conn:
+        job_rows = conn.execute(
+            f"SELECT * FROM cs_autopilot_jobs WHERE env=? AND session_id IN ({placeholders})",
+            [env, *ids],
+        ).fetchall()
+    latest: dict[int, dict[str, Any]] = {}
+    for j in job_rows:
+        sid = j["session_id"]
+        if sid not in latest or j["id"] > latest[sid]["id"]:
+            latest[sid] = dict(j)
+    for r in rows:
+        r["__ap_job"] = latest.get(r["id"])
+    return rows
 
 
 def get_workbench(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[dict[str, Any]]:

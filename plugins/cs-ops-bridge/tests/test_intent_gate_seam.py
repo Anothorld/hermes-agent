@@ -194,6 +194,30 @@ def test_latest_visitor_message_picks_newest_when_multiple_visits():
     assert ig._extract_message_text(picked) == "second visitor msg"
 
 
+def test_latest_visitor_message_skips_call_records():
+    """Phone-call metadata (contentType=call) is not an email body."""
+    ig = _load("intent_gate")
+    msgs = [
+        {"content": '{"content":"{\\"offering_time\\":\\"2026-07-06 11:27:11\\"}"}',
+         "contentType": "call", "ownerType": "visitor"},
+        {"content": {"content": "Good evening, I received confirmation but website shows processed."},
+         "contentType": "html", "ownerType": "visitor"},
+    ]
+    picked = ig._latest_visitor_message(msgs)
+    assert picked is not None
+    assert picked["contentType"] == "html"
+    assert "confirmation" in ig._extract_message_text(picked)
+
+
+def test_latest_visitor_message_none_when_only_call_visitor():
+    ig = _load("intent_gate")
+    msgs = [
+        {"content": '{"content":"call metadata"}', "contentType": "call", "ownerType": "visitor"},
+        {"content": '{"action":"chat_end"}', "ownerType": "system"},
+    ]
+    assert ig._latest_visitor_message(msgs) is None
+
+
 def test_seam_timeout_falls_back_to_legacy(monkeypatch):
     # When the seam work exceeds CS_INTENT_SEAM_TIMEOUT, the gate returns None
     # (→ legacy fallback) instead of blocking the watcher thread indefinitely.
@@ -392,6 +416,22 @@ def test_extract_conversation_history_filters_system():
     assert history[1]["text"] == "How can I help?"
 
 
+def test_extract_conversation_history_filters_call_records():
+    """Phone-call metadata (contentType=call) is excluded from history."""
+    ig = _load("intent_gate")
+    messages = [
+        {"ownerType": "visitor", "contentType": "call",
+         "content": {"content": '{"offering_time":"2026-07-06 11:27:11","agent_name":"Sarah"}'}},
+        _msg("operator", "Hope this email finds you well. Your order is confirmed."),
+        {"ownerType": "visitor", "contentType": "html",
+         "content": {"content": "Good evening, I did receive a confirmation."}},
+    ]
+    history = ig._extract_conversation_history(messages, max_turns=3)
+    assert len(history) == 1
+    assert history[0]["role"] == "agent"
+    assert "order is confirmed" in history[0]["text"]
+
+
 def test_extract_conversation_history_empty_for_first_contact():
     """Only 1 visitor message → history is empty."""
     ig = _load("intent_gate")
@@ -423,6 +463,66 @@ def test_context_turns_default_and_override(monkeypatch):
     assert ig._context_turns() == 1
     monkeypatch.setenv("CS_INTENT_CONTEXT_TURNS", "5")
     assert ig._context_turns() == 5
+
+
+# ── _clean_extracted_text (CDATA remnants + whitespace from HTML table layouts) ──
+
+def test_clean_extracted_text_strips_cdata_close_remnant():
+    """Real sample: session 2551985989058707458 — leading ]]> from CDATA close."""
+    ig = _load("intent_gate")
+    raw = "]]> \n  \n  \n    \n    Hello, my order is delayed."
+    assert ig._clean_extracted_text(raw) == "Hello, my order is delayed."
+
+
+def test_clean_extracted_text_strips_cdata_open_and_close():
+    """Both <![CDATA[ and ]]> removed (opening usually stripped by CLI, defensive)."""
+    ig = _load("intent_gate")
+    raw = "<![CDATA[ Some content ]]> more text ]]>"
+    assert ig._clean_extracted_text(raw) == "Some content more text"
+
+
+def test_clean_extracted_text_collapses_whitespace_runs():
+    """HTML table layouts leave long runs of spaces/tabs between stripped tags."""
+    ig = _load("intent_gate")
+    raw = "Hello,     \t\t\t   world   \n\n\n\n\n   foo"
+    assert ig._clean_extracted_text(raw) == "Hello, world \n\n foo"
+
+
+def test_clean_extracted_text_idempotent():
+    """Already-clean text passes through unchanged."""
+    ig = _load("intent_gate")
+    clean = "Hello, world\n\nThis is a test."
+    assert ig._clean_extracted_text(clean) == clean
+
+
+def test_clean_extracted_text_empty_and_none():
+    ig = _load("intent_gate")
+    assert ig._clean_extracted_text("") == ""
+    assert ig._clean_extracted_text(None) == ""  # type: ignore[arg-type]
+
+
+def test_extract_message_text_cleans_html_artifacts():
+    """End-to-end: visitor html message with CDATA remnant + whitespace → clean."""
+    ig = _load("intent_gate")
+    msg = {
+        "contentType": "html",
+        "content": {"content": "]]>  \n   \n  Learn how to make the most     \t  of your order."}
+    }
+    assert ig._extract_message_text(msg) == "Learn how to make the most of your order."
+
+
+def test_extract_conversation_history_cleans_html_artifacts():
+    """History extraction cleans CDATA/whitespace noise from each turn."""
+    ig = _load("intent_gate")
+    messages = [
+        _msg("visitor", "]]>  \n  \n  Where is my order?"),
+        _msg("operator", "]]>  \n    \n  Your order ships July 10."),
+        _msg("visitor", "Thanks."),
+    ]
+    history = ig._extract_conversation_history(messages, max_turns=3)
+    assert len(history) == 2
+    assert history[0]["text"] == "Where is my order?"
+    assert history[1]["text"] == "Your order ships July 10."
 
 
 # ── _strip_quoted_reply (validated against real QuickCEP email data) ──

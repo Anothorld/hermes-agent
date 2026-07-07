@@ -254,6 +254,9 @@ def list_sessions_route(
     sessions = cal.list_sessions(
         env=env, status=status, q=q, limit=limit, offset=offset, since=since, until=until,
     )
+    # Attach the latest autopilot job so draft_ready sessions can be split into
+    # autopilot vs draft on the client (matches session_display_counts).
+    sessions = cal.attach_latest_autopilot_jobs(sessions, env=env)
     total = cal.count_sessions(env=env, status=status, q=q, since=since, until=until)
     out: dict[str, Any] = {
         "sessions": sessions,
@@ -263,7 +266,7 @@ def list_sessions_route(
         "has_more": offset + len(sessions) < total,
     }
     if with_counts:
-        out["counts"] = cal.session_counts(env=env)
+        out["counts"] = cal.session_display_counts(env=env)
     if response is not None:
         response.headers["Cache-Control"] = "private, max-age=3"
     return out

@@ -56,21 +56,25 @@ def cal(tmp_path, monkeypatch):
 
 def test_console_reply_claims_and_resumes(cal, monkeypatch):
     esc_mod = _load_pkg_module("escalation_resume")
+    resume_kwargs: list[dict] = []
     # Stub the gateway resume launch (claim path runs first, then resume with already_claimed).
-    monkeypatch.setattr(
-        esc_mod, "resume_escalation",
-        lambda *, escalation_id, operator_answer, decided_by, env, already_claimed, skip_attachment_prepare: {
-            "ok": True, "run_id": "run-xyz", "escalation_id": escalation_id,
-        },
-    )
+    def _fake_resume(**kwargs):
+        resume_kwargs.append(kwargs)
+        return {"ok": True, "run_id": "run-xyz", "escalation_id": kwargs["escalation_id"]}
+    monkeypatch.setattr(esc_mod, "resume_escalation", _fake_resume)
     # Stub the Feishu [ESC-LOCK] notify by registering a fake feishu_notify
     # module under the test package so the lazy relative import resolves to it.
     import types
 
     notify_calls: list = []
     fake_feishu_notify = types.ModuleType(f"{_PKG}.feishu_notify")
-    fake_feishu_notify.notify_escalation_locked = lambda *, escalation_id, feishu_root_message_id: notify_calls.append(
-        (escalation_id, feishu_root_message_id)
+
+    class _FakeLockResult:
+        ok = True
+        message_id = "om-lock-fake"
+        error = None
+    fake_feishu_notify.notify_escalation_locked = lambda *, escalation_id, feishu_root_message_id: (
+        notify_calls.append((escalation_id, feishu_root_message_id)) or _FakeLockResult()
     )
     monkeypatch.setitem(sys.modules, f"{_PKG}.feishu_notify", fake_feishu_notify)
 
@@ -83,12 +87,17 @@ def test_console_reply_claims_and_resumes(cal, monkeypatch):
     assert res["ok"] is True
     assert res["claimed"] is True
     assert res["run_id"] == "run-xyz"
+    assert resume_kwargs and resume_kwargs[0]["skip_attachment_prepare"] is False
     # ESC-LOCK posted to the Feishu root message.
     assert (1, "fm-root-1") in notify_calls
     # Escalation moved to resuming.
     esc = cal.get_escalation(escalation_id=1)
     assert esc["state"] == "resuming"
     assert esc["decided_by"] == "console:op-9"
+    # Console path persists feishu_lock_notified so the poller won't re-post.
+    ctx = esc.get("resume_context") or {}
+    assert ctx.get("feishu_lock_notified") is True
+    assert ctx.get("feishu_lock_message_id") == "om-lock-fake"
     # Audit event recorded.
     with cal._connect() as conn:
         row = conn.execute(

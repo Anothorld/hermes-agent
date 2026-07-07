@@ -136,12 +136,22 @@ def console_reply_escalation(
                 "error_detail": "first reply wins — escalation already claimed"}
 
     # Best-effort Feishu [ESC-LOCK] notice so the Feishu side stops accepting replies.
+    # Idempotent: skip if already notified (e.g. Feishu path claimed first), and
+    # persist feishu_lock_notified + message_id so the poller doesn't re-post.
     feishu_root = esc.get("feishu_message_id")
-    if feishu_root:
+    esc_ctx = esc.get("resume_context") or {}
+    if feishu_root and not esc_ctx.get("feishu_lock_notified"):
         try:
             from .feishu_notify import notify_escalation_locked
 
-            notify_escalation_locked(escalation_id=escalation_id, feishu_root_message_id=feishu_root)
+            lock = notify_escalation_locked(escalation_id=escalation_id, feishu_root_message_id=feishu_root)
+            if lock.ok:
+                cal.merge_escalation_resume_context(
+                    escalation_id=escalation_id,
+                    patch={"feishu_lock_notified": True, "feishu_lock_message_id": lock.message_id},
+                )
+            else:
+                log.warning("console ESC-LOCK notify failed esc=%s: %s", escalation_id, lock.error)
         except Exception as exc:  # noqa: BLE001 — best-effort
             log.warning("console ESC-LOCK notify failed esc=%s: %s", escalation_id, exc)
 
@@ -168,7 +178,7 @@ def console_reply_escalation(
         decided_by=decided_by,
         env=env,
         already_claimed=True,
-        skip_attachment_prepare=True,
+        skip_attachment_prepare=False,
     )
     return {
         "ok": bool(resume.get("ok")),
@@ -328,7 +338,8 @@ def retry_resume_for_session(*, quickcep_session_id: str, env: str) -> dict[str,
     # 3. Do NOT change session status — let the resume agent's apply-handoff
     #    drive the lifecycle naturally (avoids rank regression / stale interaction).
 
-    # 4. Relaunch the resume run (already claimed, skip attachment re-prepare).
+    # 4. Relaunch the resume run (already claimed). Re-prepare vault→CDN when
+    # operator_attachments were never merged (e.g. console reply bug on first launch).
     answer = str(ctx.get("operator_answer_raw") or "").strip()
     result = resume_escalation(
         escalation_id=eid,
@@ -336,7 +347,7 @@ def retry_resume_for_session(*, quickcep_session_id: str, env: str) -> dict[str,
         decided_by=str(esc.get("decided_by") or "console_retry"),
         env=env,
         already_claimed=True,
-        skip_attachment_prepare=True,
+        skip_attachment_prepare=bool(ctx.get("operator_attachments")),
     )
     result["kind"] = "resume_retry"
     result["escalation_id"] = eid

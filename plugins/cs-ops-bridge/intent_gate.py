@@ -409,20 +409,57 @@ def _classifier_gate_work(
     return _gate_result_from_ge(ge)
 
 
+_CDATA_OPEN_RE = re.compile(r"<!\[CDATA\[")
+_CDATA_CLOSE_RE = re.compile(r"\]\]>")
+_WS_RUN_RE = re.compile(r"[ \t]+")
+_MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+
+
+def _clean_extracted_text(text: str) -> str:
+    """Clean text extracted from a QuickCEP message record.
+
+    The bridge CLI's ``html_to_plain`` uses a simple ``<[^>]+>`` tag-strip. It
+    removes the opening ``<![CDATA[`` (contains angle brackets) but leaves the
+    closing ``]]>`` (no angle brackets), and it does not collapse the large
+    runs of whitespace left behind by HTML table layouts. Both artifacts leak
+    into the classifier prompt as noise / wasted tokens.
+
+    This helper:
+    - Strips CDATA section remnants (``<![CDATA[`` and ``]]>``)
+    - Collapses runs of spaces/tabs to a single space
+    - Collapses 3+ consecutive newlines to a single blank line
+    - Trims leading/trailing whitespace
+
+    Idempotent: safe to call on already-clean text.
+    """
+    if not text:
+        return ""
+    # CDATA remnants — opening tag (rare, defensive) and closing marker.
+    text = _CDATA_OPEN_RE.sub("", text)
+    text = _CDATA_CLOSE_RE.sub("", text)
+    # Collapse whitespace runs left by HTML table layouts.
+    text = _WS_RUN_RE.sub(" ", text)
+    text = _MULTI_NEWLINE_RE.sub("\n\n", text)
+    return text.strip()
+
+
 def _extract_message_text(msg: dict[str, Any]) -> str:
     """Extract plain text body from a QuickCEP message record.
 
     QuickCEP html messages store `content` as a dict (parsed JSON) with the
     inner text under `content.content`; text messages store it as a string.
-    The CLI's `--plain` (default) already html_to_plain'd the inner text.
+    The CLI's `--plain` (default) already html_to_plain'd the inner text, but
+    that pass leaves CDATA remnants and uncollapsed whitespace — cleaned here.
     """
     content = msg.get("content")
     if isinstance(content, dict):
         # html contentType: {"content": "<plain text>", "subject": "...", ...}
-        return str(content.get("content") or content.get("text") or "")
-    if isinstance(content, str):
-        return content
-    return str(msg.get("body") or msg.get("text") or "")
+        raw = str(content.get("content") or content.get("text") or "")
+    elif isinstance(content, str):
+        raw = content
+    else:
+        raw = str(msg.get("body") or msg.get("text") or "")
+    return _clean_extracted_text(raw)
 
 
 def _latest_visitor_message(messages: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
@@ -435,15 +472,13 @@ def _latest_visitor_message(messages: list[dict[str, Any]]) -> Optional[dict[str
     email. Feeding that to the classifier made the LLM label real customer
     emails as "系统自动分配通知" → spam_irrelevant (out_of_scope).
 
-    Only `ownerType=visitor` rows carry the actual customer text. We pick the
-    latest visitor message; if none exists (brand-new session with only
-    system rows, or operator-only thread) return None so the caller falls
-    through to the legacy gate instead of classifying system noise.
+    Only `ownerType=visitor` rows carry the actual customer text. Phone-call
+    records (`contentType=call`) are excluded — they are metadata, not email
+    bodies. We pick the latest visitor email; if none exists (brand-new session
+    with only system rows, or operator-only thread) return None so the caller
+    falls through to the legacy gate instead of classifying system noise.
     """
-    visitor = [
-        m for m in messages
-        if isinstance(m, dict) and str(m.get("ownerType") or "").lower() == "visitor"
-    ]
+    visitor = [m for m in messages if _is_visitor_email_message(m)]
     return visitor[-1] if visitor else None
 
 
@@ -462,6 +497,28 @@ def _context_turns() -> int:
 # ownerType values that are NOT conversation content (system actions, internal
 # notes, bot messages). These are filtered out when building conversation history.
 _NON_CONVERSATION_TYPES = frozenset({"system", "botsystem", "bot", "operatornote"})
+# contentType values that are NOT email conversation (e.g. phone-call metadata).
+_NON_CONVERSATION_CONTENT_TYPES = frozenset({"call"})
+
+
+def _is_conversation_message(msg: dict[str, Any]) -> bool:
+    """True when a QuickCEP row is real email conversation (visitor/operator)."""
+    if not isinstance(msg, dict):
+        return False
+    if str(msg.get("ownerType") or "").lower() in _NON_CONVERSATION_TYPES:
+        return False
+    if str(msg.get("contentType") or "").lower() in _NON_CONVERSATION_CONTENT_TYPES:
+        return False
+    return True
+
+
+def _is_visitor_email_message(msg: dict[str, Any]) -> bool:
+    """True when a row is a customer email (visitor), not a phone-call record."""
+    return (
+        isinstance(msg, dict)
+        and str(msg.get("ownerType") or "").lower() == "visitor"
+        and str(msg.get("contentType") or "").lower() not in _NON_CONVERSATION_CONTENT_TYPES
+    )
 
 
 def _strip_quoted_reply(text: str) -> str:
@@ -507,24 +564,19 @@ def _extract_conversation_history(
 
     Returns a list of ``{role, text}`` dicts (oldest-first), excluding the
     latest visitor message (which is passed separately as ``body``). Filters
-    out system/bot/internal-note messages. Each message's text is cleaned via
-    ``_strip_quoted_reply`` to remove quoted content. When fewer messages exist
-    than ``max_turns - 1``, returns as many as available.
+    out system/bot/internal-note/phone-call messages. Each message's text is
+    cleaned via ``_strip_quoted_reply`` to remove quoted content. When fewer
+    messages exist than ``max_turns - 1``, returns as many as available.
     """
-    # Keep only visitor (customer) and operator (agent reply) messages.
-    conversation = [
-        m
-        for m in messages
-        if isinstance(m, dict)
-        and str(m.get("ownerType") or "").lower() not in _NON_CONVERSATION_TYPES
-    ]
+    # Keep only visitor (customer) and operator (agent reply) email messages.
+    conversation = [m for m in messages if _is_conversation_message(m)]
     if not conversation:
         return []
 
-    # Find the index of the latest visitor message (the one being classified).
+    # Find the index of the latest visitor email (the one being classified).
     last_visitor_idx = None
     for i in range(len(conversation) - 1, -1, -1):
-        if str(conversation[i].get("ownerType") or "").lower() == "visitor":
+        if _is_visitor_email_message(conversation[i]):
             last_visitor_idx = i
             break
     if last_visitor_idx is None or last_visitor_idx == 0:
