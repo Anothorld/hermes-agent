@@ -5,7 +5,7 @@ Priority: brief field > env variable > default (OFF).
 When OFF (default):
     10 covers + 10 comments → vision_analyze(cover) + comments
 When ON:
-    10 covers + 3 videos + 10 comments → above + video_analyze(top 3)
+    10 covers + 3 random videos (from recent 10) + 10 comments → above + video_analyze(video_reels)
 
 The ``hooks.py`` pre_tool_call hook blocks ``rpa_download_ig_reel`` when
 OFF, and limits to 3 downloads per candidate when ON.

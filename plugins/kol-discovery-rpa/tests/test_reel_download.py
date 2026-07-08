@@ -237,6 +237,69 @@ def test_download_cover_uses_skip_download_and_write_thumbnail(monkeypatch, tmp_
     assert r["thumbnail_url"].startswith("https://scontent")
 
 
+def test_download_cover_prefers_rpa_thumbnail(monkeypatch, tmp_path):
+    """When thumbnail_url is provided, download_cover uses HTTP fetch first."""
+    import reel_download
+
+    called = {}
+
+    def fake_thumb(url, reel_id, **kw):
+        called["url"] = url
+        out = tmp_path / f"{reel_id}.jpg"
+        out.write_bytes(b"x" * 20)
+        return {
+            "cover_path": str(out),
+            "file_size_bytes": 20,
+            "thumbnail_url": url,
+            "reel_id": reel_id,
+            "source": "rpa_thumbnail",
+        }
+
+    monkeypatch.setattr(reel_download, "download_cover_from_thumbnail", fake_thumb)
+    monkeypatch.setattr(reel_download.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("yt-dlp should not run")))
+
+    r = reel_download.download_cover(
+        "https://www.instagram.com/reel/abc/",
+        dest_dir=str(tmp_path),
+        thumbnail_url="https://cdn.example/abc.jpg",
+    )
+    assert called["url"] == "https://cdn.example/abc.jpg"
+    assert r["source"] == "rpa_thumbnail"
+
+
+def test_download_content_eval_cover_only(monkeypatch, tmp_path):
+    """download_content_eval downloads all cover_reels; skips videos in cover mode."""
+    import eval_mode
+    import reel_download
+
+    monkeypatch.setattr(eval_mode, "resolve_eval_mode", lambda brief=None: "cover")
+
+    covers = []
+
+    def fake_cover(reel_url, **kw):
+        rid = reel_download._reel_id_from_url(reel_url)
+        path = tmp_path / f"{rid}.jpg"
+        path.write_bytes(b"c")
+        return {"cover_path": str(path), "file_size_bytes": 1, "reel_id": rid, "source": "rpa_thumbnail"}
+
+    monkeypatch.setattr(reel_download, "download_cover", fake_cover)
+
+    plan = {
+        "eval_mode": "cover",
+        "covers_target": 2,
+        "videos_target": 0,
+        "cover_reels": [
+            {"reel_id": "a", "url": "https://www.instagram.com/reel/a/", "thumbnail_url": "https://x/a.jpg"},
+            {"reel_id": "b", "url": "https://www.instagram.com/reel/b/", "thumbnail_url": "https://x/b.jpg"},
+        ],
+        "video_reels": [{"reel_id": "a", "url": "https://www.instagram.com/reel/a/"}],
+    }
+    result = reel_download.download_content_eval(plan, dest_dir=str(tmp_path))
+    assert result["covers_downloaded"] == 2
+    assert result["videos_downloaded"] == 0
+    assert result["videos"] == []
+
+
 def test_reel_id_from_url():
     import reel_download
     assert reel_download._reel_id_from_url("https://www.instagram.com/mrkate/reel/DXXXA2BgY-9/") == "DXXXA2BgY-9"

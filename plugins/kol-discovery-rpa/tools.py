@@ -137,10 +137,14 @@ RPA_FETCH_IG_PROFILE_SCHEMA: dict[str, Any] = {
 RPA_FETCH_IG_REELS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Navigate to the Reels tab and extract up to max_reels items with "
-        "url, views, likes, comments, thumbnail_url, posted_at. Also runs "
-        "reels-level qualification gates (≥5 reels/3mo, avg views ≥30k excl "
-        "72h, reel ER ≥3%, static-only discard). Returns merged qualification."
+        "Navigate to the profile Reels tab and extract up to max_reels items "
+        "(default 10 — most recent on the grid) with url, views, and "
+        "thumbnail_url scraped from the grid img[src]. Also returns a "
+        "content_eval plan: cover_reels = first 10 for cover screening; "
+        "video_reels = random 3 from that pool when video eval is ON. Pass "
+        "data.content_eval to rpa_download_ig_content for batch download. "
+        "Runs reels-level qualification gates (≥5 reels/3mo, avg views ≥30k, "
+        "reel ER ≥3%, static-only discard)."
     ),
     "properties": {
         "handle": {"type": "string", "description": "IG handle."},
@@ -149,6 +153,14 @@ RPA_FETCH_IG_REELS_SCHEMA: dict[str, Any] = {
             "default": 10,
             "maximum": 20,
             "description": "Max reels to extract (default 10 for content screening).",
+        },
+        "include_content_eval": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Attach content_eval block (10 cover reels + random 3 video "
+                "sample when video mode ON). Default True."
+            ),
         },
     },
     "required": ["handle"],
@@ -206,17 +218,47 @@ RPA_DOWNLOAD_IG_REEL_SCHEMA: dict[str, Any] = {
 RPA_DOWNLOAD_IG_COVER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Download ONLY an IG Reel's cover image (no video) via yt-dlp "
-        "--write-thumbnail --skip-download. For cover-mode content screening "
-        "(KOL_RPA_VIDEO_EVAL_ENABLED=0): fetch a cover image file per reel for "
-        "vision_analyze without downloading the video. Fast — no ffmpeg needed. "
-        "Not gated by the video-eval switch (cover mode is the default). "
-        "Returns cover_path, file_size_bytes, thumbnail_url, reel_id."
+        "Download a single IG Reel cover image (no video). Prefer "
+        "thumbnail_url from rpa_fetch_ig_reels grid RPA (HTTP fetch); "
+        "falls back to yt-dlp --write-thumbnail --skip-download. For cover-mode "
+        "content screening (KOL_RPA_VIDEO_EVAL_ENABLED=0). Not gated by the "
+        "video-eval switch. Returns cover_path, file_size_bytes, thumbnail_url, "
+        "reel_id, source."
     ),
     "properties": {
         "reel_url": {"type": "string", "description": "IG Reel URL."},
+        "thumbnail_url": {
+            "type": "string",
+            "description": (
+                "Optional grid thumbnail URL from rpa_fetch_ig_reels — "
+                "downloaded directly without yt-dlp when provided."
+            ),
+        },
     },
     "required": ["reel_url"],
+    "additionalProperties": False,
+}
+
+RPA_DOWNLOAD_IG_CONTENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Batch-download content-eval assets after rpa_fetch_ig_reels. "
+        "Downloads all cover_reels (10 profile-grid thumbnails → local files "
+        "for vision_analyze). When video eval is ON, also downloads video_reels "
+        "(random 3 from the recent-10 pool) as MP4 for video_analyze. Pass "
+        "the data.content_eval block from the fetch response. Partial failures "
+        "are reported per reel in data.errors."
+    ),
+    "properties": {
+        "content_eval": {
+            "type": "object",
+            "description": (
+                "The content_eval object from rpa_fetch_ig_reels (cover_reels, "
+                "video_reels, eval_mode, targets)."
+            ),
+        },
+    },
+    "required": ["content_eval"],
     "additionalProperties": False,
 }
 
@@ -283,6 +325,8 @@ _TOOL_DESCRIPTIONS = {
     "rpa_fetch_google_serp": "Google SERP extraction for public-web KOL discovery.",
     "rpa_fetch_hashtag_candidates": "Extract candidate handles from IG hashtag explore page.",
     "rpa_download_ig_reel": "Download IG Reel MP4 via yt-dlp (video eval mode only).",
+    "rpa_download_ig_cover": "Download one IG Reel cover (RPA thumbnail URL or yt-dlp fallback).",
+    "rpa_download_ig_content": "Batch download content_eval covers + random video sample.",
     "rpa_fetch_reel_comments": "Extract Reel comments (evaluation: style/audience; discovery: commenter handles).",
     "rpa_cleanup_reels": "Delete downloaded Reel MP4 files older than threshold.",
     "rpa_fetch_similar_accounts": "Extract similar/suggested accounts from IG profile.",
@@ -352,13 +396,28 @@ def _wrap_errors(handler: Callable) -> Callable:
     Agent can use browser_navigate to the same URL as a fallback.
     """
 
-    def wrapper(arguments: dict[str, Any] | None = None, **kwargs: Any) -> str:
+    def wrapper(
+        arguments: dict[str, Any] | None = None,
+        *pos_args: Any,
+        **kwargs: Any,
+    ) -> str:
         args = dict(arguments or {})
+        # The Hermes registry passes ``task_id`` inconsistently across call
+        # sites (2nd positional arg, keyword, or nested inside ``arguments``).
+        # Normalize to a single keyword so handlers never hit
+        # "got multiple values for keyword argument 'task_id'". Always pull
+        # task_id out of args so handlers don't see a stale copy.
+        task_id = kwargs.pop("task_id", "")
+        if not task_id and pos_args and isinstance(pos_args[0], str):
+            task_id = pos_args[0]
+        nested_tid = args.pop("task_id", "")
+        if not task_id and isinstance(nested_tid, str):
+            task_id = nested_tid
+        kwargs["task_id"] = task_id
         try:
             return handler(args, **kwargs)
         except RpaError as exc:
             # Grant fallback token for DOM failures so Agent can use browser_*
-            task_id = kwargs.get("task_id", "")
             if exc.code == "dom_changed":
                 _grant_fallback_for_error(handler.__name__, args, task_id)
             return tool_error(
@@ -501,8 +560,14 @@ def _handle_fetch_ig_reels(args: dict, *, task_id: str = "", **_: Any) -> str:
         return tool_error("handle is required", code="missing_arg")
 
     max_reels = min(int(args.get("max_reels", 10)), 20)
+    include_content_eval = args.get("include_content_eval", True)
     runner = CdpRunner(task_id)
-    result = fetch_reels(runner, handle, max_reels=max_reels)
+    result = fetch_reels(
+        runner,
+        handle,
+        max_reels=max_reels,
+        include_content_eval=bool(include_content_eval),
+    )
 
     return tool_result({
         "ok": True,
@@ -561,12 +626,37 @@ def _handle_download_ig_cover(args: dict, *, task_id: str = "", **_: Any) -> str
     if not reel_url:
         return tool_error("reel_url is required", code="missing_arg")
 
-    result = download_cover(reel_url)
+    thumbnail_url = args.get("thumbnail_url") or None
+    result = download_cover(reel_url, thumbnail_url=thumbnail_url)
 
     return tool_result({
         "ok": True,
         "data": result,
         "errors": [],
+        "meta": _meta(task_id, page_loads=0),
+    })
+
+
+def _handle_download_ig_content(args: dict, *, task_id: str = "", **_: Any) -> str:
+    """Handle rpa_download_ig_content — batch cover + video download."""
+    from reel_download import download_content_eval
+
+    content_eval = args.get("content_eval")
+    if not isinstance(content_eval, dict) or not content_eval.get("cover_reels"):
+        return tool_error(
+            "content_eval with cover_reels is required (from rpa_fetch_ig_reels)",
+            code="missing_arg",
+        )
+
+    result = download_content_eval(content_eval)
+    ok = result["covers_downloaded"] > 0 or (
+        result.get("videos_target", 0) == 0 and result["covers_downloaded"] >= 0
+    )
+
+    return tool_result({
+        "ok": ok,
+        "data": result,
+        "errors": result.get("errors") or [],
         "meta": _meta(task_id, page_loads=0),
     })
 
@@ -640,6 +730,7 @@ __all__ = (
     "RPA_FETCH_HASHTAG_CANDIDATES_SCHEMA",
     "RPA_DOWNLOAD_IG_REEL_SCHEMA",
     "RPA_DOWNLOAD_IG_COVER_SCHEMA",
+    "RPA_DOWNLOAD_IG_CONTENT_SCHEMA",
     "RPA_FETCH_REEL_COMMENTS_SCHEMA",
     "RPA_CLEANUP_REELS_SCHEMA",
     "RPA_FETCH_SIMILAR_ACCOUNTS_SCHEMA",
@@ -654,6 +745,7 @@ __all__ = (
     "_handle_fetch_hashtag_candidates",
     "_handle_download_ig_reel",
     "_handle_download_ig_cover",
+    "_handle_download_ig_content",
     "_handle_fetch_reel_comments",
     "_handle_cleanup_reels",
     "_handle_fetch_similar_accounts",

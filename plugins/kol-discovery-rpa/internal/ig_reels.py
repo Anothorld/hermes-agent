@@ -20,6 +20,7 @@ _INTERNAL_DIR = str(Path(__file__).resolve().parent)
 if _INTERNAL_DIR not in sys.path:
     sys.path.insert(0, _INTERNAL_DIR)
 
+from content_eval import build_content_eval_plan  # noqa: E402
 from errors import DomChangedError  # noqa: E402
 from qualify_evaluator import evaluate_reels_gates  # noqa: E402
 from risk_detector import raise_on_risk  # noqa: E402
@@ -104,13 +105,24 @@ _REELS_JS = """
 """
 
 
-def fetch_reels(runner, handle: str, max_reels: int = 10) -> dict:
+def fetch_reels(
+    runner,
+    handle: str,
+    max_reels: int = 10,
+    *,
+    include_content_eval: bool = True,
+    eval_mode: str | None = None,
+) -> dict:
     """Navigate to IG profile reels tab and extract reels + qualification.
 
     Args:
         runner: A ``CdpRunner`` instance.
         handle: IG handle (with or without @).
         max_reels: Max reels to extract (default 10 for content screening).
+        include_content_eval: When True, attach a ``content_eval`` block with
+            the first ``max_reels`` covers and (when video mode is ON) a random
+            sample of 3 reels for ``rpa_download_ig_content``.
+        eval_mode: Optional ``"cover"`` / ``"video"`` override for the plan.
 
     Returns:
         Dict with reels ``data`` and merged ``qualification``.
@@ -163,11 +175,20 @@ def fetch_reels(runner, handle: str, max_reels: int = 10) -> dict:
     # For now, just evaluate reels gates without profile gates
     qual = evaluate_reels_gates(reels)
 
+    data: dict = {
+        "handle": clean_handle,
+        "reels": reels,
+        "count": len(reels),
+    }
+    if include_content_eval:
+        data["content_eval"] = build_content_eval_plan(
+            reels,
+            eval_mode=eval_mode,
+            cover_count=max_reels,
+            handle=clean_handle,
+        )
+
     return {
-        "data": {
-            "handle": clean_handle,
-            "reels": reels,
-            "count": len(reels),
-        },
+        "data": data,
         "qualification": qual,
     }

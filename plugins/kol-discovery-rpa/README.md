@@ -13,24 +13,29 @@ follower counting). This plugin wraps those fixed-flow operations into one-shot
 structured tools that return JSON with a `qualification` block — reducing
 browser LLM turns to 1-2 per handle (50-70% token savings).
 
-## Tools (12 total, phased rollout)
+## Tools (13 total, phased rollout)
 
 | # | Tool | Phase | Purpose |
 |---|------|-------|---------|
 | 1 | `rpa_check_ip` | 1 | US IP preflight (replaces `browser_navigate(ipinfo.io)`) |
 | 2 | `rpa_precheck_handle` | 1 | Zero page-load exclusion_set/skip/cooldown precheck |
 | 3 | `rpa_fetch_ig_profile` | 1 | Profile data + account country + followers/region qualification gates |
-| 4 | `rpa_fetch_ig_reels` | 2 | 10 reels + view counts + reels qualification gates |
+| 4 | `rpa_fetch_ig_reels` | 2 | Profile grid: 10 reels + thumbnails + `content_eval` plan |
 | 5 | `rpa_fetch_google_serp` | 2 | Google SERP extraction |
-| 6 | `rpa_download_ig_reel` | 2 | yt-dlp MP4 + cover download (video eval mode only) |
-| 7 | `rpa_download_ig_cover` | 2 | Cover-image-only download (cover mode, not video-gated) |
-| 8 | `rpa_fetch_reel_comments` | 2/3 | Reel comments (evaluation + discovery modes) |
-| 9 | `rpa_cleanup_reels` | 2 | Delete old MP4 + cover image files |
-| 10 | `rpa_fetch_hashtag_candidates` | 3 | Hashtag explore |
-| 11 | `rpa_fetch_similar_accounts` | 3 | Similar/suggested accounts |
-| 12 | `rpa_fetch_following_list` | 3 | Following list |
+| 6 | `rpa_download_ig_reel` | 2 | yt-dlp MP4 (single reel; video eval mode only) |
+| 7 | `rpa_download_ig_cover` | 2 | Single cover (RPA thumbnail URL or yt-dlp fallback) |
+| 8 | `rpa_download_ig_content` | 2 | Batch: 10 covers + random 3 videos from `content_eval` |
+| 9 | `rpa_fetch_reel_comments` | 2/3 | Reel comments (evaluation + discovery modes) |
+| 10 | `rpa_cleanup_reels` | 2 | Delete old MP4 + cover image files |
+| 11 | `rpa_fetch_hashtag_candidates` | 3 | Hashtag explore |
+| 12 | `rpa_fetch_similar_accounts` | 3 | Similar/suggested accounts |
+| 13 | `rpa_fetch_following_list` | 3 | Following list |
 
-Set `KOL_RPA_PHASE=1|2|3` to control how many tools are registered (Phase 2 = 9).
+Set `KOL_RPA_PHASE=1|2|3` to control how many tools are registered.
+**Default is 2** (all discovery + content-eval tools implemented). Phase 1
+exposes only `rpa_check_ip` / `rpa_precheck_handle` / `rpa_fetch_ig_profile`
+and leaves the agent without reels/download tools — forcing veedcrawl
+fallbacks. Phase 3 adds hashtag/similar/following (currently stubs).
 
 ## Hard Qualification Gates (synced from skill)
 
@@ -61,7 +66,7 @@ priority: HARD > learned > default).
 | Switch | Mode | Screening combination |
 |--------|------|-----------------------|
 | OFF (default) | cover | 10 covers + 10 comments |
-| ON | video | 10 covers + 3 videos + 10 comments |
+| ON | video | 10 covers + 3 random videos + 10 comments |
 
 Priority: brief field `rpa_video_eval_enabled` > env `KOL_RPA_VIDEO_EVAL_ENABLED` > default OFF.
 
@@ -170,6 +175,28 @@ reliable on a bloks reel page:
   block from its handle to the next commenter's handle so likes don't bleed
   across comments. Text is captured between the time token and the first
   `回复`/`查看所有`/`次赞` marker; likes from `<N>次赞`/`<N> likes` in that block.
+
+## Content Eval Plan (`content_eval`)
+
+`rpa_fetch_ig_reels` returns `data.content_eval` alongside the raw reels list:
+
+| Field | Meaning |
+|-------|---------|
+| `cover_reels` | First 10 reels from the profile `/reels/` grid (most recent), each with RPA-scraped `thumbnail_url` |
+| `video_reels` | When video eval is ON: **random 3** sampled from that same 10-reel pool (deterministic per handle) |
+| `eval_mode` | `cover` or `video` (from brief/env switch) |
+| `selection` | Metadata for ingest payloads (`random_3_from_recent_10`, etc.) |
+
+**Recommended flow:**
+
+1. `rpa_fetch_ig_reels(handle, max_reels=10)` → read `data.content_eval`
+2. `rpa_download_ig_content(content_eval=...)` → local `cover_path` for all 10 + MP4 for random 3 when ON
+3. `rpa_fetch_reel_comments` ×10 on `cover_reels[].url`
+4. `vision_analyze(cover_path=...)` ×10; `video_analyze(file_path=...)` ×3 when ON
+
+Cover downloads prefer the RPA grid `thumbnail_url` (HTTP GET with IG Referer) —
+no yt-dlp round-trip when the grid already exposed the CDN URL. Falls back to
+`rpa_download_ig_cover` / yt-dlp when the thumbnail is missing or HTTP fails.
 
 ## Reel Download (yt-dlp)
 

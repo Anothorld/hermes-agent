@@ -58,11 +58,12 @@ When the `kol-discovery-rpa` toolset is available, use RPA tools instead of step
    → hard_discard? skip to next handle
 3. rpa_fetch_ig_profile(handle)                  → profile data + qualification.gates.followers/region
    → hard_discard? log discard_reason, next handle
-4. rpa_fetch_ig_reels(handle, max_reels=10)      → 10 reels + thumbnail_url + qualification
+4. rpa_fetch_ig_reels(handle, max_reels=10)      → 10 reels + thumbnail_url + content_eval plan
    → hard_discard? discard
-5. [gates all pass] 10 covers + 10 comments → content screening (Step 1.5)
-6. [switch ON] top 3 reels → rpa_download + video_analyze → deep eval
-7. ingest-confirmed-candidate
+5. rpa_download_ig_content(content_eval)           → 10 cover files (+ 3 random videos when ON)
+6. [gates all pass] 10 covers + 10 comments → content screening (Step 1.5)
+7. [switch ON] content_eval.video_reels → video_analyze → deep eval
+8. ingest-confirmed-candidate
 ```
 
 ### Browser stack (RPA 落地后)
@@ -138,15 +139,17 @@ Search by **conversion mechanism**, not niche label: milestone lifestyle, daily-
 
 ### 公共流程（OFF/ON 共有，HARD）
 
-1. `rpa_fetch_ig_reels(handle, max_reels=10)` → 最近 10 条 Reel + thumbnail_url + 播放量
-2. 对 **10 条 Reel 各一次** `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` → 10 组 comments + caption
-3. 对 **10 张封面** 各 `vision_analyze(image_url=thumbnail_url, prompt=...)` — prompt 嵌入该 Reel 的 comments + caption
-4. **汇总 10 封面 + 评论** → 内容主题分布、风格一致性、场景多样性、voice_descriptors
+1. `rpa_fetch_ig_reels(handle, max_reels=10)` → 主页 Reels 网格最近 10 条 + `thumbnail_url`（RPA 从 grid `img[src]` 提取）+ `data.content_eval` 计划（`cover_reels`=10 条；`video_reels`=从该 10 条中**随机**抽 3 条，仅 ON 时有值）
+2. `rpa_download_ig_content(content_eval=<上一步 data.content_eval>)` → 批量下载 10 张封面到本地（优先 RPA `thumbnail_url` HTTP 下载；失败则 yt-dlp fallback）；ON 时另下载 `video_reels` 的 3 个 MP4
+3. 对 **10 条 Reel 各一次** `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` → 10 组 comments + caption
+4. 对 **10 张封面** 各 `vision_analyze(image_path=cover_path, …)` 或 `image_url=thumbnail_url` — prompt 嵌入该 Reel 的 comments + caption
+5. **汇总 10 封面 + 评论** → 内容主题分布、风格一致性、场景多样性、voice_descriptors
+
+单条封面也可：`rpa_download_ig_cover(reel_url, thumbnail_url=<RPA 值>)`。
 
 ### 开关 ON 追加（3 视频深评）
 
-5. 从 10 条中选 **top 3**（播放量最高，排除 72h 内发布）
-6. 对 top 3 各：`rpa_download_ig_reel` → `video_analyze`（prompt 嵌入对应 comments）
+6. `content_eval.video_reels` 已是最近 10 条中的**随机 3 条**（非播放量 top 3）；`rpa_download_ig_content` 已下载 MP4 → 对每条 `video_analyze`（prompt 嵌入对应 comments）
 7. **最终合并**：10 封面视觉 + 10 组评论（广度）+ 3 视频视觉（深度演示/on_camera）→ Showcase / Match
 
 ### 合并打分权重
@@ -159,8 +162,8 @@ Search by **conversion mechanism**, not niche label: milestone lifestyle, daily-
 
 | 模式 | 每候选上限 |
 |------|-----------|
-| OFF | 10× comments + 10× vision_analyze(封面) |
-| ON | 上述 + 3× download + 3× video_analyze(1fps) + rpa_cleanup_reels |
+| OFF | 10× comments + 10× vision_analyze(封面) + `rpa_download_ig_content`（封面） |
+| ON | 上述 + `rpa_download_ig_content`（含 3 随机视频）+ 3× video_analyze(1fps) + rpa_cleanup_reels |
 
 - 评论：first viewport only，不展开 replies
 - 10 条中某条 comments 为空 → 该条仅用封面+caption，注明 `comments_partial`

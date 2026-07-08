@@ -114,8 +114,9 @@ def pre_tool_call(
             "message": (
                 "rpa_download_ig_reel is blocked because video eval is OFF "
                 "(KOL_RPA_VIDEO_EVAL_ENABLED=0 or brief rpa_video_eval_enabled=false). "
-                "Use cover mode: rpa_fetch_ig_reels(thumbnail_url) + "
-                "rpa_fetch_reel_comments + vision_analyze(cover) for content screening."
+                "Use cover mode: rpa_fetch_ig_reels → rpa_download_ig_content "
+                "(covers only) or rpa_download_ig_cover(thumbnail_url) + "
+                "rpa_fetch_reel_comments + vision_analyze(cover_path) for content screening."
             ),
         }
 

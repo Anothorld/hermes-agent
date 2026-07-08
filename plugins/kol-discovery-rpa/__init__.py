@@ -9,7 +9,7 @@ hard thresholds (``qualification_rules.py`` — single source of truth).
 
 Phase 1: rpa_check_ip, rpa_precheck_handle, rpa_fetch_ig_profile
 Phase 2: rpa_fetch_ig_reels, rpa_fetch_google_serp, rpa_download_ig_reel,
-          rpa_download_ig_cover, rpa_fetch_reel_comments(evaluation), rpa_cleanup_reels
+          rpa_download_ig_cover, rpa_download_ig_content, rpa_fetch_reel_comments(evaluation), rpa_cleanup_reels
 Phase 3: rpa_fetch_hashtag_candidates, rpa_fetch_reel_comments(discovery),
           rpa_fetch_similar_accounts, rpa_fetch_following_list
 
@@ -25,13 +25,20 @@ import os
 from pathlib import Path
 
 _PHASE_1_COUNT = 3
-_PHASE_2_COUNT = 9
-_PHASE_3_COUNT = 12
+_PHASE_2_COUNT = 10
+_PHASE_3_COUNT = 13
+
+# Default phase is 2: all discovery + content-eval tools (profile, reels,
+# downloads, comments, cleanup) are implemented and tested. Phase 1 left the
+# agent without rpa_fetch_ig_reels / rpa_download_ig_*, forcing veedcrawl
+# fallbacks. Phase 3 still has hashtag/similar/following stubs, so it stays
+# opt-in. Set KOL_RPA_PHASE=3 to enable those once implemented.
+_DEFAULT_PHASE = int(os.environ.get("KOL_RPA_PHASE", "2"))
 
 
 def _active_tool_count() -> int:
     """Return how many tools to register based on ``KOL_RPA_PHASE`` env."""
-    phase = int(os.environ.get("KOL_RPA_PHASE", "1"))
+    phase = _DEFAULT_PHASE
     if phase >= 3:
         return _PHASE_3_COUNT
     if phase >= 2:
@@ -83,6 +90,7 @@ _TOOL_NAMES = (
     ("rpa_fetch_google_serp",    "RPA_FETCH_GOOGLE_SERP_SCHEMA",    "_handle_fetch_google_serp",    "🔍"),
     ("rpa_download_ig_reel",     "RPA_DOWNLOAD_IG_REEL_SCHEMA",     "_handle_download_ig_reel",     "⬇️"),
     ("rpa_download_ig_cover",    "RPA_DOWNLOAD_IG_COVER_SCHEMA",    "_handle_download_ig_cover",    "🖼️"),
+    ("rpa_download_ig_content",  "RPA_DOWNLOAD_IG_CONTENT_SCHEMA",  "_handle_download_ig_content",  "📦"),
     ("rpa_fetch_reel_comments",  "RPA_FETCH_REEL_COMMENTS_SCHEMA",  "_handle_fetch_reel_comments",  "💬"),
     ("rpa_cleanup_reels",        "RPA_CLEANUP_REELS_SCHEMA",        "_handle_cleanup_reels",        "🧹"),
     # Phase 3

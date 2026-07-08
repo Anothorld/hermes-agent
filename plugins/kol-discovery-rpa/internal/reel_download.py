@@ -351,27 +351,38 @@ def download_cover(
     reel_url: str,
     dest_dir: str | None = None,
     timeout: int = 60,
+    *,
+    thumbnail_url: str | None = None,
 ) -> dict:
-    """Download ONLY an IG Reel's cover image (no video) via yt-dlp.
+    """Download ONLY an IG Reel's cover image (no video).
 
-    For cover-mode content screening (``KOL_RPA_VIDEO_EVAL_ENABLED=0``): the
-    agent calls this per reel to fetch a cover image file for ``vision_analyze``,
-    without downloading the video. Uses ``--write-thumbnail --skip-download`` so
-    only the cover is fetched (fast, no ffmpeg needed).
+    When ``thumbnail_url`` is provided (from ``rpa_fetch_ig_reels`` grid RPA),
+    downloads that CDN URL directly — faster than yt-dlp. Falls back to yt-dlp
+    when the HTTP fetch fails or no thumbnail was scraped.
 
     Args:
         reel_url: IG Reel URL.
         dest_dir: Destination directory (default ~/.hermes/kol-rpa-reels/).
         timeout: Subprocess timeout in seconds.
+        thumbnail_url: Optional grid thumbnail URL from RPA extraction.
 
     Returns:
-        Dict with cover_path, file_size_bytes, thumbnail_url, reel_id.
+        Dict with cover_path, file_size_bytes, thumbnail_url, reel_id, source.
 
     Raises:
-        DownloadError: If yt-dlp fails or the cover file isn't written.
-        CookieExpiredError: If sessionid cookie is missing.
+        DownloadError: If all download paths fail.
+        CookieExpiredError: If sessionid cookie is missing (yt-dlp fallback only).
     """
     from errors import DownloadError
+
+    reel_id = _reel_id_from_url(reel_url)
+    if thumbnail_url:
+        try:
+            return download_cover_from_thumbnail(
+                thumbnail_url, reel_id, dest_dir=dest_dir, timeout=min(timeout, 30),
+            )
+        except DownloadError:
+            pass
 
     dest = Path(dest_dir or _DEFAULT_DEST)
     dest.mkdir(parents=True, exist_ok=True)
@@ -379,7 +390,6 @@ def download_cover(
     if _dir_size_mb(dest) > _DISK_CAP_MB:
         raise DownloadError("disk_cap_exceeded", f"disk usage exceeds {_DISK_CAP_MB}MB cap")
 
-    reel_id = _reel_id_from_url(reel_url)
     cookies_path = _export_cookies()
     use_cookies = _cookies_look_valid(cookies_path)
     try:
@@ -392,7 +402,7 @@ def download_cover(
         if use_cookies:
             cmd += ["--cookies", cookies_path]
         proc = _run_yt_dlp(cmd, timeout)
-        thumbnail_url = _parse_thumbnail_from_stdout(proc.stdout)
+        parsed_thumb = _parse_thumbnail_from_stdout(proc.stdout)
         cover_path = _find_file_for_reel(dest, reel_id, ("jpg", "jpeg", "webp", "png"))
 
         if not cover_path or not os.path.exists(cover_path):
@@ -404,8 +414,9 @@ def download_cover(
         return {
             "cover_path": cover_path,
             "file_size_bytes": os.path.getsize(cover_path),
-            "thumbnail_url": thumbnail_url,
+            "thumbnail_url": parsed_thumb,
             "reel_id": reel_id,
+            "source": "yt_dlp",
         }
     except subprocess.TimeoutExpired:
         raise DownloadError("download_timeout", f"yt-dlp timed out after {timeout}s")
@@ -414,6 +425,190 @@ def download_cover(
             os.unlink(cookies_path)
         except Exception:
             pass
+
+
+def download_cover_from_thumbnail(
+    thumbnail_url: str,
+    reel_id: str,
+    dest_dir: str | None = None,
+    timeout: int = 30,
+) -> dict:
+    """Download a cover image from an RPA-scraped grid ``thumbnail_url``.
+
+    Uses a plain HTTP GET with IG Referer — no yt-dlp round-trip when the reels
+    grid already exposed the CDN URL.
+
+    Args:
+        thumbnail_url: CDN URL from ``rpa_fetch_ig_reels`` ``thumbnail_url``.
+        reel_id: Reel shortcode for the local filename.
+        dest_dir: Destination directory.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        Dict with cover_path, file_size_bytes, thumbnail_url, reel_id, source.
+
+    Raises:
+        DownloadError: On HTTP failure or empty body.
+    """
+    import urllib.error
+    import urllib.request
+
+    from errors import DownloadError
+
+    if not thumbnail_url or not thumbnail_url.startswith("http"):
+        raise DownloadError("invalid_thumbnail_url", "thumbnail_url must be an http(s) URL")
+
+    dest = Path(dest_dir or _DEFAULT_DEST)
+    dest.mkdir(parents=True, exist_ok=True)
+    _cleanup_expired(dest)
+    if _dir_size_mb(dest) > _DISK_CAP_MB:
+        raise DownloadError("disk_cap_exceeded", f"disk usage exceeds {_DISK_CAP_MB}MB cap")
+
+    ext = "jpg"
+    lower = thumbnail_url.lower()
+    if ".webp" in lower:
+        ext = "webp"
+    elif ".png" in lower:
+        ext = "png"
+    elif ".jpeg" in lower:
+        ext = "jpeg"
+
+    safe_id = reel_id or "unknown"
+    out_path = dest / f"{safe_id}.{ext}"
+
+    req = urllib.request.Request(
+        thumbnail_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.instagram.com/",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+    except urllib.error.URLError as e:
+        raise DownloadError("thumbnail_fetch_failed", str(e))
+
+    if not data:
+        raise DownloadError("thumbnail_empty", f"Empty response for {thumbnail_url[:120]}")
+
+    out_path.write_bytes(data)
+    return {
+        "cover_path": str(out_path),
+        "file_size_bytes": len(data),
+        "thumbnail_url": thumbnail_url,
+        "reel_id": safe_id,
+        "source": "rpa_thumbnail",
+    }
+
+
+def download_content_eval(
+    content_eval: dict,
+    dest_dir: str | None = None,
+    *,
+    brief_fields: dict | None = None,
+) -> dict:
+    """Download all cover images + optional video sample from a content_eval plan.
+
+    Intended to run immediately after ``rpa_fetch_ig_reels`` — pass the
+    ``data.content_eval`` block. Cover downloads prefer RPA ``thumbnail_url``;
+    videos use yt-dlp and are skipped when video eval is OFF.
+
+    Args:
+        content_eval: Plan from ``build_content_eval_plan`` / fetch_reels.
+        dest_dir: Download directory.
+        brief_fields: Optional brief for eval-mode resolution.
+
+    Returns:
+        Dict with per-item results, success counts, and partial errors.
+    """
+    from eval_mode import resolve_eval_mode
+
+    from errors import DownloadError, RpaError
+
+    mode = resolve_eval_mode(brief_fields)
+    cover_reels = content_eval.get("cover_reels") or []
+    video_reels = (content_eval.get("video_reels") or []) if mode == "video" else []
+
+    covers: list[dict] = []
+    cover_errors: list[dict] = []
+    for reel in cover_reels:
+        reel_url = reel.get("url", "")
+        reel_id = reel.get("reel_id") or _reel_id_from_url(reel_url)
+        thumb = reel.get("thumbnail_url") or ""
+        try:
+            result = download_cover(
+                reel_url,
+                dest_dir=dest_dir,
+                thumbnail_url=thumb or None,
+            )
+            covers.append({"ok": True, **reel, **result})
+        except RpaError as e:
+            cover_errors.append({
+                "reel_id": reel_id,
+                "url": reel_url,
+                "code": e.code,
+                "message": e.message,
+            })
+            covers.append({"ok": False, **reel, "error_code": e.code, "error": e.message})
+        except DownloadError as e:
+            cover_errors.append({
+                "reel_id": reel_id,
+                "url": reel_url,
+                "code": e.code,
+                "message": e.message,
+            })
+            covers.append({"ok": False, **reel, "error_code": e.code, "error": e.message})
+
+    videos: list[dict] = []
+    video_errors: list[dict] = []
+    for reel in video_reels:
+        reel_url = reel.get("url", "")
+        reel_id = reel.get("reel_id") or _reel_id_from_url(reel_url)
+        if not reel_url:
+            continue
+        try:
+            result = download_reel(
+                reel_url,
+                dest_dir=dest_dir,
+                write_thumbnail=False,
+            )
+            videos.append({"ok": True, **reel, **result})
+        except RpaError as e:
+            video_errors.append({
+                "reel_id": reel_id,
+                "url": reel_url,
+                "code": e.code,
+                "message": e.message,
+            })
+            videos.append({"ok": False, **reel, "error_code": e.code, "error": e.message})
+        except DownloadError as e:
+            video_errors.append({
+                "reel_id": reel_id,
+                "url": reel_url,
+                "code": e.code,
+                "message": e.message,
+            })
+            videos.append({"ok": False, **reel, "error_code": e.code, "error": e.message})
+
+    covers_ok = sum(1 for c in covers if c.get("ok"))
+    videos_ok = sum(1 for v in videos if v.get("ok"))
+
+    return {
+        "eval_mode": mode,
+        "covers_target": content_eval.get("covers_target", len(cover_reels)),
+        "videos_target": content_eval.get("videos_target", 0) if mode == "video" else 0,
+        "covers_downloaded": covers_ok,
+        "videos_downloaded": videos_ok,
+        "covers": covers,
+        "videos": videos,
+        "errors": cover_errors + video_errors,
+        "partial": bool(cover_errors or video_errors),
+    }
 
 
 def cleanup_reels(dest_dir: str | None = None, older_than_hours: float = 1.0) -> dict:
