@@ -145,6 +145,10 @@ _COMMENTS_JS = """
         if (m && m[1]) commentText = m[1].trim().slice(0, 500);
       } catch (e) {}
     }
+    // Strip trailing like-count residue ("I love this !!!! 2次赞" → "I love this !!!!")
+    // The boundary regex stops at " 回复/查看所有/次赞" but "2次赞" has a digit
+    // before "次赞" with no separating space, so the count leaks into the text.
+    commentText = commentText.replace(/\\s*\\d+\\s*(?:次赞|赞|likes?)\\s*$/i, '').trim();
     // Likes: scoped to this comment's block only.
     let likes = 0;
     if (block) {
@@ -196,11 +200,23 @@ def fetch_reel_comments(
         SessionExpiredError: If login wall detected.
     """
     import pacing
+    import re
 
     pacing.jitter_delay("reel")
     pacing.mark_reel_load(runner.task_id)
 
-    resp = runner.navigate(reel_url)
+    # /reel/<id>/ renders as a TikTok-style reels feed where the comment
+    # section is hidden behind a "评论" click interaction (the DOM never
+    # contains commenter links or timestamps until clicked, and even then
+    # the feed may scroll to the next reel instead of opening a panel).
+    # /p/<id>/ renders the traditional post page with comments inline below
+    # the post — commenter handles are real a[href] links, timestamps are
+    # <time> elements, and the body text has the structured
+    # "<handle> <time> <text> 回复/查看所有 <likes>" pattern the JS parser
+    # expects. Rewrite /reel/ → /p/ before navigating.
+    nav_url = re.sub(r"/reel/([A-Za-z0-9_-]+)/?", r"/p/\1/", reel_url)
+
+    resp = runner.navigate(nav_url)
     if not resp.get("success"):
         raise DomChangedError(f"navigate to reel failed: {resp.get('error')}")
 
