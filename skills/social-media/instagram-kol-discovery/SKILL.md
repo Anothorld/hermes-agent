@@ -74,16 +74,18 @@ When the `kol-discovery-rpa` toolset is available, use RPA tools instead of step
 todo: evaluate <handle>
   □ rpa_fetch_ig_profile(handle)          → gates pass / hard_discard?
   □ rpa_fetch_ig_reels(handle, max_reels=10)  → content_eval plan
-  □ rpa_download_ig_content(content_eval)  → 10 cover files downloaded
+  □ rpa_download_ig_content(content_eval)  → 10 cover_path files downloaded (MANDATORY)
   □ rpa_fetch_reel_comments ×10 (mode=evaluation)  → reel_likes + comments per reel
-  □ vision_analyze ×10 (cover_path + comments in prompt)  → style/scene evaluation
+  □ vision_analyze ×10 (image_path=cover_path, prompt=comments+caption)  → style/scene eval (MANDATORY)
   □ [ON] video_analyze ×3 (video_reels)   → on_camera/demo skill
   □ [ON] rpa_cleanup_reels                → delete downloaded MP4s
-  □ compute Match/Showcase scores         → merge content + comments + covers
+  □ compute Match/Showcase scores         → merge covers + comments + (videos if ON)
   □ ingest-confirmed-candidate            → payload with content_eval_mode/covers_evaluated
 ```
 
 **禁止**在 todo 清单未全部勾选前 ingest。如果某步失败（如评论返回 0 条），在 todo 中标注失败原因后可继续下一步——但不能跳过整个步骤。
+
+**`rpa_download_ig_content` 和 `vision_analyze` 标注了 MANDATORY — 跳过这两个步骤直接 ingest 是 HARD 违规。** `rpa_download_ig_content` 接受 `rpa_fetch_ig_reels` 返回的 `data.content_eval` 对象作为参数，批量下载 10 张封面到本地文件。`vision_analyze` 接受 `image_path`（封面文件路径）或 `image_url`（`thumbnail_url`），用 `glm-5v-turbo` 视觉模型评估封面风格/场景适配。
 
 ### Deferred ER gate — 内容筛选仍然必须
 
@@ -149,11 +151,18 @@ Search by **conversion mechanism**, not niche label: milestone lifestyle, daily-
 
 ## Step 1.5 — 内容筛选 (HARD)
 
-对通过机械硬门槛（`qualification.hard_discard=false`）的候选，**必须**执行内容筛选。不得仅凭 profile 文字和播放量数字打 Showcase 分。
+对通过机械硬门槛（`qualification.hard_discard=false` 或 `reel_er.value="deferred"`）的候选，**必须**执行内容筛选。不得仅凭 profile 文字和播放量数字打 Showcase 分。
 
-### 硬规则：评论始终参与
+### 硬规则：封面 + 评论缺一不可 (HARD)
 
-不论 `rpa_video_eval_enabled` 开关 ON/OFF，每条评估 Reel **必须**调用 `rpa_fetch_reel_comments(mode=evaluation)`。Showcase/Match 打分必须合并 comments[]（`voice_descriptors`、`audience_vibe`、`signature_hooks` 的主要来源）。**禁止**仅凭视频或封面视觉单打分而跳过评论采集。
+内容筛选由**两个支柱**组成，**两者都必须执行**，缺一不可：
+
+1. **封面视觉评估**：`rpa_download_ig_content` → `vision_analyze` ×10 — 评估内容垂类分布、视觉风格、场景适配、product_placement
+2. **评论采集**：`rpa_fetch_reel_comments(mode=evaluation)` ×10 — 评估 voice_descriptors、audience_vibe、signature_hooks、真实 ER
+
+**禁止只做评论不做封面，也禁止只做封面不做评论。** 仅做评论采集而跳过 `rpa_download_ig_content` + `vision_analyze` 是违规——封面视觉是 Showcase 分的核心依据，评论无法替代。
+
+**`vision_analyze` 工具在 `vision` 工具集里，使用 `glm-5v-turbo` 模型。传入 `image_path`（本地封面文件路径，来自 `rpa_download_ig_content` 的 `cover_path`）或 `image_url`（`thumbnail_url`），prompt 嵌入对应 Reel 的 comments + caption。**
 
 ### 开关：10 封面 + 评论（OFF，默认）/ 10 封面 + 3 视频 + 评论（ON）
 

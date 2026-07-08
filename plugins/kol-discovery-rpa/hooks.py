@@ -4,6 +4,12 @@ Enforces the video-eval switch:
 - When OFF (default): block ``rpa_download_ig_reel`` — cover mode only.
 - When ON: limit to 3 downloads per candidate handle (not per run).
 
+Also resets per-run pacing quota (profile/reel counters) when a new task_id
+is seen for the first time in this process — without this, a new discover
+run that reuses the same ``kol-campaign:LIVE:...`` task_id inherits the
+previous run's exhausted quota (e.g. 39/40 profiles used), blocking all
+RPA profile evaluations in the new run.
+
 The eval mode is resolved from env ``KOL_RPA_VIDEO_EVAL_ENABLED``.
 Brief field ``rpa_video_eval_enabled`` is checked if the gateway passes
 brief context in kwargs, but the standard gateway pre_tool_call hook
@@ -39,6 +45,11 @@ _MAX_DOWNLOADS_PER_CANDIDATE = 3
 _lock = threading.Lock()
 # (task_id, handle) → download count — per-candidate limit
 _download_counts: dict[tuple[str, str], int] = {}
+
+# Task IDs that have been seen in this process. When a new task_id is
+# encountered, we reset its pacing quota so a fresh discover run doesn't
+# inherit the previous run's exhausted profile/reel counters.
+_seen_task_ids: set[str] = set()
 
 # Extract handle from reel_url: instagram.com/reel/<id>/ has no handle,
 # but the Agent typically calls rpa_fetch_ig_profile(handle) before
@@ -93,11 +104,26 @@ def pre_tool_call(
     tool_call_id: str = "",
     **kwargs: Any,
 ) -> HookResult:
-    """Pre-tool-call hook — enforce video-eval switch and download limits."""
+    """Pre-tool-call hook — enforce video-eval switch, download limits, and quota reset."""
     del tool_call_id, session_id
 
     if not tool_name.startswith(_RPA_TOOL_PREFIX):
         return None
+
+    tid = task_id or "default"
+
+    # Reset pacing quota on first RPA call for a new task_id in this process.
+    # Without this, a new discover run reusing the same task_id (e.g.
+    # kol-campaign:LIVE:SEB8008-20260525) inherits the previous run's
+    # exhausted profile quota (39/40) and can't evaluate any new candidates.
+    with _lock:
+        if tid not in _seen_task_ids:
+            _seen_task_ids.add(tid)
+            try:
+                import pacing as _pacing
+                _pacing.reset(tid)
+            except Exception:
+                pass  # Best-effort — don't block the tool call
 
     # Only enforce on the download tool
     if tool_name != _DOWNLOAD_TOOL:
@@ -121,7 +147,6 @@ def pre_tool_call(
         }
 
     # Video mode — enforce per-candidate download limit (3 distinct reels)
-    tid = task_id or "default"
     reel_url = str(args.get("reel_url", "") or "")
     if not reel_url:
         return None  # Let the handler handle missing reel_url
