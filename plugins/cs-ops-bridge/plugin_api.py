@@ -420,6 +420,7 @@ class CloseSessionBody(BaseModel):
     operator_name: Optional[str] = None
     note: str = ""
     mark_reviewed: bool = True
+    close_escalations: bool = False
 
 
 @router.post("/sessions/{quickcep_session_id}/send-reply")
@@ -472,6 +473,7 @@ def close_session_route(
         operator_name=body.operator_name,
         mark_reviewed=body.mark_reviewed,
         note=body.note,
+        close_escalations=body.close_escalations,
     )
     if result.get("error") == "quickcep_cli_not_found":
         raise HTTPException(status_code=500, detail=result)

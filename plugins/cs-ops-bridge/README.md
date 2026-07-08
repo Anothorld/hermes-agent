@@ -231,9 +231,11 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 | POST | `/escalations/{id}/resume` | key | Launch gateway + resolve |
 | POST | `/sessions/{id}/relaunch` | key | Retry failed/stuck session (auto-routes to resume retry when an escalation with expert answer exists) |
 | POST | `/internal/run-finished` | key | Gateway `on_session_end` callback for resume failure detection |
-| POST | `/sessions/{id}/close` | key | QuickCEP `leave-chat` + optional CAL `reviewed` (Console **结束工单**) |
+| POST | `/sessions/{id}/close` | key | QuickCEP `leave-chat` + optional CAL `reviewed` (Console **结束工单**). Body `close_escalations=true` (垃圾/无关关闭流程) 同时 resolve 该会话所有 open 升级 |
 
 **Close confirmation:** Email sessions record `leaveChat` in message history; live chat uses `chat_end`. Bridge `close_session.py` and profile `quickcep_cli leave-chat` accept both; legacy CLI-only `chat_end` checks caused false `chat_end_not_confirmed`.
+
+**Spam/irrelevant close:** When the operator clicks "关闭工单" on a session whose primary intent is `spam_irrelevant`, the Console passes `close_escalations=true`; `close_session` then calls `close_escalations_on_operator_manual_reply` to resolve any `awaiting_answer`/`resuming` escalations for that session, so a single action fully tears down the ticket. Result includes `escalations_closed: [{escalation_id, ok, prior_state}]`.
 
 ### L2 live caches (Workbench read path)
 

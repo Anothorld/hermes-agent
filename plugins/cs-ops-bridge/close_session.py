@@ -46,8 +46,14 @@ def close_session(
     operator_name: Optional[str] = None,
     mark_reviewed: bool = True,
     note: str = "",
+    close_escalations: bool = False,
 ) -> dict[str, Any]:
-    """End the QuickCEP session and optionally mark CAL reviewed."""
+    """End the QuickCEP session and optionally mark CAL reviewed.
+
+    When ``close_escalations`` is True (spam/irrelevant close flow), any open
+    awaiting_answer / resuming escalations for this session are also resolved
+    so the operator's single "关闭工单" action fully tears down the ticket.
+    """
     cli = _quickcep_cli_path()
     if not cli.is_file():
         return {"ok": False, "error": "quickcep_cli_not_found", "path": str(cli)}
@@ -123,7 +129,31 @@ def close_session(
             "operator_id": operator_id,
             "operator_name": operator_name,
             "mark_reviewed": mark_reviewed,
+            "close_escalations": close_escalations,
         },
         env=env,
     )
-    return {"ok": True, "quickcep": payload, "reviewed": reviewed}
+    result: dict[str, Any] = {"ok": True, "quickcep": payload, "reviewed": reviewed}
+
+    if close_escalations:
+        try:
+            from .operator_escalation_close import close_escalations_on_operator_manual_reply
+
+            esc_hint = note.strip() or "操作员关闭工单（垃圾/无关），升级随之关闭"
+            esc_result = close_escalations_on_operator_manual_reply(
+                quickcep_session_id=quickcep_session_id,
+                env=env,
+                operator_hint=esc_hint,
+            )
+            result["escalations_closed"] = esc_result.get("closed", [])
+            if esc_result.get("skipped"):
+                result["escalations_closed_skipped"] = esc_result.get("reason")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "close_escalations failed during close_session session=%s err=%s",
+                quickcep_session_id,
+                exc,
+            )
+            result["escalations_closed_error"] = str(exc)
+
+    return result
