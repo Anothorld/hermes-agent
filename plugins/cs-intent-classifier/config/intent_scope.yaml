@@ -1,6 +1,9 @@
 # Intent in-scope whitelist.
 # Controls which intents the AI agent auto-handles. Out-of-scope intents are
 # identified by the classifier but left for human agents (or escalated).
+# The Console workbench also uses this list for the "关闭工单" bar when the
+# primary intent is outside processing scope.
+# Override at Console runtime: CS_CONSOLE_INTENT_SCOPE=product_inquiry,logistics_inquiry
 # To let AI handle after_sale/order_management later, flip the value here —
 # no classifier change needed.
 

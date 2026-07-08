@@ -11,6 +11,7 @@ when loaded in-process by the Hermes plugin manager):
 - GET  /learning/intent-metrics       → observability aggregates (Phase 4)
 - GET  /learning/intent-trend         → pass-rate time series (Phase 4)
 - GET  /learning/distill-log          → distill decision audit (Phase 4)
+- GET  /config/intent-scope           → in_scope whitelist (intent_scope.yaml)
 """
 
 from __future__ import annotations
@@ -43,6 +44,33 @@ def _utcnow() -> str:
 @router.get("/health")
 def health() -> dict[str, Any]:
     return {"status": "ok", "service": "cs-intent-classifier"}
+
+
+@router.get("/metrics/trend")
+def metrics_trend_route(
+    env: str = Query("LIVE"),
+    since: str = Query(..., description="ISO lower bound (inclusive), UTC"),
+    until: str = Query(..., description="ISO upper bound (exclusive), UTC"),
+) -> dict[str, Any]:
+    """Per-day 意图分类错误率 series for the Console 数据页签 (read-only).
+
+    Beijing natural day buckets (UTC+8). Returns 分子/分母/错误率 per day.
+    See docs/features/metrics/GUIDE.md for the audit-locked formula.
+    """
+    return db.metrics_trend(env=env, since=since, until=until)
+
+
+@router.get("/config/intent-scope")
+def get_intent_scope_config() -> dict[str, Any]:
+    """Return the in_scope whitelist used for gate + operator UI close-bar logic."""
+    from .classifier import _load_scope
+
+    scope = _load_scope()
+    return {
+        "scope": scope,
+        "in_scope_intents": [k for k, v in scope.items() if v],
+        "out_of_scope_intents": [k for k, v in scope.items() if not v],
+    }
 
 
 @router.post("/classify", response_model=ClassifyResponse)

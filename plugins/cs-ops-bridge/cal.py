@@ -588,6 +588,182 @@ def daily_report_stats(
     }
 
 
+# ── Metrics trend (Console 数据页签) ──────────────────────────────────────
+# All timestamps in CAL are stored as UTC ISO8601 (see _now()). To bucket by
+# Beijing natural day (Asia/Shanghai, UTC+8, no DST) we shift with SQLite's
+# ``+8 hours`` modifier on the naive UTC value: ``date(datetime(ts, '+8 hours'))``.
+# This is validated against real data and matches the operator's "当日" intent.
+#
+# Metric formulas (audit-locked, see docs/features/metrics/GUIDE.md):
+#   ① AI 承担率
+#        分子 = DISTINCT session_id of draft_saved events with
+#                payload.source IN ('agent','resume_agent')  (excludes operator_edit)
+#        分母 = 需回复工单 = 当日已分类会话 − spam 会话 (来自 cs-intent-classifier,
+#                由 Console 后端合并;广告在分类前被 bridge 跳过,不在分类会话内)
+#        gap = 进入生成 − 当日出草稿,按去向分类(failed/takeover/escalated/in_flight/other)
+#   ② 生成升级率
+#        分母 = DISTINCT session_id where
+#                COALESCE(agent_processing_at, processing_started_at) 当日  (= "AI 处理工单" 共同基数)
+#        分子 = DISTINCT session_id of cs_escalations where created_at 当日
+#                AND EXISTS session_handoff phase='processing' before esc.created_at
+#   ④ AI 直接交付率
+#        分子 = DISTINCT session_id where sent_draft_source IN ('agent','resume_agent') 当日
+#        分母 = 当日 AI 草稿会话数(同①分子)
+# (agent_processing_at is v6+; fall back to processing_started_at for v5 rows.)
+#
+# "AI 处理工单" = entered_generation (②分母) 是 ①②④ 的共同基数口径来源;
+# ①分子(草稿)是它的子集,gap 展示进入生成却未出草稿的构成。
+
+
+def _bj_date(ts_col: str) -> str:
+    """SQLite expression yielding Beijing natural date (YYYY-MM-DD) from a UTC ISO ts."""
+    return f"date(datetime({ts_col}, '+8 hours'))"
+
+
+def metrics_trend(
+    *,
+    env: str = "LIVE",
+    since: str,
+    until: str,
+) -> dict[str, Any]:
+    """Per-day metric series for the Console 数据页签, bucketed by Beijing day.
+
+    Returns AI 承担率分子/分母构成、生成升级率、AI 直接交付率 的 CAL 侧数字。
+    意图分类错误率(③)与承担率分母(classified/spam)在 cs-intent-classifier DB,
+    由 Console 后端按日期合并。Days with no activity are filled with zeros so the
+    frontend gets a contiguous series.
+    """
+    with _connect() as conn:
+        # ① 分子 — 当日 AI 生成草稿会话 (DISTINCT session)
+        draft_rows = conn.execute(
+            f"""SELECT {_bj_date('e.created_at')} AS d, e.session_id AS sid
+                FROM cs_conversation_events e
+                WHERE e.env=? AND e.event_type='draft_saved'
+                  AND json_extract(e.payload_json, '$.source') IN ('agent','resume_agent')
+                  AND e.created_at >= ? AND e.created_at < ?""",
+            (env, since, until),
+        ).fetchall()
+        # ② 分母 / 共同基数 — 当日进入生成流程的会话 (DISTINCT session + 其当前 status)
+        gen_rows = conn.execute(
+            f"""SELECT {_bj_date('COALESCE(s.agent_processing_at, s.processing_started_at)')} AS d,
+                      s.id AS sid, s.status AS status
+                FROM cs_session s
+                WHERE s.env=?
+                  AND COALESCE(s.agent_processing_at, s.processing_started_at) IS NOT NULL
+                  AND COALESCE(s.agent_processing_at, s.processing_started_at) >= ?
+                  AND COALESCE(s.agent_processing_at, s.processing_started_at) < ?""",
+            (env, since, until),
+        ).fetchall()
+        # ② 分子 — 当日"生成中升级"会话 (DISTINCT session)
+        esc_rows = conn.execute(
+            f"""SELECT {_bj_date('e.created_at')} AS d, e.session_id AS sid
+                FROM cs_escalations e
+                WHERE e.env=? AND e.created_at >= ? AND e.created_at < ?
+                  AND EXISTS (
+                    SELECT 1 FROM cs_conversation_events ev
+                    WHERE ev.session_id = e.session_id
+                      AND ev.event_type='session_handoff'
+                      AND json_extract(ev.payload_json, '$.phase')='processing'
+                      AND ev.created_at < e.created_at
+                  )""",
+            (env, since, until),
+        ).fetchall()
+        # ④ 分子 — 当日以 AI 原稿发送的会话 (DISTINCT session)
+        sent_rows = conn.execute(
+            f"""SELECT {_bj_date('s.sent_draft_at')} AS d, s.id AS sid
+                FROM cs_session s
+                WHERE s.env=? AND s.sent_draft_source IN ('agent','resume_agent')
+                  AND s.sent_draft_at IS NOT NULL
+                  AND s.sent_draft_at >= ? AND s.sent_draft_at < ?""",
+            (env, since, until),
+        ).fetchall()
+
+    # Index by Beijing date.
+    drafted_by_day: dict[str, set[int]] = {}
+    for r in draft_rows:
+        drafted_by_day.setdefault(r["d"], set()).add(int(r["sid"]))
+    gen_by_day: dict[str, dict[int, str]] = {}  # sid -> status
+    for r in gen_rows:
+        gen_by_day.setdefault(r["d"], {})[int(r["sid"])] = str(r["status"] or "")
+    esc_by_day: dict[str, set[int]] = {}
+    for r in esc_rows:
+        esc_by_day.setdefault(r["d"], set()).add(int(r["sid"]))
+    sent_by_day: dict[str, set[int]] = {}
+    for r in sent_rows:
+        sent_by_day.setdefault(r["d"], set()).add(int(r["sid"]))
+
+    all_days = sorted(set(drafted_by_day) | set(gen_by_day) | set(esc_by_day) | set(sent_by_day))
+    days = []
+    for d in all_days:
+        drafted = drafted_by_day.get(d, set())
+        gen = gen_by_day.get(d, {})
+        esc = esc_by_day.get(d, set())
+        sent = sent_by_day.get(d, set())
+        gen_sids = set(gen.keys())
+        # gap: 进入生成当日 但 当日未出草稿,按去向分类
+        gap = gen_sids - drafted
+        gap_breakdown = {"failed": 0, "takeover": 0, "escalated": 0, "in_flight": 0, "other": 0}
+        for sid in gap:
+            st = gen.get(sid, "")
+            if st == "failed":
+                gap_breakdown["failed"] += 1
+            elif st in ("operator_replied", "operator_sent"):
+                gap_breakdown["takeover"] += 1
+            elif st == "awaiting_expert" or sid in esc:
+                gap_breakdown["escalated"] += 1
+            elif st == "processing":
+                gap_breakdown["in_flight"] += 1
+            else:
+                gap_breakdown["other"] += 1
+        days.append({
+            "date": d,
+            "ai_draft_sessions": len(drafted),
+            "entered_generation": len(gen_sids),
+            "entered_not_drafted": len(gap),
+            "gap_breakdown": gap_breakdown,
+            "escalated_sessions": len(esc),
+            "sent_as_agent_sessions": len(sent),
+        })
+    return {"env": env, "since": since, "until": until, "days": days}
+
+
+def escalated_quickcep_ids_by_day(
+    *,
+    env: str = "LIVE",
+    since: str,
+    until: str,
+) -> dict[str, set[str]]:
+    """Per Beijing day → set of quickcep_session_id that escalated (生成中口径).
+
+    Same SQL as metrics_trend's escalation numerator, but returns the id SET
+    (keyed by quickcep_session_id) so the route can union with HindSight
+    hit-auto ids for the ④ 减升率 denominator. Same口径 as ② → "升级" stays
+    consistent across ② and ④.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT {_bj_date('e.created_at')} AS d,
+                      s.quickcep_session_id AS qid
+                FROM cs_escalations e
+                INNER JOIN cs_session s ON s.id = e.session_id AND s.env = e.env
+                WHERE e.env=? AND e.created_at >= ? AND e.created_at < ?
+                  AND EXISTS (
+                    SELECT 1 FROM cs_conversation_events ev
+                    WHERE ev.session_id = e.session_id
+                      AND ev.event_type='session_handoff'
+                      AND json_extract(ev.payload_json, '$.phase')='processing'
+                      AND ev.created_at < e.created_at
+                  )""",
+            (env, since, until),
+        ).fetchall()
+    out: dict[str, set[str]] = {}
+    for r in rows:
+        out.setdefault(r["d"], set()).add(str(r["qid"]))
+    return out
+
+
+
+
 def _latest_autopilot_job(conn: sqlite3.Connection, session_id: int, env: str) -> Optional[dict[str, Any]]:
     row = conn.execute(
         "SELECT * FROM cs_autopilot_jobs WHERE session_id=? AND env=? ORDER BY id DESC LIMIT 1",

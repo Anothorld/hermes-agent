@@ -74,6 +74,19 @@ Without an LLM configured, the classifier runs keyword-only and returns a conser
 | `GET` | `/learning/intent-metrics` | Console effect panel |
 | `GET` | `/learning/intent-trend` | Console pass-rate chart |
 | `GET` | `/learning/distill-log` | Console distill decision log |
+| `GET` | `/config/intent-scope` | Console workbench (processing scope / close-bar) |
+
+## Processing scope (`config/intent_scope.yaml`)
+
+Controls which intents the AI auto-handles (`in_scope: true`). Out-of-scope intents still appear in classification but are routed to human operators. The Console workbench shows a **关闭工单** bar below the composer when the **primary intent** (AI or operator-corrected) is out of scope.
+
+Override from Console without restarting the classifier:
+
+```bash
+export CS_CONSOLE_INTENT_SCOPE=product_inquiry,logistics_inquiry
+```
+
+Console loads scope via `GET /api/classifier/intent-scope` (priority: `CS_CONSOLE_INTENT_SCOPE` → classifier → built-in default).
 
 ## gate_extract schema (summary)
 

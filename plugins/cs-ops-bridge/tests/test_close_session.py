@@ -169,3 +169,67 @@ def test_close_session_skips_escalations_by_default(close_module, monkeypatch, t
     result = close_module.close_session(quickcep_session_id="qc-close")
     assert result["ok"] is True
     assert "escalations_closed" not in result
+
+
+def test_close_session_infers_close_escalations_from_spam_note(close_module, monkeypatch, tmp_path):
+    _stub_cli(tmp_path, monkeypatch, close_module)
+
+    def fake_run(argv, **kwargs):
+        return type("P", (), {"returncode": 0, "stdout": json.dumps({"ok": True}), "stderr": ""})()
+
+    monkeypatch.setattr(close_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(close_module, "apply_handoff", lambda **kw: {"ok": True, "phase": "reviewed"})
+
+    closed_calls: list[dict[str, Any]] = []
+
+    def fake_close_esc(**kwargs):
+        closed_calls.append(kwargs)
+        return {"ok": True, "closed": [{"escalation_id": 47, "ok": True}]}
+
+    import types
+
+    fake_mod = types.ModuleType(f"{_PKG}.operator_escalation_close")
+    fake_mod.close_escalations_on_operator_manual_reply = fake_close_esc  # type: ignore[attr-defined]
+    sys.modules[f"{_PKG}.operator_escalation_close"] = fake_mod
+    setattr(sys.modules[_PKG], "operator_escalation_close", fake_mod)
+
+    result = close_module.close_session(
+        quickcep_session_id="qc-close",
+        close_escalations=False,
+        note="主意图为垃圾/无关，操作员关闭工单",
+    )
+    assert result["ok"] is True
+    assert result["escalations_closed"] == [{"escalation_id": 47, "ok": True}]
+    assert len(closed_calls) == 1
+
+
+def test_close_session_infers_close_escalations_from_out_of_scope_note(close_module, monkeypatch, tmp_path):
+    _stub_cli(tmp_path, monkeypatch, close_module)
+
+    def fake_run(argv, **kwargs):
+        return type("P", (), {"returncode": 0, "stdout": json.dumps({"ok": True}), "stderr": ""})()
+
+    monkeypatch.setattr(close_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(close_module, "apply_handoff", lambda **kw: {"ok": True, "phase": "reviewed"})
+
+    closed_calls: list[dict[str, Any]] = []
+
+    def fake_close_esc(**kwargs):
+        closed_calls.append(kwargs)
+        return {"ok": True, "closed": [{"escalation_id": 38, "ok": True}]}
+
+    import types
+
+    fake_mod = types.ModuleType(f"{_PKG}.operator_escalation_close")
+    fake_mod.close_escalations_on_operator_manual_reply = fake_close_esc  # type: ignore[attr-defined]
+    sys.modules[f"{_PKG}.operator_escalation_close"] = fake_mod
+    setattr(sys.modules[_PKG], "operator_escalation_close", fake_mod)
+
+    result = close_module.close_session(
+        quickcep_session_id="qc-close",
+        close_escalations=False,
+        note="主意图不在处理范围（售后问题），操作员关闭工单",
+    )
+    assert result["ok"] is True
+    assert result["escalations_closed"] == [{"escalation_id": 38, "ok": True}]
+    assert len(closed_calls) == 1

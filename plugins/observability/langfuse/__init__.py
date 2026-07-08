@@ -642,6 +642,65 @@ def _usage_and_cost(response: Any, *, provider: str, api_mode: str, model: str, 
     return usage_details, cost_details
 
 
+def _upsert_trace_metadata(client: Langfuse, trace_id: str, session_id: str,
+                           metadata: dict, tags: Optional[list] = None, user_id: str = "") -> None:
+    """Upsert trace session_id and name via the Langfuse ingestion API.
+
+    The Langfuse SDK's TraceContext only accepts trace_id and parent_span_id —
+    session_id must be set via OTel baggage (propagate_attributes).  When
+    propagate_attributes is unavailable or fails (e.g. cross-thread Context
+    errors on Python 3.14), the trace is created without session_id and
+    without a name.  This function uses the ingestion API's trace-create
+    endpoint as an upsert to set those fields after the fact.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    base_url = _env("HERMES_LANGFUSE_BASE_URL") or _env("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com"
+    public_key = _env("HERMES_LANGFUSE_PUBLIC_KEY") or _env("LANGFUSE_PUBLIC_KEY")
+    secret_key = _env("HERMES_LANGFUSE_SECRET_KEY") or _env("LANGFUSE_SECRET_KEY")
+    if not (public_key and secret_key):
+        return
+
+    try:
+        import requests as _requests
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        body: Dict[str, Any] = {
+            "id": trace_id,
+            "name": "Hermes turn",
+            "sessionId": session_id,
+            "timestamp": now_iso,
+            "metadata": metadata,
+        }
+        if tags:
+            body["tags"] = tags
+        if user_id:
+            body["userId"] = user_id
+
+        resp = _requests.post(
+            f"{base_url}/api/public/ingestion",
+            json={
+                "batch": [
+                    {
+                        "id": str(_uuid.uuid4()),
+                        "type": "trace-create",
+                        "timestamp": now_iso,
+                        "body": body,
+                    }
+                ]
+            },
+            auth=(public_key, secret_key),
+            timeout=5,
+        )
+        if resp.status_code not in (200, 207):
+            _debug(f"ingestion upsert returned {resp.status_code}: {resp.text[:200]}")
+        else:
+            _debug(f"upserted trace {trace_id} with session_id={session_id}")
+    except Exception as exc:
+        _debug(f"ingestion upsert failed for trace {trace_id}: {exc}")
+
+
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "") -> TraceState:
@@ -678,10 +737,24 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     if session_id:
         trace_ctx["session_id"] = session_id
 
+    # Determine effective session_id: use the provided session_id, falling
+    # back to task_key (which is task_id or session:<id> or thread:<id>).
+    # This ensures every trace has a non-empty sessionId for UI grouping,
+    # even when the caller passes an empty session_id (e.g. api_server
+    # gateway sessions where propagate_attributes can fail cross-thread).
+    effective_session_id = session_id or task_key
+
+    # propagate_attributes sets session_id via OTel baggage.  When it works,
+    # the Langfuse SDK reads the baggage and attaches session_id to the trace
+    # server-side.  However, TraceContext (the trace_ctx dict) only accepts
+    # trace_id and parent_span_id — extra keys like session_id are silently
+    # ignored by the SDK.  So if propagate_attributes fails, we must use the
+    # ingestion API to upsert the trace with session_id and name.
+    used_propagate = False
     if propagate_attributes is not None:
         try:
             with propagate_attributes(
-                session_id=session_id or task_key,
+                session_id=effective_session_id,
                 user_id=user_id or None,
                 trace_name="Hermes turn",
                 tags=tags,
@@ -695,17 +768,10 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                     end_on_exit=False,
                 )
                 root_span = root_ctx.__enter__()
-        except Exception:
-            root_ctx = client.start_as_current_observation(
-                trace_context=trace_ctx,
-                name="Hermes turn",
-                as_type="chain",
-                input=trace_input,
-                metadata=metadata,
-                end_on_exit=False,
-            )
-            root_span = root_ctx.__enter__()
-    else:
+                used_propagate = True
+        except Exception as exc:
+            _debug(f"propagate_attributes failed, falling back to ingestion upsert: {exc}")
+    if not used_propagate:
         root_ctx = client.start_as_current_observation(
             trace_context=trace_ctx,
             name="Hermes turn",
@@ -715,6 +781,14 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
             end_on_exit=False,
         )
         root_span = root_ctx.__enter__()
+
+    # If propagate_attributes was not used (missing, failed, or unavailable),
+    # the trace was created without session_id in the OTel baggage.  The
+    # Langfuse SDK's TraceContext dict silently ignores session_id, so we
+    # must upsert the trace via the ingestion API to set session_id and
+    # ensure the trace has a name for UI visibility.
+    if not used_propagate:
+        _upsert_trace_metadata(client, trace_id, effective_session_id, metadata, tags, user_id)
 
     _debug(f"started trace {trace_id} for {task_key}")
     return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span)

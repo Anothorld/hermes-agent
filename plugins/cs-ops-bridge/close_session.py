@@ -23,6 +23,26 @@ log = logging.getLogger(__name__)
 
 LEAVE_CHAT_SUBPROCESS_TIMEOUT = 120
 
+_OUT_OF_SCOPE_CLOSE_NOTE_MARKERS = (
+    "不在处理范围",
+    "不在 AI 处理范围",
+    "垃圾/无关",
+    "spam_irrelevant",
+)
+
+
+def _should_close_escalations(*, close_escalations: bool, note: str) -> bool:
+    """Return True when open escalations should be resolved with the ticket close.
+
+    Explicit ``close_escalations=True`` (out-of-scope close bar) always wins. We
+    also infer from the operator note so a console/backend version skew cannot
+    leave orphan escalations when the close note clearly went through.
+    """
+    if close_escalations:
+        return True
+    text = (note or "").strip()
+    return any(marker in text for marker in _OUT_OF_SCOPE_CLOSE_NOTE_MARKERS)
+
 
 def _quickcep_cli_path() -> Path:
     return quickcep_skill_dir() / "scripts" / "quickcep_cli.py"
@@ -130,12 +150,15 @@ def close_session(
             "operator_name": operator_name,
             "mark_reviewed": mark_reviewed,
             "close_escalations": close_escalations,
+            "close_escalations_effective": _should_close_escalations(
+                close_escalations=close_escalations, note=note
+            ),
         },
         env=env,
     )
     result: dict[str, Any] = {"ok": True, "quickcep": payload, "reviewed": reviewed}
 
-    if close_escalations:
+    if _should_close_escalations(close_escalations=close_escalations, note=note):
         try:
             from .operator_escalation_close import close_escalations_on_operator_manual_reply
 

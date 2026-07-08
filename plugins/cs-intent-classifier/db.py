@@ -273,6 +273,86 @@ def list_corrections(
     return out
 
 
+def metrics_trend(
+    *,
+    env: str = "LIVE",
+    since: str,
+    until: str,
+) -> dict[str, Any]:
+    """Per-day 意图分类错误率 + 承担率分母 series for the Console 数据页签, Beijing-day buckets.
+
+    All timestamps are stored UTC ISO (``datetime.now(timezone.utc).isoformat()``).
+    Beijing natural day = UTC+8 shift via SQLite ``+8 hours`` modifier.
+
+    Returns per day:
+      classified_sessions  — DISTINCT session classified (承担率分母基数)
+      spam_sessions        — DISTINCT session classified as primary_intent=spam_irrelevant
+                             (需回复工单 = classified − spam;广告在分类前被 bridge 跳过,不在此)
+      error_sessions       — DISTINCT session with primary_intent correction (③分子)
+      error_rate           — error_sessions / classified_sessions
+
+    Formula (audit-locked, see docs/features/metrics/GUIDE.md):
+        ③ 分子 = DISTINCT session_id of cs_intent_corrections where
+               predicted_json != '{}'  (排除无 AI 预测的操作员手标)
+               AND json_extract(predicted,'$.primary_intent')
+                   != json_extract(corrected,'$.primary_intent')
+        ③ 分母 = DISTINCT session_id of cs_intent_classifications 当日
+    """
+    with connect() as conn:
+        denom_rows = conn.execute(
+            """SELECT date(datetime(classified_at, '+8 hours')) AS d,
+                      COUNT(DISTINCT session_id) AS n
+               FROM cs_intent_classifications
+               WHERE env=? AND classified_at >= ? AND classified_at < ?
+               GROUP BY d ORDER BY d""",
+            (env, since, until),
+        ).fetchall()
+        spam_rows = conn.execute(
+            """SELECT date(datetime(classified_at, '+8 hours')) AS d,
+                      COUNT(DISTINCT session_id) AS n
+               FROM cs_intent_classifications
+               WHERE env=? AND classified_at >= ? AND classified_at < ?
+                 AND json_extract(gate_extract_json, '$.primary_intent') = 'spam_irrelevant'
+               GROUP BY d ORDER BY d""",
+            (env, since, until),
+        ).fetchall()
+        num_rows = conn.execute(
+            """SELECT date(datetime(c.created_at, '+8 hours')) AS d,
+                      COUNT(DISTINCT c.session_id) AS n
+               FROM cs_intent_corrections c
+               WHERE c.env=? AND c.created_at >= ? AND c.created_at < ?
+                 AND c.predicted_json != '{}'
+                 AND json_extract(c.predicted_json, '$.primary_intent')
+                     IS NOT json_extract(c.corrected_json, '$.primary_intent')
+               GROUP BY d ORDER BY d""",
+            (env, since, until),
+        ).fetchall()
+
+    by_date: dict[str, dict[str, int]] = {}
+    for r in denom_rows:
+        by_date.setdefault(r["d"], {})["classified_sessions"] = int(r["n"])
+    for r in spam_rows:
+        by_date.setdefault(r["d"], {})["spam_sessions"] = int(r["n"])
+    for r in num_rows:
+        by_date.setdefault(r["d"], {})["error_sessions"] = int(r["n"])
+
+    days = []
+    for d in sorted(by_date.keys()):
+        cls = by_date[d].get("classified_sessions", 0)
+        spam = by_date[d].get("spam_sessions", 0)
+        err = by_date[d].get("error_sessions", 0)
+        days.append({
+            "date": d,
+            "classified_sessions": cls,
+            "spam_sessions": spam,
+            "reply_needed_sessions": max(cls - spam, 0),
+            "error_sessions": err,
+            "error_rate": round(err / cls, 4) if cls else None,
+        })
+    return {"env": env, "since": since, "until": until, "days": days}
+
+
+
 def corrections_for_session(*, session_id: str, env: str) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(

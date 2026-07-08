@@ -20,6 +20,11 @@ _AUTO_HANDLE_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\b(where is|track(ing)?|shipping|delivery|shipment|order status)\b", "logistics"),
     (r"\b(order\s*#?\s*\d{10,})\b", "logistics"),
     (r"\b(dimension|size|material|color|spec|weight|assembly|sku|product)\b", "product"),
+    # Fabric/material/swatch/custom order inquiries — common pre-sale product questions
+    (r"\b(fabric|swatch|sample|leather|suede|linen|velvet|chenille|upholstery|napuck|nubuck)\b", "product"),
+    (r"\b(custom\s*order|customized|made\s*to\s*order|special\s*order)\b", "product"),
+    (r"\b(in\s*stock|availability|lead\s*time|when\s*available)\b", "product"),
+    (r"\b(showroom|in\s*person|see\s*it\s*in\s*person)\b", "product"),
     (r"\b(missing part|wrong item|damaged|scratch|broken)\b", "issue_standard"),
 )
 

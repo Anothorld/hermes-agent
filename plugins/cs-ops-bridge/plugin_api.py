@@ -290,6 +290,61 @@ def daily_report_stats_route(
     return cal.daily_report_stats(env=env, since=since, until=until, limit=limit)
 
 
+@router.get("/metrics/trend")
+def metrics_trend_route(
+    env: str = Query("LIVE"),
+    since: str = Query(..., description="ISO lower bound (inclusive), UTC, e.g. 2026-07-01T16:00:00+00:00 (= Beijing 07-02 00:00)"),
+    until: str = Query(..., description="ISO upper bound (exclusive), UTC"),
+) -> dict[str, Any]:
+    """Per-day metric series for the Console 数据页签 (read-only, no bridge key).
+
+    Buckets by Beijing natural day (Asia/Shanghai, UTC+8).     Returns AI 承担率
+    分子/分母构成、生成升级率(②)、HindSight 减升率(④) 的 CAL 侧数字。意图分类
+    错误率(③) 与承担率分母(classified/spam) 由 cs-intent-classifier 提供,
+    Console 后端按日期合并。见 docs/features/metrics/GUIDE.md。
+    """
+    base = cal.metrics_trend(env=env, since=since, until=until)
+    days = base.get("days", [])
+
+    # ④ HindSight 减升率:分母 = CAL 所有升级(与②同源) ∪ tracker 召回免升,
+    # 按 quickcep_session_id 求并集(两者有重叠:被免升后又升级的会话)。
+    # 分子 = tracker 召回命中且免升。这样 ④ 的"升级"= ② 的升级数,口径一致。
+    hs_by_day: dict[str, dict[str, Any]] = {}
+    cal_esc_ids_by_day: dict[str, set[str]] = {}
+    hs_ok = False
+    if days:
+        start_bj = days[0]["date"]
+        end_bj = days[-1]["date"]
+        try:
+            cal_esc_ids_by_day = cal.escalated_quickcep_ids_by_day(env=env, since=since, until=until)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("metrics/trend: cal escalated ids failed: %s", exc)
+        try:
+            from . import metrics_hindsight
+            hs = metrics_hindsight.de_escalation_trend(start_bj=start_bj, end_bj=end_bj)
+            hs_ok = bool(hs.get("available"))
+            for d in hs.get("days", []):
+                hs_by_day[d["date"]] = d
+        except Exception as exc:  # noqa: BLE001
+            log.warning("metrics/trend: hindsight de-escalation failed: %s", exc)
+
+    for d in days:
+        hs = hs_by_day.get(d["date"])
+        cal_esc_ids = cal_esc_ids_by_day.get(d["date"], set())
+        hit_auto_ids = set(hs.get("hs_hit_auto_ids", [])) if hs else set()
+        decision_domain = cal_esc_ids | hit_auto_ids  # 并集,去重
+        d["hs_hit_auto_sessions"] = len(hit_auto_ids)
+        d["hs_escalated_sessions"] = len(cal_esc_ids)  # = ② 升级数,同源一致
+        d["hs_decision_domain"] = len(decision_domain)
+        d["de_escalation_rate"] = round(len(hit_auto_ids) / len(decision_domain), 4) if decision_domain else None
+
+    base["hindsight_available"] = hs_ok
+    return base
+
+
+
+
+
 @router.get("/sessions/{quickcep_session_id}/workbench")
 def get_session_workbench(
     quickcep_session_id: str,

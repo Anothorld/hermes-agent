@@ -68,6 +68,10 @@ _PRODUCT_PATTERNS: tuple[str, ...] = (
     r"\b(dimensions?|size|material|materials?|color|colour|spec|specs|weight|assembly|sku)\b",
     r"\b(in stock|availability|lead time)\b",
     r"\b(recommend|suggestion).*(sofa|table|chair|desk|bed)\b",
+    # Fabric/material/swatch/custom order — common pre-sale product questions
+    r"\b(fabric|swatch|sample|leather|suede|linen|velvet|chenille|upholstery|nubuck|napuck)\b",
+    r"\b(custom\s*order|customized|made\s*to\s*order|special\s*order)\b",
+    r"\b(showroom|in\s*person|see\s*it\s*in\s*person)\b",
 )
 
 # Spam patterns → spam_irrelevant, out_of_scope.

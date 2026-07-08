@@ -235,7 +235,7 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 
 **Close confirmation:** Email sessions record `leaveChat` in message history; live chat uses `chat_end`. Bridge `close_session.py` and profile `quickcep_cli leave-chat` accept both; legacy CLI-only `chat_end` checks caused false `chat_end_not_confirmed`.
 
-**Spam/irrelevant close:** When the operator clicks "关闭工单" on a session whose primary intent is `spam_irrelevant`, the Console passes `close_escalations=true`; `close_session` then calls `close_escalations_on_operator_manual_reply` to resolve any `awaiting_answer`/`resuming` escalations for that session, so a single action fully tears down the ticket. Result includes `escalations_closed: [{escalation_id, ok, prior_state}]`.
+**Spam/irrelevant close:** When the operator clicks "关闭工单" on a session whose primary intent is outside AI processing scope, the Console passes `close_escalations=true`; `close_session` then calls `close_escalations_on_operator_manual_reply` to resolve any `awaiting_answer`/`resuming` escalations for that session, so a single action fully tears down the ticket. Result includes `escalations_closed: [{escalation_id, ok, prior_state}]`. **Fallback:** if `close_escalations` is missing/false but the close `note` contains `不在处理范围` / `垃圾/无关`, bridge still resolves open escalations (guards against console version skew). Regular **结束工单** also passes `close_escalations=true`.
 
 ### L2 live caches (Workbench read path)
 

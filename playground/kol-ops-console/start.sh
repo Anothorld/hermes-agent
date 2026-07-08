@@ -150,10 +150,10 @@ resolve_hermes_home() {
   # load the default profile's Gmail token, causing thread/draft lookups
   # to silently target the wrong mailbox.
   if [[ -n "${HERMES_HOME:-}" ]]; then
-    return
+    return 0
   fi
   local active_path="$HOME/.hermes/active_profile"
-  [[ -f "$active_path" ]] || return
+  [[ -f "$active_path" ]] || return 0
   local profile
   profile="$(tr -d '\n\r \t' < "$active_path" 2>/dev/null || true)"
   if [[ -z "$profile" || "$profile" == "default" ]]; then
