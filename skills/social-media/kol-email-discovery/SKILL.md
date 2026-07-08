@@ -63,7 +63,8 @@ tried or skipped.
 |-------|-------|
 | CAL | `kol_bridge_tool.py` (`get-identity`, `upsert-identity`, `write-facts-multi`) |
 | Nox Gate B | `python3 plugins/nox-kol-bridge/scripts/nox_kol_tool.py contacts --gate pre_outreach_confirm` |
-| Browser Tier 1 + 2 | `browser_navigate`, `browser_snapshot`, `browser_get_images`, `browser_click`, `vision_analyze` on **local debug Chrome** (auto-started by `local-chrome-tab-pool`) |
+| RPA (preferred) | `rpa_fetch_google_serp` (Google SERP — replaces `browser_navigate` to google.com/search), `rpa_fetch_ig_profile` (IG bio + link-in-bio URL — replaces `browser_navigate` to instagram.com profile) |
+| Browser (RPA 未覆盖面) | `browser_navigate`, `browser_snapshot`, `browser_get_images`, `browser_click`, `vision_analyze` on **local debug Chrome** — 用于 Linktree/Beacons 钻取、Contact 按钮展开、Facebook About、bio 图片 OCR 等 RPA 未覆盖的 JS-gated 面 |
 
 ### Forbidden tools (hard)
 `veedcrawl_*`, `delegate_task`, `mcp_chrome_devtools_*`, `web_search`,
@@ -161,6 +162,10 @@ Try in order (creator-owned first, agency last):
 For each query:
 
 ```
+# MUST use rpa_fetch_google_serp (HARD — not optional)
+rpa_fetch_google_serp query="<url_encoded_query>"
+
+# Fallback ONLY when rpa_fetch_google_serp returns ok=false:
 browser_navigate url="https://www.google.com/search?q=<url_encoded_query>"
 browser_snapshot
 ```
@@ -206,13 +211,17 @@ Common URLs when Google or CAL surfaces them:
 ### Step 4 — Tier 2: JS-gated surfaces (only if Step 3 found no verified email)
 
 Reserved for Instagram bio, Linktree/Beacons behind clicks, lazy-loaded
-contact blocks. Same `browser_*` tools and discipline as Step 3.
+contact blocks.
+
+**RPA 优先（HARD）：** IG profile bio + link-in-bio URL 用 `rpa_fetch_ig_profile`，
+不用 `browser_navigate`。Link-in-bio 钻取、Contact 按钮、Facebook About 等 RPA 未覆盖面
+继续用 `browser_*`。
 
 Browse sequence:
-1. `https://www.instagram.com/<handle>/` — bio text + link-in-bio URL
-2. Link-in-bio target (Linktree / Beacons / personal site)
-3. Personal site Contact / About / Press / Work-with-me subpages
-4. Facebook profile/Page/About (when relevant)
+1. `rpa_fetch_ig_profile(handle)` — 返回 bio + bio_links（link-in-bio URL）；不用 `browser_navigate` 到 IG
+2. Link-in-bio target (Linktree / Beacons / personal site) — `browser_navigate` + `browser_snapshot`（RPA 未覆盖）
+3. Personal site Contact / About / Press / Work-with-me subpages — `browser_navigate` + `browser_snapshot`
+4. Facebook profile/Page/About (when relevant) — `browser_navigate` + `browser_snapshot`
 5. Bio email in image → `browser_get_images` + `vision_analyze`:
    `"Extract any email addresses visible in this image. Reply with addresses only, one per line, or 'NONE'."`
 6. Agency roster — **only when** steps 1–5 found no `personal_candidate`

@@ -39,6 +39,7 @@ _BROWSER_BLOCKED_SESSION_PREFIXES = (
 
 _BROWSER_TOOL_PREFIX = "browser_"
 _MCP_CHROME_TOOL_PREFIX = "mcp_chrome_devtools_"
+_RPA_TOOL_PREFIX = "rpa_"
 _VEEDCRAWL_TOOL_PREFIX = "veedcrawl_"
 
 # ``execute_code`` / ``terminal`` workarounds that bypass Tier-2 ``browser_*``
@@ -110,6 +111,97 @@ def _is_mcp_chrome_tool(tool_name: str) -> bool:
 
 def _is_veedcrawl_tool(tool_name: str) -> bool:
     return tool_name.startswith(_VEEDCRAWL_TOOL_PREFIX)
+
+
+def _is_rpa_tool(tool_name: str) -> bool:
+    return tool_name.startswith(_RPA_TOOL_PREFIX)
+
+
+def _rpa_strict_browser_block_enabled() -> bool:
+    """Return True when URL-based browser block is active (default on)."""
+    return os.environ.get("KOL_RPA_STRICT_BROWSER_BLOCK", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _rpa_strict_mode_enabled() -> bool:
+    """Return True when extreme strict mode blocks ALL browser_* in discovery."""
+    return os.environ.get("KOL_RPA_STRICT", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _load_rpa_url_policy():
+    """Load rpa_url_policy module (internal, via importlib)."""
+    cached = sys.modules.get("kol_bridge_agent_guard_rpa_url_policy")
+    if cached is not None:
+        return cached
+    path = Path(__file__).resolve().parent / "internal" / "rpa_url_policy.py"
+    if not path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "kol_bridge_agent_guard_rpa_url_policy", path,
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _check_rpa_browser_url_block(
+    tool_name: str,
+    args: Dict[str, Any],
+    session_id: str,
+    task_id: str,
+) -> HookResult:
+    """Block browser_* to RPA-replaced URLs (IG/Google/ipinfo) in discovery sessions.
+
+    Only active when:
+    - KOL_RPA_STRICT_BROWSER_BLOCK=1 (default)
+    - session is kol-campaign:* discovery (not outreach/draft)
+    - bootstrap is complete (don't double-block during bootstrap)
+    - tool is browser_navigate (other browser_* don't have URL args)
+
+    Falls back to allow if a valid RPA fallback token exists for the URL.
+    """
+    if not _rpa_strict_browser_block_enabled():
+        return None
+    if not _campaign_discovery_session(session_id, task_id):
+        return None
+    if tool_name != "browser_navigate":
+        return None
+
+    url = str(args.get("url", "") or "")
+    if not url:
+        return None
+
+    policy = _load_rpa_url_policy()
+    if policy is None:
+        return None
+
+    if not policy.should_block_url(url):
+        return None  # URL is allowed (curated list, TikTok, etc.)
+
+    sid = _session_key(session_id, task_id)
+
+    # Check for RPA fallback token (one-shot allow)
+    ds = _load_discovery_session()
+    if ds.consume_rpa_fallback(sid, url):
+        return None  # Token consumed — allow this one browser_navigate
+
+    return {
+        "action": "block",
+        "message": (
+            f"browser_navigate to {url} is blocked when KOL_RPA_STRICT_BROWSER_BLOCK=1. "
+            "Use RPA tools instead: rpa_fetch_ig_profile / rpa_fetch_ig_reels / "
+            "rpa_fetch_reel_comments for instagram.com, rpa_fetch_google_serp for "
+            "google.com/search, rpa_check_ip for ipinfo.io. "
+            "If an RPA tool returned ok=false with fallback_hint, it has already "
+            "granted a one-time fallback token for that URL."
+        ),
+    }
 
 
 def _email_discover_session(session_id: str, task_id: str = "") -> bool:
@@ -260,7 +352,7 @@ def _extract_path(tool_name: str, args: Dict[str, Any]) -> str:
 
 
 def _discovery_exploration_tool(tool_name: str) -> bool:
-    return _is_browser_tool(tool_name) or _is_veedcrawl_tool(tool_name)
+    return _is_browser_tool(tool_name) or _is_veedcrawl_tool(tool_name) or _is_rpa_tool(tool_name)
 
 
 def _check_discovery_bootstrap(
@@ -349,6 +441,27 @@ def pre_tool_call(
                     "action": "block",
                     "message": _campaign_discovery_public_web_message("execute_code HTTP"),
                 }
+
+        # KOL_RPA_STRICT=1: block ALL browser_* in discovery (extreme mode)
+        if _rpa_strict_mode_enabled() and _is_browser_tool(tool_name):
+            return {
+                "action": "block",
+                "message": (
+                    "browser_* is blocked for kol-campaign discovery when "
+                    "KOL_RPA_STRICT=1 (extreme mode). Use rpa_* tools for all "
+                    "IG/Google/ipinfo operations. Set KOL_RPA_STRICT=0 to "
+                    "restore URL-specific blocking (default)."
+                ),
+            }
+
+        # RPA URL block: block browser_navigate to IG/Google/ipinfo URLs
+        # (only when bootstrap is complete — bootstrap block handles pre-bootstrap)
+        ds = _load_discovery_session()
+        _bs_complete = ds.bootstrap_complete(sid)
+        if _bs_complete:
+            url_block = _check_rpa_browser_url_block(tool_name, args, session_id, task_id)
+            if url_block is not None:
+                return url_block
 
     if _browser_enrichment_session(session_id, task_id):
         if tool_name in ("web_search", "web_extract"):

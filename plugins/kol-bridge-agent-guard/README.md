@@ -14,7 +14,8 @@ bypassing the deterministic KOL bridge CLI.
 | `web_search` / `web_extract` | `kol-email-discover:*` and `kol-campaign:*` discovery runs — use `browser_navigate` → `https://www.google.com/search?q=...` |
 | `terminal` / `execute_code` HTTP scrape | `kol-email-discover:*` and `kol-campaign:*` when command matches curl/requests/Serper/google.com/search/etc. |
 | `browser_*` | Post-approval only: `kol-campaign-outreach:`, `kol-campaign-draft:`, `kol-nox-contacts-batch:`, `kol-reply:` — use Nox + bridge CLI, not browser crawl |
-| `browser_*` / `veedcrawl_*` | **`kol-campaign:` discovery** — blocked until bootstrap completes: `list-candidates`, `list-discovery-skip-handles`, `list-outreach-cooldown-handles` for the session's campaign |
+| `browser_*` / `veedcrawl_*` / `rpa_*` | **`kol-campaign:` discovery** — blocked until bootstrap completes: `list-candidates`, `list-discovery-skip-handles`, `list-outreach-cooldown-handles` for the session's campaign |
+| `browser_navigate` (URL block) | **`kol-campaign:` discovery** (post-bootstrap, when `KOL_RPA_STRICT_BROWSER_BLOCK=1`) — blocked for `instagram.com/*`, `google.com/search`, `ipinfo.io` URLs. Use `rpa_*` tools instead. One-shot fallback token granted by RPA tools on `ok=false`. Does NOT affect `kol-email-discover:*` or `kol-creator-brief-refresh:*`. |
 | `terminal` (bridge CLI) | **`kol-campaign:` discovery** — `--campaign-id` / `--env` must match session; mismatches are blocked |
 
 Block messages include the canonical Nox path:
@@ -28,7 +29,8 @@ Allowed:
 - `terminal` running absolute path to **`kol-bridge-cli`** (one subcommand per call).
 - `ingest-confirmed-candidate --json @/tmp/ingest_<handle>.json` (single handle; not batch execute_code).
 - `| tee /tmp/…` on bridge CLI (stdout still visible to the agent).
-- `browser_*` on `kol-campaign:` (instagram discovery) and `kol-email-discover:` (Console「全网搜索邮箱」Tier 2) and `kol-creator-brief-refresh:` (Console 创作者简介刷新).
+- `browser_*` on `kol-campaign:` (instagram discovery — but see URL block below when `KOL_RPA_STRICT_BROWSER_BLOCK=1`) and `kol-email-discover:` (Console「全网搜索邮箱」Tier 2) and `kol-creator-brief-refresh:` (Console 创作者简介刷新).
+- `rpa_*` tools on `kol-campaign:` discovery (after bootstrap) — these are the preferred replacement for `browser_*` on IG/Google URLs.
 
 ## Session matching
 

@@ -112,6 +112,45 @@ def test_collect_visited_handles_dedupes_preserving_order():
     assert visited == ["alpha", "beta"]
 
 
+def test_collect_visited_handles_includes_rpa_tools():
+    """rpa_fetch_ig_profile and rpa_fetch_ig_reels count as visited."""
+    h = _load_hooks()
+    messages = [
+        _assistant_msg_with_tool_call(
+            "rpa_fetch_ig_profile",
+            {"handle": "rpa_alpha"},
+        ),
+        _assistant_msg_with_tool_call(
+            "rpa_fetch_ig_reels",
+            {"handle": "rpa_beta"},
+        ),
+        _assistant_msg_with_tool_call(
+            "browser_navigate",
+            {"url": "https://www.instagram.com/browser_gamma/"},
+        ),
+        # Same handle via rpa + browser → deduped
+        _assistant_msg_with_tool_call(
+            "rpa_fetch_ig_profile",
+            {"handle": "browser_gamma"},
+        ),
+    ]
+    visited = h.collect_visited_handles(messages)
+    assert visited == ["rpa_alpha", "rpa_beta", "browser_gamma"]
+
+
+def test_collect_visited_handles_rpa_handle_with_at_prefix():
+    """RPA handle with @ prefix is normalized."""
+    h = _load_hooks()
+    messages = [
+        _assistant_msg_with_tool_call(
+            "rpa_fetch_ig_profile",
+            {"handle": "@username"},
+        ),
+    ]
+    visited = h.collect_visited_handles(messages)
+    assert visited == ["username"]
+
+
 def test_compute_pending_handles_subtracts_ingested(tmp_path, monkeypatch):
     h = _load_hooks()
     messages = [

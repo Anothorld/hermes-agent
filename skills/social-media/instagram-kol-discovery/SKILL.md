@@ -29,6 +29,11 @@ Before browsing, extract a compact **Campaign Context** from user input, product
   `browser_mode: local-chrome` (always treat as local-chrome). Do not
   confuse with the brief's `mode:` field — that is campaign env
   (`LIVE` / `TEST`). See **Local Chrome (`browser_*` tools)** below.
+  **RPA 优先 (HARD):** When `kol-discovery-rpa` toolset is available, use
+  `rpa_*` tools for the main discovery path (IG profile/reels/comments,
+  Google SERP, IP check) instead of step-by-step `browser_*`. `browser_*`
+  is reserved for fallback, curated lists, and non-Google public web. See
+  **Step 0.5 — RPA 采集优先** below for the full workflow.
 - **Product**: category, key features, materials/mechanisms/tech, price tier.
 - **Buyer**: likely age/life stage, household, home status, pain points, competitive alternatives.
 - **Purchase driver**: one Primary Driver and 1-2 Secondary Drivers from the routing table.
@@ -38,6 +43,47 @@ Before browsing, extract a compact **Campaign Context** from user input, product
 - **Assumptions**: mark missing fields as `inferred` and disclose them later.
 
 If no brief exists, infer a provisional persona from product category + visible claims. Use **Embedded Historical Search Experience** by default; newer user-supplied winners override it only when closer to the current product family and repeatedly commercial, not just visually similar.
+
+## Step 0.5 — RPA 采集优先 (HARD)
+
+When the `kol-discovery-rpa` toolset is available, use RPA tools instead of step-by-step `browser_*` for the main discovery path. RPA tools return structured JSON with a `qualification` block — no need to parse snapshots or count followers manually.
+
+**Hard rule: `qualification.hard_discard=true` → Agent MUST discard, cannot override with learned criteria.** Mechanical gates (followers ≥100k, region US/CA, ≥5 reels/3mo, avg views ≥30k, reel ER ≥3%) are evaluated by the RPA tool. The Agent still decides `agent_judgment_required` items (product_context, match_score, showcase_score).
+
+### Main path (no `browser_*` needed)
+
+```
+1. rpa_check_ip(expected_country="US")           → US IP preflight
+2. rpa_precheck_handle(handle, exclusion_*)      → zero page-load precheck
+   → hard_discard? skip to next handle
+3. rpa_fetch_ig_profile(handle)                  → profile data + qualification.gates.followers/region
+   → hard_discard? log discard_reason, next handle
+4. rpa_fetch_ig_reels(handle, max_reels=10)      → 10 reels + thumbnail_url + qualification
+   → hard_discard? discard
+5. [gates all pass] 10 covers + 10 comments → content screening (Step 1.5)
+6. [switch ON] top 3 reels → rpa_download + video_analyze → deep eval
+7. ingest-confirmed-candidate
+```
+
+### Browser stack (RPA 落地后)
+
+**Default (HARD):** Discovery main path uses `rpa_*` + `vision_analyze`/`video_analyze`, NOT `browser_*`.
+
+**`browser_*` is allowed ONLY for:**
+1. RPA fallback (`meta.fallback_hint` points to browser; tool returned `ok=false` with `dom_changed`)
+2. Curated third-party lists (FeedSpot, blog posts — HTML structures vary, not RPA'd)
+3. Non-Google public web (TikTok creator pages, Reddit — `rpa_fetch_google_serp` only covers Google)
+4. Link-in-bio / IG Contact button drill-down (email discovery, not discovery skill's scope)
+5. Full rollback (`KOL_RPA_ENABLED=false` or plugin not loaded)
+
+**Forbidden:**
+- Using `browser_*` to IG/Google URLs after RPA succeeds on the same handle (double quota)
+- Using `browser_console` to read comments instead of `rpa_fetch_reel_comments`
+- Reading snapshots to guess follower counts instead of `qualification.gates`
+
+**Registration gate:** `rpa_fetch_ig_profile(handle)` success = this run has visited the handle (equivalent to `browser_navigate("https://www.instagram.com/<handle>/")`). The `kol-discovery-precompress-guard` recognizes both `browser_navigate` and `rpa_fetch_ig_profile`/`rpa_fetch_ig_reels` as visited.
+
+**Guard enforcement:** When `KOL_RPA_STRICT_BROWSER_BLOCK=1` (default), the `kol-bridge-agent-guard` hook blocks `browser_navigate` to `instagram.com/*`, `google.com/search`, and `ipinfo.io` URLs in campaign discovery sessions (post-bootstrap). RPA tools that return `ok=false` with a fallback hint grant a one-shot token for that specific URL.
 
 ## Driver And Historical Calibration
 Pick **one Primary Purchase Driver**. If two drivers tie, choose the one closest to buyer intent, not product appearance. The same sofa may route to A for cozy aesthetics, B for family hosting, or D for home-theater/gaming setup.
@@ -74,6 +120,67 @@ Creator vertical is a clue, not a gate. Home/family, tech/setup, gaming, DIY/mak
 3. Their Reels can showcase this product credibly.
 
 Search by **conversion mechanism**, not niche label: milestone lifestyle, daily-use comfort, feature demo, specialized setup, setup completion, relatable personality/humor.
+
+## Step 1.5 — 内容筛选 (HARD)
+
+对通过机械硬门槛（`qualification.hard_discard=false`）的候选，**必须**执行内容筛选。不得仅凭 profile 文字和播放量数字打 Showcase 分。
+
+### 硬规则：评论始终参与
+
+不论 `rpa_video_eval_enabled` 开关 ON/OFF，每条评估 Reel **必须**调用 `rpa_fetch_reel_comments(mode=evaluation)`。Showcase/Match 打分必须合并 comments[]（`voice_descriptors`、`audience_vibe`、`signature_hooks` 的主要来源）。**禁止**仅凭视频或封面视觉单打分而跳过评论采集。
+
+### 开关：10 封面 + 评论（OFF，默认）/ 10 封面 + 3 视频 + 评论（ON）
+
+| 开关来源 | 值 | 筛选组合 |
+|---------|-----|---------|
+| brief `rpa_video_eval_enabled: false` / env `KOL_RPA_VIDEO_EVAL_ENABLED=0` / 默认 | OFF | **10 封面 + 评论** |
+| brief `rpa_video_eval_enabled: true` / env `KOL_RPA_VIDEO_EVAL_ENABLED=1` | ON | **10 封面 + 3 视频 + 评论** |
+
+### 公共流程（OFF/ON 共有，HARD）
+
+1. `rpa_fetch_ig_reels(handle, max_reels=10)` → 最近 10 条 Reel + thumbnail_url + 播放量
+2. 对 **10 条 Reel 各一次** `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` → 10 组 comments + caption
+3. 对 **10 张封面** 各 `vision_analyze(image_url=thumbnail_url, prompt=...)` — prompt 嵌入该 Reel 的 comments + caption
+4. **汇总 10 封面 + 评论** → 内容主题分布、风格一致性、场景多样性、voice_descriptors
+
+### 开关 ON 追加（3 视频深评）
+
+5. 从 10 条中选 **top 3**（播放量最高，排除 72h 内发布）
+6. 对 top 3 各：`rpa_download_ig_reel` → `video_analyze`（prompt 嵌入对应 comments）
+7. **最终合并**：10 封面视觉 + 10 组评论（广度）+ 3 视频视觉（深度演示/on_camera）→ Showcase / Match
+
+### 合并打分权重
+
+- **评论（10 组）**：audience_vibe、voice_descriptors、signature_hooks — 始终参与
+- **10 封面**：内容垂类分布、视觉风格、场景适配 — 广度筛选
+- **3 视频（仅 ON）**：on_camera_skill、动态演示、product_placement — 深度加分
+
+### 成本控制 (HARD)
+
+| 模式 | 每候选上限 |
+|------|-----------|
+| OFF | 10× comments + 10× vision_analyze(封面) |
+| ON | 上述 + 3× download + 3× video_analyze(1fps) + rpa_cleanup_reels |
+
+- 评论：first viewport only，不展开 replies
+- 10 条中某条 comments 为空 → 该条仅用封面+caption，注明 `comments_partial`
+- 10 条中 ≥6 条有 comments + ≥6 张封面 → 可完成完整筛选（对齐 partial grid 规则 L611-615）
+- 封面/评论大面积失败 → `content_eval_degraded`，payload 披露
+- ON 模式：评估完必须 `rpa_cleanup_reels` 清理下载的 MP4
+
+### ingest payload 记录
+
+`candidate.payload` 写入：
+- `content_eval_mode: "cover_only" | "cover_plus_video"`
+- `covers_evaluated: 10`（实际成功数）
+- `videos_evaluated: 0 | 3`
+- `comments_collected_count: N`（目标 10）
+- `content_eval_basis: "10cover_and_comments" | "10cover_3video_and_comments" | "degraded"`
+
+### 何时可跳过内容筛选
+
+- skip list / cooldown / `qualification.hard_discard=true` → 不需要
+- 已有 veedcrawl_extract 覆盖该 Reel → 可复用，不重复识图/下载
 
 ## Scoring
 Score only after reviewing recent Reels, not from profile niche alone.
@@ -601,7 +708,7 @@ Minimum evidence when reachable:
 - review at least **3 High-Match candidates**;
 - sample at least **2 discovery surfaces**;
 - measure 10-15 recent Reels per qualified creator;
-- run `browser_navigate` to every candidate's profile URL (`https://www.instagram.com/<handle>/`) at least once in this run — this is the hard registration gate the orchestrator skill enforces before allowing `shortlist_ready`;
+- run `browser_navigate` to every candidate's profile URL (`https://www.instagram.com/<handle>/`) OR `rpa_fetch_ig_profile(handle)` at least once in this run — this is the hard registration gate the orchestrator skill enforces before allowing `shortlist_ready`;
 - after IG profile `browser_navigate`, read `ig_readiness` / `ig_followers_hint` on the tool result first — when `ig_readiness.has_followers=true` or `ig_profile_readable` is present, the page **is** loaded for CDP even if `element_count`/`snapshot` look empty; do **not** report "无法获取 Instagram 页面信息" in that case;
 - after `browser_click` into a profile, the click result may already include `ig_readiness` + snapshot — read that before calling a separate `browser_snapshot`; if snapshot is still empty on an IG profile URL, retry `browser_snapshot` once (tool waits for profile text automatically);
 - use screenshots (`browser_snapshot` / `browser_vision`) and extract numbers via `browser_console(expression="...")` from the rendered page when you need extra fields beyond `ig_followers_hint`;
@@ -616,7 +723,8 @@ Minimum evidence when reachable:
 
 **Anti-fabrication rule (hard).** Every handle you persist via **`ingest-confirmed-candidate`**
 MUST be a handle that you actually visited via `browser_navigate("https://www.instagram.com/<handle>/")`
-earlier in the same run, with on-page evidence supporting the numbers you write into
+OR `rpa_fetch_ig_profile(handle)` / `rpa_fetch_ig_reels(handle)`
+earlier in the same run, with on-page or RPA-returned evidence supporting the numbers you write into
 `match_score`, `showcase_score`, `final_fit`, `audience_fit`, and `reason`.
 Generic-sounding placeholders (`home_style_lover`, `minimalist_home`, `cozy_living_xx`, `test_kol_*`)
 are red flags; if you cannot point to the corresponding `browser_navigate` call, omit the handle.

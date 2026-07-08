@@ -136,21 +136,51 @@ def _iter_tool_results(messages: Iterable[Dict[str, Any]]) -> Iterable[str]:
             yield str(content)
 
 
+def _parse_handle_from_arguments(arguments_str: str) -> Optional[str]:
+    """Best-effort parse of the ``handle`` field from a tool-call arguments
+    JSON string. Returns None on any parse failure."""
+    if not arguments_str:
+        return None
+    try:
+        parsed = json.loads(arguments_str)
+    except (TypeError, ValueError):
+        m = re.search(r'"handle"\s*:\s*"([^"]+)"', arguments_str)
+        return m.group(1).lower().lstrip("@") if m else None
+    if isinstance(parsed, dict):
+        handle = parsed.get("handle")
+        if isinstance(handle, str):
+            return handle.lower().lstrip("@")
+    return None
+
+
+# RPA tools that count as a profile visit (same as browser_navigate to
+# instagram.com/<handle>/). These tools take a ``handle`` argument.
+_RPA_VISIT_TOOLS = frozenset({
+    "rpa_fetch_ig_profile",
+    "rpa_fetch_ig_reels",
+})
+
+
 def collect_visited_handles(messages: List[Dict[str, Any]]) -> List[str]:
     """Return the ordered, deduplicated list of IG handles visited via
-    ``browser_navigate`` in this message history."""
+    ``browser_navigate`` or ``rpa_fetch_ig_profile`` / ``rpa_fetch_ig_reels``
+    in this message history."""
     seen: List[str] = []
     seen_set: set[str] = set()
     for name, args in _iter_tool_calls(messages):
-        if name != "browser_navigate":
-            continue
-        url = _parse_url_from_arguments(args)
-        if not url:
-            continue
-        handle = _extract_handle_from_url(url)
-        if handle and handle not in seen_set:
-            seen.append(handle)
-            seen_set.add(handle)
+        if name == "browser_navigate":
+            url = _parse_url_from_arguments(args)
+            if not url:
+                continue
+            handle = _extract_handle_from_url(url)
+            if handle and handle not in seen_set:
+                seen.append(handle)
+                seen_set.add(handle)
+        elif name in _RPA_VISIT_TOOLS:
+            handle = _parse_handle_from_arguments(args)
+            if handle and handle not in seen_set:
+                seen.append(handle)
+                seen_set.add(handle)
     return seen
 
 

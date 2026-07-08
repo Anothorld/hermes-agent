@@ -1,0 +1,19 @@
+name: kol-discovery-rpa
+version: 0.1.0
+description: "RPA tools for KOL Instagram discovery — structured IG profile/reels/comments extraction via local-chrome tab-pool CDP, hard qualification gates synced from instagram-kol-discovery skill, and optional Reel video download for content evaluation. Reduces browser LLM turns from 10-20 to 1-2 per handle."
+author: kol-ops
+kind: backend
+provides_tools:
+  - rpa_check_ip
+  - rpa_precheck_handle
+  - rpa_fetch_ig_profile
+  - rpa_fetch_ig_reels
+  - rpa_fetch_google_serp
+  - rpa_fetch_hashtag_candidates
+  - rpa_download_ig_reel
+  - rpa_fetch_reel_comments
+  - rpa_cleanup_reels
+  - rpa_fetch_similar_accounts
+  - rpa_fetch_following_list
+provides_hooks:
+  - pre_tool_call

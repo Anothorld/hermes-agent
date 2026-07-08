@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import threading
 from typing import Final, Optional
+from urllib.parse import urlparse
 
 _BOOTSTRAP_STEPS: Final[frozenset[str]] = frozenset(
     {"list_candidates", "skip_handles", "cooldown_handles"}
@@ -11,6 +13,12 @@ _BOOTSTRAP_STEPS: Final[frozenset[str]] = frozenset(
 
 # task_id / session_id → completed bootstrap steps (in-process; one gateway worker).
 _bootstrap_done: dict[str, set[str]] = {}
+
+# RPA fallback tokens: (task_id, normalized_url) → True (one-shot, consumed on use).
+# When an RPA tool returns ok=false with a fallback hint, it grants a token
+# so the guard allows ONE browser_navigate to the same URL. Agent cannot self-grant.
+_rpa_fallback_tokens: dict[tuple[str, str], bool] = {}
+_fallback_lock = threading.Lock()
 
 _SESSION_RE = re.compile(r"^kol-campaign:(TEST|LIVE):(.+)$")
 _CAMPAIGN_ID_RE = re.compile(r"--campaign-id\s+(\S+)")
@@ -124,3 +132,51 @@ def bootstrap_block_message(session_key: str) -> str:
         f"Required (missing: {', '.join(missing) or 'none'}):\n{steps}\n"
         "Do NOT use browser_navigate or veedcrawl_* until bootstrap is done."
     )
+
+
+# ----------------------------------------------------------------- RPA fallback tokens
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for token keying (strip trailing slash, lowercase host)."""
+    try:
+        parsed = urlparse(url.strip())
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").rstrip("/")
+        return f"{host}{path}"
+    except Exception:
+        return url.strip().lower().rstrip("/")
+
+
+def grant_rpa_fallback(session_key: str, url: str) -> None:
+    """Grant a one-shot fallback token allowing ONE browser_navigate to this URL.
+
+    Called by RPA tools when they return ok=false with a fallback hint.
+    The Agent cannot self-grant — only RPA tool handlers call this.
+    """
+    if not url:
+        return
+    norm = _normalize_url(url)
+    with _fallback_lock:
+        _rpa_fallback_tokens[(session_key, norm)] = True
+
+
+def consume_rpa_fallback(session_key: str, url: str) -> bool:
+    """Check and consume a fallback token. Returns True if a token was found.
+
+    Called by the guard hook before blocking a browser_navigate.
+    If a token exists for (session, url), it is consumed (deleted) and
+    the browser call is allowed. Subsequent calls to the same URL will block.
+    """
+    if not url:
+        return False
+    norm = _normalize_url(url)
+    with _fallback_lock:
+        return _rpa_fallback_tokens.pop((session_key, norm), False)
+
+
+def reset_fallback_tokens(session_key: str) -> None:
+    """Clear all fallback tokens for a session (called on run end)."""
+    with _fallback_lock:
+        keys_to_remove = [k for k in _rpa_fallback_tokens if k[0] == session_key]
+        for k in keys_to_remove:
+            del _rpa_fallback_tokens[k]

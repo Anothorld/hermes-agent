@@ -421,6 +421,7 @@ def test_allows_bridge_cli_terminal_on_email_discover():
 
 
 def test_allows_browser_on_discovery_session():
+    """Non-IG/Google URLs (e.g. FeedSpot) are still allowed after bootstrap."""
     h = _hooks()
     ds = h._load_discovery_session()
     sid = "kol-campaign:LIVE:POVISON-TS-8319"
@@ -432,12 +433,210 @@ def test_allows_browser_on_discovery_session():
         f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
     ):
         assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
+    # FeedSpot (curated list) — NOT blocked by RPA URL policy
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.feedspot.com/furniture-blog/"},
+        task_id=sid,
+    )
+    assert out is None
+
+
+def test_blocks_ig_url_on_discovery_session_post_bootstrap():
+    """IG URLs are blocked after bootstrap when KOL_RPA_STRICT_BROWSER_BLOCK=1."""
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    ds.reset_bootstrap(sid)
+    ds.reset_fallback_tokens(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id POVISON-TS-8319",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
+    # IG URL — blocked by RPA URL policy
     out = h.pre_tool_call(
         "browser_navigate",
         {"url": "https://www.instagram.com/foo/"},
         task_id=sid,
     )
-    assert out is None
+    assert out is not None
+    assert out["action"] == "block"
+    assert "rpa_fetch_ig_profile" in out["message"]
+
+
+def test_blocks_google_url_on_discovery_session_post_bootstrap():
+    """Google search URLs are blocked after bootstrap (rpa_fetch_google_serp replaces)."""
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    ds.reset_bootstrap(sid)
+    ds.reset_fallback_tokens(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id POVISON-TS-8319",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.google.com/search?q=home+cinema+instagram"},
+        task_id=sid,
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "rpa_fetch_google_serp" in out["message"]
+
+
+def test_rpa_fallback_token_allows_browser():
+    """RPA fallback token allows ONE browser_navigate to the same URL."""
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    ds.reset_bootstrap(sid)
+    ds.reset_fallback_tokens(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id POVISON-TS-8319",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
+
+    url = "https://www.instagram.com/foo/"
+    # Grant a fallback token (as RPA tool would on ok=false)
+    ds.grant_rpa_fallback(sid, url)
+
+    # First browser_navigate — consumed token, allowed
+    out1 = h.pre_tool_call(
+        "browser_navigate",
+        {"url": url},
+        task_id=sid,
+    )
+    assert out1 is None
+
+    # Second browser_navigate to same URL — token consumed, blocked
+    out2 = h.pre_tool_call(
+        "browser_navigate",
+        {"url": url},
+        task_id=sid,
+    )
+    assert out2 is not None
+    assert out2["action"] == "block"
+
+    ds.reset_fallback_tokens(sid)
+
+
+def test_browser_url_block_not_applied_to_email_discover():
+    """URL block only applies to campaign discovery, NOT kol-email-discover."""
+    h = _hooks()
+    # kol-email-discover session — browser_* should be allowed even for IG URLs
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.instagram.com/foo/"},
+        task_id="kol-email-discover:LIVE:701",
+    )
+    assert out is None, "email-discover should allow browser_navigate to IG"
+
+
+def test_rpa_tool_blocked_before_bootstrap():
+    """rpa_* tools are blocked by bootstrap gate (same as browser/veedcrawl)."""
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    ds.reset_bootstrap(sid)
+    out = h.pre_tool_call(
+        "rpa_fetch_ig_profile",
+        {"handle": "foo"},
+        task_id=sid,
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "bootstrap" in out["message"].lower()
+
+
+def test_blocks_ipinfo_url_on_discovery_session_post_bootstrap():
+    """ipinfo.io URLs are blocked after bootstrap (rpa_check_ip replaces)."""
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    ds.reset_bootstrap(sid)
+    ds.reset_fallback_tokens(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id POVISON-TS-8319",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://ipinfo.io/json"},
+        task_id=sid,
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "rpa_check_ip" in out["message"]
+
+
+def test_allows_non_search_google_url():
+    """Google non-search URLs (e.g. Google Docs) are NOT blocked."""
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    ds.reset_bootstrap(sid)
+    ds.reset_fallback_tokens(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id POVISON-TS-8319",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://docs.google.com/document/d/abc123/edit"},
+        task_id=sid,
+    )
+    assert out is None  # Google Docs is not /search — allowed
+
+
+def test_kol_rpa_strict_blocks_all_browser():
+    """KOL_RPA_STRICT=1 blocks ALL browser_* in discovery (extreme mode)."""
+    import os
+    h = _hooks()
+    ds = h._load_discovery_session()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    ds.reset_bootstrap(sid)
+    ds.reset_fallback_tokens(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id POVISON-TS-8319",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
+
+    old = os.environ.get("KOL_RPA_STRICT", "")
+    os.environ["KOL_RPA_STRICT"] = "1"
+    try:
+        # Even non-IG URLs are blocked in strict mode
+        out = h.pre_tool_call(
+            "browser_navigate",
+            {"url": "https://www.feedspot.com/furniture-blog/"},
+            task_id=sid,
+        )
+        assert out is not None
+        assert out["action"] == "block"
+        assert "KOL_RPA_STRICT" in out["message"]
+    finally:
+        if old:
+            os.environ["KOL_RPA_STRICT"] = old
+        else:
+            os.environ.pop("KOL_RPA_STRICT", None)
 
 
 def test_blocks_web_search_on_campaign_discovery():
@@ -491,6 +690,7 @@ def test_allows_bridge_cli_terminal_on_campaign_discovery():
     ds = h._load_discovery_session()
     sid = "kol-campaign:LIVE:SSF8033-20260609"
     ds.reset_bootstrap(sid)
+    ds.reset_fallback_tokens(sid)
     cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
     for cmd in (
         f"{cli} list-candidates --env LIVE --campaign-id SSF8033-20260609",
@@ -499,9 +699,10 @@ def test_allows_bridge_cli_terminal_on_campaign_discovery():
     ):
         out = h.pre_tool_call("terminal", {"command": cmd}, task_id=sid)
         assert out is None, cmd
+    # Non-IG URL — still allowed after bootstrap
     out = h.pre_tool_call(
         "browser_navigate",
-        {"url": "https://www.instagram.com/example/"},
+        {"url": "https://www.reddit.com/r/InteriorDesign/"},
         task_id=sid,
     )
     assert out is None
