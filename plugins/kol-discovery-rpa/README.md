@@ -143,7 +143,7 @@ word-matches must be locale-aware — not just `rpa_fetch_ig_profile`:
 | `rpa_fetch_ig_profile` | account country | en/zh/es/fr/de/ja/ko (+ GB/AU/DE/FR/ES/IT/JP/KR/MX/BR) |
 | `rpa_fetch_ig_reels` | reel views | en/zh/es/fr/ja/ko, both "num word" and "word num" layouts |
 | `rpa_fetch_reel_comments` | comment likes | en/zh/ja/ko/es |
-| `rpa_fetch_google_serp` | — | selector-based, no word matching (locale-independent) |
+| `rpa_fetch_google_serp` | — | h3-anchored extraction + Google-domain filter + `/url?q=` unwrap; locale-independent |
 | `rpa_check_ip` | — | ipinfo.io JSON (locale-independent) |
 
 ## SPA Hydration Timing
