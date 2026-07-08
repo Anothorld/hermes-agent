@@ -182,11 +182,33 @@ def evaluate_reels_gates(
         discard_reasons.append("avg_views_below_30k")
 
     # --- Reel ER gate ---
+    # The /reels/ grid only exposes views — likes and comments are always 0
+    # from the grid extraction (ig_reels.py hardcodes them). Computing ER from
+    # that would give 0% for every reel and hard-discard every candidate with
+    # a false reel_er_below_3pct. When ALL reels have likes=0 AND comments=0,
+    # the engagement data is simply unavailable (not genuinely 0%); defer the
+    # ER gate to the agent (which gets real likes/comments from
+    # rpa_fetch_reel_comments per reel page).
+    all_engagement_missing = all(
+        int(r.get("likes", 0) or 0) == 0 and int(r.get("comments", 0) or 0) == 0
+        for r in reels
+        if int(r.get("views", 0) or 0) > 0
+    )
     avg_er = sum(er_values) / len(er_values) if er_values else 0
-    er_pass = avg_er >= rules.REEL_ER_MIN
-    gates["reel_er"] = _gate(er_pass, round(avg_er, 4), rules.REEL_ER_MIN)
-    if not er_pass and er_values:
-        discard_reasons.append("reel_er_below_3pct")
+    if all_engagement_missing and er_values:
+        # Grid couldn't provide likes/comments — defer, don't hard-discard.
+        gates["reel_er"] = _gate(
+            True,
+            "deferred",
+            rules.REEL_ER_MIN,
+            reason="likes_comments_unavailable_from_grid",
+            note="ER must be re-evaluated from rpa_fetch_reel_comments reel_likes/reel_comments_count",
+        )
+    else:
+        er_pass = avg_er >= rules.REEL_ER_MIN
+        gates["reel_er"] = _gate(er_pass, round(avg_er, 4), rules.REEL_ER_MIN)
+        if not er_pass and er_values:
+            discard_reasons.append("reel_er_below_3pct")
 
     hard_discard = len(discard_reasons) > 0
 

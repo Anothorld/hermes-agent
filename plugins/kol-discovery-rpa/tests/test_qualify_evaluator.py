@@ -133,6 +133,41 @@ def test_reels_er_just_above_3pct():
     assert r["gates"]["reel_er"]["value"] >= 0.03
 
 
+def test_reels_er_deferred_when_grid_has_no_likes_comments():
+    """The /reels/ grid only exposes views — likes and comments are always 0.
+    The ER gate must defer (pass=True, no hard_discard) instead of computing
+    a false 0% ER and discarding every candidate."""
+    profile = qualify_evaluator.evaluate_profile_gates("200K", ["US"])
+    reels = [_reel(50000, 0, 0) for _ in range(6)]  # grid extraction: likes=comments=0
+    r = qualify_evaluator.evaluate_reels_gates(reels, profile)
+    assert r["hard_discard"] == False
+    assert "reel_er_below_3pct" not in r["discard_reasons"]
+    assert r["gates"]["reel_er"]["pass"] == True
+    assert r["gates"]["reel_er"]["value"] == "deferred"
+    assert r["gates"]["reel_er"]["reason"] == "likes_comments_unavailable_from_grid"
+
+
+def test_reels_er_still_evaluated_when_some_engagement_present():
+    """If even one reel has non-zero likes, the grid DID provide engagement
+    data (e.g. from a different source) — evaluate ER normally."""
+    profile = qualify_evaluator.evaluate_profile_gates("200K", ["US"])
+    # 5 reels with 0 engagement + 1 with real low engagement → not deferred
+    reels = [_reel(50000, 0, 0) for _ in range(5)]
+    reels.append(_reel(50000, 100, 5))  # ER = 0.21% — real but low
+    r = qualify_evaluator.evaluate_reels_gates(reels, profile)
+    assert "reel_er_below_3pct" in r["discard_reasons"]
+    assert r["gates"]["reel_er"]["value"] != "deferred"
+
+
+def test_reels_er_deferred_does_not_mask_real_low_views():
+    """Deferred ER should not hide a real avg_views_below_30k discard."""
+    profile = qualify_evaluator.evaluate_profile_gates("200K", ["US"])
+    reels = [_reel(5000, 0, 0) for _ in range(6)]  # low views + no engagement
+    r = qualify_evaluator.evaluate_reels_gates(reels, profile)
+    assert "avg_views_below_30k" in r["discard_reasons"]
+    assert "reel_er_below_3pct" not in r["discard_reasons"]  # still deferred
+
+
 # ----------------------------------------------------------------- exclusion precheck
 
 def test_precheck_skip_list():

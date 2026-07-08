@@ -142,6 +142,7 @@ word-matches must be locale-aware — not just `rpa_fetch_ig_profile`:
 | `rpa_fetch_ig_profile` | followers/following/posts | en/zh/es/pt/fr/de/ja/ko + structural fallback |
 | `rpa_fetch_ig_profile` | account country | en/zh/es/fr/de/ja/ko (+ GB/AU/DE/FR/ES/IT/JP/KR/MX/BR) |
 | `rpa_fetch_ig_reels` | reel views | en/zh/es/fr/ja/ko, both "num word" and "word num" layouts |
+| `rpa_fetch_reel_comments` | reel likes + comment count | en/zh from og:description prefix (`N likes, N comments` / `N 次赞，N 条评论`) |
 | `rpa_fetch_reel_comments` | comment likes | en/zh/ja/ko/es |
 | `rpa_fetch_google_serp` | — | h3-anchored extraction + Google-domain filter + `/url?q=` unwrap; locale-independent |
 | `rpa_check_ip` | — | ipinfo.io JSON (locale-independent) |

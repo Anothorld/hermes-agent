@@ -266,7 +266,8 @@ RPA_FETCH_REEL_COMMENTS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Navigate to a Reel page and extract comments. mode=evaluation returns "
-        "comments+caption+hashtags+thumbnail_url (for KOL content screening). "
+        "comments+caption+hashtags+thumbnail_url+reel_likes+reel_comments_count "
+        "(for KOL content screening + real ER computation). "
         "mode=discovery returns commenter handles with follower hints (for "
         "lateral discovery). First viewport only — does not scroll or expand replies."
     ),

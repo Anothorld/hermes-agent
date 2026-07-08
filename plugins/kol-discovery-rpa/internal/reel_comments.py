@@ -32,6 +32,8 @@ _COMMENTS_JS = """
     commenters: [],
     thumbnail_url: '',
     total_visible: 0,
+    reel_likes: 0,
+    reel_comments_count: 0,
   };
 
   // Thumbnail from og:image (reliable across locales).
@@ -42,18 +44,44 @@ _COMMENTS_JS = """
     result.thumbnail_url = videoEl.poster;
   }
 
-  // Caption from og:description — format (locale-varied):
+  // Caption + reel-level likes/comments from og:description — format (locale-varied):
   //   "<likes> likes, <N> comments - <author>，<date> : \\"<caption>\\""
+  //   "<likes> 次赞，<N> 条评论 - <author>，<date> : \\"<caption>\\""
   // The caption is the text inside the trailing quotes. The reel page uses IG's
   // "bloks" component system (no <article>/<ul>/<li>), so caption selectors are
-  // unreliable; og:description is locale-stable and always populated.
+  // unreliable; og:description is locale-stable and always populated. We also
+  // parse the leading "<N> likes, <N> comments" to get reel-level engagement
+  // (the /reels/ grid only exposes views, not likes/comments — without this,
+  // the ER gate sees likes=0/comments=0 for every reel and hard-discards every
+  // candidate with a false reel_er_below_3pct).
   const extractQuoted = (s) => {
     if (!s) return '';
     const m = s.match(/["“”"]\\s*([^“”""]{5,})\\s*["”""]\\s*$/);
     return m ? m[1].slice(0, 1000) : '';
   };
+  const parseCount = (raw) => {
+    if (!raw) return 0;
+    const num = parseFloat(raw.replace(/,/g, ''));
+    if (isNaN(num)) return 0;
+    const suffix = (raw.match(/[KkMmBb万亿]/i) || [])[0] || '';
+    const mult = {k:1e3, K:1e3, m:1e6, M:1e6, b:1e9, B:1e9, '万':1e4, '亿':1e8}[suffix] || 1;
+    return Math.round(num * mult);
+  };
   const ogDesc = document.querySelector('meta[property="og:description"]');
-  if (ogDesc) result.caption = extractQuoted(ogDesc.getAttribute('content') || '');
+  const ogDescRaw = ogDesc ? (ogDesc.getAttribute('content') || '') : '';
+  if (ogDescRaw) {
+    // Engagement prefix is everything before the first " - " separator.
+    const dashIdx = ogDescRaw.indexOf(' - ');
+    const prefix = dashIdx > 0 ? ogDescRaw.slice(0, dashIdx) : '';
+    if (prefix) {
+      // "1,234 likes, 56 comments" / "1,234 次赞，56 条评论" / "12.3K likes · 456 comments"
+      const lm = prefix.match(/([\\d.,]+\\s*[KkMmBb万亿]?)\\s*(?:likes?|次赞|赞|j'aime|gefällt|me gusta)/i);
+      if (lm) result.reel_likes = parseCount(lm[1]);
+      const cm = prefix.match(/([\\d.,]+\\s*[KkMmBb万亿]?)\\s*(?:comments?|条评论|评论|commentaires?|comentarios?)/i);
+      if (cm) result.reel_comments_count = parseCount(cm[1]);
+    }
+    result.caption = extractQuoted(ogDescRaw);
+  }
   if (!result.caption) {
     const ogTitle = document.querySelector('meta[property="og:title"]');
     if (ogTitle) result.caption = extractQuoted(ogTitle.getAttribute('content') || '');
@@ -205,6 +233,8 @@ def fetch_reel_comments(
                 "caption": js_result.get("caption", "") if include_caption else "",
                 "hashtags": js_result.get("hashtags", []) if include_caption else [],
                 "thumbnail_url": js_result.get("thumbnail_url", ""),
+                "reel_likes": js_result.get("reel_likes", 0),
+                "reel_comments_count": js_result.get("reel_comments_count", 0),
                 "comments": comments,
                 "total_visible": len(comments),
             },
@@ -215,6 +245,8 @@ def fetch_reel_comments(
         return {
             "data": {
                 "reel_url": reel_url,
+                "reel_likes": js_result.get("reel_likes", 0),
+                "reel_comments_count": js_result.get("reel_comments_count", 0),
                 "commenters": commenters,
                 "total_visible": len(commenters),
             },
