@@ -61,10 +61,35 @@ When the `kol-discovery-rpa` toolset is available, use RPA tools instead of step
 4. rpa_fetch_ig_reels(handle, max_reels=10)      → 10 reels + thumbnail_url + content_eval plan
    → hard_discard? discard
 5. rpa_download_ig_content(content_eval)           → 10 cover files (+ 3 random videos when ON)
-6. [gates all pass] 10 covers + 10 comments → content screening (Step 1.5)
+6. [gates all pass OR deferred] 10 covers + 10 comments → content screening (Step 1.5)
 7. [switch ON] content_eval.video_reels → video_analyze → deep eval
 8. ingest-confirmed-candidate
 ```
+
+### Per-candidate todo checklist (HARD)
+
+每个进入内容筛选的候选，**必须**用 `todo` 工具创建一个步骤清单，逐步勾选完成，防止遗漏封面/评论/视觉评估。清单模板：
+
+```
+todo: evaluate <handle>
+  □ rpa_fetch_ig_profile(handle)          → gates pass / hard_discard?
+  □ rpa_fetch_ig_reels(handle, max_reels=10)  → content_eval plan
+  □ rpa_download_ig_content(content_eval)  → 10 cover files downloaded
+  □ rpa_fetch_reel_comments ×10 (mode=evaluation)  → reel_likes + comments per reel
+  □ vision_analyze ×10 (cover_path + comments in prompt)  → style/scene evaluation
+  □ [ON] video_analyze ×3 (video_reels)   → on_camera/demo skill
+  □ [ON] rpa_cleanup_reels                → delete downloaded MP4s
+  □ compute Match/Showcase scores         → merge content + comments + covers
+  □ ingest-confirmed-candidate            → payload with content_eval_mode/covers_evaluated
+```
+
+**禁止**在 todo 清单未全部勾选前 ingest。如果某步失败（如评论返回 0 条），在 todo 中标注失败原因后可继续下一步——但不能跳过整个步骤。
+
+### Deferred ER gate — 内容筛选仍然必须
+
+当 `qualification.gates.reel_er.value == "deferred"`（`reason="likes_comments_unavailable_from_grid"`），ER gate **已通过**（`pass=true`，不是 hard_discard）。这是因为 `/reels/` 网格只提供播放量，不提供点赞/评论数——不是真实的 0% ER。
+
+deferred 意味着 Agent **必须**在内容筛选阶段从 `rpa_fetch_reel_comments` 的 `reel_likes` + `reel_comments_count` 重新计算真实 ER，而非跳过内容筛选直接入库。真实 ER 低于 3% 时，在 ingest payload 中注明 `reel_er_computed: <value>` 供运营审查。
 
 ### Browser stack (RPA 落地后)
 
@@ -184,6 +209,8 @@ Search by **conversion mechanism**, not niche label: milestone lifestyle, daily-
 
 - skip list / cooldown / `qualification.hard_discard=true` → 不需要
 - 已有 veedcrawl_extract 覆盖该 Reel → 可复用，不重复识图/下载
+
+**deferred gate ≠ 可跳过内容筛选。** `reel_er.value="deferred"` 表示 gate 已通过（`pass=true`），ER 因网格数据限制暂缓计算——内容筛选**必须**执行，并在筛选阶段从 `rpa_fetch_reel_comments` 的 `reel_likes`/`reel_comments_count` 补算真实 ER。仅凭 profile 文字 + 播放量数字直接入库是**违规**（违反 Step 1.5 HARD 约束）。
 
 ## Scoring
 Score only after reviewing recent Reels, not from profile niche alone.
