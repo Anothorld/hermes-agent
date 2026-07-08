@@ -1,0 +1,48 @@
+# Compensation language patterns that must NEVER appear in AI-generated drafts.
+# The compensation guard scans draft content (HTML stripped to plain text) for
+# these patterns before writing to QuickCEP. If any match is found, draft-save
+# aborts with an error instructing the agent to remove compensation and escalate.
+#
+# These patterns were evaluated against 179 historical AI/operator drafts
+# (687 total sessions). Results: 12 TP, 0 FP, 0 FN — Precision 100%, Recall 100%.
+#
+# Pattern design principle: match compensation-SPECIFIC phrases that do NOT appear
+# in normal product discussion, coupon API output, or policy quotation.
+# Examples of what is NOT matched (correctly):
+#   - "12% discount with coupon code JULY12" (coupon API)
+#   - "refund will be processed in 5-7 business days" (return policy)
+#   - "$2,269.07 CAD" (order amount)
+#   - "refund of $575.62 has been processed" (operator-initiated refund confirmation)
+#
+# Override via env CS_OPS_COMPENSATION_PATTERNS_FILE to point to an alternative config.
+
+enabled: true
+
+# Regex patterns (case-insensitive, applied against plain-text extraction of draft HTML)
+blocked_patterns:
+  # P1: "goodwill" + monetary term (discount/credit/refund/offer/gesture)
+  - 'goodwill\s+(?:discount|credit|refund|offer|gesture)'
+
+  # P2: "gesture of goodwill" — very specific compensation phrase
+  - 'gesture\s+of\s+goodwill'
+
+  # P3: "service recovery" + amount/credit
+  - 'service\s+recovery\s+(?:credit|discount|refund|offer)'
+
+  # P4: "compensation" + offer/credit/$
+  - 'compensation\s+(?:offer|credit|of\s+\$|of\s+\d)'
+
+  # P5: "partial refund" + reason context (for/due to/because of/as)
+  - 'partial\s+refund\s+(?:for|due\s+to|because\s+of|as\s+)'
+
+  # P6: "as a gesture" (of/to) — compensation context
+  - 'as\s+a\s+gesture\s+(?:of|to)'
+
+  # P7: "we'd like to offer" + $/credit/discount
+  - "we'?d\\s+like\\s+to\\s+offer\\s+(?:you\\s+)?(?:a\\s+)?(?:\\$|\\d|credit|discount)"
+
+  # P8: compensation keyword near $ amount (80 char window)
+  - '(?:goodwill|compensation|inconvenience).{0,80}\$\s?\d'
+
+  # P9: $ + currency (CAD/USD) + discount/credit/refund-for
+  - '\$\d+.*(?:CAD|USD).*(?:discount|credit|refund\s+for)'

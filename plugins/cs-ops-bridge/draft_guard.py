@@ -1,9 +1,9 @@
 """Shared draft guard (PR1.9).
 
-Single entry point combining the internal-domain guard and the PDF attachment
-guard, reused by every draft-writing path so the Console composer, the agent
-(cs_bridge_tool draft-save), and the service send-reply all enforce the same
-policy:
+Single entry point combining the internal-domain guard, the PDF attachment
+guard, and the compensation guard, reused by every draft-writing path so the
+Console composer, the agent (cs_bridge_tool draft-save), and the service
+send-reply all enforce the same policy:
 
 - ``guard_draft_content(content, attachments, allowed_attachment_urls)`` →
   returns ``None`` when the draft is allowed, or a block payload dict
@@ -30,6 +30,7 @@ try:
         attachments_contain_pdf as _attachments_contain_pdf,
         guard_draft_attachments as _guard_draft_attachments,
     )
+    from .compensation_guard import guard_draft as _guard_compensation  # type: ignore
     _PKG_CONTEXT = True
 except ImportError:  # loaded as a top-level module
     from internal_domain_guard import guard_draft as _guard_domain  # type: ignore
@@ -37,6 +38,7 @@ except ImportError:  # loaded as a top-level module
         attachments_contain_pdf as _attachments_contain_pdf,
         guard_draft_attachments as _guard_draft_attachments,
     )
+    from compensation_guard import guard_draft as _guard_compensation  # type: ignore
     _PKG_CONTEXT = False
 
 
@@ -57,7 +59,7 @@ def guard_draft_content(
     *,
     allowed_attachment_urls: Optional[list[str]] = None,
 ) -> Optional[dict[str, Any]]:
-    """Run internal-domain + PDF attachment guards on a draft.
+    """Run internal-domain + compensation + PDF attachment guards on a draft.
 
     Returns ``None`` if the draft passes, else a block payload dict suitable for
     raising as an HTTP 422 detail or returning to the FE.
@@ -78,7 +80,21 @@ def guard_draft_content(
                 "blocked_kind": "",
             }
 
-    # 2. PDF attachment guard (vault-sourced PDFs only on escalation resume).
+    # 2. Compensation guard — block AI drafts containing compensation offers.
+    if _guard_compensation is not None:
+        res = _guard_compensation(content)
+        if res.get("blocked"):
+            return {
+                "blocked": True,
+                "error": res.get("error", "compensation offer blocked"),
+                "error_detail": f"Matched: {', '.join(res.get('matches') or [])}",
+                "source": "content",
+                "matches": res.get("matches") or [],
+                "snippet": res.get("snippet", ""),
+                "blocked_kind": "compensation",
+            }
+
+    # 3. PDF attachment guard (vault-sourced PDFs only on escalation resume).
     if _attachments_contain_pdf is not None and _guard_draft_attachments is not None:
         if _attachments_contain_pdf(attachments_json):
             res = _guard_draft_attachments(attachments_json, allowed_attachment_urls=allowed_attachment_urls)
