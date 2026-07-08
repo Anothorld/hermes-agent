@@ -52,9 +52,26 @@ _REELS_JS = """
     if (!reelMatch) continue;
     const reelId = reelMatch[1];
 
-    // Extract thumbnail from img inside the link
+    // Extract thumbnail — IG reels grid uses CSS background-image on <div>,
+    // not <img> tags. Check img first (older layout), then background-image
+    // (current bloks layout), then video poster.
+    let thumbnailUrl = '';
     const img = link.querySelector('img') || link.closest('article')?.querySelector('img');
-    const thumbnailUrl = img ? (img.src || img.dataset?.src || '') : '';
+    if (img) {
+      thumbnailUrl = img.src || img.dataset?.src || '';
+    }
+    if (!thumbnailUrl) {
+      const bgEl = link.querySelector('[style*="background-image"]');
+      if (bgEl) {
+        const style = bgEl.getAttribute('style') || '';
+        const bm = style.match(/background-image:\\s*url\\(["']?([^"')]+)/);
+        if (bm) thumbnailUrl = bm[1];
+      }
+    }
+    if (!thumbnailUrl) {
+      const video = link.querySelector('video');
+      if (video && video.poster) thumbnailUrl = video.poster;
+    }
 
     // Views/likes/comments may be in overlay text or aria-label
     const ariaLabel = link.getAttribute('aria-label') || '';
