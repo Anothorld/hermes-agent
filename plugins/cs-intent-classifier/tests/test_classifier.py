@@ -364,3 +364,73 @@ def test_classify_passes_history_to_llm(monkeypatch):
     user_msg = json.loads(captured["user_msg"])
     assert len(user_msg["conversation_history"]) == 1
     assert user_msg["conversation_history"][0]["role"] == "agent"
+
+
+# ── Scheme 3: keyword tier ──
+
+def test_keyword_tier_default_all(monkeypatch):
+    monkeypatch.delenv("CS_INTENT_KEYWORD_TIER", raising=False)
+    assert classifier.keyword_tier() == "all"
+    assert classifier.soft_keyword_enabled() is True
+
+
+def test_keyword_tier_safe_only(monkeypatch):
+    monkeypatch.setenv("CS_INTENT_KEYWORD_TIER", "safe_only")
+    assert classifier.keyword_tier() == "safe_only"
+    assert classifier.soft_keyword_enabled() is False
+
+
+def test_safe_only_skips_logistics_falls_through(monkeypatch):
+    monkeypatch.setenv("CS_INTENT_KEYWORD_TIER", "safe_only")
+    ge = _kw("Where is my order?", "Where is my order #12345678?")
+    assert ge is None
+
+
+def test_safe_only_still_matches_threat(monkeypatch):
+    monkeypatch.setenv("CS_INTENT_KEYWORD_TIER", "safe_only")
+    ge = _kw("Lawyer", "I will contact my lawyer if you don't refund me.")
+    assert ge is not None
+    assert ge["threat_signal"] == "legal"
+
+
+def test_safe_only_still_matches_closing(monkeypatch):
+    monkeypatch.setenv("CS_INTENT_KEYWORD_TIER", "safe_only")
+    ge = _kw("Re: Help", "Thank you for your help!")
+    assert ge is not None
+    assert ge["is_conversation_closing"] is True
+
+
+# ── Scheme 2: soft guards ──
+
+def test_logistics_guard_rejects_bare_order_number():
+    ge = _kw("Hello", "Regarding order #11223344 please advise.")
+    if ge is not None and ge["primary_intent"] == "logistics_inquiry":
+        raise AssertionError("bare order number must not keyword-classify as logistics")
+
+
+def test_product_guard_rejects_refund_conflict():
+    ge = _kw("Sofa", "What are the dimensions? Also I want a refund for damage.")
+    if ge is not None:
+        assert ge["primary_intent"] != "product_inquiry"
+
+
+def test_spam_guard_skips_greeting_with_re_subject():
+    ge = _kw("Re: Order #99887766 tracking", "ok")
+    assert ge is None or ge["primary_intent"] != "spam_irrelevant" or ge.get("is_conversation_closing")
+
+
+def test_overlay_forces_logistics_fallthrough(monkeypatch):
+    monkeypatch.setattr(
+        classifier,
+        "_load_keyword_overlays",
+        lambda: [
+            {
+                "id": "t1",
+                "action": "fallthrough",
+                "blocks": ["logistics", "soft"],
+                "pattern": r"\bwhere is my order\b",
+            }
+        ],
+    )
+    ge = _kw("Where is my order?", "Where is my order #12345678?")
+    assert ge is None

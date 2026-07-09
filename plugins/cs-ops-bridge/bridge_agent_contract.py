@@ -218,7 +218,7 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
 4. terminal: write_file(path='/tmp/draft-<quickcep_session_id>.html', content='<English reply merging operator_answer, Povison tone>')
 5. **[REQUIRED] Record Q&A to Hindsight** BEFORE draft-save. This step is NOT optional — skipping it means future identical questions will be re-escalated:
    terminal: python3 {hindsight_cli} retain --bank {hindsight_bank} --content '<structured Q&A per povison-cs-escalation-resumer skill template>' --tags "povison,escalation-qa,<product_slug>,<category>" --context "povison escalation Q&A"
-   If bridge script times out (60s), retry via terminal with: curl -s -X POST http://localhost:8888/v1/default/banks/{hindsight_bank}/memories -H 'Content-Type: application/json' -d '{{"content":"<Q&A>","context":"povison escalation Q&A","tags":["povison","escalation-qa"]}}' --max-time 120
+   If bridge script times out (60s), retry via terminal with: curl -s -X POST http://192.168.10.63:8888/v1/default/banks/{hindsight_bank}/memories -H 'Content-Type: application/json' -d '{{"content":"<Q&A>","context":"povison escalation Q&A","tags":["povison","escalation-qa"]}}' --max-time 120
    Only skip if Hindsight server is confirmed down.
 6. terminal: python3 {cli} draft-save --env {env} --session-id <quickcep_session_id> --content-file /tmp/draft-<quickcep_session_id>.html --subject "Re: ..." --receiver "<email>" (never send-email; join-chat is automatic)
    If get-escalation resume_context includes operator_attachments, pass them via --attachments with the JSON array (fileName, fileSize, url). PDF attachments must be vault-sourced — draft-save attachment guard blocks assembly/static.povison PDFs.

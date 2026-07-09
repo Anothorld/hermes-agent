@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS cs_intent_corrections (
     reason TEXT,
     operator_id TEXT,
     subject TEXT,
+    body TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -119,6 +120,7 @@ def _migrate(conn: sqlite3.Connection, key: str) -> None:
     conn.executescript(_SCHEMA)
     # Idempotent column adds for already-existing tables (older DBs).
     _ensure_column(conn, "cs_intent_corrections", "subject", "TEXT")
+    _ensure_column(conn, "cs_intent_corrections", "body", "TEXT")
     _MIGRATED.add(key)
     log.debug("cs_intent db migrated at %s", key)
 
@@ -222,18 +224,20 @@ def insert_correction(
     reason: str,
     operator_id: str,
     subject: str = "",
+    body: str = "",
 ) -> int:
     """Persist an operator correction. Returns the correction row id.
 
-    ``subject`` is stored so the learning loop has email-text context for
-    few-shot examples (without it, few-shot only has label↔label pairs).
+    ``subject`` + ``body`` are stored so T2/T3 learning has email-text features
+    (not just label↔label pairs). ``reason`` is optional/legacy — the Console
+    no longer collects a correction-reason dropdown.
     """
     ts = _utcnow()
     with connect() as conn:
         cur = conn.execute(
             """INSERT INTO cs_intent_corrections
-               (session_id, env, predicted_json, corrected_json, reason, operator_id, subject, created_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
+               (session_id, env, predicted_json, corrected_json, reason, operator_id, subject, body, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 session_id,
                 env,
@@ -242,6 +246,7 @@ def insert_correction(
                 reason,
                 operator_id,
                 subject,
+                body,
                 ts,
             ),
         )

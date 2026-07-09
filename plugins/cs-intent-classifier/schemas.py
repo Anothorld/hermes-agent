@@ -152,8 +152,9 @@ class CorrectionRequest(BaseModel):
     operator_id: str
     primary_intent: Optional[str] = None
     intent_overrides: list[IntentOverrideItem] = Field(default_factory=list)
-    reason: str = ""
-    subject: str = ""  # stored so the learning loop has email-text context
+    reason: str = ""  # legacy; Console no longer collects a reason dropdown
+    subject: str = ""  # email subject for T2/T3 text features
+    body: str = ""  # latest customer email plain text (truncated) for T2/T3
 
 
 class IntentReadResponse(BaseModel):

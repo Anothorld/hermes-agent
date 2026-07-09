@@ -95,6 +95,7 @@ def test_reconcile_skips_when_visitor_is_latest(monkeypatch, tmp_path):
 
 
 def test_reconcile_skips_when_operator_sent_event_exists(monkeypatch, tmp_path):
+    """Same-cycle operator_sent (after inbound) still skips QuickCEP fetch."""
     _reset_modules()
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
     cal = _load("cal")
@@ -102,6 +103,7 @@ def test_reconcile_skips_when_operator_sent_event_exists(monkeypatch, tmp_path):
 
     r = cal.enqueue_session(quickcep_session_id="s1", message_id="m1", env="LIVE")
     cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+    # enqueue_session already wrote inbound_received; this send is same-cycle.
     cal.write_event(
         quickcep_session_id="s1",
         event_type="operator_sent",
@@ -117,3 +119,35 @@ def test_reconcile_skips_when_operator_sent_event_exists(monkeypatch, tmp_path):
     assert stats["skipped_already"] == 1
     fetch.assert_not_called()
     repair.assert_called_once()
+
+
+def test_reconcile_checks_again_after_reopen_despite_prior_operator_sent(monkeypatch, tmp_path):
+    """Prior-cycle operator_sent must not skip reconcile after customer reopen."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    rec = _load("operator_send_reconcile")
+
+    r = cal.enqueue_session(quickcep_session_id="s-reopen", message_id="m1", env="LIVE")
+    cal.write_event(
+        quickcep_session_id="s-reopen",
+        event_type="operator_sent",
+        payload={"message_id": "op-old"},
+        env="LIVE",
+    )
+    # Customer reopen → new inbound cycle while still draft_ready for reconcile scan.
+    cal.enqueue_session(quickcep_session_id="s-reopen", message_id="m2", env="LIVE")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+
+    op_msg = {"id": "op-new", "createTime": "2026-07-09 12:00:00"}
+    with patch.object(rec, "_fetch_last_operator_message", return_value=op_msg) as fetch:
+        with patch.object(rec, "handle_operator_send", return_value={"ok": True}) as handoff:
+            with patch.object(
+                rec, "repair_orphaned_escalations_once", return_value={"checked": 0, "repaired": 0}
+            ):
+                stats = rec.reconcile_operator_sent_once(env="LIVE")
+
+    assert stats["skipped_already"] == 0
+    assert stats["synced"] == 1
+    fetch.assert_called_once()
+    handoff.assert_called_once()

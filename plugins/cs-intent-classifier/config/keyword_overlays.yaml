@@ -1,0 +1,298 @@
+version: 3
+updated_at: '2026-07-09T03:16:54+00:00'
+promoted_by: keyword_optimize
+eval:
+  golden_accuracy: 0.75
+  fp_rate: 0.25806451612903225
+  resolve_rate: 0.7419354838709677
+  baseline_golden_accuracy: 0.7
+  baseline_fp_rate: 0.3225806451612903
+fallthrough_patterns:
+- id: auto_a86d33011c
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bshipping\ address\b
+  reason: auto from keyword FP phrase 'shipping address' (n=5)
+  support: 5
+  source: keyword_optimize
+- id: auto_57e1b688db
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \baddress\ nbsp\b
+  reason: auto from keyword FP phrase 'address nbsp' (n=5)
+  support: 5
+  source: keyword_optimize
+- id: auto_a47cb3c545
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bshipping\ address\ nbsp\b
+  reason: auto from keyword FP phrase 'shipping address nbsp' (n=5)
+  support: 5
+  source: keyword_optimize
+- id: auto_f98b0e4635
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bnbsp\ nbsp\b
+  reason: auto from keyword FP phrase 'nbsp nbsp' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_db6e9be1f9
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bpovison\ order\b
+  reason: auto from keyword FP phrase 'povison order' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_9e1c743039
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \border\ 260628388322007316\b
+  reason: auto from keyword FP phrase 'order 260628388322007316' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_10b1418a50
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \b260628388322007316\ order\b
+  reason: auto from keyword FP phrase '260628388322007316 order' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_ee2e9ebb21
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \border\ status\b
+  reason: auto from keyword FP phrase 'order status' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_b54e2abadc
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bpovison\ order\ 260628388322007316\b
+  reason: auto from keyword FP phrase 'povison order 260628388322007316' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_fd2a061065
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \border\ 260628388322007316\ order\b
+  reason: auto from keyword FP phrase 'order 260628388322007316 order' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_b58a38747e
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \b260628388322007316\ order\ status\b
+  reason: auto from keyword FP phrase '260628388322007316 order status' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_921106cb33
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bfinally\ rescheduled\b
+  reason: auto from keyword FP phrase 'finally rescheduled' (n=3)
+  support: 3
+  source: keyword_optimize
+- id: auto_f6a7fde307
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bnbsp\ label\b
+  reason: auto from keyword FP phrase 'nbsp label' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_5a560629d8
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bwhite\ glove\b
+  reason: auto from keyword FP phrase 'white glove' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_822fe6513f
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bglove\ delivery\b
+  reason: auto from keyword FP phrase 'glove delivery' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_5984c866ba
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bwhite\ glove\ delivery\b
+  reason: auto from keyword FP phrase 'white glove delivery' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_eddaa29b23
+  action: fallthrough
+  blocks:
+  - product
+  - soft
+  pattern: \bcolor\ rgb\b
+  reason: auto from keyword FP phrase 'color rgb' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_24f9ae003f
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \border\ 1851\b
+  reason: auto from keyword FP phrase 'order 1851' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_9ea82c5d5b
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \b1817\ shipping\b
+  reason: auto from keyword FP phrase '1817 shipping' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_31edcac613
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bshipping\ details\b
+  reason: auto from keyword FP phrase 'shipping details' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_1e6a09e079
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bdetails\ support\b
+  reason: auto from keyword FP phrase 'details support' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_e924c80190
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bsupport\ team\b
+  reason: auto from keyword FP phrase 'support team' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_f5cb375ffb
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bteam\ i'm\b
+  reason: auto from keyword FP phrase 'team i'm' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_7603a9daa8
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \btracking\ delivery\b
+  reason: auto from keyword FP phrase 'tracking delivery' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_68f3af4a09
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bdelivery\ link\b
+  reason: auto from keyword FP phrase 'delivery link' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_55b5ae5097
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \blink\ tracking\b
+  reason: auto from keyword FP phrase 'link tracking' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_9f18dc4e58
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \btracking\ says\b
+  reason: auto from keyword FP phrase 'tracking says' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_db98a5e0a4
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bsays\ delivery\b
+  reason: auto from keyword FP phrase 'says delivery' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_cb3588503c
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bdelivery\ left\b
+  reason: auto from keyword FP phrase 'delivery left' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_63ee03e615
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bleft\ carport\b
+  reason: auto from keyword FP phrase 'left carport' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_4e8e83a232
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \bcarport\ wright\b
+  reason: auto from keyword FP phrase 'carport wright' (n=2)
+  support: 2
+  source: keyword_optimize
+- id: auto_ac7dadc2a4
+  action: fallthrough
+  blocks:
+  - logistics
+  - soft
+  pattern: \btracking\ delivery\ link\b
+  reason: auto from keyword FP phrase 'tracking delivery link' (n=2)
+  support: 2
+  source: keyword_optimize

@@ -3,10 +3,11 @@
 T1 error bank + T2 few-shot injection + T3 offline policy distillation.
 
 - T1: golden + failure cases in eval/cases/*.jsonl; eval_runner scores them.
-- T2: build_few_shot_block() — recent high-confidence corrections injected into
-  the classifier prompt as few-shot examples (online, no approve).
-- T3: distill_intent_policy_llm() — cron aggregates corrections and asks an LLM
-  to generate/update config/intent_policy.md rules. Self-adaptive:
+- T2: build_few_shot_block() — recent corrections (subject + body text + labels)
+  injected into the classifier prompt as few-shot examples (online, no approve).
+  Correction ``reason`` is unused (Console no longer collects it).
+- T3: distill_intent_policy_llm() — cron aggregates corrections (with email text)
+  and asks an LLM to generate/update config/intent_policy.md rules. Self-adaptive:
   latest_weekly_trend() compares this week vs last week pass-rate:
     - this_week >= last_week → mode="repair" (incremental ADJUST:/REMOVE:)
     - this_week <  last_week → mode="rebuild" (regenerate from cumulative samples)
@@ -49,13 +50,36 @@ def _load_learning_config() -> dict[str, Any]:
     except OSError:
         data = {}
     # env overrides
-    for key in ("distill_period", "eval_period", "promote_min_accuracy_delta", "rebuild_threshold", "fewshot_period", "fewshot_sample_size"):
+    float_keys = (
+        "promote_min_accuracy_delta",
+        "rebuild_threshold",
+        "keyword_promote_max_golden_drop",
+    )
+    int_keys = (
+        "fewshot_sample_size",
+        "keyword_overlay_min_support",
+        "keyword_overlay_max_rules",
+    )
+    for key in (
+        "distill_period",
+        "eval_period",
+        "promote_min_accuracy_delta",
+        "rebuild_threshold",
+        "fewshot_period",
+        "fewshot_sample_size",
+        "keyword_optimize_period",
+        "keyword_overlay_min_support",
+        "keyword_overlay_max_rules",
+        "keyword_promote_max_golden_drop",
+    ):
         env_key = f"CS_INTENT_{key.upper()}"
         if env_key in os.environ:
             raw = os.environ[env_key]
             try:
-                if key in ("promote_min_accuracy_delta", "rebuild_threshold"):
+                if key in float_keys:
                     data[key] = float(raw)
+                elif key in int_keys:
+                    data[key] = int(raw)
                 else:
                     data[key] = raw
             except ValueError:
@@ -72,19 +96,81 @@ def list_intent_corrections(*, env: str, since: str = "", until: str = "", limit
 
 # ── T2: few-shot block ──
 
+_FEWSHOT_BODY_MAX = 280
+_DISTILL_BODY_MAX = 400
+
+# Quote / forward markers — aligned with cs-ops-bridge intent_gate._strip_quoted_reply.
+_QUOTE_CUT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?im)^\s*on\s.{5,200}?\swrote\s*:"),
+    re.compile(r"(?im)-{5,}\s*forwarded message\s*-{5,}"),
+    re.compile(r"(?im)-{2,}\s*original\s+message\s*-{2,}"),
+    re.compile(r"(?im)^\s*from\s*:.*\n(.*\n){0,5}(subject|date|to)\s*:"),
+    re.compile(r"(?im)^\s*.{0,80}写道\s*[:：]"),
+    re.compile(r"(?im)^\s*-{2,}\s*原始邮件\s*-{2,}"),
+)
+_QUOTE_LINE_RE = re.compile(r"^\s*>")
+
+
+def strip_quoted_reply(text: str) -> str:
+    """Remove quoted / forwarded reply content from an email body.
+
+    Keeps only the customer's new content so T2/T3 learning does not absorb
+    prior-thread noise (agent replies, old questions, signatures in quotes).
+    """
+    import html as _html
+
+    if not text:
+        return ""
+    text = _html.unescape(str(text))
+    for pat in _QUOTE_CUT_PATTERNS:
+        m = pat.search(text)
+        if m:
+            text = text[: m.start()].rstrip()
+    text = "\n".join(
+        line for line in text.splitlines() if not _QUOTE_LINE_RE.match(line)
+    )
+    return text.strip()
+
+
+def _clip_text(text: str, max_len: int) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def _correction_body_text(correction: dict[str, Any]) -> str:
+    """Best-effort email body for learning samples.
+
+    Prefer the stored ``body`` column. For older rows (pre-body migration),
+    fall back to predicted intent snippets so historical corrections still
+    contribute text features without requiring a Console re-submit.
+
+    Quoted / forwarded reply blocks are stripped so few-shot / distill do not
+    learn from prior-thread noise.
+    """
+    raw = str(correction.get("body") or "").strip()
+    if not raw:
+        predicted = correction.get("predicted") or {}
+        snippets: list[str] = []
+        for intent in predicted.get("intents") or []:
+            if isinstance(intent, dict) and intent.get("snippet"):
+                snippets.append(str(intent["snippet"]).strip())
+        raw = " ".join(s for s in snippets if s)
+    return strip_quoted_reply(raw)
+
 
 def build_few_shot_block(*, env: str, n: int = 0) -> str:
-    """Render recent high-confidence corrections as a few-shot prompt block.
+    """Render recent corrections as a few-shot prompt block for the LLM.
 
     Injected into the classifier LLM prompt at call time. Returns "" when no
-    corrections are available. Each example carries the email subject (so the
-    LLM sees text features, not just label↔label pairs) plus the full predicted
-    intents list (so multi-intent detection mistakes are visible to the model).
+    useful corrections are available. Each example prefers **subject + body**
+    text features (not label↔label only). Correction ``reason`` is ignored —
+    the Console no longer collects it.
     """
     if n <= 0:
         n = int(_load_learning_config().get("fewshot_sample_size", 8))
     corrections = db.list_corrections(env=env, limit=n * 3)
-    # keep only corrected != predicted primary_intent, high-signal
     examples: list[dict[str, Any]] = []
     for c in corrections:
         pred = c.get("predicted") or {}
@@ -94,28 +180,34 @@ def build_few_shot_block(*, env: str, n: int = 0) -> str:
         pred_intents = [i.get("intent") for i in (pred.get("intents") or [])]
         examples.append({
             "subject": (c.get("subject") or "").strip()[:120],
+            "body": _clip_text(_correction_body_text(c), _FEWSHOT_BODY_MAX),
             "predicted_primary": pred.get("primary_intent"),
             "corrected_primary": corr.get("primary_intent"),
             "predicted_intents": pred_intents,
-            "reason": c.get("reason") or "",
         })
         if len(examples) >= n:
             break
     if not examples:
         return ""
-    lines = ["## Few-shot corrections (recent operator overrides — learn from these)"]
+    lines = [
+        "## Few-shot corrections (recent operator overrides — learn from email text + labels)"
+    ]
     for ex in examples:
-        subj = f' subject="{ex["subject"]}"' if ex["subject"] else ""
+        bits: list[str] = []
+        if ex["subject"]:
+            bits.append(f'subject="{ex["subject"]}"')
+        if ex["body"]:
+            bits.append(f'body="{ex["body"]}"')
+        text_prefix = (" " + " ".join(bits)) if bits else ""
         pred_prim = ex["predicted_primary"]
         if pred_prim:
             intents_str = f' intents={ex["predicted_intents"]}' if ex["predicted_intents"] else ""
             lines.append(
-                f'-{subj} predicted_primary={pred_prim}{intents_str} → corrected_primary={ex["corrected_primary"]}'
+                f'-{text_prefix} predicted_primary={pred_prim}{intents_str} → corrected_primary={ex["corrected_primary"]}'
             )
         else:
-            # Label-only correction (no AI prediction existed) — a ground-truth label.
             lines.append(
-                f'-{subj} operator_label_primary={ex["corrected_primary"]} (no AI prediction was stored for this email)'
+                f'-{text_prefix} operator_label_primary={ex["corrected_primary"]} (no AI prediction was stored for this email)'
             )
     return "\n".join(lines) + "\n"
 
@@ -206,9 +298,14 @@ def _build_distill_prompt(*, baseline_md: str, samples: list[dict[str, Any]], mo
     samples_block = json.dumps(
         [
             {
+                "subject": (c.get("subject") or "").strip()[:120],
+                "body": _clip_text(_correction_body_text(c), _DISTILL_BODY_MAX),
                 "predicted": (c.get("predicted") or {}).get("primary_intent"),
                 "corrected": (c.get("corrected") or {}).get("primary_intent"),
-                "reason": c.get("reason") or "",
+                "predicted_intents": [
+                    i.get("intent") for i in ((c.get("predicted") or {}).get("intents") or [])
+                    if isinstance(i, dict) and i.get("intent")
+                ],
             }
             for c in samples
         ],
@@ -218,11 +315,18 @@ def _build_distill_prompt(*, baseline_md: str, samples: list[dict[str, Any]], mo
     if mode == "rebuild":
         baseline_section = "Rebuild mode: ignore any prior policy. Generate fresh rules from the samples."
     else:
-        baseline_section = f"Repair mode: edit the baseline with ADJUST:/REMOVE: prefixes.\n\nCURRENT baseline:\n{baseline_md or '(empty)'}"
+        baseline_section = (
+            "Repair mode: edit the baseline with ADJUST:/REMOVE: prefixes.\n\n"
+            f"CURRENT baseline:\n{baseline_md or '(empty)'}"
+        )
     return (
         "You analyze operator intent corrections to improve an email intent classifier.\n"
-        "Produce markdown rules for the classifier. Use ADJUST: to revise or add a rule, REMOVE: to delete one.\n"
-        "Cite evidence (predicted→corrected pairs). Do not invent rules not supported by the samples.\n"
+        "Each sample includes subject/body text when available — ground rules in those "
+        "text signals (keywords, phrases, checkout vs after-sale cues), not bare label pairs.\n"
+        "Produce markdown rules for the classifier. Use ADJUST: to revise or add a rule, "
+        "REMOVE: to delete one.\n"
+        "Cite evidence (predicted→corrected + short text cue). Do not invent rules not "
+        "supported by the samples. Do not rely on a free-text 'reason' field — it is unused.\n"
         f"{baseline_section}\n\n"
         "Output ONLY markdown starting with `## Approved intent policy`. 3-8 bullets.\n\n"
         f"SAMPLES_JSON:\n{samples_block}"
@@ -230,15 +334,31 @@ def _build_distill_prompt(*, baseline_md: str, samples: list[dict[str, Any]], mo
 
 
 def _deterministic_aggregate(samples: list[dict[str, Any]]) -> str:
-    """Fallback: tally the most common predicted→corrected transitions as rules."""
+    """Fallback: tally predicted→corrected transitions with optional text cues."""
     counts: dict[tuple[str, str], int] = {}
+    cues: dict[tuple[str, str], str] = {}
     for c in samples:
         pred = (c.get("predicted") or {}).get("primary_intent") or "?"
         corr = (c.get("corrected") or {}).get("primary_intent") or "?"
-        counts[(pred, corr)] = counts.get((pred, corr), 0) + 1
+        key = (pred, corr)
+        counts[key] = counts.get(key, 0) + 1
+        if key not in cues:
+            body = _clip_text(_correction_body_text(c), 80)
+            subj = (c.get("subject") or "").strip()[:60]
+            cue = body or subj
+            if cue:
+                cues[key] = cue
     lines = ["## Approved intent policy (deterministic fallback)"]
     for (pred, corr), n in sorted(counts.items(), key=lambda x: -x[1])[:8]:
-        lines.append(f"- ADJUST: when predicted={pred} but email signals {corr}, prefer {corr} (n={n})")
+        cue = cues.get((pred, corr))
+        if cue:
+            lines.append(
+                f'- ADJUST: when predicted={pred} but email text resembles "{cue}", prefer {corr} (n={n})'
+            )
+        else:
+            lines.append(
+                f"- ADJUST: when predicted={pred} but email signals {corr}, prefer {corr} (n={n})"
+            )
     return "\n".join(lines) + "\n"
 
 

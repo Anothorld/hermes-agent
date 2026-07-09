@@ -106,6 +106,27 @@ def _fetch_last_operator_message(quickcep_session_id: str) -> Optional[dict[str,
     }
 
 
+def _already_synced_this_cycle(*, session_row_id: int) -> bool:
+    """True when CAL already has operator_sent for the current customer-message cycle.
+
+    Anchor is the latest ``inbound_received`` / ``customer_followup_while_busy``.
+    A prior-cycle ``operator_sent`` (before customer reopen) must not skip
+    reconcile — otherwise SIO-missed sends after reopen never backfill.
+    """
+    cycle_start = cal.latest_event_created_at(
+        session_row_id=session_row_id,
+        event_types=("inbound_received", "customer_followup_while_busy"),
+    )
+    if cycle_start:
+        return cal.session_has_event_since(
+            session_row_id=session_row_id,
+            event_type="operator_sent",
+            since=cycle_start,
+        )
+    # No inbound anchor (legacy / odd rows): keep historical any-event skip.
+    return cal.session_has_event(session_row_id=session_row_id, event_type="operator_sent")
+
+
 def reconcile_operator_sent_once(*, env: str | None = None) -> dict[str, Any]:
     """Sync CAL operator_sent for sessions where QuickCEP shows operator already replied."""
     env = env or os.environ.get("CS_OPS_ENV", "LIVE")
@@ -119,7 +140,7 @@ def reconcile_operator_sent_once(*, env: str | None = None) -> dict[str, Any]:
             if row_id in seen_row_ids:
                 continue
             seen_row_ids.add(row_id)
-            if cal.session_has_event(session_row_id=row_id, event_type="operator_sent"):
+            if _already_synced_this_cycle(session_row_id=row_id):
                 skipped += 1
                 continue
             checked += 1

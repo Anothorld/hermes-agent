@@ -15,10 +15,15 @@ All decisions audited in cs_learning_job_runs.
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import db, eval_runner, learning
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
+from jobs.bootstrap import db, eval_runner, learning
 
 log = logging.getLogger(__name__)
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
@@ -53,11 +58,12 @@ def run(*, env: str = "LIVE") -> dict:
     old_policy = policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
     try:
         policy_path.write_text(candidate_md, encoding="utf-8")
-        cand_result = eval_runner.run_eval(use_llm=False)
+        # Golden only — failures.jsonl is scored by keyword_optimize, not policy distill.
+        cand_result = eval_runner.run_eval(use_llm=False, include_failures=False)
     finally:
         policy_path.write_text(old_policy, encoding="utf-8")
 
-    current_result = eval_runner.run_eval(use_llm=False)
+    current_result = eval_runner.run_eval(use_llm=False, include_failures=False)
     min_delta = float(cfg.get("promote_min_accuracy_delta", 0.0))
     promoted = False
     if cand_result.accuracy - current_result.accuracy >= min_delta:

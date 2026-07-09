@@ -88,11 +88,12 @@ def main() -> None:
     _load_env()
     log = logging.getLogger("cs-intent-classifier")
     log.info(
-        "starting host=%s port=%s model=%s llm_configured=%s",
+        "starting host=%s port=%s model=%s llm_configured=%s keyword_tier=%s",
         args.host,
         args.port,
         os.environ.get("CS_INTENT_LLM_MODEL", "(unconfigured)"),
         bool(os.environ.get("CS_INTENT_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")),
+        os.environ.get("CS_INTENT_KEYWORD_TIER", "all"),
     )
     import uvicorn
 

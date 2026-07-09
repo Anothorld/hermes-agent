@@ -17,3 +17,13 @@ rebuild_threshold: -0.02
 # T2 few-shot refresh cadence (higher frequency than distill).
 fewshot_period: 6h
 fewshot_sample_size: 8
+
+# Scheme 1 — keyword failure bank + overlay self-eval loop
+# (jobs/optimize_keyword.py). Override via CS_INTENT_KEYWORD_*.
+keyword_optimize_period: 1d
+# Minimum recurring FP phrase support before proposing a fallthrough overlay.
+keyword_overlay_min_support: 2
+# Cap new overlay rules proposed per cycle.
+keyword_overlay_max_rules: 12
+# Candidate golden accuracy may drop by at most this vs baseline (0 = no drop).
+keyword_promote_max_golden_drop: 0.0

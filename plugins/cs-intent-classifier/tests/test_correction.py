@@ -74,6 +74,26 @@ def test_correct_without_prediction_creates_label(client):
     assert out["corrections"][0]["subject"] == "Question about a sofa"
 
 
+def test_patch_intent_strips_quoted_reply_from_body(client):
+    r = client.patch("/intent/quote-strip", json={
+        "env": "TEST",
+        "operator_id": "op1",
+        "primary_intent": "after_sale_issue",
+        "subject": "Re: Order",
+        "body": (
+            "The sofa arrived damaged and I need a refund.\n\n"
+            "On Mon, 1 Jan 2026 Alice wrote:\n"
+            "> Where is my tracking number?"
+        ),
+    })
+    assert r.status_code == 200
+    stored = r.json()["corrections"][0]["body"]
+    assert "damaged" in stored
+    assert "refund" in stored
+    assert "tracking" not in stored
+    assert "Alice" not in stored
+
+
 def test_get_intent_returns_predicted_only_when_no_correction(client):
     client.post("/classify", json={
         "session_id": "s2",

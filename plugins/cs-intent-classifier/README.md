@@ -56,10 +56,15 @@ Without an LLM configured, the classifier runs keyword-only and returns a conser
 | `CS_INTENT_LLM_API_KEY` | (falls back to `OPENAI_API_KEY`) | LLM key. |
 | `CS_INTENT_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint. |
 | `CS_INTENT_CONTEXT_TURNS` | `3` | Number of recent messages (visitor+operator) to include as conversation context. Set `1` to disable history. Read by the cs-ops-bridge seam. |
+| `CS_INTENT_KEYWORD_TIER` | `all` | Keyword layer tier. `all` = hard+soft blocks; `safe_only` / `hard_only` = threat/closing/spam only (soft intents → LLM). |
 | `CS_INTENT_DISTILL_PERIOD` | `7d` | T3 distillation cadence. |
 | `CS_INTENT_EVAL_PERIOD` | `1d` | T0 eval cadence. |
 | `CS_INTENT_PROMOTE_MIN_ACCURACY_DELTA` | `0.0` | Candidate must beat current by this. |
 | `CS_INTENT_REBUILD_THRESHOLD` | `-0.02` | Week-over-week drop triggering rebuild mode. |
+| `CS_INTENT_KEYWORD_OPTIMIZE_PERIOD` | `1d` | Keyword failure-bank / overlay loop cadence (docs; cron invokes `jobs/optimize_keyword.py`). |
+| `CS_INTENT_KEYWORD_OVERLAY_MIN_SUPPORT` | `2` | Min recurring FP phrase count before proposing a fallthrough overlay. |
+| `CS_INTENT_KEYWORD_OVERLAY_MAX_RULES` | `12` | Cap new overlay rules proposed per cycle. |
+| `CS_INTENT_KEYWORD_PROMOTE_MAX_GOLDEN_DROP` | `0.0` | Max allowed golden accuracy drop when promoting overlays (0 = no drop). |
 
 ## HTTP API
 
@@ -74,7 +79,9 @@ Without an LLM configured, the classifier runs keyword-only and returns a conser
 | `GET` | `/learning/intent-metrics` | Console effect panel |
 | `GET` | `/learning/intent-trend` | Console pass-rate chart |
 | `GET` | `/learning/distill-log` | Console distill decision log |
+| `GET` | `/learning/keyword-optimize-log` | Keyword overlay promote/reject audit |
 | `GET` | `/config/intent-scope` | Console workbench (processing scope / close-bar) |
+| `GET` | `/config/keyword-tier` | Active `CS_INTENT_KEYWORD_TIER` |
 
 ## Processing scope (`config/intent_scope.yaml`)
 
@@ -109,15 +116,42 @@ See `schemas.py` for the canonical pydantic models. Highlights:
 4. `fabrication_guard=true` is mandatory; failure returns 422, not fake data.
 5. Eval golden set includes "should be null" cases — fabricated values fail the eval.
 
+## Keyword tier + guards (schemes 2–3)
+
+- **Hard blocks** (always): legal/threat, conversation-closing thank-you, clear B2B/spam.
+- **Soft blocks** (only when `CS_INTENT_KEYWORD_TIER=all`): checkout/BNPL, after-sale, order mgmt, logistics, product.
+- **Precision guards** on soft hits: e.g. logistics requires tracking language (not bare order #); product skips when refund/damage/cancel present; spam greeting skips when subject is `Re:` + order/SKU; after-sale skips when checkout/BNPL language is present.
+- **Overlays** (`config/keyword_overlays.yaml`): auto-learned fallthrough regexes that force soft hits → LLM when they match.
+
 ## Learning loop
 
-- **T1 error bank**: `eval/cases/golden.jsonl` (seeded) + `failures.jsonl` (auto-appended from corrections).
-- **T2 few-shot** (`jobs/optimize_fewshot.py`, ~6h): recent high-confidence corrections injected into the prompt at classify time.
-- **T3 distill** (`jobs/optimize_distill.py`, weekly): aggregates corrections → LLM generates/edits `config/intent_policy.md`. Adaptive:
+- **T1 error bank (automatic)**: operator corrections with `classifier_source=keyword` and wrong primary are synced into `eval/cases/failures.jsonl` (on `PATCH /intent` + `jobs/optimize_keyword.py`). Deduped by correction id + fingerprint. Failure cases use `expected_outcome: keyword_miss` (goal = fall through to LLM).
+- **T1b keyword optimize** (`jobs/optimize_keyword.py`, daily): propose fallthrough overlays from recurring FP phrases → **self-eval** on golden + failure bank → promote only if **golden accuracy does not drop** (failures alone cannot outweigh a golden regression) and failure FP rate improves. Rejected candidates are audited, never applied. Writes `config/keyword_overlays.yaml` (+ archive).
+- **T2 few-shot** (`jobs/optimize_fewshot.py`, ~6h audit; examples built at classify time): recent corrections injected into the **LLM** prompt with **subject + body** text (not label-only; correction `reason` is unused — Console no longer collects it). Body is quote-stripped (same markers as bridge `intent_gate._strip_quoted_reply`) and falls back to predicted snippets for older rows.
+- **T3 distill** (`jobs/optimize_distill.py`, weekly): aggregates corrections (subject/body + predicted→corrected) → LLM generates/edits `config/intent_policy.md` (LLM path). Adaptive:
   - this week ≥ last week pass-rate → `repair` mode (incremental ADJUST:/REMOVE:)
   - this week < last week → `rebuild` mode (regenerate from cumulative samples)
-  - Candidate must beat current eval accuracy to auto-promote (version bump + archive).
+  - Candidate must beat current **golden** eval accuracy to auto-promote (version bump + archive).
   - All decisions audited in `cs_learning_job_runs`; Console surfaces them.
+
+### Self-iteration closed loop (keyword)
+
+```
+operator corrects keyword FP
+  → sync failures.jsonl (automatic)
+  → optimize_keyword proposes overlays
+  → eval: golden must not regress; failure FP rate must improve
+  → promote overlays OR reject + audit
+  → next inbound: soft keyword + overlays + guards → fewer FPs
+```
+
+Run manually:
+
+```bash
+cd plugins/cs-intent-classifier
+CS_INTENT_ENV=LIVE python3 jobs/optimize_keyword.py
+# or: python3 -m jobs.optimize_keyword
+```
 
 ## Tests
 
@@ -139,21 +173,25 @@ plugins/cs-intent-classifier/
 ├── classifier.py          # keyword pre-filter + LLM fallback
 ├── intent_provider.py     # thin HTTP client (reference impl for bridge seam)
 ├── learning.py            # T2 few-shot + T3 distill + promote
-├── eval_runner.py         # golden-set eval + fabrication detection
+├── keyword_learning.py    # T1b failure-bank sync + overlay self-eval
+├── eval_runner.py         # golden + failures eval + fabrication detection
 ├── config/
 │   ├── intent_prompt_v1.md    # LLM prompt with no-fabrication contract
 │   ├── intent_policy.md       # distilled rules (starts empty)
 │   ├── intent_version.txt     # current model_version
 │   ├── intent_scope.yaml      # in_scope whitelist
-│   ├── intent_learning.yaml   # distill/eval cadence config
-│   └── archive/               # historical policy versions
+│   ├── intent_learning.yaml   # distill/eval/keyword-optimize cadence
+│   ├── keyword_overlays.yaml  # auto-promoted fallthrough overlays
+│   └── archive/               # historical policy + overlay versions
 ├── eval/cases/
 │   ├── golden.jsonl           # seed golden set
-│   └── failures.jsonl         # auto-appended failures
+│   ├── failures.jsonl         # auto-synced keyword FPs
+│   └── keyword_sync_state.json
 ├── jobs/
 │   ├── eval_daily.py          # T0 daily eval snapshot
 │   ├── optimize_distill.py    # T3 weekly distill + auto-promote
-│   └── optimize_fewshot.py    # T2 high-freq few-shot refresh
+│   ├── optimize_fewshot.py    # T2 high-freq few-shot refresh
+│   └── optimize_keyword.py    # T1b keyword overlay loop
 ├── scripts/cs_intent_cli.py   # ops CLI (classify/get/eval/promote)
 └── tests/                     # classifier / correction / learning / eval
 ```

@@ -86,9 +86,20 @@ def _guard_enabled() -> bool:
 
 
 def _session_key(session_id: str, task_id: str = "") -> str:
-    """Gateway runs pass ``task_id`` (e.g. kol-email-discover:LIVE:701); hooks
-    historically received empty ``session_id``. Prefer whichever is set."""
-    return (session_id or task_id or "").strip()
+    """Resolve the stable KOL session key for guard state.
+
+    Gateway runs usually pass ``task_id`` (e.g. ``kol-campaign:LIVE:SEB8010``).
+    After context compression, ``session_id`` may become a timestamp run id
+    (e.g. ``20260709_102222_72ff7c``) while ``task_id`` still holds the
+    ``kol-campaign:*`` key. Prefer whichever identifies the KOL gateway session
+    so bootstrap, URL block, and fallback tokens stay aligned across sub-runs.
+    """
+    sid = (session_id or "").strip()
+    tid = (task_id or "").strip()
+    for candidate in (tid, sid):
+        if candidate and any(candidate.startswith(p) for p in _KOL_SESSION_PREFIXES):
+            return candidate
+    return sid or tid
 
 
 def _kol_session(session_id: str, task_id: str = "") -> bool:

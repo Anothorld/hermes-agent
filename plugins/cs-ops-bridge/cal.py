@@ -1210,6 +1210,51 @@ def session_has_event(*, session_row_id: int, event_type: str) -> bool:
         return row is not None
 
 
+def session_has_event_since(
+    *,
+    session_row_id: int,
+    event_type: str,
+    since: str,
+) -> bool:
+    """True when an event of ``event_type`` exists with ``created_at >= since``.
+
+    Used by orphaned-escalation repair so a prior-cycle ``operator_sent`` does not
+    close a newer open escalation after customer reopen.
+    """
+    since_ts = (since or "").strip()
+    if not since_ts:
+        return False
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT 1 FROM cs_conversation_events
+               WHERE session_id=? AND event_type=? AND created_at>=?
+               LIMIT 1""",
+            (session_row_id, event_type, since_ts),
+        ).fetchone()
+        return row is not None
+
+
+def latest_event_created_at(
+    *,
+    session_row_id: int,
+    event_types: tuple[str, ...] | list[str],
+) -> Optional[str]:
+    """Return the newest ``created_at`` among the given event types, or None."""
+    types = tuple(t for t in event_types if str(t).strip())
+    if not types:
+        return None
+    placeholders = ",".join("?" for _ in types)
+    with _connect() as conn:
+        row = conn.execute(
+            f"""SELECT MAX(created_at) AS ts FROM cs_conversation_events
+                WHERE session_id=? AND event_type IN ({placeholders})""",
+            (session_row_id, *types),
+        ).fetchone()
+        if not row or row["ts"] is None:
+            return None
+        return str(row["ts"])
+
+
 def session_has_open_escalation(*, quickcep_session_id: str, env: str = "LIVE") -> bool:
     """True when the session has awaiting_answer or resuming escalation rows."""
     return bool(

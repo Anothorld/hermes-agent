@@ -1,7 +1,7 @@
-"""Shared test setup — load the plugin as a synthetic package.
+"""Bootstrap plugin modules for cron jobs under ``jobs/``.
 
-Mirrors serve.py's _load_pkg() so tests can import cs_intent_classifier_pkg.*
-without needing the standalone runner.
+Jobs are not subpackages of ``cs_intent_classifier_pkg``; they run as scripts
+from the plugin root. This loader mirrors ``serve.py`` / ``tests/conftest.py``.
 """
 
 from __future__ import annotations
@@ -14,23 +14,29 @@ from types import ModuleType
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _PKG_NAME = "cs_intent_classifier_pkg"
 
+_SUBMODULES = (
+    "schemas",
+    "db",
+    "classifier",
+    "intent_provider",
+    "plugin_api",
+    "eval_runner",
+    "learning",
+    "keyword_learning",
+)
 
-def _load_pkg() -> ModuleType:
+
+def load_pkg() -> ModuleType:
+    """Load (or return cached) synthetic package for the plugin."""
     if _PKG_NAME in sys.modules:
         return sys.modules[_PKG_NAME]
+    if str(_PLUGIN_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PLUGIN_ROOT))
+
     pkg = ModuleType(_PKG_NAME)
     pkg.__path__ = [str(_PLUGIN_ROOT)]  # type: ignore[attr-defined]
     sys.modules[_PKG_NAME] = pkg
-    for sub in (
-        "schemas",
-        "db",
-        "classifier",
-        "intent_provider",
-        "plugin_api",
-        "eval_runner",
-        "learning",
-        "keyword_learning",
-    ):
+    for sub in _SUBMODULES:
         path = _PLUGIN_ROOT / f"{sub}.py"
         if not path.exists():
             continue
@@ -48,4 +54,7 @@ def _load_pkg() -> ModuleType:
     return pkg
 
 
-_load_pkg()
+def __getattr__(name: str):
+    if name in _SUBMODULES:
+        return getattr(load_pkg(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

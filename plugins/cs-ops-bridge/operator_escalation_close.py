@@ -111,7 +111,13 @@ def close_escalations_on_operator_manual_reply(
 
 
 def repair_orphaned_escalations_once(*, env: str | None = None) -> dict[str, Any]:
-    """Close open escalations when CAL already records operator-handled session state."""
+    """Close open escalations superseded by a *current-cycle* operator send.
+
+    Only an ``operator_sent`` event at or after the escalation's ``created_at``
+    counts. A prior-cycle send (customer reopen → new escalation) must not
+    auto-close the new ticket — that was the coletteallen@verizon.net false
+    ``superseded_by_operator_send`` bug.
+    """
     env = env or os.environ.get("CS_OPS_ENV", "LIVE")
     if not _close_escalations_enabled():
         return {"ok": True, "skipped": True, "reason": "disabled", "checked": 0, "repaired": 0}
@@ -131,25 +137,36 @@ def repair_orphaned_escalations_once(*, env: str | None = None) -> dict[str, Any
         if not sid:
             continue
 
-        status = str(sess.get("status") or "")
-        already_handled = status == "operator_replied" or cal.session_has_event(
-            session_row_id=row_id,
-            event_type="operator_sent",
-        )
-        if not already_handled:
-            continue
-
-        result = close_escalations_on_operator_manual_reply(
+        closed_ids: list[int] = []
+        for esc in cal.list_escalations_for_session(
             quickcep_session_id=sid,
+            states=_OPEN_STATES,
             env=env,
-            operator_hint="repair: 会话已标记为客服已回复，补关升级",
-        )
-        if result.get("closed"):
+        ):
+            esc_created = str(esc.get("created_at") or "")
+            if not esc_created:
+                continue
+            if not cal.session_has_event_since(
+                session_row_id=row_id,
+                event_type="operator_sent",
+                since=esc_created,
+            ):
+                continue
+            item = _close_one_escalation(
+                esc,
+                quickcep_session_id=sid,
+                env=env,
+                operator_hint="repair: 会话已标记为客服已回复，补关升级",
+            )
+            if item.get("ok"):
+                closed_ids.append(int(item["escalation_id"]))
+
+        if closed_ids:
             repaired += 1
             log.info(
                 "orphaned escalation repair session=%s closed=%s",
                 sid,
-                [c.get("escalation_id") for c in result["closed"]],
+                closed_ids,
             )
 
     return {"ok": True, "checked": checked, "repaired": repaired}

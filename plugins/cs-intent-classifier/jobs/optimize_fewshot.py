@@ -9,16 +9,22 @@ doesn't regress. Bumps a separate fewshot_version (not model_version).
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-from . import db, eval_runner
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
+from jobs.bootstrap import db, eval_runner
 
 log = logging.getLogger(__name__)
 
 
 def run(*, env: str = "LIVE") -> dict:
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    result = eval_runner.run_eval(use_llm=False)
+    result = eval_runner.run_eval(use_llm=False, include_failures=False)
     finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
     db.record_job_run(
         env=env,

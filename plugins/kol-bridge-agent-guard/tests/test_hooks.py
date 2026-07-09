@@ -467,6 +467,37 @@ def test_blocks_ig_url_on_discovery_session_post_bootstrap():
     assert "rpa_fetch_ig_profile" in out["message"]
 
 
+def test_blocks_ig_url_when_session_id_is_timestamp_run_id():
+    """Regression: compressed sub-runs use timestamp session_id; task_id stays kol-*."""
+    h = _hooks()
+    ds = h._load_discovery_session()
+    task_id = "kol-campaign:LIVE:POVISON-TS-8319-20260603"
+    session_id = "20260709_102222_72ff7c"
+    ds.reset_bootstrap(task_id)
+    ds.reset_fallback_tokens(task_id)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id POVISON-TS-8319-20260603",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call(
+            "terminal",
+            {"command": cmd},
+            task_id=task_id,
+            session_id=session_id,
+        ) is None
+    out = h.pre_tool_call(
+        "browser_navigate",
+        {"url": "https://www.instagram.com/angelarosehome/"},
+        task_id=task_id,
+        session_id=session_id,
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "rpa_fetch_ig_profile" in out["message"]
+
+
 def test_blocks_google_url_on_discovery_session_post_bootstrap():
     """Google search URLs are blocked after bootstrap (rpa_fetch_google_serp replaces)."""
     h = _hooks()

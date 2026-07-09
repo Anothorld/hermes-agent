@@ -11,12 +11,15 @@ when loaded in-process by the Hermes plugin manager):
 - GET  /learning/intent-metrics       → observability aggregates (Phase 4)
 - GET  /learning/intent-trend         → pass-rate time series (Phase 4)
 - GET  /learning/distill-log          → distill decision audit (Phase 4)
+- GET  /learning/keyword-optimize-log → keyword overlay promote/reject audit
 - GET  /config/intent-scope           → in_scope whitelist (intent_scope.yaml)
+- GET  /config/keyword-tier           → active CS_INTENT_KEYWORD_TIER
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -188,9 +191,48 @@ def patch_intent(
         reason=body.reason,
         operator_id=body.operator_id,
         subject=body.subject,
+        body=_resolve_correction_body(body=body, predicted=predicted),
     )
+    # Scheme 1: immediately sync keyword false-positives into the failure bank
+    # so the next optimize_keyword cycle can propose overlays. Never fail the
+    # operator-facing PATCH if sync has a problem.
+    try:
+        from . import keyword_learning
+
+        keyword_learning.sync_keyword_failures(env=body.env, limit=200)
+    except Exception as exc:  # pragma: no cover — best-effort
+        log.warning("keyword failure sync after correction failed: %s", exc)
     # Re-read to return fresh state
     return get_intent(session_id, env=body.env)
+
+
+_CORRECTION_BODY_MAX = 800
+
+
+def _resolve_correction_body(*, body: CorrectionRequest, predicted: dict[str, Any]) -> str:
+    """Prefer Console-supplied body; fall back to predicted intent snippets.
+
+    Always strips quoted-reply / forwarded blocks before truncating. The
+    Workbench no longer collects a correction reason — learning quality depends
+    on the customer's *new* email text (subject alone is often just ``Re: Order``).
+    """
+    from .learning import strip_quoted_reply
+
+    raw = (body.body or "").strip()
+    if not raw:
+        snippets: list[str] = []
+        for intent in predicted.get("intents") or []:
+            if isinstance(intent, dict) and intent.get("snippet"):
+                snippets.append(str(intent["snippet"]).strip())
+        raw = " ".join(snippets).strip()
+    if not raw:
+        return ""
+    raw = strip_quoted_reply(raw)
+    if not raw:
+        return ""
+    # Collapse whitespace so few-shot / distill prompts stay compact.
+    raw = re.sub(r"\s+", " ", raw)
+    return raw[:_CORRECTION_BODY_MAX]
 
 
 def _build_label_only_correction(body: CorrectionRequest) -> dict[str, Any]:
@@ -335,3 +377,26 @@ def distill_log(
 ) -> dict[str, Any]:
     runs = db.list_job_runs(env=env, job="intent_optimize_distill", limit=limit)
     return {"env": env, "runs": runs}
+
+
+@router.get("/learning/keyword-optimize-log")
+def keyword_optimize_log(
+    env: str = Query("LIVE"),
+    limit: int = Query(50, ge=1, le=500),
+) -> dict[str, Any]:
+    """Audit log for the keyword failure-bank / overlay self-eval loop."""
+    runs = db.list_job_runs(env=env, job="intent_optimize_keyword", limit=limit)
+    return {"env": env, "runs": runs}
+
+
+@router.get("/config/keyword-tier")
+def get_keyword_tier() -> dict[str, Any]:
+    """Return active keyword tier (all | safe_only) for ops / Console."""
+    from .classifier import keyword_tier, soft_keyword_enabled
+
+    tier = keyword_tier()
+    return {
+        "tier": tier,
+        "soft_enabled": soft_keyword_enabled(),
+        "env_var": "CS_INTENT_KEYWORD_TIER",
+    }

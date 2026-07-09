@@ -4,6 +4,14 @@ Keyword layer: deterministic regex on subject+body, zero LLM cost, high precisio
 for clear single-intent cases (order tracking, refund/legal threats, B2B spam).
 Returns a full gate_extract dict when confident, or None to fall through to LLM.
 
+Tiering (``CS_INTENT_KEYWORD_TIER``):
+- ``all`` (default): hard blocks (threat/closing/spam) + soft blocks (checkout,
+  after_sale, order_mgmt, logistics, product).
+- ``safe_only`` / ``hard_only``: only hard blocks; soft intents fall through to LLM.
+
+Soft blocks apply precision guards (scheme 2) and optional auto-learned
+fallthrough overlays from ``config/keyword_overlays.yaml`` (scheme 1 loop).
+
 LLM layer: OpenAI-compatible chat completions call with the versioned prompt from
 config/intent_prompt_v1.md. Outputs full multi-intent schema. Self-configured via
 CS_INTENT_LLM_* env vars — does NOT read profile config.
@@ -31,6 +39,12 @@ from .schemas import GateExtract
 log = logging.getLogger(__name__)
 
 _CONFIG_DIR = Path(__file__).resolve().parent / "config"
+
+# Soft-intent keyword blocks skipped when CS_INTENT_KEYWORD_TIER=safe_only|hard_only.
+_SOFT_KEYWORD_BLOCKS = frozenset(
+    {"checkout", "after_sale", "order_mgmt", "logistics", "product"}
+)
+_HARD_KEYWORD_BLOCKS = frozenset({"threat", "closing", "spam"})
 
 
 # ── Keyword patterns (ported/extended from cs-ops-bridge/classify_intent.py) ──
@@ -165,6 +179,137 @@ def _load_scope() -> dict[str, bool]:
         }
 
 
+def keyword_tier() -> str:
+    """Return the active keyword tier: ``all`` or ``safe_only``.
+
+    Env ``CS_INTENT_KEYWORD_TIER``:
+    - ``all`` (default): hard + soft keyword blocks.
+    - ``safe_only`` / ``hard_only``: hard blocks only; soft → LLM.
+    Unknown values fall back to ``all``.
+    """
+    raw = (os.environ.get("CS_INTENT_KEYWORD_TIER") or "all").strip().lower()
+    if raw in ("safe_only", "hard_only", "safe", "hard"):
+        return "safe_only"
+    if raw in ("all", "full", ""):
+        return "all"
+    log.warning("unknown CS_INTENT_KEYWORD_TIER=%r — using all", raw)
+    return "all"
+
+
+def soft_keyword_enabled() -> bool:
+    """True when soft keyword blocks (logistics/product/…) may return a result."""
+    return keyword_tier() == "all"
+
+
+def _load_keyword_overlays() -> list[dict[str, Any]]:
+    """Load auto-learned fallthrough overlays from config/keyword_overlays.yaml.
+
+    Each overlay may force keyword fallthrough (return None) when its pattern
+    matches, reducing soft-block false positives. Empty/missing file → [].
+    """
+    path = _CONFIG_DIR / "keyword_overlays.yaml"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        log.warning("keyword overlays load failed: %s", exc)
+        return []
+    rules = data.get("fallthrough_patterns") or data.get("overlays") or []
+    if not isinstance(rules, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        pat = str(rule.get("pattern") or "").strip()
+        if not pat:
+            continue
+        out.append(rule)
+    return out
+
+
+def _overlay_forces_fallthrough(text: str, *, block: str) -> bool:
+    """True when an overlay says this soft block should not keyword-classify."""
+    lower = text.lower()
+    for rule in _load_keyword_overlays():
+        action = str(rule.get("action") or "fallthrough").lower()
+        if action not in ("fallthrough", "skip", "none"):
+            continue
+        applies = rule.get("blocks") or rule.get("block") or "soft"
+        if isinstance(applies, str):
+            applies_list = [applies]
+        else:
+            applies_list = list(applies)
+        applies_norm = {str(a).lower() for a in applies_list}
+        if "soft" not in applies_norm and "all" not in applies_norm and block not in applies_norm:
+            continue
+        pat = str(rule.get("pattern") or "")
+        try:
+            if re.search(pat, lower, re.I):
+                log.debug(
+                    "keyword overlay fallthrough block=%s id=%s",
+                    block,
+                    rule.get("id") or rule.get("reason") or "?",
+                )
+                return True
+        except re.error as exc:
+            log.warning("invalid keyword overlay pattern %r: %s", pat, exc)
+    return False
+
+
+# Soft-block precision guards (scheme 2) — prefer fallthrough over false positive.
+_LOGISTICS_STRONG_RE = re.compile(
+    r"\b(where is|track(ing)?|shipping|delivery|shipment|order status|"
+    r"when will|eta|estimated.*arrival)\b",
+    re.I,
+)
+_AFTER_SALE_CONFLICT_RE = re.compile(
+    r"\b(refund|return|chargeback|damaged|broken|defect|warranty|replace)\b",
+    re.I,
+)
+_PRODUCT_CONFLICT_RE = re.compile(
+    r"\b(refund|return|damaged|broken|cancel|tracking|where is|"
+    r"shipment|after\s?pay|afterpay|chargeback)\b",
+    re.I,
+)
+
+
+def _logistics_guard_ok(text: str) -> bool:
+    """Require a real tracking/status signal; bare order numbers are not enough."""
+    if not _LOGISTICS_STRONG_RE.search(text):
+        return False
+    # Competing after-sale / cancel signals → leave to LLM (or earlier blocks).
+    if _AFTER_SALE_CONFLICT_RE.search(text) and not re.search(
+        r"\b(where is|track(ing)?|shipment|delivery)\b", text, re.I
+    ):
+        return False
+    return True
+
+
+def _after_sale_guard_ok(text: str) -> bool:
+    """Skip after-sale keyword hit when checkout/BNPL language is present."""
+    lower = text.lower()
+    for pat, _ in _CHECKOUT_PAYMENT_PATTERNS:
+        if re.search(pat, lower):
+            return False
+    return True
+
+
+def _product_guard_ok(text: str) -> bool:
+    """Skip product keyword hit when post-sale / logistics / checkout signals dominate."""
+    return not _PRODUCT_CONFLICT_RE.search(text)
+
+
+def _spam_guard_ok(*, subject: str, body: str) -> bool:
+    """Skip ultra-short spam greeting when subject carries order/SKU/thread context."""
+    subj = subject.strip()
+    if _ORDER_RE.search(subj) or _SKU_RE.search(subj):
+        return False
+    if re.match(r"(?i)^\s*re\s*:", subj) and len(subj) > 8:
+        return False
+    # Body-only greeting with empty subject is still ok to flag.
+    return True
+
+
 def _extract_orders(text: str) -> list[str]:
     out: list[str] = []
     for m in _ORDER_RE.finditer(text):
@@ -265,6 +410,10 @@ def keyword_classify(
 
     Returns None when the input doesn't match a clear single-intent pattern,
     signaling the caller to fall through to the LLM layer.
+
+    Hard blocks (threat / closing / spam) always run. Soft blocks run only when
+    ``CS_INTENT_KEYWORD_TIER=all`` (default). Soft matches also pass precision
+    guards and optional auto-learned overlays before returning.
     """
     text = f"{subject}\n{body}"
     lower = text.lower()
@@ -275,6 +424,7 @@ def keyword_classify(
     region = _build_region(metadata, body, customer_email)
     lang_val, lang_conf = _detect_language(text)
     emo_val, emo_conf = _detect_emotion(text)
+    allow_soft = soft_keyword_enabled()
 
     uncertain: list[str] = []
     null_fields: list[str] = []
@@ -297,6 +447,7 @@ def keyword_classify(
             "snippet": snippet[:300],
         }
 
+    # ── Hard blocks (always) ──────────────────────────────────────────
     # Threat → escalate + after_sale out_of_scope
     for pat, threat_type in _THREAT_PATTERNS:
         if re.search(pat, lower):
@@ -349,9 +500,14 @@ def keyword_classify(
             is_conversation_closing=True,
         )
 
-    # Spam
+    # Spam (hard) — with subject-context guard for ultra-short greetings.
+    # Use continue (not break) so later spam patterns still run if a greeting
+    # is skipped due to Re:/order subject context.
     for pat in _SPAM_PATTERNS:
         if re.search(pat, lower):
+            if pat.startswith("^") and not _spam_guard_ok(subject=subject, body=body):
+                log.debug("spam greeting guard → skip pattern (subject has thread context)")
+                continue
             intent = _mk_intent("spam_irrelevant", _snippet_match(text, pat), urgency="low")
             return _assemble(
                 intents=[intent],
@@ -374,9 +530,17 @@ def keyword_classify(
                 source="keyword",
             )
 
+    # Soft blocks skipped when tier=safe_only → LLM handles logistics/product/…
+    if not allow_soft:
+        log.debug("keyword tier=safe_only — soft blocks skipped → LLM fallback")
+        return None
+
+    # ── Soft blocks (tier=all only) ───────────────────────────────────
     # Checkout / BNPL payment failure (before after_sale — "after pay" ≠ after sale).
     for pat, sub in _CHECKOUT_PAYMENT_PATTERNS:
         if re.search(pat, lower):
+            if _overlay_forces_fallthrough(text, block="checkout"):
+                return None
             intent = _mk_intent("order_management", _snippet_match(text, pat), urgency="medium")
             return _assemble(
                 intents=[intent],
@@ -402,6 +566,11 @@ def keyword_classify(
     # After-sale
     for pat, signal_type, _ in _AFTER_SALE_PATTERNS:
         if re.search(pat, lower):
+            if not _after_sale_guard_ok(text):
+                log.debug("after_sale guard → fallthrough (checkout/BNPL context)")
+                break
+            if _overlay_forces_fallthrough(text, block="after_sale"):
+                return None
             intent = _mk_intent(
                 "after_sale_issue",
                 _snippet_match(text, pat),
@@ -432,6 +601,8 @@ def keyword_classify(
     # Order management
     for pat, sub in _ORDER_MGMT_PATTERNS:
         if re.search(pat, lower):
+            if _overlay_forces_fallthrough(text, block="order_mgmt"):
+                return None
             intent = _mk_intent("order_management", _snippet_match(text, pat), urgency="medium")
             return _assemble(
                 intents=[intent],
@@ -457,6 +628,11 @@ def keyword_classify(
     # Logistics (in_scope) — only if clearly a tracking/shipping question
     for pat in _LOGISTICS_PATTERNS:
         if re.search(pat, lower):
+            if not _logistics_guard_ok(text):
+                log.debug("logistics guard → fallthrough (weak/ambiguous match)")
+                break
+            if _overlay_forces_fallthrough(text, block="logistics"):
+                return None
             intent = _mk_intent("logistics_inquiry", _snippet_match(text, pat), urgency="medium")
             return _assemble(
                 intents=[intent],
@@ -482,6 +658,11 @@ def keyword_classify(
     # Product (in_scope)
     for pat in _PRODUCT_PATTERNS:
         if re.search(pat, lower):
+            if not _product_guard_ok(text):
+                log.debug("product guard → fallthrough (post-sale/logistics conflict)")
+                break
+            if _overlay_forces_fallthrough(text, block="product"):
+                return None
             intent = _mk_intent("product_inquiry", _snippet_match(text, pat), urgency="low")
             return _assemble(
                 intents=[intent],

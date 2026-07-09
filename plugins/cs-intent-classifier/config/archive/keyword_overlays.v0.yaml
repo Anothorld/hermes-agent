@@ -1,0 +1,11 @@
+# Auto-managed keyword overlays (scheme 1 learning loop).
+# Written by jobs/optimize_keyword.py only when self-eval passes.
+# Manual edits are allowed but will be archived on the next promote.
+#
+# Each fallthrough rule: when pattern matches a soft keyword block, the
+# keyword layer returns None so the LLM classifies instead.
+version: 0
+updated_at: null
+promoted_by: seed
+eval: {}
+fallthrough_patterns: []

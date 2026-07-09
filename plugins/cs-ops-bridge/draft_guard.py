@@ -31,6 +31,7 @@ try:
         guard_draft_attachments as _guard_draft_attachments,
     )
     from .compensation_guard import guard_draft as _guard_compensation  # type: ignore
+    from .link_guard import guard_draft as _guard_link  # type: ignore
     _PKG_CONTEXT = True
 except ImportError:  # loaded as a top-level module
     from internal_domain_guard import guard_draft as _guard_domain  # type: ignore
@@ -39,6 +40,7 @@ except ImportError:  # loaded as a top-level module
         guard_draft_attachments as _guard_draft_attachments,
     )
     from compensation_guard import guard_draft as _guard_compensation  # type: ignore
+    from link_guard import guard_draft as _guard_link  # type: ignore
     _PKG_CONTEXT = False
 
 
@@ -94,7 +96,21 @@ def guard_draft_content(
                 "blocked_kind": "compensation",
             }
 
-    # 3. PDF attachment guard (vault-sourced PDFs only on escalation resume).
+    # 3. Link guard — block AI drafts containing broken (404/5xx) povison.com links.
+    if _guard_link is not None:
+        res = _guard_link(content)
+        if res.get("blocked"):
+            return {
+                "blocked": True,
+                "error": res.get("error", "broken link blocked"),
+                "error_detail": f"Matched: {', '.join(res.get('matches') or [])}",
+                "source": "content",
+                "matches": res.get("matches") or [],
+                "snippet": res.get("snippet", ""),
+                "blocked_kind": "link",
+            }
+
+    # 4. PDF attachment guard (vault-sourced PDFs only on escalation resume).
     if _attachments_contain_pdf is not None and _guard_draft_attachments is not None:
         if _attachments_contain_pdf(attachments_json):
             res = _guard_draft_attachments(attachments_json, allowed_attachment_urls=allowed_attachment_urls)

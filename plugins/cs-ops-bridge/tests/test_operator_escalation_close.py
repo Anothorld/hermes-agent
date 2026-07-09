@@ -121,6 +121,7 @@ def test_repair_orphaned_escalations(monkeypatch, tmp_path):
     r = cal.enqueue_session(quickcep_session_id="qs-repair", message_id="m1", env="LIVE")
     cal.update_session_status(session_row_id=r["session"]["id"], status="operator_replied")
     eid = cal.open_escalation(quickcep_session_id="qs-repair", reason="stuck", env="LIVE")
+    # Current-cycle send: operator_sent after the open escalation.
     cal.write_event(
         quickcep_session_id="qs-repair",
         event_type="operator_sent",
@@ -132,3 +133,30 @@ def test_repair_orphaned_escalations(monkeypatch, tmp_path):
 
     assert stats["repaired"] == 1
     assert cal.get_escalation(escalation_id=eid)["state"] == "resolved"
+
+
+def test_repair_ignores_prior_cycle_operator_sent(monkeypatch, tmp_path):
+    """Prior-cycle operator_sent must not close a newer escalation after reopen."""
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_OPERATOR_RECONCILE_CLOSE_ESC", "true")
+    cal = _load("cal")
+    close_mod = _load("operator_escalation_close")
+
+    r = cal.enqueue_session(quickcep_session_id="qs-reopen", message_id="m1", env="LIVE")
+    # Cycle 1: operator already replied.
+    cal.write_event(
+        quickcep_session_id="qs-reopen",
+        event_type="operator_sent",
+        payload={"message_id": "op-old"},
+        env="LIVE",
+    )
+    # Cycle 2: customer reopen → new escalation while awaiting expert.
+    cal.update_session_status(session_row_id=r["session"]["id"], status="awaiting_expert")
+    eid = cal.open_escalation(quickcep_session_id="qs-reopen", reason="need logistics", env="LIVE")
+
+    stats = close_mod.repair_orphaned_escalations_once(env="LIVE")
+
+    assert stats["repaired"] == 0
+    assert cal.get_escalation(escalation_id=eid)["state"] == "awaiting_answer"
+    esc = cal.get_escalation(escalation_id=eid)
+    assert not (esc.get("resume_context") or {}).get("superseded_by_operator_send")

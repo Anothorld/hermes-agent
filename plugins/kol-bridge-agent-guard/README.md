@@ -34,8 +34,11 @@ Allowed:
 
 ## Session matching
 
-Gateway passes the run namespace as **`task_id`** (e.g. `kol-email-discover:LIVE:701`), not
-`session_id`. This hook matches on `session_id or task_id` so blocks actually fire.
+Gateway passes the run namespace as **`task_id`** (e.g. `kol-email-discover:LIVE:701`).
+After context compression, **`session_id`** may become a timestamp run id
+(e.g. `20260709_102222_72ff7c`) while `task_id` still holds `kol-campaign:*`.
+The hook resolves the session key by preferring whichever value starts with a
+`kol-*` prefix so bootstrap, URL block, and fallback tokens stay aligned.
 
 Observer hooks may also pass `turn_id`, `api_request_id`, and `middleware_trace`; this
 plugin ignores them via `**kwargs` forward compatibility (required since Hermes 0.14).
