@@ -58,6 +58,39 @@ _ORDER_MGMT_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\b(coupon|promo|discount).*(not work|didn't apply|incorrect)\b", "payment"),
 )
 
+# Checkout / BNPL payment failure → order_management (NOT after_sale_issue).
+# "Afterpay" / "after pay" is a payment method, not post-purchase "after sale".
+_CHECKOUT_PAYMENT_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\b(after\s?pay|afterpay|klarna|affirm|zip\s?pay|bnpl)\b", "checkout_payment"),
+    (
+        r"\b(payment|pay(?:ment)?)\s+(?:was\s+)?(?:not\s+)?"
+        r"(?:approved|declined|failed|rejected|denied)\b",
+        "checkout_payment",
+    ),
+    (
+        r"\b(not\s+approved|declined|was\s+denied|wasn't\s+approved)\b.*"
+        r"(?:after\s?pay|afterpay|payment|checkout)\b",
+        "checkout_payment",
+    ),
+    (
+        r"\b(?:after\s?pay|afterpay|payment)\b.*"
+        r"\b(?:not\s+approved|declined|was\s+denied|wasn't\s+approved)\b",
+        "checkout_payment",
+    ),
+    (
+        r"\b(didn'?t|couldn'?t|could\s+not|cannot|can'?t)\s+"
+        r"(?:finish|complete)\s+(?:the\s+)?(?:sale|purchase|checkout|order|payment)\b",
+        "checkout_payment",
+    ),
+    (
+        r"\b(?:finish|complete)\s+(?:the\s+)?(?:sale|purchase|checkout)\b.*"
+        r"(?:after\s?pay|afterpay|payment)\b",
+        "checkout_payment",
+    ),
+    (r"\b(checkout|check\s+out)\s+(?:failed|issue|problem|error)\b", "checkout_payment"),
+    (r"\b(unable\s+to\s+pay|can'?t\s+pay|cannot\s+pay)\b", "checkout_payment"),
+)
+
 # Auto-handle patterns → in_scope intents.
 _LOGISTICS_PATTERNS: tuple[str, ...] = (
     r"\b(where is|track(ing)?|shipping|delivery|shipment|order status)\b",
@@ -341,6 +374,31 @@ def keyword_classify(
                 source="keyword",
             )
 
+    # Checkout / BNPL payment failure (before after_sale — "after pay" ≠ after sale).
+    for pat, sub in _CHECKOUT_PAYMENT_PATTERNS:
+        if re.search(pat, lower):
+            intent = _mk_intent("order_management", _snippet_match(text, pat), urgency="medium")
+            return _assemble(
+                intents=[intent],
+                primary_intent="order_management",
+                route="escalate",
+                urgency="medium",
+                threat_signal=None,
+                emotion_value=emo_val,
+                emotion_conf=emo_conf,
+                lang_val=lang_val,
+                lang_conf=lang_conf,
+                orders=orders,
+                skus=skus,
+                region=region,
+                uncertain=uncertain,
+                null_fields=null_fields,
+                summary_zh=_summary_zh(sub, "order_mgmt", orders, skus),
+                hindsight_keywords=_hindsight_keywords(skus, [sub, "payment"]),
+                metadata=metadata,
+                source="keyword",
+            )
+
     # After-sale
     for pat, signal_type, _ in _AFTER_SALE_PATTERNS:
         if re.search(pat, lower):
@@ -506,6 +564,7 @@ def _summary_zh(key: str, kind: str, orders: list[str], skus: list[str]) -> str:
         "cancel": "客户要求取消订单",
         "modify": "客户要求修改订单",
         "payment": "客户反馈支付/优惠券问题",
+        "checkout_payment": "客户反馈结账/支付失败（含 Afterpay）",
         "logistics": "客户询问物流进度",
         "product": "客户咨询商品信息",
     }

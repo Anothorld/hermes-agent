@@ -51,8 +51,22 @@ Return ONLY a JSON object matching the `gate_extract` schema. No prose, no markd
 1. **product_inquiry** — customer asks about product info/specs/availability/recommendations/swatches. `in_scope=true`.
 2. **logistics_inquiry** — customer asks about tracking/delivery/shipping status/schedule. `in_scope=true`.
 3. **after_sale_issue** — customer reports damage/defect/wrong item/missing part/return/refund/repair/warranty. `in_scope=false` (handled by human unless operator reclassifies).
-4. **order_management** — customer wants to cancel/modify an unshipped order, change address, fix payment. `in_scope=false`.
+4. **order_management** — customer wants to cancel/modify an unshipped order, change address, or resolve **checkout/payment** issues (card declined, Afterpay/Klarna/Affirm not approved, couldn't complete purchase, coupon didn't apply). `in_scope=false`.
 5. **spam_irrelevant** — B2B pitches, verification codes, bounce notifications, no-content replies, chat trigger words. `in_scope=false`.
+
+**Payment / BNPL at checkout (NOT after_sale_issue):** Afterpay, Klarna, Affirm, BNPL, "after pay", payment declined/not approved/rejected, couldn't finish/complete the sale/purchase/checkout/order, checkout failed, unable to pay → classify as **order_management**, NOT after_sale_issue. **"After pay" / "Afterpay" is a payment-method brand name — it is NOT "after sale" (post-purchase support).** `after_sale_issue` applies only AFTER delivery or on a placed order the customer already received (damage, return, refund on delivered goods, warranty, missing parts).
+
+Examples (order_management):
+- "The after pay wasn't approved that is why i didn't finish the sale" → `order_management`
+- "My Afterpay was declined, can I pay another way?" → `order_management`
+- "Checkout failed / payment not going through" → `order_management`
+- "Coupon code didn't apply at checkout" → `order_management`
+
+Examples (after_sale_issue — post-delivery / existing order):
+- "I want a refund for my damaged sofa that arrived yesterday" → `after_sale_issue`
+- "Wrong item received, need to return" → `after_sale_issue`
+
+**Disambiguation:** If the email mentions BOTH product questions AND payment failure, list both intents; `primary_intent` = whichever is the customer's dominant need (usually payment failure blocks purchase → `order_management` when they need help completing checkout).
 
 **Spam is STRICT:** only classify as spam_irrelevant when the email is clearly unsolicited marketing/B2B OR a genuine no-content reply (just "ok"/"thanks"/"hi" with NOTHING else). A short subject like "Re: Question" or "Re: Swatches" is NOT spam — it is a customer reply in an existing thread. When in doubt between spam and a real intent, prefer the real intent. Never classify as spam if the subject mentions a product name, order number, delivery, swatch, dimensions, or any customer-service-relevant keyword.
 

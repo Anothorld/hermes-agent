@@ -2,6 +2,7 @@
 {"name": "product_dimensions", "subject": "Sofa dimensions", "body": "What are the dimensions of the Atticus sofa SF8268?", "metadata": {}, "expected_primary_intent": "product_inquiry", "expected_in_scope": true}
 {"name": "after_sale_damage", "subject": "Damaged sofa", "body": "The sofa arrived damaged, I want a refund.", "metadata": {}, "expected_primary_intent": "after_sale_issue", "expected_in_scope": false}
 {"name": "order_cancel", "subject": "Cancel order", "body": "Please cancel my order #99887766, I haven't received it.", "metadata": {}, "expected_primary_intent": "order_management", "expected_in_scope": false}
+{"name": "afterpay_checkout_declined", "subject": "Payment", "body": "The after pay wasn't approved that is why i didn't finish the sale", "metadata": {}, "expected_primary_intent": "order_management", "expected_in_scope": false}
 {"name": "spam_b2b", "subject": "Guest post offer", "body": "We are a supplier offering guest post services for SEO.", "metadata": {}, "expected_primary_intent": "spam_irrelevant", "expected_in_scope": false}
 {"name": "legal_threat", "subject": "Lawyer", "body": "I will contact my lawyer if you don't refund me.", "metadata": {}, "expected_primary_intent": "after_sale_issue", "expected_in_scope": false, "expected_threat_signal": "legal"}
 {"name": "region_unknown_no_signal", "subject": "Hello", "body": "Hi, I have a question about a product.", "metadata": {"customer_email": "x@y.com"}, "expected_primary_intent": "product_inquiry", "expected_in_scope": true, "expect_null": ["customer_region.country"]}

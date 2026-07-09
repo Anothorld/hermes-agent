@@ -61,6 +61,35 @@ def test_keyword_order_management_cancel():
     assert ge["in_scope"] is False
 
 
+def test_keyword_order_management_afterpay_not_approved():
+    ge = _kw(
+        "Payment issue",
+        "The after pay wasn't approved that is why i didn't finish the sale",
+    )
+    assert ge is not None
+    assert ge["primary_intent"] == "order_management"
+    assert ge["in_scope"] is False
+    assert ge["classifier_source"] == "keyword"
+    assert "checkout_payment" in ge["summary_zh"] or "支付" in ge["summary_zh"]
+
+
+def test_keyword_order_management_afterpay_declined_question():
+    ge = _kw("Afterpay", "My Afterpay was declined, can I pay another way?")
+    assert ge is not None
+    assert ge["primary_intent"] == "order_management"
+    assert ge["in_scope"] is False
+
+
+def test_keyword_afterpay_not_classified_as_after_sale():
+    ge = _kw(
+        "Re: Order",
+        "The after pay wasn't approved that is why i didn't finish the sale",
+    )
+    assert ge is not None
+    assert ge["primary_intent"] != "after_sale_issue"
+    assert ge["primary_intent"] == "order_management"
+
+
 def test_keyword_product_inquiry():
     ge = _kw("Sofa dimensions", "What are the dimensions of the Atticus sofa?")
     assert ge is not None

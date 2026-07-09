@@ -99,6 +99,8 @@ See `schemas.py` for the canonical pydantic models. Highlights:
 - `fabrication_guard`: bool self-assertion; HTTP 422 when it can't be asserted.
 - `is_conversation_closing`: `true` when the email is a pure thank-you / acknowledgment with no new question (e.g. "Thank you so much for your help!"). Distinct from spam — it's a real customer in an existing thread signaling the conversation is done. When `true`: `in_scope=true`, `route=auto_handle`, `urgency=low`, `emotion=grateful`. The agent brief includes a closing instruction block (send brief acknowledgment, close session). Detected by keyword layer (thank-you patterns + question-marker exclusion + length cap) and LLM layer (prompt rules).
 
+**Payment / BNPL disambiguation:** Afterpay / "after pay" / Klarna / checkout payment declined → `order_management` (pre-purchase checkout), **not** `after_sale_issue`. Keyword layer matches these before after-sale patterns; LLM prompt includes explicit examples in `config/intent_prompt_v1.md`.
+
 ## No-fabrication contract (enforced in `config/intent_prompt_v1.md`)
 
 1. Unknown field → null + `null_fields`; low-confidence → `uncertain_fields`.
