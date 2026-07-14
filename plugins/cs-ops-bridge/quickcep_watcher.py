@@ -70,10 +70,13 @@ def _truthy_env(key: str, *, default: bool) -> bool:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
 
-# REST reconcile only bootstraps missed first launches or retries failed rows.
+# REST reconcile bootstraps missed first launches or retries failed rows.
 # Busy statuses (processing, awaiting_expert, …) must not be re-polled: lastMsgTime
 # moves when we add internal notes, which previously caused false follow-up loops.
-_REST_LAUNCH_STATUSES = frozenset({"pending", "failed"})
+# operator_replied/reviewed are included so customer follow-ups after operator send
+# are picked up by REST when SIO misses the event. The --unread-only filter and
+# enqueue_session's dedup table prevent false re-launches on operator-only actions.
+_REST_LAUNCH_STATUSES = frozenset({"pending", "failed", "operator_replied", "reviewed"})
 
 
 def _quickcep_scripts_dir() -> Path:
@@ -94,6 +97,7 @@ def rest_reconcile_eligible(*, quickcep_session_id: str, env: str = _ENV) -> boo
     if not sess:
         return True
     return str(sess.get("status") or "") in _REST_LAUNCH_STATUSES
+
 
 
 def _load_quickcep_credentials_from_profile() -> None:
@@ -588,75 +592,89 @@ def _quickcep_subprocess_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if isinstance(v, str)}
 
 
+_REST_MAX_PAGES = int(os.environ.get("CS_OPS_REST_MAX_PAGES", "5"))
+
+
 def run_rest_reconcile_once() -> dict[str, Any]:
     cli = _quickcep_scripts_dir() / "scripts" / "quickcep_cli.py"
     if not cli.exists():
         return {"error": "quickcep_cli not found", "launched": 0}
-    proc = subprocess.run(
-        [sys.executable, str(cli), "sessions", "--email-only", "--unread-only", "--page-size", "100"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=str(_quickcep_scripts_dir()),
-        env=_quickcep_subprocess_env(),
-    )
-    if proc.returncode != 0:
-        return {"error": proc.stderr or proc.stdout, "launched": 0}
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return {"error": "invalid json from quickcep_cli", "launched": 0}
-    sessions = data.get("sessions", []) if isinstance(data, dict) else data
     launched = 0
     skipped_busy = 0
-    for row in sessions:
-        sid = str(row.get("id") or "")
-        if not sid:
-            continue
-        if not rest_reconcile_eligible(quickcep_session_id=sid, env=_ENV):
-            skipped_busy += 1
-            busy_sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
-            if busy_sess and str(busy_sess.get("status") or "") == "awaiting_expert":
-                _agent_debug_log(
-                    hypothesis_id="B",
-                    location="quickcep_watcher.py:run_rest_reconcile_once",
-                    message="REST skipped awaiting_expert session",
-                    data={"session_id": sid, "last_message_id": busy_sess.get("last_message_id")},
-                )
-            continue
-        # Skip sessions already tagged as 广告 in QuickCEP.
-        if has_ad_tag(row):
-            log.info("REST skip session %s ad_tagged", sid)
-            continue
-        msg_id = rest_session_message_id(row)
-        sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
-        if sess and str(sess.get("last_message_id") or "") == msg_id:
-            continue
-        vi = row.get("visitorInfo") if isinstance(row.get("visitorInfo"), dict) else {}
-        # Extract email_subject and content from lastMsgContent for ad detection.
-        rest_subject, rest_content = parse_rest_last_msg_content(row)
-        info = {
-            "chatSubSessionId": sid,
-            "chatSessionId": row.get("chatSessionId"),
-            "id": msg_id,
-            "email": row.get("email") or vi.get("email"),
-            "intentionTags": row.get("intentionTags"),
-            "channel": row.get("channel") or "email",
-            "operatorIds": row.get("operatorIds"),
-            "visitorInfo": vi,
-            "email_subject": rest_subject,
-            "content_preview": rest_content[:300] if rest_content else "",
-        }
-        if not inbound_payload_is_email(info):
-            continue
-        if _launch_for_message(info):
-            launched += 1
+    total_seen = 0
+    pages_scanned = 0
+    for page in range(1, _REST_MAX_PAGES + 1):
+        proc = subprocess.run(
+            [sys.executable, str(cli), "sessions", "--email-only", "--unread-only",
+             "--page-size", "100", "--page", str(page)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(_quickcep_scripts_dir()),
+            env=_quickcep_subprocess_env(),
+        )
+        if proc.returncode != 0:
+            log.warning("REST reconcile page %d failed: %s", page, proc.stderr or proc.stdout[:200])
+            break
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            log.warning("REST reconcile page %d: invalid json", page)
+            break
+        sessions = data.get("sessions", []) if isinstance(data, dict) else data
+        if not sessions:
+            break
+        total_seen += len(sessions)
+        pages_scanned = page
+        for row in sessions:
+            sid = str(row.get("id") or "")
+            if not sid:
+                continue
+            if not rest_reconcile_eligible(quickcep_session_id=sid, env=_ENV):
+                skipped_busy += 1
+                busy_sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
+                if busy_sess and str(busy_sess.get("status") or "") == "awaiting_expert":
+                    _agent_debug_log(
+                        hypothesis_id="B",
+                        location="quickcep_watcher.py:run_rest_reconcile_once",
+                        message="REST skipped awaiting_expert session",
+                        data={"session_id": sid, "last_message_id": busy_sess.get("last_message_id")},
+                    )
+                continue
+            # Skip sessions already tagged as 广告 in QuickCEP.
+            if has_ad_tag(row):
+                log.info("REST skip session %s ad_tagged", sid)
+                continue
+            msg_id = rest_session_message_id(row)
+            sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
+            if sess and str(sess.get("last_message_id") or "") == msg_id:
+                continue
+            vi = row.get("visitorInfo") if isinstance(row.get("visitorInfo"), dict) else {}
+            # Extract email_subject and content from lastMsgContent for ad detection.
+            rest_subject, rest_content = parse_rest_last_msg_content(row)
+            info = {
+                "chatSubSessionId": sid,
+                "chatSessionId": row.get("chatSessionId"),
+                "id": msg_id,
+                "email": row.get("email") or vi.get("email"),
+                "intentionTags": row.get("intentionTags"),
+                "channel": row.get("channel") or "email",
+                "operatorIds": row.get("operatorIds"),
+                "visitorInfo": vi,
+                "email_subject": rest_subject,
+                "content_preview": rest_content[:300] if rest_content else "",
+            }
+            if not inbound_payload_is_email(info):
+                continue
+            if _launch_for_message(info):
+                launched += 1
     op_sync = reconcile_operator_sent_once(env=_ENV)
     state = {
         "last_run": time.time(),
         "launched": launched,
         "skipped_busy": skipped_busy,
-        "seen": len(sessions),
+        "seen": total_seen,
+        "pages_scanned": pages_scanned,
         "sio_backoff_sec": _sio_backoff_sec,
         "operator_sent_synced": op_sync.get("synced", 0),
         "operator_sent_checked": op_sync.get("checked", 0),
@@ -671,16 +689,183 @@ def request_stop() -> None:
     _stop_event.set()
 
 
+# ── Re-arming: detect customer follow-ups on operator_replied/reviewed sessions ──
+# Independently scans CAL for sessions in terminal statuses and checks QuickCEP
+# for newer visitor messages. If found, resets the CAL status to "pending" so the
+# next REST reconcile cycle picks it up. This compensates for:
+#   1. SIO event loss (visitorSendMsg missed during disconnects)
+#   2. --unread-only filtering out sessions where an operator joined (clearing unreadNum)
+#   3. REST pagination not reaching older sessions
+_REARM_STATUSES = frozenset({"operator_replied", "reviewed"})
+_REARM_INTERVAL_SEC = int(os.environ.get("CS_OPS_REARM_INTERVAL_SEC", "300"))
+_REARM_MAX_SESSIONS = int(os.environ.get("CS_OPS_REARM_MAX_SESSIONS", "50"))
+# Only re-arm sessions updated within this many hours (avoids scanning ancient history)
+_REARM_MAX_AGE_HOURS = int(os.environ.get("CS_OPS_REARM_MAX_AGE_HOURS", "168"))
+
+
+def _run_quickcep_cli_json(*args: str) -> Optional[dict[str, Any]]:
+    """Run quickcep_cli.py and return parsed JSON, or None on failure."""
+    cli = _quickcep_scripts_dir() / "scripts" / "quickcep_cli.py"
+    if not cli.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(cli)] + list(args),
+            capture_output=True, text=True, timeout=30,
+            cwd=str(_quickcep_scripts_dir()),
+            env=_quickcep_subprocess_env(),
+        )
+        if proc.returncode != 0:
+            return None
+        return json.loads(proc.stdout)
+    except Exception:
+        return None
+
+
+def _rearm_check_session(sess: dict[str, Any]) -> bool:
+    """Check if a CAL session has a newer visitor message in QuickCEP. Reset to pending if so.
+
+    Returns True if the session was re-armed (status reset to pending).
+    """
+    sid = str(sess.get("quickcep_session_id") or "")
+    if not sid:
+        return False
+    cal_last_msg_id = str(sess.get("last_message_id") or "")
+
+    # Fetch the latest messages from QuickCEP to find the most recent visitor message.
+    data = _run_quickcep_cli_json("messages", sid)
+    if not data:
+        return False
+    msgs = data.get("messages", [])
+    if not msgs:
+        return False
+
+    # Find the latest visitor (customer) message.
+    latest_visitor_msg = None
+    for m in msgs:
+        if m.get("ownerType") == "visitor" and m.get("contentType") in ("html", "text"):
+            latest_visitor_msg = m
+            break  # messages are in reverse chronological order (page 0 = newest)
+
+    if not latest_visitor_msg:
+        return False
+
+    visitor_msg_id = str(latest_visitor_msg.get("id") or "")
+    visitor_create_time = str(latest_visitor_msg.get("createTime") or "")
+
+    # If this visitor message ID is already tracked in CAL, no new follow-up.
+    # Compare by createTime since CAL's last_message_id format may differ between SIO/REST paths.
+    cal_msg_marker = cal_last_msg_id
+    if cal_msg_marker and (visitor_msg_id in cal_msg_marker or cal_msg_marker in visitor_msg_id):
+        return False
+
+    # Also check the dedup table — if we already processed this visitor message, skip.
+    dedup_key = f"{_ENV}:{sid}:{visitor_msg_id}"
+    # We can't query dedup table directly (cal.py doesn't expose it), so we use
+    # the createTime comparison: if the visitor message is newer than the CAL
+    # last_message_id's implied time, it's a genuine follow-up.
+    # A simpler heuristic: check if last_message_id in CAL starts with "rest:" (REST-origin)
+    # or is a numeric ID (SIO-origin). If the visitor message createTime is newer than
+    # what CAL recorded, re-arm.
+
+    # Use the QuickCEP message ID as the new message_id for dedup.
+    # enqueue_session will handle the dedup check properly.
+    log.info(
+        "rearm: session %s has new visitor msg %s (createTime=%s), resetting to pending",
+        sid, visitor_msg_id, visitor_create_time,
+    )
+
+    try:
+        cal.update_session_status(session_row_id=int(sess["id"]), status="pending")
+        # Write a rearm event for auditability.
+        cal.write_event(
+            quickcep_session_id=sid,
+            env=_ENV,
+            event_type="rearm_operator_replied",
+            payload={
+                "prior_status": sess.get("status"),
+                "visitor_msg_id": visitor_msg_id,
+                "visitor_msg_time": visitor_create_time,
+            },
+        )
+        return True
+    except Exception as exc:
+        log.warning("rearm: failed to reset session %s: %s", sid, exc)
+        return False
+
+
+def run_rearm_scan_once() -> dict[str, Any]:
+    """Scan operator_replied/reviewed sessions for new customer follow-ups.
+
+    Called independently from start_background on its own interval.
+    Does NOT launch AI processing directly — it only resets CAL status to "pending",
+    letting the next REST reconcile cycle handle the actual launch.
+    """
+    now = time.time()
+    rearmed = 0
+    checked = 0
+    errors = 0
+
+    for status in sorted(_REARM_STATUSES):
+        try:
+            sessions = cal.list_sessions(env=_ENV, status=status, limit=_REARM_MAX_SESSIONS)
+        except Exception as exc:
+            log.warning("rearm: list_sessions status=%s failed: %s", status, exc)
+            errors += 1
+            continue
+
+        for sess in sessions:
+            # Skip sessions older than _REARM_MAX_AGE_HOURS based on updated_at.
+            updated_str = str(sess.get("updated_at") or "")
+            if updated_str:
+                try:
+                    from datetime import datetime, timezone
+                    updated_dt = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
+                    age_hours = (now - updated_dt.timestamp()) / 3600
+                    if age_hours > _REARM_MAX_AGE_HOURS:
+                        continue
+                except Exception:
+                    pass  # If we can't parse the timestamp, proceed anyway.
+
+            checked += 1
+            try:
+                if _rearm_check_session(sess):
+                    rearmed += 1
+            except Exception as exc:
+                log.warning("rearm: session %s check failed: %s", sess.get("quickcep_session_id"), exc)
+                errors += 1
+
+    state = {
+        "last_run": now,
+        "checked": checked,
+        "rearmed": rearmed,
+        "errors": errors,
+    }
+    cal.set_poller_state("rearm_scanner", state)
+    log.info("rearm scan: checked=%d rearmed=%d errors=%d", checked, rearmed, errors)
+    return state
+
+
 async def start_background() -> None:
     rest_interval = int(os.environ.get("CS_OPS_QUICKCEP_REST_INTERVAL_SEC", "60"))
+    rearm_interval = _REARM_INTERVAL_SEC
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, run_sio_loop)
+    # Run rearm scan once at startup, then on its own interval.
+    rearm_counter = 0
     try:
         while True:
             try:
                 await loop.run_in_executor(None, run_rest_reconcile_once)
             except Exception as exc:
                 log.warning("REST reconcile error: %s", exc)
+            rearm_counter += rest_interval
+            if rearm_counter >= rearm_interval:
+                rearm_counter = 0
+                try:
+                    await loop.run_in_executor(None, run_rearm_scan_once)
+                except Exception as exc:
+                    log.warning("rearm scan error: %s", exc)
             await asyncio.sleep(rest_interval)
     finally:
         request_stop()

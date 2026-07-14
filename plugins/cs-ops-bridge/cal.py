@@ -185,7 +185,7 @@ def enqueue_session(
         ).fetchone()
         prior_status = str(prior_row[0]) if prior_row else None
         is_reopen = prior_status in (
-            "draft_ready", "operator_replied", "skipped", "failed", "reviewed",
+            "draft_ready", "operator_replied", "failed", "reviewed",
         )
 
         conn.execute(
@@ -204,8 +204,9 @@ def enqueue_session(
                    chat_session_id=COALESCE(excluded.chat_session_id, chat_session_id),
                    customer_email=COALESCE(excluded.customer_email, customer_email),
                    last_message_id=excluded.last_message_id,
-                   status=CASE WHEN status IN ('draft_ready','operator_replied','skipped','failed','reviewed') THEN 'pending'
-                            ELSE status END,
+                   status=CASE WHEN status IN ('draft_ready','operator_replied','failed','reviewed') THEN 'pending'
+                           WHEN status = 'skipped' THEN 'skipped'
+                           ELSE status END,
                    updated_at=excluded.updated_at,
                    customer_name=COALESCE(excluded.customer_name, customer_name),
                    customer_company=COALESCE(excluded.customer_company, customer_company),

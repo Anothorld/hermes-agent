@@ -1,0 +1,4151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>POVISON SEO Studio</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --sf-font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+  --bg-primary: #f5f5f7;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f2f2f7;
+  --bg-overlay: rgba(255,255,255,0.72);
+  --sidebar-bg: rgba(245,245,247,0.8);
+  --text-primary: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-tertiary: #aeaeb2;
+  --text-inverse: #ffffff;
+  --accent: #0071e3;
+  --accent-hover: #0077ED;
+  --accent-pressed: #0066CC;
+  --povison-warm: #8b6f47;
+  --povison-light: #c4a882;
+  --success: #30d158;
+  --warning: #ff9f0a;
+  --danger: #ff3b30;
+  --purple: #af52de;
+  --pink: #ff2d92;
+  --teal: #5ac8fa;
+  --border: rgba(0,0,0,0.06);
+  --border-strong: rgba(0,0,0,0.1);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.03);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.06), 0 1px 4px rgba(0,0,0,0.04);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
+  --shadow-xl: 0 24px 80px rgba(0,0,0,0.12), 0 8px 24px rgba(0,0,0,0.06);
+  --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px; --r-pill: 980px;
+  --t-fast: 0.2s cubic-bezier(0.25,0.1,0.25,1);
+  --t-normal: 0.3s cubic-bezier(0.25,0.1,0.25,1);
+  --t-spring: 0.5s cubic-bezier(0.34,1.56,0.64,1);
+}
+
+html { font-size: 15px; }
+body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--text-primary); -webkit-font-smoothing: antialiased; overflow: hidden; height: 100vh; }
+
+.app { display: flex; height: 100vh; }
+
+/* ==================== Sidebar ==================== */
+.sidebar { width: 240px; flex-shrink: 0; background: var(--sidebar-bg); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 48px 0 16px; }
+.sidebar-logo { display: flex; align-items: center; gap: 10px; padding: 0 20px 28px; }
+.sidebar-logo .logo-mark { width: 28px; height: 28px; border-radius: 7px; background: linear-gradient(135deg, var(--povison-warm), var(--povison-light)); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 800; }
+.sidebar-logo .logo-text { font-size: 15px; font-weight: 700; letter-spacing: -0.3px; }
+.sidebar-nav { flex: 1; padding: 0 12px; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text-primary); transition: background var(--t-fast), color var(--t-fast); margin-bottom: 2px; -webkit-user-select: none; user-select: none; }
+.nav-item:hover { background: rgba(0,0,0,0.04); }
+.nav-item.active { background: var(--accent); color: var(--text-inverse); }
+.nav-item .nav-icon { width: 20px; height: 20px; flex-shrink: 0; opacity: 0.8; }
+.nav-item.active .nav-icon { opacity: 1; }
+.nav-step-num { width: 18px; height: 18px; border-radius: 50%; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: var(--text-secondary); flex-shrink: 0; }
+.nav-item.active .nav-step-num { background: rgba(255,255,255,0.25); color: #fff; }
+.sidebar-footer { padding: 12px 20px 0; border-top: 1px solid var(--border); margin-top: auto; }
+.wp-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(48,209,88,0.2); }
+
+/* ==================== Main ==================== */
+.main { flex: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+.main::-webkit-scrollbar { width: 6px; }
+.main::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 3px; }
+.view { display: none; animation: viewIn 0.4s cubic-bezier(0.25,0.1,0.25,1); }
+.view.active { display: block; }
+@keyframes viewIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ==================== Hero ==================== */
+.hero { padding: 56px 48px 32px; max-width: 960px; }
+.hero-eyebrow { font-size: 13px; font-weight: 600; color: var(--povison-warm); letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 12px; }
+.hero h1 { font-size: 40px; font-weight: 700; letter-spacing: -1px; line-height: 1.15; margin-bottom: 16px; }
+.hero .hero-desc { font-size: 17px; color: var(--text-secondary); line-height: 1.5; max-width: 560px; margin-bottom: 40px; }
+
+/* Step flow cards */
+.step-flow { display: flex; align-items: center; gap: 12px; padding: 0 48px; max-width: 960px; margin-bottom: 24px; }
+.step-card { flex: 1; background: var(--bg-secondary); border-radius: var(--r-lg); padding: 20px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); transition: all var(--t-normal); cursor: pointer; position: relative; }
+.step-card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+.step-card .step-badge { width: 28px; height: 28px; border-radius: 50%; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: var(--text-secondary); margin-bottom: 12px; }
+.step-card.active .step-badge { background: var(--accent); color: #fff; }
+.step-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.step-card p { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+.step-arrow { color: var(--text-tertiary); font-size: 20px; flex-shrink: 0; }
+
+.btn-start { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: var(--text-inverse); border: none; border-radius: var(--r-pill); padding: 14px 32px; font-size: 16px; font-weight: 500; cursor: pointer; transition: all var(--t-fast); font-family: var(--sf-font); }
+.btn-start:hover { background: var(--accent-hover); transform: scale(1.02); }
+.btn-start:active { background: var(--accent-pressed); transform: scale(0.98); }
+
+/* ==================== Shared ==================== */
+.btn { display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: var(--r-sm); padding: 8px 16px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all var(--t-fast); font-family: var(--sf-font); }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); }
+.btn-secondary:hover { background: rgba(0,0,0,0.08); }
+.btn-ghost { background: transparent; color: var(--accent); }
+.btn-ghost:hover { background: rgba(0,113,227,0.06); }
+
+.view-header { padding: 48px 48px 24px; max-width: 960px; }
+.view-header h2 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 8px; }
+.view-header p { font-size: 15px; color: var(--text-secondary); }
+
+.action-bar { position: sticky; bottom: 0; background: var(--bg-overlay); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-top: 1px solid var(--border); padding: 14px 48px; display: flex; align-items: center; gap: 12px; z-index: 10; }
+.action-bar .spacer { flex: 1; }
+
+/* ==================== Step 1: Keyword Heatmap ==================== */
+.heatmap-controls {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 48px 20px; max-width: 960px;
+}
+.segmented {
+  display: inline-flex; background: var(--bg-tertiary);
+  border-radius: 9px; padding: 3px;
+}
+.segmented button {
+  border: none; background: transparent;
+  padding: 6px 16px; font-size: 12px; font-weight: 600;
+  color: var(--text-secondary); border-radius: 7px;
+  cursor: pointer; transition: all 0.25s cubic-bezier(0.25,0.1,0.25,1);
+  font-family: var(--sf-font); letter-spacing: -0.1px;
+}
+.segmented button:hover { color: var(--text-primary); }
+.segmented button.active {
+  background: #fff; color: var(--text-primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 0.5px 1px rgba(0,0,0,0.04);
+}
+
+.heatmap-container { padding: 0 48px 48px; max-width: 960px; }
+
+.heatmap {
+  background: #ffffff;
+  border-radius: 24px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06);
+  border: 1px solid rgba(0,0,0,0.05);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Subtle gradient backdrop for depth — barely visible */
+.heatmap::before {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(135deg, rgba(0,113,227,0.015) 0%, transparent 40%,
+              rgba(175,82,222,0.015) 60%, transparent 100%);
+  pointer-events: none;
+}
+
+/* ── Keyword list ── */
+.kw-list-container {
+  padding: 0 48px 16px;
+  max-width: 960px;
+}
+.kw-list {
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 8px 32px rgba(0,0,0,0.06);
+  border: 1px solid rgba(0,0,0,0.05);
+  overflow: hidden;
+}
+.kw-list-header {
+  display: flex; align-items: center;
+  padding: 10px 20px;
+  font-size: 11px; font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+  background: rgba(250,250,252,0.5);
+}
+.kw-row {
+  display: flex; align-items: center;
+  padding: 10px 20px;
+  border-bottom: 1px solid rgba(0,0,0,0.03);
+  transition: background 0.12s;
+  gap: 12px;
+}
+.kw-row:hover { background: rgba(0,0,0,0.015); }
+.kw-row:last-child { border-bottom: none; }
+.kw-row.kw-needs-metrics { background: rgba(255,159,10,0.06); }
+.kw-seo .metrics-flag {
+  display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 600;
+  color: var(--warning); vertical-align: middle;
+}
+.kw-row .kw-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0;
+}
+.kw-row .kw-text {
+  flex: 1; font-size: 14px; font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.kw-row .kw-src {
+  font-size: 11px; color: var(--text-tertiary);
+  white-space: nowrap; min-width: 60px;
+}
+.kw-row .kw-seo {
+  font-size: 11px; color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; min-width: 100px;
+}
+.kw-row .kw-weight {
+  -webkit-appearance: none; appearance: none;
+  width: 60px; height: 4px; border-radius: 2px;
+  background: rgba(0,0,0,0.12); cursor: pointer;
+  flex-shrink: 0;
+}
+.kw-row .kw-weight::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--accent); cursor: grab;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
+.kw-row .kw-remove {
+  font-size: 14px; color: var(--text-tertiary);
+  cursor: pointer; opacity: 0.3; padding: 0 2px;
+  transition: opacity 0.12s, color 0.12s; flex-shrink: 0;
+}
+.kw-row .kw-remove:hover { opacity: 1; color: var(--danger); }
+
+/* Source dot colors */
+.kw-dot[data-src="brand"]  { background: #1a73e8; }
+.kw-dot[data-src="media"]  { background: #0b8043; }
+.kw-dot[data-src="trend"]  { background: #e52592; }
+.kw-dot[data-src="news"]   { background: #e8710a; }
+.kw-text[data-src="brand"]  { color: #1a73e8; }
+.kw-text[data-src="media"]  { color: #0b8043; }
+.kw-text[data-src="trend"]  { color: #e52592; }
+.kw-text[data-src="news"]   { color: #e8710a; }
+
+/* ── Add keyword row ── */
+.kw-add-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 48px;
+  max-width: 960px;
+}
+.kw-add-row input {
+  flex: 1; padding: 8px 14px;
+  border: 1px solid var(--border); border-radius: 9px;
+  font-family: var(--sf-font); font-size: 13px;
+  outline: none; transition: border-color 0.15s;
+}
+.kw-add-row input:focus { border-color: var(--accent); }
+.kw-add-row select {
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px;
+  font-family: var(--sf-font); font-size: 12px; background: #fff; cursor: pointer;
+}
+.btn-sm { font-size: 12px; padding: 8px 16px; }
+
+/* ── Legend bar ── */
+.heatmap-legend {
+  display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+  padding: 18px 40px 22px;
+  border-top: 1px solid rgba(0,0,0,0.05);
+  font-size: 12px; color: var(--text-secondary);
+  background: rgba(250,250,252,0.5);
+  position: relative; z-index: 1;
+}
+.legend-item { display: flex; align-items: center; gap: 7px; font-weight: 500; }
+.legend-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.8);
+}
+.legend-sep { width: 1px; height: 14px; background: rgba(0,0,0,0.08); }
+.legend-hint { color: var(--text-tertiary); font-style: italic; }
+
+/* ── Audit Trail sidebar panel ── */
+.audit-panel {
+  border-top: 1px solid rgba(0,0,0,0.06);
+  padding: 12px 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.audit-panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px 8px;
+}
+.audit-panel-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+.audit-export-btn {
+  font-size: 10px; padding: 2px 8px; border-radius: 980px;
+  background: rgba(0,113,227,0.08); color: var(--accent); border: none;
+  cursor: pointer; font-weight: 500; transition: background 0.15s;
+}
+.audit-export-btn:hover { background: rgba(0,113,227,0.15); }
+.audit-run {
+  padding: 10px 20px; cursor: pointer; transition: background 0.15s;
+  border-bottom: 1px solid rgba(0,0,0,0.03);
+}
+.audit-run:hover { background: rgba(0,0,0,0.02); }
+.audit-run.active { background: rgba(0,113,227,0.06); }
+.audit-run-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.audit-run-id { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.audit-run-status { font-size: 10px; font-weight: 600; }
+.audit-run-meta { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.audit-step {
+  width: 18px; height: 18px; border-radius: 50%; font-size: 10px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.06); color: var(--text-tertiary);
+  transition: all 0.2s;
+}
+.audit-step.done { background: var(--success); color: #fff; }
+.audit-step-line { width: 12px; height: 1.5px; background: rgba(0,0,0,0.08); }
+.audit-run-detail { font-size: 10px; color: var(--text-tertiary); margin-bottom: 6px; }
+.audit-run-forks { display: flex; gap: 4px; }
+.fork-btn {
+  font-size: 9px; padding: 2px 7px; border-radius: 980px;
+  background: rgba(175,82,222,0.1); color: var(--purple); border: none;
+  cursor: pointer; font-weight: 600; transition: all 0.15s;
+}
+.fork-btn:hover { background: rgba(175,82,222,0.2); transform: scale(1.05); }
+
+/* ── Keyword tooltip (Apple-style floating card) ── */
+.kw-tooltip {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+  transition: opacity 0.2s ease, transform 0.25s cubic-bezier(0.34, 1.3, 0.64, 1);
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 0.5px solid rgba(0, 0, 0, 0.06);
+  border-radius: 14px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.06);
+  padding: 14px 18px;
+  min-width: 180px;
+  font-family: var(--sf-font);
+}
+.kw-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+.kw-tooltip-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 0.5px solid rgba(0, 0, 0, 0.06);
+  white-space: nowrap;
+}
+.kw-tooltip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 3px 0;
+}
+.kw-tooltip-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  letter-spacing: 0.1px;
+}
+.kw-tooltip-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.kw-tooltip-intent {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 980px;
+}
+.kw-tooltip-intent.commercial {
+  background: rgba(0, 113, 227, 0.1);
+  color: #0051d5;
+}
+.kw-tooltip-intent.informational {
+  background: rgba(48, 209, 88, 0.1);
+  color: #0b8043;
+}
+
+/* Selected chips bar */
+.kw-selected-bar { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+.kw-selected-bar strong { color: var(--text-primary); font-weight: 600; }
+.kw-selected-chips { display: flex; gap: 6px; flex-wrap: wrap; max-width: 400px; }
+.kw-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--accent); color: #fff;
+  padding: 4px 12px; border-radius: 980px;
+  font-size: 12px; font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0,113,227,0.25);
+}
+.kw-chip .chip-x { cursor: pointer; opacity: 0.6; font-size: 14px; line-height: 1; transition: opacity 0.15s; }
+.kw-chip .chip-x:hover { opacity: 1; }
+
+/* ==================== Step 2: Topic Brainstorm ==================== */
+.brainstorm-container { padding: 0 48px 48px; max-width: 960px; }
+
+.brainstorm-input { background: var(--bg-secondary); border-radius: var(--r-lg); padding: 24px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); margin-bottom: 24px; }
+.brainstorm-input .bs-label { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 12px; }
+.bs-keywords { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; min-height: 36px; }
+.bs-keyword-tag { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-tertiary); border-radius: var(--r-sm); padding: 6px 12px; font-size: 13px; font-weight: 500; }
+.bs-keyword-tag .tag-x { cursor: pointer; color: var(--text-tertiary); font-size: 15px; line-height: 1; }
+.bs-keyword-tag .tag-x:hover { color: var(--danger); }
+.bs-options { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
+.bs-count-group { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+.bs-count-group input { width: 60px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 6px 10px; font-size: 14px; font-family: var(--sf-font); outline: none; text-align: center; }
+.bs-count-group input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,0.12); }
+
+.bs-generate-btn { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: #fff; border: none; border-radius: var(--r-sm); padding: 8px 20px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all var(--t-fast); font-family: var(--sf-font); }
+.bs-generate-btn:hover { background: var(--accent-hover); }
+.bs-generate-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Brainstorm live */
+.bs-live { background: #1d1d1f; border-radius: var(--r-md); overflow: hidden; margin-bottom: 24px; display: none; }
+.bs-live.show { display: block; }
+.bs-live-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.bs-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 1.5s ease-in-out infinite; flex-shrink: 0; }
+@keyframes pulse { 0%,100% { opacity:1; box-shadow:0 0 0 0 rgba(48,209,88,0.4); } 50% { opacity:0.6; box-shadow:0 0 0 4px rgba(48,209,88,0); } }
+.bs-live-label { font-size: 13px; font-weight: 600; color: #fff; }
+.bs-live-detail { font-size: 12px; color: rgba(255,255,255,0.5); margin-left: auto; }
+.bs-live-stream { padding: 16px; max-height: 280px; overflow-y: auto; font-family: "SF Mono","Monaco","Menlo",monospace; font-size: 13px; line-height: 1.7; }
+.bs-live-stream::-webkit-scrollbar { width: 4px; }
+.bs-live-stream::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+.bs-live-line { color: rgba(255,255,255,0.7); animation: lineIn 0.3s ease; }
+@keyframes lineIn { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:translateX(0); } }
+
+/* Topic results grid */
+.topic-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.topic-card { background: var(--bg-secondary); border-radius: var(--r-md); padding: 16px 18px; border: 1px solid var(--border); transition: all var(--t-fast); cursor: pointer; position: relative; }
+.topic-card:hover { box-shadow: var(--shadow-sm); border-color: var(--border-strong); }
+.topic-card.selected { border-color: var(--accent); background: rgba(0,113,227,0.02); }
+.topic-card .tc-checkbox { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--text-tertiary); flex-shrink: 0; cursor: pointer; transition: all var(--t-fast); display: flex; align-items: center; justify-content: center; margin-bottom: 10px; }
+.topic-card.selected .tc-checkbox { background: var(--accent); border-color: var(--accent); }
+.topic-card.selected .tc-checkbox::after { content: ""; width: 6px; height: 10px; border: 2px solid #fff; border-top: 0; border-left: 0; transform: rotate(45deg) translate(-1px,-1px); }
+.tc-title { font-size: 14px; font-weight: 600; line-height: 1.4; margin-bottom: 6px; }
+.tc-meta { display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--text-tertiary); }
+.tc-meta .tag { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: var(--r-pill); font-size: 11px; font-weight: 500; }
+.tag-p0 { background: rgba(255,59,48,0.1); color: var(--danger); }
+.tag-p1 { background: rgba(255,159,10,0.1); color: var(--warning); }
+.tag-p2 { background: rgba(0,113,227,0.1); color: var(--accent); }
+.tag-p3 { background: rgba(48,209,88,0.1); color: var(--success); }
+.tc-keywords { font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
+.tc-gap {
+  font-size: 11px; color: var(--text-secondary); margin-top: 8px; line-height: 1.4;
+  padding: 8px 10px; background: rgba(175,82,222,0.06); border-radius: 8px;
+}
+.tc-gap strong { color: var(--purple); font-weight: 600; }
+.tc-edit { position: absolute; top: 12px; right: 12px; opacity: 0; background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12px; font-weight: 500; padding: 4px 8px; border-radius: 5px; transition: opacity var(--t-fast); }
+.topic-card:hover .tc-edit { opacity: 1; }
+
+/* ==================== Step 3: Section Workbench ==================== */
+.gen-container { padding: 0 48px 48px; max-width: 960px; }
+
+.gen-topic-bar {
+  display: flex; align-items: flex-start; gap: 16px;
+  background: var(--bg-secondary); border-radius: var(--r-lg);
+  padding: 18px 20px; border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm); margin-bottom: 20px;
+}
+.gen-topic-bar .gt-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
+.gen-topic-bar .gt-title { font-size: 16px; font-weight: 600; line-height: 1.35; flex: 1; }
+.gen-phase-pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 20px; }
+.gen-phase-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: var(--r-pill);
+  font-size: 12px; font-weight: 600; border: 1px solid var(--border);
+  background: var(--bg-secondary); color: var(--text-secondary);
+  cursor: pointer; transition: all var(--t-fast);
+}
+.gen-phase-pill:hover { border-color: var(--border-strong); }
+.gen-phase-pill.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.gen-phase-pill.done { color: var(--success); border-color: rgba(48,209,88,0.35); background: rgba(48,209,88,0.06); }
+.gen-phase-pill.done.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.gen-phase-pill .pill-num {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: rgba(0,0,0,0.06); display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px;
+}
+.gen-phase-pill.active .pill-num { background: rgba(255,255,255,0.25); }
+
+.wb-panel { display: none; }
+.wb-panel.active { display: block; animation: viewIn 0.35s cubic-bezier(0.25,0.1,0.25,1); }
+
+.wb-card {
+  background: var(--bg-secondary); border-radius: var(--r-lg);
+  border: 1px solid var(--border); box-shadow: var(--shadow-sm);
+  margin-bottom: 14px; overflow: hidden;
+}
+.wb-card-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  background: rgba(250,250,252,0.7);
+}
+.wb-card-header h3 { font-size: 14px; font-weight: 600; flex: 1; }
+.wb-status {
+  font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: var(--r-pill);
+}
+.wb-status.idle { background: var(--bg-tertiary); color: var(--text-secondary); }
+.wb-status.generating { background: rgba(0,113,227,0.1); color: var(--accent); }
+.wb-status.ready { background: rgba(48,209,88,0.12); color: var(--success); }
+.wb-status.edited { background: rgba(255,159,10,0.12); color: var(--warning); }
+.wb-card-body { padding: 16px 18px; }
+.wb-hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.45; }
+.wb-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.wb-actions .spacer { flex: 1; }
+
+.outline-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.outline-item {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 10px 12px; border-radius: var(--r-md);
+  border: 1px solid var(--border); background: #fff;
+}
+.outline-item.h2 { border-left: 3px solid var(--accent); }
+.outline-item.h3 { margin-left: 22px; border-left: 3px solid var(--povison-light); }
+.outline-level {
+  font-size: 10px; font-weight: 700; color: var(--text-tertiary);
+  min-width: 24px; padding-top: 3px;
+}
+.outline-text {
+  flex: 1; font-size: 13px; line-height: 1.4; outline: none;
+  min-height: 20px;
+}
+.outline-text:focus { background: rgba(0,113,227,0.04); border-radius: 4px; padding: 2px 4px; margin: -2px -4px; }
+.outline-remove {
+  background: none; border: none; color: var(--text-tertiary);
+  cursor: pointer; font-size: 14px; padding: 2px 4px; opacity: 0.4;
+}
+.outline-remove:hover { opacity: 1; color: var(--danger); }
+
+.section-stack { display: flex; flex-direction: column; gap: 12px; }
+.section-card {
+  background: var(--bg-secondary); border-radius: var(--r-lg);
+  border: 1px solid var(--border); overflow: hidden;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.section-card:hover { box-shadow: var(--shadow-sm); }
+.section-card.generating { border-color: rgba(0,113,227,0.35); }
+.section-card.ready { border-color: rgba(48,209,88,0.3); }
+.section-card.editing { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,0.1); }
+.section-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; cursor: pointer; user-select: none;
+}
+.section-head .sec-type {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.4px; color: var(--text-tertiary); min-width: 48px;
+}
+.section-head .sec-title { flex: 1; font-size: 14px; font-weight: 600; }
+.section-body { display: none; padding: 0 16px 16px; border-top: 1px solid var(--border); }
+.section-card.open .section-body { display: block; padding-top: 14px; }
+.section-editor {
+  width: 100%; min-height: 140px; border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 12px 14px; font-family: var(--sf-font);
+  font-size: 13px; line-height: 1.55; resize: vertical; outline: none;
+  background: #fff; color: var(--text-primary);
+}
+.section-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,0.1); }
+.section-meta-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.section-field label { display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+.section-field input, .section-field textarea {
+  width: 100%; border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 10px 12px; font-family: var(--sf-font); font-size: 13px; outline: none;
+}
+.section-field input:focus, .section-field textarea:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,0.1);
+}
+.section-field .char-count { font-size: 11px; color: var(--text-tertiary); margin-top: 4px; text-align: right; }
+.section-field .char-count.ok { color: var(--success); }
+.section-field .char-count.warn { color: var(--warning); }
+.section-field .char-count.bad { color: var(--danger); }
+
+.placement-grid { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
+.place-card {
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 14px 16px; background: #fff;
+}
+.place-card.rejected { opacity: 0.45; }
+.place-card.accepted { border-color: rgba(48,209,88,0.35); background: rgba(48,209,88,0.03); }
+.place-card-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.place-badge {
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: var(--r-pill);
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.place-badge.product { background: rgba(139,111,71,0.12); color: var(--povison-warm); }
+.place-badge.link { background: rgba(0,113,227,0.1); color: var(--accent); }
+.place-card-top .place-title { flex: 1; font-size: 14px; font-weight: 600; }
+.place-card .section-field { margin-bottom: 8px; }
+.place-card select {
+  width: 100%; border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 10px 12px; font-family: var(--sf-font); font-size: 13px; background: #fff;
+}
+
+.serp-gaps { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.serp-gap-chip {
+  font-size: 12px; padding: 6px 10px; border-radius: var(--r-sm);
+  background: rgba(175,82,222,0.08); color: var(--purple); font-weight: 500;
+}
+.serp-list { font-size: 13px; color: var(--text-secondary); line-height: 1.7; margin-bottom: 8px; }
+.serp-list li { margin-left: 18px; }
+
+.preview-wrapper { background: var(--bg-secondary); border-radius: var(--r-lg); box-shadow: var(--shadow-md); border: 1px solid var(--border); overflow: hidden; }
+.preview-toolbar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary); }
+.traffic-lights { display: flex; gap: 6px; }
+.traffic-lights span { width: 12px; height: 12px; border-radius: 50%; }
+.tl-red { background: #ff5f57; } .tl-yellow { background: #febc2e; } .tl-green { background: #28c840; }
+.preview-url { flex: 1; text-align: center; font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+.preview-frame { width: 100%; height: 480px; border: none; background: #fff; }
+.preview-checklist { margin-top: 14px; padding: 14px 16px; background: var(--bg-secondary); border-radius: var(--r-md); border: 1px solid var(--border); }
+.preview-checklist h4 { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); padding: 4px 0; }
+.check-row .ck { width: 14px; height: 14px; border-radius: 4px; background: var(--success); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; }
+.check-row .ck.fail { background: var(--danger); }
+
+.empty-state { text-align: center; padding: 80px 48px; color: var(--text-tertiary); }
+.empty-state .empty-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.3; }
+.empty-state h4 { font-size: 17px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
+.empty-state p { font-size: 14px; }
+
+.gen-live-mini {
+  background: #1d1d1f; border-radius: var(--r-md); padding: 10px 14px;
+  font-family: "SF Mono","Monaco","Menlo",monospace; font-size: 12px;
+  color: rgba(255,255,255,0.65); margin-bottom: 12px; display: none;
+}
+.gen-live-mini.show { display: block; }
+.btn-danger-ghost { background: transparent; color: var(--danger); }
+.btn-danger-ghost:hover { background: rgba(255,59,48,0.06); }
+
+/* ==================== Rules ==================== */
+.rules-container { padding: 0 48px 48px; max-width: 840px; }
+.rules-section { margin-bottom: 28px; padding: 20px 22px; background: var(--bg-elevated, #fff); border: 1px solid var(--border); border-radius: 16px; }
+.rules-section h3 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+.rules-section .section-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; }
+.rules-section .rules-inject-hint { font-size: 11px; color: var(--accent); margin-bottom: 12px; }
+.rules-header-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.rules-prompt-box { margin: 0 48px 40px; max-width: 840px; background: #1d1d1f; color: #f5f5f7; border-radius: 16px; padding: 16px 18px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 280px; overflow: auto; }
+
+.bridge-bar { display:flex; flex-direction:column; align-items:flex-start; gap:6px; padding:10px 12px; margin:0 12px 10px; background:rgba(0,0,0,0.04); border-radius:12px; font-size:11px; line-height:1.35; color:var(--text-secondary); }
+.bridge-bar-row { display:flex; align-items:center; gap:8px; width:100%; }
+.bridge-dot { width:8px; height:8px; border-radius:50%; background:#c7c7cc; flex-shrink:0; }
+.bridge-dot.on { background:#34c759; }
+.bridge-dot.off { background:#ff3b30; }
+.bridge-job { font-family:ui-monospace,Menlo,monospace; color:var(--text-tertiary); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bridge-wrong-host { display:none; position:fixed; inset:0; z-index:10000; background:rgba(29,29,31,0.88); color:#fff; align-items:center; justify-content:center; padding:32px; text-align:center; }
+.bridge-wrong-host.show { display:flex; }
+.bridge-wrong-host .box { max-width:420px; background:#1d1d1f; border-radius:20px; padding:28px 24px; box-shadow:var(--shadow-xl); }
+.bridge-wrong-host h2 { font-size:20px; margin-bottom:10px; }
+.bridge-wrong-host p { font-size:14px; color:#a1a1a6; margin-bottom:16px; line-height:1.5; }
+.bridge-wrong-host a { color:#64d2ff; word-break:break-all; }
+.bridge-wrong-host .btn { margin-top:8px; }
+
+.rules-prompt-box h4 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: #a1a1a6; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+.rule-item { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--bg-secondary); border-radius: var(--r-md); border: 1px solid var(--border); margin-bottom: 8px; transition: all var(--t-fast); }
+.rule-item:hover { box-shadow: var(--shadow-sm); }
+.rule-drag { width: 20px; color: var(--text-tertiary); cursor: grab; font-size: 16px; text-align: center; }
+.rule-text { flex: 1; font-size: 13px; line-height: 1.4; }
+.rule-text[contenteditable="true"] { outline: 2px solid var(--accent); border-radius: var(--r-sm); padding: 2px 6px; margin: -2px -6px; }
+.rule-toggle { width: 40px; height: 24px; border-radius: var(--r-pill); background: var(--bg-tertiary); position: relative; cursor: pointer; transition: background var(--t-fast); flex-shrink: 0; }
+.rule-toggle.on { background: var(--success); }
+.rule-toggle::after { content: ""; position: absolute; width: 20px; height: 20px; border-radius: 50%; background: #fff; top: 2px; left: 2px; box-shadow: var(--shadow-sm); transition: transform var(--t-fast); }
+.rule-toggle.on::after { transform: translateX(16px); }
+.rule-delete { background: none; border: none; color: var(--text-tertiary); cursor: pointer; font-size: 16px; padding: 4px; border-radius: 5px; }
+.rule-delete:hover { color: var(--danger); background: rgba(255,59,48,0.06); }
+.add-rule { display: flex; gap: 8px; margin-top: 12px; }
+.add-rule input { flex: 1; border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 10px 14px; font-size: 13px; font-family: var(--sf-font); background: var(--bg-secondary); outline: none; transition: border var(--t-fast); }
+.add-rule input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,0.12); }
+.add-rule input::placeholder { color: var(--text-tertiary); }
+
+/* ==================== Toast & Spinner ==================== */
+.toast-container { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 9999; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+.toast { background: rgba(29,29,31,0.92); backdrop-filter: blur(20px); color: #fff; padding: 12px 24px; border-radius: var(--r-pill); font-size: 14px; font-weight: 500; box-shadow: var(--shadow-lg); animation: toastIn 0.4s cubic-bezier(0.34,1.56,0.64,1); pointer-events: auto; }
+.toast.success { background: rgba(48,209,88,0.92); }
+@keyframes toastIn { from { opacity:0; transform:translateY(20px) scale(0.9); } to { opacity:1; transform:translateY(0) scale(1); } }
+@keyframes toastOut { to { opacity:0; transform:translateY(20px) scale(0.9); } }
+.spinner { width: 20px; height: 20px; border: 2.5px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 900px) {
+  .sidebar { width: 64px; }
+  .sidebar-logo .logo-text, .nav-item span:not(.nav-step-num), .sidebar-footer .wp-status span:not(.status-dot) { display: none; }
+  .sidebar-logo { justify-content: center; }
+  .nav-item { justify-content: center; }
+  .hero { padding: 32px 24px; } .hero h1 { font-size: 28px; }
+  .step-flow { flex-direction: column; padding: 0 24px; } .step-arrow { display: none; }
+  .heatmap-container, .brainstorm-container, .gen-container, .rules-container, .view-header, .heatmap-controls { padding-left: 24px; padding-right: 24px; }
+  .topic-grid { grid-template-columns: 1fr; }
+  .action-bar { padding: 14px 24px; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo"><div class="logo-mark">P</div><span class="logo-text">SEO Studio</span></div>
+    <nav class="sidebar-nav">
+      <div class="nav-item active" data-view="dashboard">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12l9-9 9 9M5 10v10h5v-6h4v6h5V10"/></svg>
+        <span>概览</span>
+      </div>
+      <div class="nav-item" data-view="keywords">
+        <div class="nav-step-num">1</div>
+        <span>关键词发现</span>
+      </div>
+      <div class="nav-item" data-view="brainstorm">
+        <div class="nav-step-num">2</div>
+        <span>主题头脑风暴</span>
+      </div>
+      <div class="nav-item" data-view="generation">
+        <div class="nav-step-num">3</div>
+        <span>分板块写作</span>
+      </div>
+      <div class="nav-item" data-view="rules">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
+        <span>规则设置</span>
+      </div>
+    </nav>
+    <div class="audit-panel">
+      <div class="audit-panel-header">
+        <span class="audit-panel-title">运行审计</span>
+        <button class="audit-export-btn" onclick="exportAuditLog()">导出日志</button>
+        <button class="audit-export-btn" onclick="exportRunPackage()">导出 Run</button>
+        <label class="audit-export-btn" style="cursor:pointer;margin:0;">
+          导入 Run
+          <input type="file" accept=".json,application/json" style="display:none;" onchange="importRunPackage(this)">
+        </label>
+      </div>
+      <div id="auditTrail">
+        <div style="padding:16px;color:var(--text-tertiary);font-size:12px;text-align:center;">暂无运行记录</div>
+      </div>
+    </div>
+    <div class="bridge-bar" id="bridgeBar">
+      <div class="bridge-bar-row">
+        <span class="bridge-dot off" id="bridgeDot"></span>
+        <span id="bridgeStatus">Bridge 未连接</span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="bridgeHealth()" style="margin-left:auto;">重试</button>
+      </div>
+      <span class="bridge-job" id="bridgeJob"></span>
+    </div>
+    <div class="sidebar-footer"><div class="wp-status"><div class="status-dot"></div><span>WordPress 已连接</span></div></div>
+  </aside>
+  <div class="bridge-wrong-host" id="bridgeWrongHost" role="dialog" aria-modal="true">
+    <div class="box">
+      <h2>请用系统浏览器打开 Studio</h2>
+      <p>当前不是 Bridge 地址（Cursor 预览 / file:// / 其它端口都会导致「Bridge 未连接」，且页面可能显示异常）。</p>
+      <p><a id="bridgeCorrectUrl" href="http://127.0.0.1:8765/">http://127.0.0.1:8765/</a></p>
+      <button type="button" class="btn btn-primary" onclick="window.open('http://127.0.0.1:8765/','_blank')">打开正确地址</button>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <main class="main">
+    <!-- Dashboard -->
+    <div class="view active" id="view-dashboard">
+      <div class="hero">
+        <div class="hero-eyebrow">POVISON · SEO Blog Pipeline</div>
+        <h1>从关键词到发布<br>三步内容生产流水线</h1>
+        <p class="hero-desc">关键词发现 → AI 选题确认 → 分板块写作与人工审核 → WordPress 草稿。Agent 提效，人工把关。</p>
+        <button class="btn-start" onclick="createRun();switchView('keywords')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          新建运行
+        </button>
+      </div>
+      <div class="step-flow">
+        <div class="step-card" onclick="switchView('keywords')"><div class="step-badge">1</div><h3>关键词发现</h3><p>由 keyword-discovery.py 固化脚本产出，Studio 负责权重管理与导入</p></div>
+        <div class="step-arrow">→</div>
+        <div class="step-card" onclick="switchView('brainstorm')"><div class="step-badge">2</div><h3>主题头脑风暴</h3><p>AI 关联关键词，发散生成多个 SEO 选题供选择</p></div>
+        <div class="step-arrow">→</div>
+        <div class="step-card" onclick="switchView('generation')"><div class="step-badge">3</div><h3>分板块写作</h3><p>SERP → 大纲确认 → 逐段生成/修改 → FAQ & Meta → 预览发布</p></div>
+      </div>
+    </div>
+
+    <!-- Step 1: Keywords -->
+    <div class="view" id="view-keywords">
+      <div class="view-header"><h2>关键词发现</h2><p>数据来自固化脚本 <code>keyword-discovery.py</code>（爬取 → 拆解 → LLM 清洗）。下方可导入脚本输出的 JSON；权重滑块控制头脑风暴抽样。SEO 指标（SV/KD/CPC）由后续 Semrush 步骤补齐。</p></div>
+      <div class="heatmap-controls">
+        <div class="segmented" id="kwSegmented">
+          <button class="active" onclick="filterKeywords(this,'all')">全部来源</button>
+          <button onclick="filterKeywords(this,'brand')">竞品品牌</button>
+          <button onclick="filterKeywords(this,'media')">家居媒体</button>
+          <button onclick="filterKeywords(this,'trend')">搜索趋势</button>
+          <button onclick="filterKeywords(this,'news')">热点新闻</button>
+        </div>
+        <div class="kw-selected-bar" style="margin-left:auto;gap:10px;">
+          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0;">
+            导入脚本 JSON
+            <input type="file" id="kwImportFile" accept=".json,application/json" style="display:none;" onchange="importKeywordsFromScript(this)">
+          </label>
+            <button type="button" class="btn btn-primary btn-sm" onclick="bridgeDiscoverKeywords()">桥接：发现关键词</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="bridgeEnrichKeywords()">桥接：补 SV/KD/CPC</button>
+
+          <span>共 <strong id="kwTotalCount">0</strong> 个关键词</span>
+        </div>
+      </div>
+      <div class="kw-list-container">
+        <div class="kw-list" id="kwList"></div>
+      </div>
+      <div class="kw-add-row">
+        <input type="text" id="kwAddInput" placeholder="手动添加关键词，回车确认（自动去重）" />
+        <select id="kwAddSource">
+          <option value="brand">竞品品牌</option>
+          <option value="media">家居媒体</option>
+          <option value="trend">搜索趋势</option>
+          <option value="news">热点新闻</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" onclick="addKeywordManual()">添加</button>
+      </div>
+      <div class="action-bar">
+        <div class="spacer"></div>
+        <button class="btn btn-secondary" onclick="switchView('dashboard')">返回</button>
+        <button class="btn btn-primary" id="btnToBrainstorm" onclick="goToBrainstorm()">
+          开始头脑风暴
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Step 2: Brainstorm -->
+    <div class="view" id="view-brainstorm">
+      <div class="view-header"><h2>主题头脑风暴</h2><p><strong>生产路径：</strong>运行 <code>topic-brainstorm.py</code> 后点「导入主题 JSON」。下方「本地 Demo」仅用于界面演示，不作为生产选题来源。</p></div>
+      <div class="brainstorm-container">
+        <div class="brainstorm-input">
+          <div class="bs-label">已选关键词</div>
+          <div class="bs-keywords" id="bsKeywords"></div>
+          <div class="bs-options">
+            <div class="bs-count-group">
+              生成数量
+              <input type="number" id="bsCount" value="10" min="3" max="30">
+              个主题
+            </div>
+            <label class="bs-generate-btn" style="cursor:pointer;margin:0;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
+              导入主题 JSON
+              <input type="file" id="topicImportFile" accept=".json,application/json" style="display:none;" onchange="importTopicsFromSchema(this)">
+            </label>
+            <button type="button" class="btn btn-primary btn-sm" onclick="bridgeBrainstormTopics()">桥接：跑 topic-brainstorm</button>
+
+            <button class="btn btn-secondary" id="bsGenerateBtn" onclick="runBrainstormDemo()" title="仅本地 mock，非生产">
+              本地 Demo
+            </button>
+          </div>
+          <p class="wb-hint" style="margin-top:10px;">脚本示例：<code>python3 scripts/topic-brainstorm.py -i kw.json --demo -n 10 -o topics.json</code></p>
+        </div>
+
+        <div class="bs-live" id="bsLive">
+          <div class="bs-live-header">
+            <div class="bs-live-dot"></div>
+            <span class="bs-live-label" id="bsLiveLabel">关联分析中</span>
+            <span class="bs-live-detail" id="bsLiveDetail">正在建立关键词关联图谱...</span>
+          </div>
+          <div class="bs-live-stream" id="bsLiveStream"></div>
+        </div>
+
+        <div class="topic-grid" id="topicGrid"></div>
+      </div>
+      <div class="action-bar" id="bsActionBar" style="display:none;">
+        <div class="kw-selected-bar">已选 <strong id="bsTopicCount">0</strong> 个主题</div>
+        <div class="spacer"></div>
+        <button class="btn btn-secondary" onclick="switchView('keywords')">重新选词</button>
+        <button class="btn btn-primary" id="btnToGeneration" onclick="goToGeneration()" disabled>
+          生成博客
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Step 3: Section Workbench -->
+    <div class="view" id="view-generation">
+      <div class="view-header">
+        <h2>分板块写作</h2>
+        <p>按板块生成内容，每一步可修改后再继续。Agent 起草，你负责确认质量与品牌调性。</p>
+      </div>
+      <div class="gen-container">
+        <div class="empty-state" id="genEmpty">
+          <div class="empty-icon">📝</div>
+          <h4>等待主题选择或导入草稿</h4>
+          <p>从「主题头脑风暴」进入，或导入脚本产出的 <code>article-state.json</code></p>
+          <label class="btn btn-primary" style="cursor:pointer;margin-top:12px;">
+            导入 article-state.json
+            <input type="file" accept=".json,application/json" style="display:none;" onchange="importArticleState(this)">
+          </label>
+        </div>
+
+        <div id="genWorkbench" style="display:none;">
+          <div class="gen-topic-bar">
+            <div style="flex:1;">
+              <div class="gt-label">当前选题（已人工确认）</div>
+              <div class="gt-title" id="wbTopicTitle">—</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" onclick="switchView('brainstorm')">换主题</button>
+          </div>
+
+          <div class="gen-phase-pills" id="genPhasePills">
+            <button class="gen-phase-pill active" data-phase="serp" onclick="setGenPhase('serp')"><span class="pill-num">1</span>SERP 洞察</button>
+            <button class="gen-phase-pill" data-phase="outline" onclick="setGenPhase('outline')"><span class="pill-num">2</span>大纲</button>
+            <button class="gen-phase-pill" data-phase="sections" onclick="setGenPhase('sections')"><span class="pill-num">3</span>正文板块</button>
+            <button class="gen-phase-pill" data-phase="placements" onclick="setGenPhase('placements')"><span class="pill-num">4</span>产品与内链</button>
+            <button class="gen-phase-pill" data-phase="faq" onclick="setGenPhase('faq')"><span class="pill-num">5</span>FAQ</button>
+            <button class="gen-phase-pill" data-phase="meta" onclick="setGenPhase('meta')"><span class="pill-num">6</span>SEO 元信息</button>
+            <button class="gen-phase-pill" data-phase="preview" onclick="setGenPhase('preview')"><span class="pill-num">7</span>预览发布</button>
+          </div>
+
+          <!-- Phase: SERP -->
+          <div class="wb-panel active" id="phase-serp">
+            <div class="wb-card">
+              <div class="wb-card-header">
+                <h3>SERP 竞品洞察</h3>
+                <span class="wb-status idle" id="serpStatus">待生成</span>
+              </div>
+              <div class="wb-card-body">
+                <p class="wb-hint">分析排名前十文章的共性与内容缺口，作为大纲与正文的依据。可重新生成，也可直接进入大纲。</p>
+                <div class="gen-live-mini" id="serpLive"></div>
+                <div id="serpResult" style="display:none;">
+                  <div style="font-size:13px;font-weight:600;margin-bottom:6px;">排名前列</div>
+                  <ul class="serp-list" id="serpRankList"></ul>
+                  <div style="font-size:13px;font-weight:600;margin:12px 0 6px;">内容缺口（可写入大纲）</div>
+                  <div class="serp-gaps" id="serpGaps"></div>
+                </div>
+                <div class="wb-actions" style="margin-top:14px;">
+                  <button class="btn btn-primary" id="btnGenSerp" onclick="generateSerp()">生成 SERP 分析</button>
+                  <button class="btn btn-secondary" id="btnSerpNext" onclick="setGenPhase('outline')" disabled>下一步：大纲</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Phase: Outline -->
+          <div class="wb-panel" id="phase-outline">
+            <div class="wb-card">
+              <div class="wb-card-header">
+                <h3>文章大纲（H2 / H3）</h3>
+                <span class="wb-status idle" id="outlineStatus">待生成</span>
+              </div>
+              <div class="wb-card-body">
+                <p class="wb-hint">先确认结构再写正文。点击标题可直接改字；可增删条目。确认后才会解锁正文板块生成。</p>
+                <div class="gen-live-mini" id="outlineLive"></div>
+                <div class="outline-list" id="outlineList"></div>
+                <div class="wb-actions">
+                  <button class="btn btn-primary" id="btnGenOutline" onclick="generateOutline()">生成大纲（本地 Demo）</button>
+                  <button class="btn btn-secondary" type="button" onclick="bridgeGenerateSection('outline')">桥接：脚本生成大纲</button>
+                  <button class="btn btn-ghost" type="button" onclick="bridgeAskAgent('serp')">请 Agent（SERP）</button>
+                  <button class="btn btn-secondary" onclick="addOutlineItem('h2')" id="btnAddH2" disabled>加 H2</button>
+                  <button class="btn btn-secondary" onclick="addOutlineItem('h3')" id="btnAddH3" disabled>加 H3</button>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost" onclick="setGenPhase('serp')">上一步</button>
+                  <button class="btn btn-primary" id="btnConfirmOutline" onclick="confirmOutline()" disabled>确认大纲，写正文</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Phase: Sections -->
+          <div class="wb-panel" id="phase-sections">
+            <div class="wb-card" style="margin-bottom:14px;">
+              <div class="wb-card-header">
+                <h3>正文板块</h3>
+                <span class="wb-status idle" id="sectionsStatus">待生成</span>
+              </div>
+              <div class="wb-card-body">
+                <p class="wb-hint">按 Intro → 各 H2 → Conclusion 逐块生成。每块可编辑、可单独重写；全部就绪后进入产品植入与内链审核。</p>
+                <div class="wb-actions">
+                  <button class="btn btn-primary" id="btnGenAllSections" onclick="generateAllSections()" disabled>一键生成全部板块（Demo）</button>
+                  <button class="btn btn-secondary" type="button" onclick="bridgeGenerateSection('section')" id="btnBridgeGenSections">桥接：脚本生成正文</button>
+                  <button class="btn btn-ghost" type="button" onclick="bridgeAskAgent('section')">请 Agent 写正文</button>
+                  <button class="btn btn-ghost" type="button" onclick="bridgeReloadState()">从 Bridge 刷新</button>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost" onclick="setGenPhase('outline')">回改大纲</button>
+                  <button class="btn btn-primary" id="btnSectionsNext" onclick="setGenPhase('placements')" disabled>下一步：产品与内链</button>
+                </div>
+              </div>
+            </div>
+            <div class="section-stack" id="sectionStack"></div>
+          </div>
+
+          <!-- Phase: Product placements & internal links -->
+          <div class="wb-panel" id="phase-placements">
+            <div class="wb-card" style="margin-bottom:14px;">
+              <div class="wb-card-header">
+                <h3>产品植入与内链</h3>
+                <span class="wb-status idle" id="placementsStatus">待生成</span>
+              </div>
+              <div class="wb-card-body">
+                <p class="wb-hint">Agent 推荐 1–2 个产品段落与 2–3 条内链；你审核合理性后可改文案、换挂载板块、接受或驳回。确认后可一键写入对应正文板块。</p>
+                <div class="gen-live-mini" id="placementsLive"></div>
+                <div class="wb-actions">
+                  <button class="btn btn-primary" id="btnGenPlacements" onclick="generatePlacements()" disabled>生成推荐</button>
+                  <button class="btn btn-secondary" id="btnAcceptAllPlacements" onclick="acceptAllPlacements()" disabled>一键全部接受</button>
+                  <button class="btn btn-secondary" id="btnApplyPlacements" onclick="applyPlacementsToSections()" disabled>写入已接受项到正文</button>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost" onclick="setGenPhase('sections')">上一步</button>
+                  <button class="btn btn-primary" id="btnPlacementsNext" onclick="confirmPlacements()" disabled>确认，写 FAQ</button>
+                </div>
+              </div>
+            </div>
+            <div style="font-size:13px;font-weight:600;margin:4px 0 8px;">产品植入（1–2 个，约 40–70 词）</div>
+            <div class="placement-grid" id="productPlaceList"></div>
+            <div class="wb-actions" style="margin-bottom:16px;">
+              <button class="btn btn-secondary btn-sm" id="btnAddProduct" onclick="addProductPlacement()" disabled>加一个产品</button>
+            </div>
+            <div style="font-size:13px;font-weight:600;margin:4px 0 8px;">内链建议（2–3 条，anchor 须为文中自然长尾词）</div>
+            <div class="placement-grid" id="linkPlaceList"></div>
+            <div class="wb-actions">
+              <button class="btn btn-secondary btn-sm" id="btnAddLink" onclick="addLinkPlacement()" disabled>加一条内链</button>
+            </div>
+          </div>
+
+          <!-- Phase: FAQ -->
+          <div class="wb-panel" id="phase-faq">
+            <div class="wb-card">
+              <div class="wb-card-header">
+                <h3>FAQ 模块</h3>
+                <span class="wb-status idle" id="faqStatus">待生成</span>
+              </div>
+              <div class="wb-card-body">
+                <p class="wb-hint">4–6 个常见问题。答案应短于正文，与正文重复率控制在 20% 以内。可直接改问题与答案。</p>
+                <div class="gen-live-mini" id="faqLive"></div>
+                <div id="faqEditor"></div>
+                <div class="wb-actions" style="margin-top:14px;">
+                  <button class="btn btn-primary" id="btnGenFaq" onclick="generateFaq()" disabled>生成 FAQ</button>
+                  <button class="btn btn-secondary" onclick="addFaqItem()" id="btnAddFaq" disabled>加一问</button>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost" onclick="setGenPhase('placements')">上一步</button>
+                  <button class="btn btn-primary" id="btnFaqNext" onclick="setGenPhase('meta')" disabled>下一步：SEO 元信息</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Phase: Meta -->
+          <div class="wb-panel" id="phase-meta">
+            <div class="wb-card">
+              <div class="wb-card-header">
+                <h3>SEO 元信息</h3>
+                <span class="wb-status idle" id="metaStatus">待生成</span>
+              </div>
+              <div class="wb-card-body">
+                <p class="wb-hint">Meta Title 建议 50–60 字符；Description 150–160 字符；URL 小写连字符且 ≤75。改完即保存。</p>
+                <div class="section-meta-grid" id="metaEditor">
+                  <div class="section-field">
+                    <label>Meta Title</label>
+                    <input type="text" id="metaTitle" maxlength="70" oninput="onMetaEdit()" disabled>
+                    <div class="char-count" id="metaTitleCount">0 / 60</div>
+                  </div>
+                  <div class="section-field">
+                    <label>Meta Description</label>
+                    <textarea id="metaDesc" rows="3" maxlength="200" oninput="onMetaEdit()" disabled></textarea>
+                    <div class="char-count" id="metaDescCount">0 / 160</div>
+                  </div>
+                  <div class="section-field">
+                    <label>URL Slug</label>
+                    <input type="text" id="metaSlug" maxlength="80" oninput="onMetaEdit()" disabled>
+                    <div class="char-count" id="metaSlugCount">0 / 75</div>
+                  </div>
+                  <div class="section-field">
+                    <label>Focus Keyword</label>
+                    <input type="text" id="metaFocus" oninput="onMetaEdit()" disabled>
+                  </div>
+                </div>
+                <div class="wb-actions" style="margin-top:14px;">
+                  <button class="btn btn-primary" id="btnGenMeta" onclick="generateMeta()" disabled>生成元信息</button>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost" onclick="setGenPhase('faq')">上一步</button>
+                  <button class="btn btn-primary" id="btnMetaNext" onclick="assemblePreview()" disabled>组装预览（本地）</button>
+                  <button class="btn btn-secondary" type="button" onclick="bridgeValidateAndPreview()">桥接：校验+模板预览</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Phase: Preview -->
+          <div class="wb-panel" id="phase-preview">
+            <div class="preview-wrapper" id="previewWrapper">
+              <div class="preview-toolbar">
+                <div class="traffic-lights"><span class="tl-red"></span><span class="tl-yellow"></span><span class="tl-green"></span></div>
+                <div class="preview-url" id="previewUrl">preview.html</div>
+                <button class="btn btn-ghost" style="font-size:12px;padding:4px 10px;" onclick="openPreviewWindow()">新窗口</button>
+                <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;" onclick="exportPreviewHtml()">导出 HTML</button>
+                <label class="btn btn-ghost" style="font-size:12px;padding:4px 10px;cursor:pointer;margin:0;">
+                  导入 article-state
+                  <input type="file" accept=".json,application/json" style="display:none;" onchange="importArticleState(this)">
+                </label>
+              </div>
+              <iframe class="preview-frame" id="previewFrame" src="about:blank"></iframe>
+            </div>
+            <div class="preview-checklist" id="previewChecklist"></div>
+            <div class="wb-actions" style="margin-top:14px;">
+              <button class="btn btn-secondary" onclick="setGenPhase('meta')">回改元信息</button>
+              <button class="btn btn-danger-ghost" onclick="rejectArticle()">驳回重写</button>
+              <div class="spacer"></div>
+              <button class="btn btn-primary" id="btnPublishDraft" onclick="finalizeMvpExport()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v8M8 6l4 4 4-4M5 14v6h14v-6"/></svg>
+                审核通过，导出 HTML（MVP）
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="action-bar" id="genActionBar" style="display:none;">
+        <div class="kw-selected-bar" id="genTopicInfo">进度：—</div>
+        <div class="spacer"></div>
+        <button class="btn btn-secondary" onclick="switchView('brainstorm')">重新选主题</button>
+      </div>
+    </div>
+
+    <!-- Rules (by generation block — injected into prompts) -->
+    <div class="view" id="view-rules">
+      <div class="view-header">
+        <h2>规则设置</h2>
+        <p>按生成板块填写。已启用规则会注入对应 prompt；「全局」在每一块生成时都会追加。</p>
+        <div class="rules-header-actions">
+          <button class="btn btn-secondary" type="button" onclick="previewRulesPrompt('outline')">预览大纲 Prompt</button>
+          <button class="btn btn-secondary" type="button" onclick="previewRulesPrompt('h2')">预览 H2 Prompt</button>
+          <button class="btn btn-secondary" type="button" onclick="exportGenerationRules()">导出规则 JSON</button>
+          <label class="btn btn-secondary" style="cursor:pointer;">导入规则<input type="file" accept="application/json,.json" hidden onchange="importGenerationRules(this)"></label>
+          <button class="btn btn-ghost" type="button" onclick="resetGenerationRules()">恢复默认</button>
+        </div>
+      </div>
+      <div class="rules-container" id="rulesContainer"></div>
+      <div class="rules-prompt-box" id="rulesPromptPreview" style="display:none;"></div>
+    </div>
+  </main>
+</div>
+<div class="kw-tooltip" id="kwTooltip"></div>
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// #region agent log
+fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:1126',message:'JS_EXEC_START: main script tag entered',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H3'})}).catch(()=>{});
+// #endregion
+// ==================== Keyword Data ====================
+// DEMO seed only. Production Step 1 = keyword-discovery.py → import JSON below.
+// Script output shape: [{ text, source, type, freq }] (+ optional sv/kd/cpc/intent after Semrush).
+const KEYWORD_SCRIPT_PATH = '~/.hermes/skills/productivity/povison-seo-blog/scripts/keyword-discovery.py';
+let KEYWORDS = [
+  // Brand-sourced (blue) — 14 keywords
+  { text: "fully assembled furniture", source: "brand", heat: "xl", sv: 18100, kd: 32, cpc: 2.4, intent: "Commercial" },
+  { text: "mid-century modern sofa", source: "brand", heat: "xl", sv: 9900, kd: 28, cpc: 1.8, intent: "Commercial" },
+  { text: "modular sofa", source: "brand", heat: "lg", sv: 14800, kd: 41, cpc: 3.1, intent: "Commercial" },
+  { text: "sectional sofa", source: "brand", heat: "lg", sv: 27100, kd: 55, cpc: 4.2, intent: "Commercial" },
+  { text: "pet-friendly upholstery", source: "brand", heat: "lg", sv: 6600, kd: 19, cpc: 1.2, intent: "Informational" },
+  { text: "lift top coffee table", source: "brand", heat: "md", sv: 8100, kd: 35, cpc: 2.0, intent: "Commercial" },
+  { text: "power recliner", source: "brand", heat: "md", sv: 9900, kd: 38, cpc: 3.5, intent: "Commercial" },
+  { text: "accent chair", source: "brand", heat: "md", sv: 12100, kd: 44, cpc: 2.8, intent: "Commercial" },
+  { text: "upholstered bed frame", source: "brand", heat: "md", sv: 4400, kd: 22, cpc: 1.5, intent: "Commercial" },
+  { text: "dining bench with back", source: "brand", heat: "sm", sv: 2400, kd: 18, cpc: 1.3, intent: "Commercial" },
+  { text: "console table with drawers", source: "brand", heat: "sm", sv: 1900, kd: 15, cpc: 1.0, intent: "Commercial" },
+  { text: "bar cart on wheels", source: "brand", heat: "xs", sv: 1300, kd: 12, cpc: 0.9, intent: "Commercial" },
+  { text: "entryway bench with storage", source: "brand", heat: "xs", sv: 880, kd: 10, cpc: 0.7, intent: "Commercial" },
+  { text: "tv stand with fireplace", source: "brand", heat: "sm", sv: 3600, kd: 30, cpc: 2.3, intent: "Commercial" },
+  // Media-sourced (green) — 13 keywords
+  { text: "small space living", source: "media", heat: "xl", sv: 22200, kd: 24, cpc: 1.0, intent: "Informational" },
+  { text: "apartment therapy", source: "media", heat: "lg", sv: 33100, kd: 48, cpc: 2.5, intent: "Informational" },
+  { text: "before and after", source: "media", heat: "lg", sv: 14800, kd: 18, cpc: 0.5, intent: "Informational" },
+  { text: "minimalist decor", source: "media", heat: "md", sv: 6600, kd: 25, cpc: 1.3, intent: "Informational" },
+  { text: "rental friendly upgrades", source: "media", heat: "md", sv: 4400, kd: 14, cpc: 0.6, intent: "Informational" },
+  { text: "gallery wall ideas", source: "media", heat: "md", sv: 9900, kd: 29, cpc: 1.1, intent: "Informational" },
+  { text: "biophilic design", source: "media", heat: "sm", sv: 2900, kd: 16, cpc: 0.9, intent: "Informational" },
+  { text: "curved furniture trend", source: "media", heat: "sm", sv: 1900, kd: 11, cpc: 0.8, intent: "Informational" },
+  { text: "japandi style", source: "media", heat: "sm", sv: 1900, kd: 13, cpc: 0.7, intent: "Informational" },
+  { text: "room layout planner", source: "media", heat: "sm", sv: 3600, kd: 20, cpc: 0.8, intent: "Informational" },
+  { text: "color blocking decor", source: "media", heat: "xs", sv: 880, kd: 8, cpc: 0.4, intent: "Informational" },
+  { text: "mixing furniture styles", source: "media", heat: "xs", sv: 590, kd: 7, cpc: 0.3, intent: "Informational" },
+  // Trend-sourced (pink) — 12 keywords
+  { text: "sustainable furniture", source: "trend", heat: "xl", sv: 12100, kd: 36, cpc: 1.6, intent: "Informational" },
+  { text: "multifunctional furniture", source: "trend", heat: "lg", sv: 8100, kd: 22, cpc: 1.0, intent: "Informational" },
+  { text: "outdoor living", source: "trend", heat: "lg", sv: 6600, kd: 28, cpc: 1.4, intent: "Informational" },
+  { text: "smart home office", source: "trend", heat: "md", sv: 3600, kd: 20, cpc: 1.2, intent: "Commercial" },
+  { text: "earth tones decor", source: "trend", heat: "md", sv: 4400, kd: 17, cpc: 0.8, intent: "Informational" },
+  { text: "vintage revival furniture", source: "trend", heat: "md", sv: 2400, kd: 15, cpc: 0.7, intent: "Informational" },
+  { text: "boucle fabric", source: "trend", heat: "sm", sv: 1900, kd: 13, cpc: 0.9, intent: "Informational" },
+  { text: "cane furniture", source: "trend", heat: "sm", sv: 1300, kd: 10, cpc: 0.6, intent: "Informational" },
+  { text: "terrazzo decor", source: "trend", heat: "xs", sv: 590, kd: 7, cpc: 0.4, intent: "Informational" },
+  { text: "rounded corners furniture", source: "trend", heat: "xs", sv: 720, kd: 9, cpc: 0.5, intent: "Informational" },
+  { text: "furniture subscription", source: "trend", heat: "sm", sv: 1600, kd: 14, cpc: 1.1, intent: "Commercial" },
+  { text: "modular furniture system", source: "trend", heat: "md", sv: 3200, kd: 19, cpc: 1.3, intent: "Commercial" },
+  // News-sourced (orange) — 11 keywords
+  { text: "moving in together", source: "news", heat: "xl", sv: 18100, kd: 26, cpc: 1.5, intent: "Informational" },
+  { text: "remote work from home", source: "news", heat: "lg", sv: 135000, kd: 58, cpc: 4.5, intent: "Informational" },
+  { text: "home renovation tips", source: "news", heat: "lg", sv: 22200, kd: 45, cpc: 3.2, intent: "Informational" },
+  { text: "first apartment essentials", source: "news", heat: "md", sv: 8100, kd: 24, cpc: 1.3, intent: "Informational" },
+  { text: "tiny home furniture", source: "news", heat: "md", sv: 9900, kd: 33, cpc: 1.8, intent: "Informational" },
+  { text: "empty nester downsizing", source: "news", heat: "sm", sv: 2900, kd: 16, cpc: 0.9, intent: "Informational" },
+  { text: "downsizing your home", source: "news", heat: "sm", sv: 4400, kd: 21, cpc: 1.1, intent: "Informational" },
+  { text: "co-living space", source: "news", heat: "xs", sv: 880, kd: 12, cpc: 0.6, intent: "Informational" },
+  { text: "furniture for aging in place", source: "news", heat: "sm", sv: 1900, kd: 15, cpc: 1.4, intent: "Informational" },
+  { text: "back to office furniture", source: "news", heat: "md", sv: 5400, kd: 27, cpc: 2.0, intent: "Commercial" },
+  { text: "eco friendly packaging furniture", source: "news", heat: "xs", sv: 720, kd: 11, cpc: 0.5, intent: "Informational" },
+];
+
+const SOURCE_LABELS = { brand: "竞品品牌", media: "家居媒体", trend: "搜索趋势", news: "热点新闻" };
+
+// ==================== Topic Templates ====================
+const TOPIC_TEMPLATES = [
+  { title: "How to Choose a {kw1} for Your First Apartment", priority: "p0", cat: "选购指南" },
+  { title: "{kw1} vs {kw2}: Which Is Right for Your Space?", priority: "p0", cat: "选购指南" },
+  { title: "The Ultimate Guide to {kw1} in Small Spaces", priority: "p0", cat: "空间布局" },
+  { title: "Why {kw1} Is the Biggest Furniture Trend of 2026", priority: "p3", cat: "趋势" },
+  { title: "{kw1} and {kw2}: How to Mix Styles Without Clashing", priority: "p0", cat: "空间布局" },
+  { title: "Pet-Friendly {kw1}: What to Look For and What to Avoid", priority: "p1", cat: "材质护理" },
+  { title: "How {kw1} Is Reshaping the Furniture Industry", priority: "p2", cat: "行业洞察" },
+  { title: "Moving in Together: Merging {kw1} and {kw2} Styles", priority: "p0", cat: "选购指南" },
+  { title: "Budget {kw1}: Finding Quality Without Breaking the Bank", priority: "p0", cat: "选购指南" },
+  { title: "Before & After: Transforming a Room with {kw1}", priority: "p3", cat: "案例" },
+  { title: "How to Clean and Maintain Your {kw1}", priority: "p1", cat: "材质护理" },
+  { title: "The Psychology of {kw1}: How Furniture Affects Your Mood", priority: "p2", cat: "行业洞察" },
+  { title: "Sustainable {kw1}: What to Know Before You Buy", priority: "p2", cat: "行业洞察" },
+  { title: "{kw1} for {kw2}: A Room-by-Room Guide", priority: "p0", cat: "空间布局" },
+  { title: "Common {kw1} Mistakes and How to Avoid Them", priority: "p0", cat: "选购指南" },
+  { title: "How to Style {kw1} in a Rental Apartment", priority: "p0", cat: "空间布局" },
+  { title: "The Best {kw1} for Families with Kids and Pets", priority: "p1", cat: "材质护理" },
+  { title: "From {kw1} to {kw2}: Upgrading Your Living Room", priority: "p3", cat: "案例" },
+  { title: "Why Fully Assembled {kw1} Is Worth Every Penny", priority: "p2", cat: "行业洞察" },
+  { title: "Designing Around {kw1}: Layout Tips from the Pros", priority: "p0", cat: "空间布局" },
+];
+
+// ==================== Rules (by generation block) ====================
+const RULE_BLOCKS = [
+  { id: 'global', label: '全局（每块都注入）', desc: '语气、语言、品牌底线；任意板块生成时都会追加到 prompt', inject: '每次生成' },
+  { id: 'outline', label: '大纲 Outline', desc: '生成 / 重写 H2–H3 大纲时注入', inject: 'mode=outline' },
+  { id: 'intro', label: '正文 · Intro', desc: '生成 Introduction 时注入（另含全局）', inject: 'section type=Intro' },
+  { id: 'h2', label: '正文 · H2 章节', desc: '生成各 H2 正文时注入（另含全局）', inject: 'section type=H2' },
+  { id: 'conclusion', label: '正文 · Conclusion', desc: '生成 Conclusion 时注入（另含全局）', inject: 'section type=Conclusion' },
+  { id: 'placements', label: '产品与内链', desc: '推荐产品植入与内链时注入', inject: 'mode=placements' },
+  { id: 'faq', label: 'FAQ', desc: '生成 FAQ 时注入', inject: 'mode=faq' },
+  { id: 'meta', label: 'SEO 元信息', desc: '生成 Meta Title / Description / Slug 时注入', inject: 'mode=meta' },
+];
+
+const PROMPT_TEMPLATES = {
+  outline: '# Outline generation\nYou write an SEO blog outline for POVISON (fully assembled furniture).\nInput: TopicItem JSON.\nOutput JSON only: {"outline":[{"level":"h2"|"h3","text":"..."}]}\n\n{{RULES}}\n',
+  section: '# Section body generation\nWrite one English section for a POVISON SEO blog.\nInput: TopicItem + outline + section spec.\nOutput JSON only: {"id","content"}\n\n{{RULES}}\n',
+  placements: '# Product & internal link recommendations\nOutput JSON: {"products":[...],"links":[...]}\n\n{{RULES}}\n',
+  faq: '# FAQ generation\nOutput JSON: {"faq":[{"q","a"}]}\n\n{{RULES}}\n',
+  meta: '# SEO meta generation\nOutput JSON: {"title","description","slug","focus"}\n\n{{RULES}}\n',
+};
+
+// POVISON blog post template (mirrors templates/blog-post-template.html).
+// assemblePreview() fills {{PLACEHOLDER}} slots; server /preview uses the same template.
+const BLOG_POST_TEMPLATE = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{META_TITLE}} | POVISON</title>
+<meta name="description" content="{{META_DESC}}">
+<link rel="canonical" href="https://www.povison.com/blog/{{CANONICAL_URL}}">
+<meta property="og:title" content="{{META_TITLE}}">
+<meta property="og:description" content="{{META_DESC}}">
+<meta property="og:type" content="article">
+{{FAQ_JSON_LD}}
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#faf8f5;--card-bg:#fff;--text:#2b2b2b;--text-light:#6b6b6b;--accent:#8b6f47;--accent-light:#c4a882;--border:#e8e2d8;--link:#8b6f47;--link-hover:#6d5638;--table-header:#f5efe6;--table-stripe:#fbf9f5}
+body{font-family:Georgia,'Times New Roman',serif;background:var(--bg);color:var(--text);line-height:1.8;font-size:18px;-webkit-font-smoothing:antialiased}
+.blog-container{max-width:800px;margin:0 auto;padding:60px 24px 80px}
+.blog-header{text-align:center;margin-bottom:48px;padding-bottom:32px;border-bottom:1px solid var(--border)}
+.blog-category{display:inline-block;font-family:'Helvetica Neue',Arial,sans-serif;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin-bottom:16px}
+.blog-header h1{font-size:36px;font-weight:700;line-height:1.3;margin-bottom:20px}
+.blog-meta{font-family:'Helvetica Neue',Arial,sans-serif;font-size:14px;color:var(--text-light)}
+.hero-image{width:100%;height:420px;border-radius:4px;margin-bottom:48px;overflow:hidden;position:relative}
+.hero-image img{width:100%;height:100%;object-fit:cover}
+.hero-image .hero-caption{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.5));padding:20px 24px 16px;font-family:'Helvetica Neue',Arial,sans-serif;font-size:13px;color:rgba(255,255,255,0.85)}
+.article-body p{margin-bottom:24px}
+.article-body h2{font-size:26px;font-weight:700;margin-top:56px;margin-bottom:20px;line-height:1.35}
+.article-body h3{font-size:20px;font-weight:600;margin-top:36px;margin-bottom:16px;line-height:1.4}
+.article-body a{color:var(--link);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
+.article-body a:hover{color:var(--link-hover)}
+.article-body ul{margin-bottom:24px;padding-left:0;list-style:none}
+.article-body ul li{position:relative;padding-left:28px;margin-bottom:12px}
+.article-body ul li::before{content:"";position:absolute;left:0;top:12px;width:8px;height:8px;background:var(--accent-light);border-radius:50%}
+.article-body ul li strong{color:var(--text);font-weight:700}
+.experience-note{background:#f9f5f0;border-left:3px solid var(--accent);padding:16px 20px;margin:24px 0;font-style:italic;font-size:16px;color:var(--text-light);border-radius:0 4px 4px 0}
+.conclusion{margin-top:56px;padding:32px;background:var(--card-bg);border:1px solid var(--border);border-radius:4px;text-align:center}
+.conclusion h2{margin-top:0}
+.conclusion p{text-align:left;font-size:17px}
+.faq-section{margin-top:56px}
+.faq-section h2{text-align:center}
+.faq-item{border-bottom:1px solid var(--border);padding:20px 0}
+.faq-item h3{font-size:17px;font-weight:600;margin-top:0;margin-bottom:8px;cursor:pointer;position:relative;padding-right:28px}
+.faq-item h3::after{content:"+";position:absolute;right:0;top:0;font-size:20px;color:var(--accent);font-weight:400}
+.faq-item h3.active::after{content:"\\u2212"}
+.faq-item p{font-size:15px;color:var(--text-light);font-family:'Helvetica Neue',Arial,sans-serif;line-height:1.7;display:none}
+.faq-item.open p{display:block}
+.image-gallery{margin-top:56px}
+.image-gallery h2{font-size:22px;margin-bottom:24px}
+.gallery-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.gallery-item{border-radius:4px;overflow:hidden;text-decoration:none;border:1px solid var(--border)}
+.gallery-item:hover{box-shadow:0 4px 16px rgba(0,0,0,0.08)}
+.gallery-item img{width:100%;height:140px;object-fit:cover;display:block}
+.gallery-item p{padding:12px 14px;font-family:'Helvetica Neue',Arial,sans-serif;font-size:13px;color:var(--text-light);line-height:1.5}
+@media (max-width:640px){.blog-container{padding:40px 16px 60px}.blog-header h1{font-size:26px}.article-body h2{font-size:22px}.article-body h3{font-size:18px}.hero-image{height:240px}.gallery-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="blog-container">
+<header class="blog-header">
+<span class="blog-category">{{BLOG_CATEGORY}}</span>
+<h1>{{H1_TITLE}}</h1>
+<div class="blog-meta"><span>By {{AUTHOR}}</span><span> &bull; </span><span>{{DATE}}</span><span> &bull; </span><span>8 min read</span></div>
+</header>
+<div class="hero-image"><img src="{{HERO_IMG_URL}}" alt="{{HERO_IMG_CAPTION}}" loading="eager"><div class="hero-caption">{{HERO_IMG_CAPTION}}</div></div>
+<article class="article-body">{{ARTICLE_BODY}}</article>
+<section class="image-gallery"><h2>Visual Inspiration</h2><div class="gallery-grid">{{GALLERY_ITEMS}}</div></section>
+</div>
+<script>function toggleFaq(e){var i=e.parentElement,o=i.classList.contains('open');document.querySelectorAll('.faq-item').forEach(function(el){el.classList.remove('open');el.querySelector('h3').classList.remove('active')});if(!o){i.classList.add('open');e.classList.add('active')}}<\/script>
+</body>
+</html>`;
+
+const PEXELS_HEROES = [
+  'https://images.pexels.com/photos/1571460/pexels-photo-1571460.jpeg?auto=compress&cs=tinysrgb&w=1200',
+  'https://images.pexels.com/photos/1648776/pexels-photo-1648776.jpeg?auto=compress&cs=tinysrgb&w=1200',
+  'https://images.pexels.com/photos/276583/pexels-photo-276583.jpeg?auto=compress&cs=tinysrgb&w=1200',
+];
+const PEXELS_GALLERY = [
+  'https://images.pexels.com/photos/1571460/pexels-photo-1571460.jpeg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/1648776/pexels-photo-1648776.jpeg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/276583/pexels-photo-276583.jpeg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/1080721/pexels-photo-1080721.jpeg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/6492397/pexels-photo-6492397.jpeg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/6444/timeline-clothing-rack-pants.jpg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/1668860/pexels-photo-1668860.jpeg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/3935350/pexels-photo-3935350.jpeg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/2253870/pexels-photo-2253870.jpeg?auto=compress&cs=tinysrgb&w=600',
+  'https://images.pexels.com/photos/4498596/pexels-photo-4498596.jpeg?auto=compress&cs=tinysrgb&w=600',
+];
+const GALLERY_CAPTIONS = [
+  'Living room layout ideas', 'Bedroom storage solutions', 'Dining setup for two',
+  'Workspace corner', 'Entryway bench', 'Closet edit',
+  'Reading nook', 'Open shelving', 'Neutral palette', 'Modular sofa',
+];
+
+// #region agent log
+fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:DEFAULT_RULES',message:'JS_EXEC_AFTER_TEMPLATE: reached DEFAULT_RULES (past BLOG_POST_TEMPLATE)',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H7'})}).catch(()=>{});
+// #endregion
+const DEFAULT_RULES = {
+  global: [
+    { text: '英文输出，美式拼写', enabled: true },
+    { text: '使用第二人称 you 直接对话读者', enabled: true },
+    { text: "避免 'A good example is' 句式", enabled: true },
+    { text: '不借鉴已有 POVISON 博客内容', enabled: true },
+    { text: '品牌差异化：提及 fully assembled 时要自然、可验证', enabled: true },
+  ],
+  outline: [
+    { text: '4–6 个 H2；前 2–3 个 H2 使用 How/What/Why 问句', enabled: true },
+    { text: '覆盖 TopicItem.serp_gap 与 angle', enabled: true },
+    { text: '每个关键 H2 下可挂 1–2 个 H3，避免空壳标题', enabled: true },
+    { text: '大纲阶段不写产品硬广，不堆关键词', enabled: true },
+  ],
+  intro: [
+    { text: '约 90 词；首段含 primary_keyword', enabled: true },
+    { text: 'Intro 不加产品链接与内链', enabled: true },
+    { text: '交代读者能获得什么，不剧透全文', enabled: true },
+  ],
+  h2: [
+    { text: '整篇目标 ≥1500 词；本 H2 写充实，含过渡段 40–60 词', enabled: true },
+    { text: '有 H3 时先过渡再展开；可用 bullet 但保持段落可读', enabled: true },
+    { text: '全文至少 1 个对比表思路或明确对比段；权威数据 1–2 处（可占位来源）', enabled: true },
+    { text: '个人体验细节可穿插（具体、可感知）', enabled: true },
+    { text: '核心关键词全文 3–5 次；本段不硬塞密度', enabled: true },
+  ],
+  conclusion: [
+    { text: '约 90 词；总结行动步骤，不引入新论点', enabled: true },
+    { text: '可轻点 fully assembled 价值，避免硬 CTA 堆砌', enabled: true },
+  ],
+  placements: [
+    { text: '每篇 1–2 个 POVISON 产品；文案 40–70 词；链接嵌在产品名上', enabled: true },
+    { text: '仅使用 catalog 中的 URL；禁止编造链接', enabled: true },
+    { text: '内链 2–3 条；anchor 须是文中可自然出现的长尾词', enabled: true },
+    { text: '每个 H2 最多 1 条内链；挂载 sectionId 必须合理', enabled: true },
+  ],
+  faq: [
+    { text: '4–6 个问答；答案 40–60 词', enabled: true },
+    { text: '与正文语义重复率 ≤20%；不复读整段', enabled: true },
+    { text: '无硬广 CTA；可保留 FAQ Schema 友好的问答结构', enabled: true },
+  ],
+  meta: [
+    { text: 'Meta Title 50–60 字符，含主关键词', enabled: true },
+    { text: 'Meta Description 150–160 字符', enabled: true },
+    { text: 'URL slug 小写+连字符，≤75 字符', enabled: true },
+    { text: 'focus = primary_keyword', enabled: true },
+  ],
+};
+
+// ==================== State ====================
+let selectedKeywords = new Set();
+let kwFilter = 'all';
+let rules = JSON.parse(JSON.stringify(DEFAULT_RULES));
+let brainstormTopics = [];
+let selectedTopics = new Set();
+let currentGenTopic = null;
+let articleState = null; // section workbench state
+let currentGenPhase = 'serp';
+
+function freshArticleState(topic) {
+  return {
+    topic: topic ? JSON.parse(JSON.stringify(topic)) : null,
+    serp: null,
+    outline: [],
+    outlineConfirmed: false,
+    sections: [],
+    products: [],
+    links: [],
+    placementsConfirmed: false,
+    faq: [],
+    meta: { title: '', description: '', slug: '', focus: '' },
+    phaseDone: { serp: false, outline: false, sections: false, placements: false, faq: false, meta: false, preview: false },
+    previewHtml: '',
+  };
+}
+
+// ==================== Audit Trail & Fork System ====================
+let runs = [];
+let activeRunId = null;
+let runCounter = 0;
+
+function createRun(parentId, forkStep) {
+  runCounter++;
+  const run = {
+    id: runCounter, parentId: parentId || null, forkStep: forkStep || null,
+    createdAt: new Date(), status: 'active',
+    keywords: new Set(), kwFilter: 'all',
+    topics: [], selectedTopics: new Set(),
+    genTopic: null, genStatus: null, articleState: null, log: [],
+  };
+  if (parentId) {
+    const parent = runs.find(function(r){return r.id===parentId;});
+    if (parent) {
+      run.keywords = new Set(parent.keywords);
+      run.kwFilter = parent.kwFilter;
+      if (forkStep >= 2) { run.topics = JSON.parse(JSON.stringify(parent.topics)); run.selectedTopics = new Set(parent.selectedTopics); }
+      if (forkStep >= 3) {
+        run.genTopic = parent.genTopic ? JSON.parse(JSON.stringify(parent.genTopic)) : null;
+        run.genStatus = parent.genStatus;
+        run.articleState = parent.articleState ? JSON.parse(JSON.stringify(parent.articleState)) : null;
+      }
+      parent.status = 'forked';
+      run.log.push({ step: forkStep, action: 'fork', detail: '从 Run #' + parentId + ' 第' + forkStep + '步分叉', ts: new Date() });
+    }
+  }
+  runs.push(run);
+  activeRunId = run.id;
+  syncFromRun(run);
+  renderAuditTrail();
+  return run;
+}
+
+function getActiveRun() { return runs.find(function(r){return r.id===activeRunId;}); }
+
+function syncFromRun(run) {
+  if (!run) return;
+  selectedKeywords = new Set(run.keywords);
+  kwFilter = run.kwFilter;
+  brainstormTopics = JSON.parse(JSON.stringify(run.topics));
+  selectedTopics = new Set(run.selectedTopics);
+  currentGenTopic = run.genTopic ? JSON.parse(JSON.stringify(run.genTopic)) : null;
+  articleState = run.articleState ? JSON.parse(JSON.stringify(run.articleState)) : null;
+}
+
+function saveToRun() {
+  var run = getActiveRun(); if (!run) return;
+  run.keywords = new Set(selectedKeywords);
+  run.kwFilter = kwFilter;
+  run.topics = JSON.parse(JSON.stringify(brainstormTopics));
+  run.selectedTopics = new Set(selectedTopics);
+  run.genTopic = currentGenTopic ? JSON.parse(JSON.stringify(currentGenTopic)) : null;
+  run.articleState = articleState ? JSON.parse(JSON.stringify(articleState)) : null;
+}
+
+function logStep(step, action, detail) {
+  var run = getActiveRun(); if (!run) return;
+  run.log.push({ step: step, action: action, detail: detail, ts: new Date() });
+  renderAuditTrail();
+}
+
+function forkFromStep(step) {
+  saveToRun();
+  var run = createRun(activeRunId, step);
+  showToast('已从第' + step + '步分叉 → Run #' + run.id, 'success');
+  if (step === 1) { switchView('keywords'); applyKeywordFilters(); updateKwBar(); }
+  else if (step === 2) { switchView('brainstorm'); renderBsKeywords(); renderTopics(); updateBsBar(); }
+  else if (step === 3) { switchView('generation'); }
+}
+
+function switchToRun(runId) {
+  var run = runs.find(function(r){return r.id===runId;}); if (!run) return;
+  activeRunId = runId; syncFromRun(run); renderAuditTrail();
+  showToast('已切换到 Run #' + runId, '');
+}
+
+function renderAuditTrail() {
+  var container = document.getElementById('auditTrail'); if (!container) return;
+  if (runs.length === 0) { container.innerHTML = '<div style="padding:16px;color:var(--text-tertiary);font-size:12px;text-align:center;">暂无运行记录</div>'; return; }
+  var html = '';
+  for (var i = runs.length - 1; i >= 0; i--) {
+    var r = runs[i];
+    var isActive = r.id === activeRunId;
+    var statusLabel = r.status === 'active' ? (isActive ? '当前' : '活跃') : (r.status === 'forked' ? '已分叉' : '已完成');
+    var statusColor = r.status === 'active' ? (isActive ? 'var(--accent)' : 'var(--success)') : 'var(--text-tertiary)';
+    var chain = r.parentId ? '<span style="color:var(--text-tertiary);font-size:10px;"> ← #' + r.parentId + '</span>' : '';
+    var kwCount = r.keywords.size;
+    var topicCount = r.topics.length;
+    var selTopicCount = r.selectedTopics.size;
+    var step1Done = kwCount > 0;
+    var step2Done = topicCount > 0;
+    var step3Done = r.genStatus === 'published';
+    html += '<div class="audit-run ' + (isActive ? 'active' : '') + '" onclick="switchToRun(' + r.id + ')">';
+    html += '<div class="audit-run-header"><span class="audit-run-id">Run #' + r.id + chain + '</span><span class="audit-run-status" style="color:' + statusColor + ';">' + statusLabel + '</span></div>';
+    html += '<div class="audit-run-meta"><span class="audit-step ' + (step1Done?'done':'') + '">1</span><span class="audit-step-line"></span><span class="audit-step ' + (step2Done?'done':'') + '">2</span><span class="audit-step-line"></span><span class="audit-step ' + (step3Done?'done':'') + '">3</span></div>';
+    html += '<div class="audit-run-detail">' + kwCount + ' 关键词 · ' + selTopicCount + '/' + topicCount + ' 主题' + (r.genTopic ? ' · ' + (r.genStatus||'生成中') : '') + '</div>';
+    html += '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function exportAuditLog() {
+  var run = getActiveRun(); if (!run) return;
+  var log = { runId: run.id, parentId: run.parentId, forkStep: run.forkStep, createdAt: run.createdAt,
+    keywords: Array.from(run.keywords), topics: run.topics, selectedTopics: Array.from(run.selectedTopics),
+    genTopic: run.genTopic, genStatus: run.genStatus,
+    auditLog: run.log.map(function(l){return {step:l.step,action:l.action,detail:l.detail,ts:l.ts.toISOString()};}) };
+  var blob = new Blob([JSON.stringify(log, null, 2)], {type:'application/json'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a'); a.href = url; a.download = 'audit-run-' + run.id + '.json'; a.click();
+  URL.revokeObjectURL(url);
+  showToast('审计日志已导出', 'success');
+}
+
+/** Export full Run package (run-envelope-schema v1.0) */
+function exportRunPackage() {
+  saveToRun();
+  var run = getActiveRun(); if (!run) return;
+  var envelope = {
+    version: '1.0',
+    id: 'run-' + run.id,
+    created_at: (run.createdAt instanceof Date ? run.createdAt : new Date()).toISOString(),
+    status: run.status || 'active',
+    parent_id: run.parentId,
+    fork_step: run.forkStep,
+    kw_weights: Object.assign({}, kwWeights),
+    selected_keywords: Array.from(selectedKeywords),
+    selected_topic_id: currentGenTopic ? (currentGenTopic.schema_id || currentGenTopic.id) : null,
+    keywords: KEYWORDS.slice(),
+    topics: {
+      version: '1.0',
+      generated_at: new Date().toISOString(),
+      input_keywords: Array.from(selectedKeywords),
+      serp_queries: [],
+      topics: brainstormTopics,
+    },
+    article_state: articleState,
+    generation_rules: rulesEnvelope(),
+    log: (run.log || []).map(function(l){
+      return { step: l.step, action: l.action, detail: l.detail, ts: (l.ts instanceof Date ? l.ts : new Date(l.ts)).toISOString() };
+    }),
+  };
+  var blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'run-' + run.id + '.json'; a.click();
+  URL.revokeObjectURL(url);
+  logStep(0, 'export_run', '导出 Run 包（含 generation_rules）');
+  showToast('Run 包已导出（含板块规则）', 'success');
+}
+
+function importRunPackage(input) {
+  var file = input.files && input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function() {
+    try {
+      var data = JSON.parse(reader.result);
+      if (Array.isArray(data.keywords) && data.keywords.length) {
+        KEYWORDS = data.keywords.map(normalizeScriptKeyword).filter(Boolean);
+        if (data.kw_weights) kwWeights = Object.assign({}, data.kw_weights);
+        renderKwList();
+      }
+      var topicList = [];
+      if (data.topics && Array.isArray(data.topics.topics)) topicList = data.topics.topics;
+      else if (Array.isArray(data.topics)) topicList = data.topics;
+      if (topicList.length) {
+        brainstormTopics = topicList.map(function(t, i){ return normalizeTopicItem(t, i + 1); });
+        selectedTopics.clear();
+        if (data.selected_topic_id != null) {
+          var hit = brainstormTopics.find(function(t){
+            return String(t.schema_id) === String(data.selected_topic_id) || String(t.id) === String(data.selected_topic_id);
+          });
+          if (hit) selectedTopics.add(hit.id);
+        }
+        renderTopics();
+        document.getElementById('bsActionBar').style.display = 'flex';
+      }
+      if (Array.isArray(data.selected_keywords)) {
+        selectedKeywords = new Set(data.selected_keywords);
+        renderBsKeywords();
+      }
+      if (data.article_state) {
+        articleState = data.article_state;
+        currentGenTopic = articleState.topic || currentGenTopic;
+        document.getElementById('genEmpty').style.display = 'none';
+        document.getElementById('genWorkbench').style.display = 'block';
+        document.getElementById('genActionBar').style.display = 'flex';
+        if (articleState.topic) document.getElementById('wbTopicTitle').textContent = articleState.topic.title;
+        restoreWorkbenchUI();
+      }
+      if (data.generation_rules) applyRulesEnvelope(data.generation_rules);
+      else if (data.article_state && data.article_state.generation_rules) applyRulesEnvelope(data.article_state.generation_rules);
+      saveToRun();
+      logStep(0, 'import_run', '导入 Run 包 ' + file.name);
+      showToast('Run 包已导入', 'success');
+      switchView(articleState && articleState.topic ? 'generation' : (brainstormTopics.length ? 'brainstorm' : 'keywords'));
+    } catch (e) {
+      showToast('Run 导入失败：' + e.message, '');
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
+// ==================== Navigation ====================
+function switchView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('view-' + name)?.classList.add('active');
+  document.querySelector('.nav-item[data-view="' + name + '"]')?.classList.add('active');
+  document.querySelector('.main').scrollTo(0, 0);
+  // Restore state from active run when navigating back
+  var run = getActiveRun();
+  if (run) {
+    if (name === 'keywords') { applyKwListFilter(); updateKwTotalCount(); }
+    if (name === 'brainstorm') { renderBsKeywords(); if (brainstormTopics.length > 0) { renderTopics(); document.getElementById('bsActionBar').style.display = 'flex'; } updateBsBar(); }
+    if (name === 'generation' && articleState && articleState.topic) {
+      document.getElementById('genEmpty').style.display = 'none';
+      document.getElementById('genWorkbench').style.display = 'block';
+      document.getElementById('genActionBar').style.display = 'flex';
+      document.getElementById('wbTopicTitle').textContent = articleState.topic.title;
+      restoreWorkbenchUI();
+      updateGenProgressBar();
+    }
+  }
+}
+document.querySelectorAll('.nav-item').forEach(item => item.addEventListener('click', () => switchView(item.dataset.view)));
+
+// ==================== Step 1: Keywords ====================
+let kwListRendered = false;
+let kwWeights = {}; // text → weight (0-1)
+
+function renderKwList() {
+  const list = document.getElementById('kwList');
+  let html = '<div class="kw-list-header"><div style="flex:1;">关键词</div><div style="min-width:60px;">来源</div><div style="min-width:120px;">SV / KD / CPC</div><div style="min-width:60px;">权重</div><div style="min-width:20px;"></div></div>';
+  KEYWORDS.forEach(kw => {
+    if (kwWeights[kw.text] === undefined) kwWeights[kw.text] = 0.5;
+    const w = kwWeights[kw.text];
+    const needs = kw.metrics_status === 'needs_manual' || kw.metrics_status === 'pending' || (kw.sv == null && kw.sv !== 0);
+    const hasSv = kw.sv != null && kw.sv !== '' && !Number.isNaN(Number(kw.sv));
+    const zeroClass = (w === 0 ? ' kw-zero' : '') + (needs ? ' kw-needs-metrics' : '');
+    const seoText = hasSv
+      ? (Number(kw.sv).toLocaleString() + ' / ' + (kw.kd ?? '—') + ' / $' + Number(kw.cpc || 0).toFixed(1))
+      : '待补数';
+    const flag = needs ? '<span class="metrics-flag">缺指标</span>' : '';
+    const safeText = String(kw.text).replace(/'/g, "\\'");
+    html += `<div class="kw-row${zeroClass}" data-text="${kw.text}" data-src="${kw.source}">
+      <div class="kw-dot" data-src="${kw.source}"></div>
+      <div class="kw-text" data-src="${kw.source}">${kw.text}</div>
+      <div class="kw-src">${SOURCE_LABELS[kw.source] || kw.source}</div>
+      <div class="kw-seo">${seoText}${flag}</div>
+      <input type="range" class="kw-weight" min="0" max="1" step="0.1" value="${w}" oninput="updateKwWeight('${safeText}', this.value); updateKwRowClass(this)"/>
+      <span class="kw-remove" onclick="removeKeyword('${safeText}')">✕</span>
+    </div>`;
+  });
+  list.innerHTML = html;
+  kwListRendered = true;
+  applyKwListFilter();
+  updateKwTotalCount();
+}
+
+function updateKwRowClass(slider) {
+  const row = slider.closest('.kw-row');
+  if (slider.value === '0') row.classList.add('kw-zero');
+  else row.classList.remove('kw-zero');
+}
+
+function applyKwListFilter() {
+  document.querySelectorAll('.kw-row').forEach(row => {
+    const src = row.dataset.src;
+    row.style.display = (kwFilter === 'all' || src === kwFilter) ? '' : 'none';
+  });
+  updateKwTotalCount();
+}
+
+function updateKwWeight(text, val) {
+  kwWeights[text] = parseFloat(val);
+}
+
+function removeKeyword(text) {
+  const idx = KEYWORDS.findIndex(k => k.text === text);
+  if (idx >= 0) {
+    KEYWORDS.splice(idx, 1);
+    delete kwWeights[text];
+    renderKwList();
+    showToast('已移除: ' + text, '');
+  }
+}
+
+function normalizeScriptKeyword(raw) {
+  const text = String(raw.text || raw.keyword || '').trim();
+  if (!text) return null;
+  const sourceRaw = String(raw.source || 'brand').toLowerCase();
+  const sourceMap = {
+    brand: 'brand', media: 'media', trend: 'trend', news: 'news',
+    lifestyle: 'news', health: 'news', fitness: 'news', education: 'news',
+    lifestyle_news: 'news', llm: 'trend',
+  };
+  const source = sourceMap[sourceRaw] || (['brand','media','trend','news'].includes(sourceRaw) ? sourceRaw : 'media');
+  const sv = Number(raw.sv) || 0;
+  const kd = Number(raw.kd) || 0;
+  const cpc = Number(raw.cpc) || 0;
+  let heat = raw.heat || 'sm';
+  if (!raw.heat) {
+    if (sv >= 10000) heat = 'xl';
+    else if (sv >= 5000) heat = 'lg';
+    else if (sv >= 2000) heat = 'md';
+    else if (sv > 0) heat = 'sm';
+    else heat = 'xs';
+  }
+  return {
+    text,
+    source,
+    type: raw.type || '',
+    freq: Number(raw.freq) || 0,
+    heat,
+    sv: raw.sv == null || raw.sv === '' ? null : Number(raw.sv),
+    kd: raw.kd == null || raw.kd === '' ? null : Number(raw.kd),
+    cpc: raw.cpc == null || raw.cpc === '' ? null : Number(raw.cpc),
+    intent: raw.intent || (kd >= 40 ? 'Commercial' : 'Informational'),
+    metrics_status: raw.metrics_status || (raw.sv != null ? 'ok' : 'pending'),
+  };
+}
+
+function importKeywordsFromScript(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      const arr = Array.isArray(data) ? data : (data.keywords || data.items || []);
+      if (!Array.isArray(arr) || !arr.length) {
+        showToast('JSON 中没有关键词数组', '');
+        input.value = '';
+        return;
+      }
+      const mapped = arr.map(normalizeScriptKeyword).filter(Boolean);
+      if (!mapped.length) {
+        showToast('未能解析任何关键词（需要 text 字段）', '');
+        input.value = '';
+        return;
+      }
+      // Merge: keep existing weights when text matches; append new
+      const byText = new Map(KEYWORDS.map(k => [k.text.toLowerCase(), k]));
+      let added = 0, updated = 0;
+      mapped.forEach(kw => {
+        const key = kw.text.toLowerCase();
+        if (byText.has(key)) {
+          const old = byText.get(key);
+          Object.assign(old, kw);
+          updated++;
+        } else {
+          KEYWORDS.push(kw);
+          byText.set(key, kw);
+          if (kwWeights[kw.text] === undefined) kwWeights[kw.text] = 0.5;
+          added++;
+        }
+      });
+      renderKwList();
+      logStep(1, 'import', `从 keyword-discovery.py 导入 ${file.name}：+${added} 更新 ${updated}`);
+      showToast(`已导入脚本结果：新增 ${added}，更新 ${updated}`, 'success');
+    } catch (e) {
+      showToast('JSON 解析失败：' + e.message, '');
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
+function addKeywordManual() {
+  const input = document.getElementById('kwAddInput');
+  const source = document.getElementById('kwAddSource').value;
+  const text = input.value.trim();
+  if (!text) return;
+  if (KEYWORDS.find(k => k.text.toLowerCase() === text.toLowerCase())) {
+    showToast('关键词已存在: ' + text, '');
+    return;
+  }
+  KEYWORDS.push({ text, source, heat: 'sm', sv: 0, kd: 0, cpc: 0, intent: 'Informational' });
+  kwWeights[text] = 0.5;
+  renderKwList();
+  input.value = '';
+  showToast('已添加: ' + text, 'success');
+}
+
+function updateKwTotalCount() {
+  const count = document.querySelectorAll('.kw-row').length;
+  const visible = Array.from(document.querySelectorAll('.kw-row')).filter(r => r.style.display !== 'none').length;
+  document.getElementById('kwTotalCount').textContent = visible;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  const inp = document.getElementById('kwAddInput');
+  if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') addKeywordManual(); });
+});
+
+function filterKeywords(btn, filter) {
+  btn.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  kwFilter = filter;
+  applyKwListFilter();
+}
+
+function goToBrainstorm() {
+  var pool = KEYWORDS.filter(k => kwWeights[k.text] > 0);
+  if (pool.length === 0) { showToast('没有可用关键词（权重全为0）', ''); return; }
+
+  selectedKeywords.clear();
+  var numToPick = Math.min(Math.floor(Math.random() * 5) + 1, pool.length);
+
+  var mustInclude = pool.filter(k => kwWeights[k.text] >= 1);
+  var optional = pool.filter(k => kwWeights[k.text] > 0 && kwWeights[k.text] < 1);
+
+  mustInclude.forEach(k => { if (selectedKeywords.size < numToPick) selectedKeywords.add(k.text); });
+
+  while (selectedKeywords.size < numToPick && optional.length > 0) {
+    var totalWeight = optional.reduce((s, k) => s + kwWeights[k.text], 0);
+    var r = Math.random() * totalWeight;
+    var cumulative = 0;
+    for (var i = 0; i < optional.length; i++) {
+      cumulative += kwWeights[optional[i].text];
+      if (r <= cumulative) {
+        selectedKeywords.add(optional[i].text);
+        optional.splice(i, 1);
+        break;
+      }
+    }
+  }
+
+  var run = getActiveRun();
+  if (run && run.topics.length > 0) {
+    saveToRun();
+    var newRun = createRun(run.id, 1);
+    newRun.keywords = new Set(selectedKeywords);
+    logStep(1, 'complete', '随机组合了 ' + selectedKeywords.size + ' 个关键词: ' + Array.from(selectedKeywords).join(', '));
+    showToast('随机组合 ' + selectedKeywords.size + ' 个关键词 → 自动分叉为 Run #' + newRun.id, 'success');
+  } else if (run) {
+    saveToRun();
+    logStep(1, 'complete', '随机组合了 ' + selectedKeywords.size + ' 个关键词: ' + Array.from(selectedKeywords).join(', '));
+  }
+  switchView('brainstorm');
+  renderBsKeywords();
+}
+
+// ==================== Step 2: Brainstorm ====================
+function renderBsKeywords() {
+  const div = document.getElementById('bsKeywords');
+  div.innerHTML = '';
+  selectedKeywords.forEach(kw => {
+    const tag = document.createElement('span');
+    tag.className = 'bs-keyword-tag';
+    tag.innerHTML = `${kw} <span class="tag-x" onclick="removeBsKeyword('${kw}')">✕</span>`;
+    div.appendChild(tag);
+  });
+  document.getElementById('bsGenerateBtn').disabled = selectedKeywords.size === 0;
+}
+
+function removeBsKeyword(kw) {
+  selectedKeywords.delete(kw);
+  renderBsKeywords();
+  updateKwBar();
+}
+
+function runBrainstormDemo() {
+  if (selectedKeywords.size === 0) return;
+  if (!confirm('本地 Demo 使用模板拼凑主题，仅供界面演示。\n生产请运行 topic-brainstorm.py 后「导入主题 JSON」。\n仍要继续 Demo？')) return;
+  runBrainstorm();
+}
+
+function runBrainstorm() {
+  if (selectedKeywords.size === 0) return;
+  var run = getActiveRun();
+  // If this run already has topics and user re-runs brainstorm → fork
+  if (run && run.topics.length > 0) {
+    saveToRun();
+    var newRun = createRun(run.id, 2);
+    newRun.keywords = new Set(selectedKeywords);
+    logStep(2, 'start', '分叉并重新头脑风暴');
+    showToast('重新头脑风暴 → 自动分叉为 Run #' + newRun.id, 'success');
+  } else if (run) {
+    logStep(2, 'start', '开始头脑风暴');
+  }
+  var count = parseInt(document.getElementById('bsCount').value) || 10;
+  var kws = Array.from(selectedKeywords);
+
+  // Show live panel
+  const live = document.getElementById('bsLive');
+  const stream = document.getElementById('bsLiveStream');
+  live.classList.add('show');
+  stream.innerHTML = '';
+  document.getElementById('topicGrid').innerHTML = '';
+  document.getElementById('bsActionBar').style.display = 'none';
+
+  const liveLines = [
+    `Analyzing ${kws.length} keywords...`,
+    `Building association graph...`,
+    ...kws.map(k => `→ Node: "${k}" (${SOURCE_LABELS[KEYWORDS.find(x=>x.text===k)?.source || 'brand']})`),
+    `Cross-referencing with POVISON product categories...`,
+    `Mapping search intent (buying guide / comparison / educational)...`,
+    `Generating ${count} topic candidates...`,
+  ];
+
+  let lineIdx = 0;
+  function nextLine() {
+    if (lineIdx < liveLines.length) {
+      const line = document.createElement('div');
+      line.className = 'bs-live-line';
+      line.textContent = liveLines[lineIdx];
+      stream.appendChild(line);
+      stream.scrollTop = stream.scrollHeight;
+      lineIdx++;
+      setTimeout(nextLine, 120 + Math.random() * 180);
+    } else {
+      generateTopics(kws, count);
+    }
+  }
+  nextLine();
+}
+
+function generateTopics(kws, count) {
+  brainstormTopics = [];
+  selectedTopics.clear();
+  const stream = document.getElementById('bsLiveStream');
+  const contentTypes = ['buying_guide', 'comparison_guide', 'scenario_longform', 'explainer', 'listicle'];
+  const intents = ['informational', 'commercial', 'informational', 'commercial', 'transactional'];
+
+  for (let i = 0; i < count; i++) {
+    const template = TOPIC_TEMPLATES[i % TOPIC_TEMPLATES.length];
+    const kw1 = kws[i % kws.length];
+    const kw2 = kws[(i + 1) % kws.length] || kws[0];
+    const title = template.title.replace('{kw1}', kw1).replace('{kw2}', kw2);
+    const raw = {
+      id: 't' + String(i + 1).padStart(2, '0'),
+      title,
+      priority: String(template.priority || 'p0').toUpperCase(),
+      category: template.cat,
+      content_type: contentTypes[i % contentTypes.length],
+      search_intent: intents[i % intents.length],
+      primary_keyword: kw1,
+      secondary_keywords: kw2 && kw2 !== kw1 ? [kw2] : [],
+      estimated_traffic: null,
+      competition: 'medium',
+      priority_score: null,
+      serp_gap: 'Demo gap — replace with real SERP analysis: missing fully assembled angle and decision table.',
+      serp_competitors: ['thespruce.com', 'apartmenttherapy.com'],
+      angle: 'Scene-led guide built around ' + kw1,
+      why_povison: 'Fully assembled furniture shortens setup friction for this scenario.',
+      suggested_slug: title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 75),
+    };
+    const topic = normalizeTopicItem(raw, i + 1);
+    brainstormTopics.push(topic);
+
+    const line = document.createElement('div');
+    line.className = 'bs-live-line';
+    line.innerHTML = `<span style="color:#7dea9e">✓ ${topic.id}:</span> [${topic.priority}] ${title}`;
+    stream.appendChild(line);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  const doneLine = document.createElement('div');
+  doneLine.className = 'bs-live-line';
+  doneLine.innerHTML = `<span style="color:#30d158;font-weight:600">头脑风暴完成 — 共生成 ${count} 个主题（schema v1.0）</span>`;
+  stream.appendChild(doneLine);
+
+  setTimeout(() => {
+    document.getElementById('bsLive').classList.remove('show');
+    renderTopics();
+    document.getElementById('bsActionBar').style.display = 'flex';
+    saveToRun();
+    logStep(2, 'complete', '生成了 ' + count + ' 个主题（topic-brainstorm-schema v1.0）');
+  }, 1200);
+}
+
+/** Normalize to topic-brainstorm-schema.md v1.0 + Studio numeric id */
+function normalizeTopicItem(raw, fallbackNum) {
+  const pri = String(raw.priority || raw.Priority || 'P2').toUpperCase().replace(/^P?/, 'P');
+  const priority = ['P0','P1','P2','P3','P4'].includes(pri) ? pri : 'P2';
+  let primary = raw.primary_keyword || '';
+  let secondary = Array.isArray(raw.secondary_keywords) ? raw.secondary_keywords.slice() : [];
+  if (!primary && raw.keywords) {
+    const parts = Array.isArray(raw.keywords)
+      ? raw.keywords
+      : String(raw.keywords).split(',').map(s => s.trim()).filter(Boolean);
+    primary = parts[0] || '';
+    secondary = parts.slice(1);
+  }
+  const category = raw.category || raw.cat || '选购指南';
+  const title = String(raw.title || '').trim();
+  const schemaId = String(raw.id || ('t' + String(fallbackNum || 1).padStart(2, '0')));
+  const numId = typeof raw._uid === 'number' ? raw._uid : (fallbackNum || Date.now() % 100000);
+  return {
+    // Studio selection key
+    id: numId,
+    schema_id: schemaId,
+    title,
+    priority: priority.toLowerCase(), // keep tag-p0 CSS class
+    priority_label: priority,
+    category,
+    cat: category, // legacy
+    content_type: raw.content_type || 'buying_guide',
+    search_intent: raw.search_intent || 'informational',
+    primary_keyword: primary,
+    secondary_keywords: secondary,
+    keywords: [primary].concat(secondary).filter(Boolean).join(', '),
+    estimated_traffic: raw.estimated_traffic == null ? null : Number(raw.estimated_traffic),
+    competition: raw.competition || null,
+    priority_score: raw.priority_score == null ? null : Number(raw.priority_score),
+    serp_gap: raw.serp_gap || raw.gap || raw.serpGap || '',
+    serp_competitors: Array.isArray(raw.serp_competitors) ? raw.serp_competitors : [],
+    angle: raw.angle || '',
+    why_povison: raw.why_povison || '',
+    suggested_slug: raw.suggested_slug || '',
+  };
+}
+
+function importTopicsFromSchema(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      const list = Array.isArray(data) ? data : (data.topics || []);
+      if (!list.length) {
+        showToast('JSON 中没有 topics 数组', '');
+        input.value = '';
+        return;
+      }
+      const missing = list.filter(t => !(t.title && (t.serp_gap || t.gap || t.serpGap) && (t.primary_keyword || t.keywords)));
+      if (missing.length) {
+        showToast(`有 ${missing.length} 条缺少 title / serp_gap / primary_keyword，已尽量导入`, '');
+      }
+      brainstormTopics = list.map((t, i) => normalizeTopicItem(t, i + 1));
+      selectedTopics.clear();
+      renderTopics();
+      document.getElementById('bsActionBar').style.display = 'flex';
+      document.getElementById('bsLive').classList.remove('show');
+      saveToRun();
+      logStep(2, 'import', `导入主题 JSON ${file.name}：${brainstormTopics.length} 条`);
+      showToast(`已导入 ${brainstormTopics.length} 个主题（schema v1.0）`, 'success');
+    } catch (e) {
+      showToast('JSON 解析失败：' + e.message, '');
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
+function renderTopics() {
+  const grid = document.getElementById('topicGrid');
+  grid.innerHTML = '';
+  brainstormTopics.forEach(topic => {
+    const card = document.createElement('div');
+    card.className = 'topic-card' + (selectedTopics.has(topic.id) ? ' selected' : '');
+    card.dataset.id = topic.id;
+    const pri = (topic.priority_label || topic.priority || 'P2').toUpperCase();
+    const priClass = String(topic.priority || 'p2').toLowerCase();
+    const gap = topic.serp_gap
+      ? `<div class="tc-gap"><strong>SERP 缺口</strong> — ${topic.serp_gap}</div>`
+      : `<div class="tc-gap" style="opacity:0.5;">缺少 serp_gap（不符合 schema）</div>`;
+    const metaExtra = [
+      topic.content_type ? `<span class="tag" style="background:rgba(0,0,0,0.05);color:var(--text-secondary);">${topic.content_type}</span>` : '',
+      topic.search_intent ? `<span>${topic.search_intent}</span>` : '',
+      topic.priority_score != null ? `<span>分 ${topic.priority_score}</span>` : '',
+      topic.estimated_traffic != null ? `<span>SV~${topic.estimated_traffic}</span>` : '',
+    ].filter(Boolean).join('');
+    card.innerHTML = `
+      <div class="tc-checkbox" onclick="toggleTopic(${topic.id})"></div>
+      <div class="tc-title" data-id="${topic.id}">${topic.title}</div>
+      <div class="tc-meta">
+        <span class="tag tag-${priClass}">${pri}</span>
+        <span>${topic.category || topic.cat || ''}</span>
+        ${metaExtra}
+      </div>
+      <div class="tc-keywords">KW: ${topic.primary_keyword || topic.keywords || '—'}${
+        (topic.secondary_keywords && topic.secondary_keywords.length)
+          ? ' · ' + topic.secondary_keywords.join(', ') : ''
+      }</div>
+      ${gap}
+      ${topic.angle ? `<div class="tc-keywords" style="margin-top:6px;">角度：${topic.angle}</div>` : ''}
+      <button class="tc-edit" onclick="editTopic(${topic.id})">编辑</button>
+    `;
+    grid.appendChild(card);
+  });
+  updateBsBar();
+}
+
+function toggleTopic(id) {
+  if (selectedTopics.has(id)) selectedTopics.delete(id);
+  else selectedTopics.add(id);
+  renderTopics();
+}
+
+function editTopic(id) {
+  const topic = brainstormTopics.find(t => t.id === id);
+  if (!topic) return;
+  const el = document.querySelector(`.tc-title[data-id="${id}"]`);
+  el.contentEditable = true;
+  el.focus();
+  const range = document.createRange(); range.selectNodeContents(el);
+  const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  el.addEventListener('blur', () => { topic.title = el.textContent.trim(); el.contentEditable = false; showToast('主题已更新', 'success'); }, { once: true });
+  el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } if (e.key === 'Escape') { el.textContent = topic.title; el.blur(); } });
+}
+
+function updateBsBar() {
+  document.getElementById('bsTopicCount').textContent = selectedTopics.size;
+  document.getElementById('btnToGeneration').disabled = selectedTopics.size === 0;
+}
+
+// ==================== Step 3: Section Workbench ====================
+function goToGeneration() {
+  if (selectedTopics.size === 0) return;
+  var run = getActiveRun();
+  if (run && (run.genTopic || run.selectedTopics.size > 0)) {
+    var sameSel = run.selectedTopics.size === selectedTopics.size &&
+      Array.from(selectedTopics).every(function(t){return run.selectedTopics.has(t);});
+    if (!sameSel) {
+      saveToRun();
+      var newRun = createRun(run.id, 2);
+      newRun.topics = JSON.parse(JSON.stringify(brainstormTopics));
+      newRun.selectedTopics = new Set(selectedTopics);
+      logStep(2, 'select', '分叉并选定了 ' + selectedTopics.size + ' 个主题');
+      showToast('主题选择已变更 → 自动分叉为 Run #' + newRun.id, 'success');
+      switchView('generation');
+      initWorkbench();
+      return;
+    }
+  }
+  if (run) { saveToRun(); logStep(2, 'select', '选定了 ' + selectedTopics.size + ' 个主题'); }
+  switchView('generation');
+  initWorkbench();
+}
+
+function initWorkbench() {
+  const topicId = Array.from(selectedTopics)[0];
+  const topic = brainstormTopics.find(t => t.id === topicId);
+  if (!topic) return;
+  currentGenTopic = topic;
+
+  if (!articleState || !articleState.topic || articleState.topic.id !== topic.id) {
+    articleState = freshArticleState(topic);
+  }
+
+  document.getElementById('genEmpty').style.display = 'none';
+  document.getElementById('genWorkbench').style.display = 'block';
+  document.getElementById('genActionBar').style.display = 'flex';
+  document.getElementById('wbTopicTitle').textContent = topic.title;
+
+  restoreWorkbenchUI();
+  setGenPhase(articleState.phaseDone.meta ? 'preview' :
+    articleState.phaseDone.faq ? 'meta' :
+    articleState.phaseDone.placements ? 'faq' :
+    articleState.phaseDone.sections ? 'placements' :
+    articleState.outlineConfirmed ? 'sections' :
+    articleState.phaseDone.serp ? 'outline' : 'serp');
+  updateGenProgressBar();
+  saveToRun();
+}
+
+function restoreWorkbenchUI() {
+  if (articleState.serp) {
+    renderSerpResult(articleState.serp);
+    setStatus('serpStatus', 'ready', '已完成');
+    document.getElementById('btnSerpNext').disabled = false;
+  }
+  if (articleState.outline.length) {
+    renderOutline();
+    setStatus('outlineStatus', articleState.outlineConfirmed ? 'ready' : 'edited', articleState.outlineConfirmed ? '已确认' : '可编辑');
+    document.getElementById('btnAddH2').disabled = false;
+    document.getElementById('btnAddH3').disabled = false;
+    document.getElementById('btnConfirmOutline').disabled = false;
+  }
+  if (articleState.sections.length) {
+    renderSectionStack();
+    refreshSectionsGate();
+  }
+  if ((articleState.products && articleState.products.length) || (articleState.links && articleState.links.length)) {
+    renderPlacements();
+    refreshPlacementsGate();
+    document.getElementById('btnGenPlacements').disabled = false;
+    document.getElementById('btnAddProduct').disabled = false;
+    document.getElementById('btnAddLink').disabled = false;
+  }
+  if (articleState.faq.length) {
+    renderFaqEditor();
+    setStatus('faqStatus', 'ready', '已完成');
+    document.getElementById('btnAddFaq').disabled = false;
+    document.getElementById('btnFaqNext').disabled = false;
+    document.getElementById('btnGenFaq').disabled = false;
+  }
+  if (articleState.meta.title) {
+    fillMetaFields();
+    setStatus('metaStatus', 'ready', '已完成');
+    enableMetaFields(true);
+    document.getElementById('btnMetaNext').disabled = false;
+    document.getElementById('btnGenMeta').disabled = false;
+  }
+  updatePhasePills();
+}
+
+function setStatus(id, cls, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = 'wb-status ' + cls;
+  el.textContent = text;
+}
+
+function setGenPhase(phase) {
+  currentGenPhase = phase;
+  document.querySelectorAll('.wb-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('phase-' + phase)?.classList.add('active');
+  document.querySelectorAll('.gen-phase-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.phase === phase);
+  });
+  updatePhasePills();
+  updateGenProgressBar();
+  document.querySelector('.main').scrollTo(0, 0);
+}
+
+function updatePhasePills() {
+  if (!articleState) return;
+  document.querySelectorAll('.gen-phase-pill').forEach(p => {
+    const ph = p.dataset.phase;
+    p.classList.toggle('done', !!articleState.phaseDone[ph]);
+  });
+}
+
+function updateGenProgressBar() {
+  if (!articleState) return;
+  const order = ['serp','outline','sections','placements','faq','meta','preview'];
+  const labels = { serp:'SERP', outline:'大纲', sections:'正文', placements:'植入', faq:'FAQ', meta:'Meta', preview:'预览' };
+  const done = order.filter(k => articleState.phaseDone[k]).length;
+  document.getElementById('genTopicInfo').textContent =
+    '进度：' + done + '/7 · 当前 ' + (labels[currentGenPhase] || '—');
+}
+
+function showLive(id, lines, onDone) {
+  const el = document.getElementById(id);
+  el.classList.add('show');
+  el.textContent = '';
+  let i = 0;
+  function next() {
+    if (i < lines.length) {
+      el.textContent = lines[i];
+      i++;
+      setTimeout(next, 280 + Math.random() * 200);
+    } else {
+      setTimeout(() => { el.classList.remove('show'); if (onDone) onDone(); }, 400);
+    }
+  }
+  next();
+}
+
+// ---- SERP ----
+function generateSerp() {
+  if (!articleState) return;
+  setStatus('serpStatus', 'generating', '分析中');
+  document.getElementById('btnGenSerp').disabled = true;
+  showLive('serpLive', [
+    'Searching Google for target keyword…',
+    'Found 10 results on page 1…',
+    'Analyzing content angles & gaps…',
+  ], () => {
+    const serp = {
+      ranks: [
+        { site: 'thespruce.com', angle: 'Room-by-room checklist' },
+        { site: 'apartmenttherapy.com', angle: 'Style-merge tips for couples' },
+        { site: 'westelm.com', angle: 'Product-led living room guide' },
+      ],
+      gaps: [
+        'No fully assembled furniture angle',
+        'Missing keep/sell/donate decision table',
+        'Weak coverage of pet-friendly merge scenarios',
+      ],
+    };
+    articleState.serp = serp;
+    articleState.phaseDone.serp = true;
+    renderSerpResult(serp);
+    setStatus('serpStatus', 'ready', '已完成');
+    document.getElementById('btnGenSerp').disabled = false;
+    document.getElementById('btnGenSerp').textContent = '重新分析';
+    document.getElementById('btnSerpNext').disabled = false;
+    saveToRun();
+    logStep(3, 'serp', 'SERP 分析完成');
+    updatePhasePills();
+    showToast('SERP 分析完成', 'success');
+  });
+}
+
+function renderSerpResult(serp) {
+  document.getElementById('serpResult').style.display = 'block';
+  document.getElementById('serpRankList').innerHTML = serp.ranks.map(r =>
+    `<li><strong>${r.site}</strong> — ${r.angle}</li>`).join('');
+  document.getElementById('serpGaps').innerHTML = serp.gaps.map(g =>
+    `<span class="serp-gap-chip">${g}</span>`).join('');
+}
+
+// ---- Outline ----
+function generateOutline() {
+  if (!articleState) return;
+  setStatus('outlineStatus', 'generating', '生成中');
+  document.getElementById('btnGenOutline').disabled = true;
+  showLive('outlineLive', [
+    'Mapping SERP gaps to H2 structure…',
+    'Injecting outline + global rules into prompt…',
+    'Drafting question-led headings…',
+    'Adding FAQ placeholders…',
+  ], () => {
+    const prompt = buildInjectedPrompt('outline');
+    rememberPrompt('outline', prompt);
+    const kw = (articleState.topic.keywords || 'furniture').split(',')[0].trim();
+    articleState.outline = [
+      { id: 1, level: 'h2', text: `How do you decide what to keep when merging ${kw}?` },
+      { id: 2, level: 'h3', text: 'Shared inventory checklist' },
+      { id: 3, level: 'h3', text: 'Three criteria that prevent regret' },
+      { id: 4, level: 'h2', text: 'What should you do with furniture that does not fit?' },
+      { id: 5, level: 'h3', text: 'Keep / sell / donate / buy-new comparison' },
+      { id: 6, level: 'h2', text: 'When should you buy new pieces instead of compromising?' },
+      { id: 7, level: 'h3', text: 'Fully assembled options for a faster move-in' },
+      { id: 8, level: 'h2', text: 'How to choose styles that still feel like “us”?' },
+    ];
+    articleState.outlineConfirmed = false;
+    articleState.phaseDone.outline = false;
+    articleState.sections = [];
+    articleState.phaseDone.sections = false;
+    renderOutline();
+    setStatus('outlineStatus', 'edited', '待确认');
+    document.getElementById('btnGenOutline').disabled = false;
+    document.getElementById('btnGenOutline').textContent = '重新生成大纲';
+    document.getElementById('btnAddH2').disabled = false;
+    document.getElementById('btnAddH3').disabled = false;
+    document.getElementById('btnConfirmOutline').disabled = false;
+    saveToRun();
+    var n = enabledRuleTexts('global', 'outline').length;
+    logStep(3, 'outline', '大纲已生成（注入 ' + n + ' 条规则），等待人工确认');
+    updatePhasePills();
+    showToast('大纲已生成（已注入板块规则），请审核后确认', 'success');
+  });
+}
+
+function renderOutline() {
+  const list = document.getElementById('outlineList');
+  list.innerHTML = '';
+  articleState.outline.forEach((item, idx) => {
+    const row = document.createElement('div');
+    row.className = 'outline-item ' + item.level;
+    row.innerHTML = `
+      <span class="outline-level">${item.level.toUpperCase()}</span>
+      <div class="outline-text" contenteditable="true" data-idx="${idx}">${item.text}</div>
+      <button class="outline-remove" title="删除" onclick="removeOutlineItem(${idx})">✕</button>`;
+    list.appendChild(row);
+    const te = row.querySelector('.outline-text');
+    te.addEventListener('blur', () => {
+      articleState.outline[idx].text = te.textContent.trim();
+      articleState.outlineConfirmed = false;
+      articleState.phaseDone.outline = false;
+      setStatus('outlineStatus', 'edited', '已修改 · 待确认');
+      saveToRun();
+    });
+    te.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); te.blur(); } });
+  });
+}
+
+function addOutlineItem(level) {
+  if (!articleState) return;
+  const id = Date.now();
+  articleState.outline.push({ id, level, text: level === 'h2' ? 'New section heading' : 'New subsection' });
+  articleState.outlineConfirmed = false;
+  articleState.phaseDone.outline = false;
+  renderOutline();
+  setStatus('outlineStatus', 'edited', '已修改 · 待确认');
+  saveToRun();
+}
+
+function removeOutlineItem(idx) {
+  articleState.outline.splice(idx, 1);
+  articleState.outlineConfirmed = false;
+  articleState.phaseDone.outline = false;
+  renderOutline();
+  setStatus('outlineStatus', 'edited', '已修改 · 待确认');
+  saveToRun();
+}
+
+function confirmOutline() {
+  if (!articleState || !articleState.outline.length) {
+    showToast('请先生成大纲', '');
+    return;
+  }
+  articleState.outlineConfirmed = true;
+  articleState.phaseDone.outline = true;
+  buildSectionsFromOutline();
+  setStatus('outlineStatus', 'ready', '已确认');
+  document.getElementById('btnGenAllSections').disabled = false;
+  saveToRun();
+  logStep(3, 'outline_confirm', '人工确认大纲');
+  updatePhasePills();
+  showToast('大纲已确认，可以写正文', 'success');
+  setGenPhase('sections');
+}
+
+function buildSectionsFromOutline() {
+  const secs = [
+    { id: 'intro', type: 'Intro', title: 'Introduction', content: '', status: 'idle' },
+  ];
+  articleState.outline.filter(o => o.level === 'h2').forEach((h2, i) => {
+    const kids = [];
+    const idx = articleState.outline.indexOf(h2);
+    for (let j = idx + 1; j < articleState.outline.length; j++) {
+      if (articleState.outline[j].level === 'h2') break;
+      kids.push(articleState.outline[j].text);
+    }
+    secs.push({
+      id: 'h2-' + i,
+      type: 'H2',
+      title: h2.text,
+      subheads: kids,
+      content: '',
+      status: 'idle',
+    });
+  });
+  secs.push({ id: 'conclusion', type: 'Conclusion', title: 'Conclusion', content: '', status: 'idle' });
+  articleState.sections = secs;
+  articleState.phaseDone.sections = false;
+  renderSectionStack();
+  refreshSectionsGate();
+}
+
+// ---- Body sections ----
+function renderSectionStack() {
+  const stack = document.getElementById('sectionStack');
+  stack.innerHTML = '';
+  articleState.sections.forEach((sec, idx) => {
+    const card = document.createElement('div');
+    card.className = 'section-card' + (sec.status === 'ready' || sec.status === 'edited' ? ' ready' : '') + (sec._open ? ' open' : '');
+    card.id = 'sec-card-' + idx;
+    const statusLabel = { idle: '待生成', generating: '生成中', ready: '已完成', edited: '已修改' }[sec.status] || sec.status;
+    const statusCls = sec.status === 'edited' ? 'edited' : (sec.status === 'ready' ? 'ready' : (sec.status === 'generating' ? 'generating' : 'idle'));
+    const sub = (sec.subheads && sec.subheads.length) ? `<div style="font-size:11px;color:var(--text-tertiary);margin:4px 0 8px;">含 H3：${sec.subheads.join(' · ')}</div>` : '';
+    card.innerHTML = `
+      <div class="section-head" onclick="toggleSectionCard(${idx})">
+        <span class="sec-type">${sec.type}</span>
+        <span class="sec-title">${sec.title}</span>
+        <span class="wb-status ${statusCls}">${statusLabel}</span>
+      </div>
+      <div class="section-body">
+        ${sub}
+        <textarea class="section-editor" id="sec-editor-${idx}" placeholder="本板块内容将显示在这里，可直接修改…" oninput="onSectionEdit(${idx})">${sec.content || ''}</textarea>
+        <div class="wb-actions" style="margin-top:10px;">
+          <button class="btn btn-primary btn-sm" onclick="generateOneSection(${idx})">${sec.content ? '重新生成本板块' : '生成本板块'}</button>
+          <button class="btn btn-secondary btn-sm" onclick="saveSectionEdit(${idx})">保存修改</button>
+        </div>
+      </div>`;
+    stack.appendChild(card);
+  });
+}
+
+function toggleSectionCard(idx) {
+  articleState.sections.forEach((s, i) => { s._open = i === idx ? !s._open : false; });
+  renderSectionStack();
+}
+
+function onSectionEdit(idx) {
+  const val = document.getElementById('sec-editor-' + idx).value;
+  articleState.sections[idx].content = val;
+  if (articleState.sections[idx].status === 'ready') {
+    articleState.sections[idx].status = 'edited';
+    articleState.phaseDone.sections = false;
+  }
+  saveToRun();
+}
+
+function saveSectionEdit(idx) {
+  const val = document.getElementById('sec-editor-' + idx).value.trim();
+  if (!val) { showToast('内容不能为空', ''); return; }
+  articleState.sections[idx].content = val;
+  articleState.sections[idx].status = 'edited';
+  articleState.sections[idx]._open = true;
+  refreshSectionsGate();
+  renderSectionStack();
+  saveToRun();
+  logStep(3, 'section_edit', '修改了板块: ' + articleState.sections[idx].title);
+  showToast('本板块修改已保存', 'success');
+}
+
+function mockSectionContent(sec) {
+  const topic = articleState.topic.title;
+  if (sec.id === 'intro') {
+    return `Moving in together is exciting—and messy when two furniture collections collide. This guide walks you through how to merge styles without wasting money or creating a home that feels like nobody's. Whether you're sorting a mid-century sofa next to a modular sectional, you'll leave with a clear keep/sell/donate plan and a shortlist of fully assembled pieces that shorten setup stress. (${topic})`;
+  }
+  if (sec.id === 'conclusion') {
+    return `Merging homes works best when you decide criteria first, then shop second. Use the inventory checklist, honor the pieces that earn their space, and fill gaps with furniture that arrives ready to live with—especially if your timeline is tight. Start with one shared room this weekend, then roll the same process through the rest of your place.`;
+  }
+  const bullets = (sec.subheads || []).map(h => `• ${h}: practical steps you can finish in an afternoon.`).join('\n');
+  return `${sec.title}\n\nBefore you rearrange a single chair, align on what "good enough" means for both of you. Shared criteria beat taste debates every time.\n\n${bullets || '• Clarify must-haves\n• Measure the real rooms\n• Budget for one hero piece'}\n\nA comparison table (keep / sell / donate / buy new) helps you stay objective when emotions run high. When you do buy, prioritize fully assembled options so move-in day is about settling in—not hunting for missing screws.`;
+}
+
+function generateOneSection(idx) {
+  const sec = articleState.sections[idx];
+  sec.status = 'generating';
+  sec._open = true;
+  renderSectionStack();
+  setTimeout(() => {
+    const prompt = buildInjectedPrompt('section', sec.type);
+    rememberPrompt('section:' + sec.id, prompt);
+    sec.content = mockSectionContent(sec);
+    sec.status = 'ready';
+    sec._open = true;
+    renderSectionStack();
+    refreshSectionsGate();
+    saveToRun();
+    var n = enabledRuleTexts.apply(null, ruleBlockIdsFor('section', sec.type)).length;
+    logStep(3, 'section_gen', '生成板块: ' + sec.title + '（注入 ' + n + ' 条规则）');
+    showToast('已生成：' + sec.type + ' — 已注入板块规则', 'success');
+  }, 700 + Math.random() * 500);
+}
+
+function generateAllSections() {
+  if (!articleState.outlineConfirmed) {
+    showToast('请先确认大纲', '');
+    return;
+  }
+  setStatus('sectionsStatus', 'generating', '批量生成中');
+  document.getElementById('btnGenAllSections').disabled = true;
+  let i = 0;
+  function next() {
+    if (i >= articleState.sections.length) {
+      setStatus('sectionsStatus', 'ready', '全部就绪');
+      document.getElementById('btnGenAllSections').disabled = false;
+      document.getElementById('btnGenAllSections').textContent = '重新生成全部';
+      document.getElementById('btnGenPlacements').disabled = false;
+      refreshSectionsGate();
+      saveToRun();
+      logStep(3, 'sections', '全部正文板块已生成');
+      showToast('全部正文板块已生成，下一步审核产品与内链', 'success');
+      return;
+    }
+    const sec = articleState.sections[i];
+    sec.status = 'generating';
+    renderSectionStack();
+    setTimeout(() => {
+      rememberPrompt('section:' + sec.id, buildInjectedPrompt('section', sec.type));
+      sec.content = mockSectionContent(sec);
+      sec.status = 'ready';
+      i++;
+      next();
+    }, 450);
+  }
+  next();
+}
+
+function refreshSectionsGate() {
+  const allReady = articleState.sections.length > 0 &&
+    articleState.sections.every(s => s.content && (s.status === 'ready' || s.status === 'edited'));
+  articleState.phaseDone.sections = allReady;
+  document.getElementById('btnSectionsNext').disabled = !allReady;
+  document.getElementById('btnGenPlacements').disabled = !allReady;
+  if (allReady) {
+    setStatus('sectionsStatus', 'ready', '全部就绪');
+    document.getElementById('btnAddProduct').disabled = false;
+    document.getElementById('btnAddLink').disabled = false;
+  } else if (articleState.sections.some(s => s.content)) setStatus('sectionsStatus', 'edited', '部分完成');
+  updatePhasePills();
+  updateGenProgressBar();
+}
+
+// ---- Product placements & internal links ----
+function h2SectionOptionsHtml(selectedId) {
+  return articleState.sections
+    .filter(s => s.type === 'H2')
+    .map(s => `<option value="${s.id}" ${s.id === selectedId ? 'selected' : ''}>${s.title.slice(0, 56)}</option>`)
+    .join('');
+}
+
+function generatePlacements() {
+  if (!articleState.phaseDone.sections) {
+    showToast('请先完成正文板块', '');
+    return;
+  }
+  setStatus('placementsStatus', 'generating', '推荐中');
+  document.getElementById('btnGenPlacements').disabled = true;
+  showLive('placementsLive', [
+    'Matching POVISON catalog to outline…',
+    'Injecting placements + global rules…',
+    'Scanning povison.com/blog for related posts…',
+    'Drafting natural product blurbs & anchors…',
+  ], () => {
+    rememberPrompt('placements', buildInjectedPrompt('placements'));
+    const h2s = articleState.sections.filter(s => s.type === 'H2');
+    const a = h2s[Math.min(1, h2s.length - 1)] || h2s[0];
+    const b = h2s[Math.min(2, h2s.length - 1)] || h2s[0];
+    articleState.products = [
+      {
+        id: 'p1', status: 'pending',
+        name: 'Arlo Sofa',
+        url: 'https://www.povison.com/products/arlo-sofa',
+        sectionId: a ? a.id : '',
+        blurb: 'If you need one shared seating piece that still feels intentional, the Arlo Sofa arrives fully assembled—so move-in day is about arranging cushions, not hunting for missing hardware. Its clean silhouette works when you are blending two styles without starting from scratch.',
+      },
+      {
+        id: 'p2', status: 'pending',
+        name: 'LumiFlex Bed Frame',
+        url: 'https://www.povison.com/products/lumiflex-bed',
+        sectionId: b ? b.id : '',
+        blurb: 'For the bedroom you both sleep in, the LumiFlex Bed Frame skips the assembly weekend. Soft upholstery and a low profile help a mixed-furniture room look planned, not temporary—especially useful when one partner already owns nightstands in a different wood tone.',
+      },
+    ];
+    articleState.links = [
+      {
+        id: 'l1', status: 'pending',
+        anchor: 'small space living layouts',
+        url: 'https://www.povison.com/blog/small-space-living-layouts',
+        sectionId: a ? a.id : '',
+        note: 'Anchor must already appear (or be edited into) the target H2 sentence.',
+      },
+      {
+        id: 'l2', status: 'pending',
+        anchor: 'pet-friendly upholstery',
+        url: 'https://www.povison.com/blog/pet-friendly-upholstery-guide',
+        sectionId: b ? b.id : '',
+        note: 'Link the natural phrase only—no “click here” or “see this guide”.',
+      },
+      {
+        id: 'l3', status: 'pending',
+        anchor: 'how to choose a modular sofa',
+        url: 'https://www.povison.com/blog/how-to-choose-modular-sofa',
+        sectionId: h2s[0] ? h2s[0].id : '',
+        note: 'Prefer long-tail phrases already used in body copy.',
+      },
+    ];
+    articleState.placementsConfirmed = false;
+    articleState.phaseDone.placements = false;
+    renderPlacements();
+    setStatus('placementsStatus', 'edited', '待审核');
+    document.getElementById('btnGenPlacements').disabled = false;
+    document.getElementById('btnGenPlacements').textContent = '重新推荐';
+    document.getElementById('btnAddProduct').disabled = false;
+    document.getElementById('btnAddLink').disabled = false;
+    refreshPlacementsGate();
+    saveToRun();
+    logStep(3, 'placements', '产品与内链推荐已生成（注入 ' + enabledRuleTexts('global', 'placements').length + ' 条规则），等待人工审核');
+    showToast('已生成产品与内链（已注入板块规则），请审核', 'success');
+  });
+}
+
+function renderPlacements() {
+  const pBox = document.getElementById('productPlaceList');
+  const lBox = document.getElementById('linkPlaceList');
+  pBox.innerHTML = '';
+  lBox.innerHTML = '';
+  (articleState.products || []).forEach((p, idx) => {
+    const card = document.createElement('div');
+    card.className = 'place-card' + (p.status === 'accepted' ? ' accepted' : '') + (p.status === 'rejected' ? ' rejected' : '');
+    card.innerHTML = `
+      <div class="place-card-top">
+        <span class="place-badge product">产品</span>
+        <span class="place-title">${p.name || '未命名产品'}</span>
+        <span class="wb-status ${p.status === 'accepted' ? 'ready' : (p.status === 'rejected' ? 'idle' : 'edited')}">${
+          p.status === 'accepted' ? '已接受' : (p.status === 'rejected' ? '已驳回' : '待审核')}</span>
+      </div>
+      <div class="section-field"><label>产品名</label>
+        <input type="text" value="${escapeAttr(p.name)}" oninput="editProduct(${idx},'name',this.value)"></div>
+      <div class="section-field"><label>产品链接</label>
+        <input type="text" value="${escapeAttr(p.url)}" oninput="editProduct(${idx},'url',this.value)"></div>
+      <div class="section-field"><label>挂载到哪个 H2</label>
+        <select onchange="editProduct(${idx},'sectionId',this.value)">${h2SectionOptionsHtml(p.sectionId)}</select></div>
+      <div class="section-field"><label>植入文案（40–70 词，链接嵌在产品名上）</label>
+        <textarea rows="4" oninput="editProduct(${idx},'blurb',this.value)">${p.blurb || ''}</textarea>
+        <div class="char-count">${(p.blurb || '').trim().split(/\s+/).filter(Boolean).length} 词</div></div>
+      <div class="wb-actions">
+        <button class="btn btn-primary btn-sm" onclick="setPlacementStatus('products',${idx},'accepted')">接受</button>
+        <button class="btn btn-danger-ghost btn-sm" onclick="setPlacementStatus('products',${idx},'rejected')">驳回</button>
+        <button class="btn btn-secondary btn-sm" onclick="removePlacement('products',${idx})">删除</button>
+      </div>`;
+    pBox.appendChild(card);
+  });
+  (articleState.links || []).forEach((l, idx) => {
+    const card = document.createElement('div');
+    card.className = 'place-card' + (l.status === 'accepted' ? ' accepted' : '') + (l.status === 'rejected' ? ' rejected' : '');
+    card.innerHTML = `
+      <div class="place-card-top">
+        <span class="place-badge link">内链</span>
+        <span class="place-title">${l.anchor || '未设 anchor'}</span>
+        <span class="wb-status ${l.status === 'accepted' ? 'ready' : (l.status === 'rejected' ? 'idle' : 'edited')}">${
+          l.status === 'accepted' ? '已接受' : (l.status === 'rejected' ? '已驳回' : '待审核')}</span>
+      </div>
+      <div class="section-field"><label>Anchor text（须是文中已有/将写入的自然长尾词）</label>
+        <input type="text" value="${escapeAttr(l.anchor)}" oninput="editLink(${idx},'anchor',this.value)"></div>
+      <div class="section-field"><label>目标 URL（povison.com/blog/…）</label>
+        <input type="text" value="${escapeAttr(l.url)}" oninput="editLink(${idx},'url',this.value)"></div>
+      <div class="section-field"><label>挂载到哪个 H2（每节最多 1 条）</label>
+        <select onchange="editLink(${idx},'sectionId',this.value)">${h2SectionOptionsHtml(l.sectionId)}</select></div>
+      <div class="section-field"><label>备注</label>
+        <input type="text" value="${escapeAttr(l.note || '')}" oninput="editLink(${idx},'note',this.value)"></div>
+      <div class="wb-actions">
+        <button class="btn btn-primary btn-sm" onclick="setPlacementStatus('links',${idx},'accepted')">接受</button>
+        <button class="btn btn-danger-ghost btn-sm" onclick="setPlacementStatus('links',${idx},'rejected')">驳回</button>
+        <button class="btn btn-secondary btn-sm" onclick="removePlacement('links',${idx})">删除</button>
+      </div>`;
+    lBox.appendChild(card);
+  });
+}
+
+function escapeAttr(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+function editProduct(idx, field, val) {
+  articleState.products[idx][field] = val;
+  // 改文案不撤销「已接受」，避免审完一点小改又卡死确认按钮
+  articleState.placementsConfirmed = false;
+  articleState.phaseDone.placements = false;
+  saveToRun();
+  refreshPlacementsGate();
+}
+
+function editLink(idx, field, val) {
+  articleState.links[idx][field] = val;
+  articleState.placementsConfirmed = false;
+  articleState.phaseDone.placements = false;
+  saveToRun();
+  refreshPlacementsGate();
+}
+
+function setPlacementStatus(kind, idx, status) {
+  articleState[kind][idx].status = status;
+  articleState.placementsConfirmed = false;
+  articleState.phaseDone.placements = false;
+  renderPlacements();
+  refreshPlacementsGate();
+  saveToRun();
+  logStep(3, 'placement_' + status, kind + '#' + (idx + 1));
+}
+
+function acceptAllPlacements() {
+  (articleState.products || []).forEach(p => { if (p.status !== 'rejected') p.status = 'accepted'; });
+  (articleState.links || []).forEach(l => { if (l.status !== 'rejected') l.status = 'accepted'; });
+  articleState.placementsConfirmed = false;
+  articleState.phaseDone.placements = false;
+  renderPlacements();
+  refreshPlacementsGate();
+  saveToRun();
+  logStep(3, 'placement_accept_all', '一键全部接受产品与内链');
+  showToast('已全部接受，可确认进入 FAQ', 'success');
+}
+
+function removePlacement(kind, idx) {
+  articleState[kind].splice(idx, 1);
+  articleState.placementsConfirmed = false;
+  articleState.phaseDone.placements = false;
+  renderPlacements();
+  refreshPlacementsGate();
+  saveToRun();
+}
+
+function addProductPlacement() {
+  const h2 = articleState.sections.find(s => s.type === 'H2');
+  articleState.products.push({
+    id: 'p' + Date.now(), status: 'pending', name: '', url: 'https://www.povison.com/products/',
+    sectionId: h2 ? h2.id : '', blurb: '',
+  });
+  renderPlacements();
+  refreshPlacementsGate();
+  saveToRun();
+}
+
+function addLinkPlacement() {
+  const h2 = articleState.sections.find(s => s.type === 'H2');
+  articleState.links.push({
+    id: 'l' + Date.now(), status: 'pending', anchor: '', url: 'https://www.povison.com/blog/',
+    sectionId: h2 ? h2.id : '', note: '',
+  });
+  renderPlacements();
+  refreshPlacementsGate();
+  saveToRun();
+}
+
+function refreshPlacementsGate() {
+  if (!articleState) return;
+  const products = articleState.products || [];
+  const links = articleState.links || [];
+  const acceptedP = products.filter(p => p.status === 'accepted');
+  const acceptedL = links.filter(l => l.status === 'accepted');
+  const pending = products.concat(links).some(x => x.status === 'pending');
+  const hasAny = products.length + links.length > 0;
+  const allRejected = hasAny && products.concat(links).every(x => x.status === 'rejected');
+  // 无待审核项，且至少接受一项（或全部驳回）即可点确认
+  const canConfirm = hasAny && !pending && (acceptedP.length + acceptedL.length > 0 || allRejected);
+  const allHandled = hasAny && products.concat(links).every(x => x.status === 'accepted' || x.status === 'rejected');
+
+  const btnAcceptAll = document.getElementById('btnAcceptAllPlacements');
+  const btnApply = document.getElementById('btnApplyPlacements');
+  const btnNext = document.getElementById('btnPlacementsNext');
+  const btnFaq = document.getElementById('btnGenFaq');
+  if (btnAcceptAll) btnAcceptAll.disabled = !hasAny || allHandled;
+  if (btnApply) btnApply.disabled = !(acceptedP.length + acceptedL.length > 0);
+  if (btnNext) btnNext.disabled = !canConfirm;
+  if (btnFaq) btnFaq.disabled = !articleState.phaseDone.placements;
+
+  if (!hasAny) setStatus('placementsStatus', 'idle', '待生成');
+  else if (articleState.placementsConfirmed) setStatus('placementsStatus', 'ready', '已确认');
+  else if (pending) setStatus('placementsStatus', 'edited', '待审核');
+  else setStatus('placementsStatus', 'edited', '已审 · 可确认');
+  updatePhasePills();
+  updateGenProgressBar();
+}
+
+function applyPlacementsToSections() {
+  const acceptedP = (articleState.products || []).filter(p => p.status === 'accepted');
+  const acceptedL = (articleState.links || []).filter(l => l.status === 'accepted');
+  if (!acceptedP.length && !acceptedL.length) {
+    showToast('请先接受至少一项', '');
+    return;
+  }
+  // Clear previous auto-applied markers then append
+  articleState.sections.forEach(sec => {
+    if (!sec.content) return;
+    sec.content = sec.content
+      .replace(/\n\n\[Product:[\s\S]*?\]/g, '')
+      .replace(/\n\n\[Internal link:[\s\S]*?\]/g, '');
+  });
+  acceptedP.forEach(p => {
+    const sec = articleState.sections.find(s => s.id === p.sectionId);
+    if (!sec) return;
+    const linked = (p.blurb || '').replace(p.name, `[${p.name}](${p.url})`);
+    sec.content = (sec.content || '').trim() + `\n\n[Product: ${p.name}]\n${linked}`;
+    sec.status = 'edited';
+  });
+  acceptedL.forEach(l => {
+    const sec = articleState.sections.find(s => s.id === l.sectionId);
+    if (!sec) return;
+    sec.content = (sec.content || '').trim() + `\n\n[Internal link: "${l.anchor}" → ${l.url}]`;
+    sec.status = 'edited';
+  });
+  renderSectionStack();
+  saveToRun();
+  logStep(3, 'placements_apply', `写入 ${acceptedP.length} 产品 + ${acceptedL.length} 内链到正文`);
+  showToast('已写入正文对应板块，可回正文检查语气', 'success');
+}
+
+function confirmPlacements() {
+  const products = articleState.products || [];
+  const links = articleState.links || [];
+  if (products.concat(links).some(x => x.status === 'pending')) {
+    showToast('还有待审核项，请先接受或驳回', '');
+    return;
+  }
+  const acceptedP = products.filter(p => p.status === 'accepted');
+  const acceptedL = links.filter(l => l.status === 'accepted');
+  if (acceptedP.length > 2) { showToast('产品植入最多 2 个', ''); return; }
+  if (acceptedL.length > 3) { showToast('内链建议最多 3 条（硬上限 5）', ''); return; }
+  // Soft warn if under targets but allow if all rejected (operator chooses none)
+  if (acceptedP.length === 1 || acceptedP.length === 2 || acceptedP.length === 0) { /* ok */ }
+  if (acceptedL.length > 0 && acceptedL.length < 2) {
+    if (!confirm('内链少于 2 条，确定继续？')) return;
+  }
+  if (acceptedP.length === 0 && acceptedL.length === 0) {
+    if (!confirm('未接受任何产品或内链，确定跳过？')) return;
+  }
+  articleState.placementsConfirmed = true;
+  articleState.phaseDone.placements = true;
+  document.getElementById('btnGenFaq').disabled = false;
+  refreshPlacementsGate();
+  saveToRun();
+  logStep(3, 'placements_confirm', `确认植入：产品 ${acceptedP.length} · 内链 ${acceptedL.length}`);
+  showToast('产品与内链已确认', 'success');
+  setGenPhase('faq');
+}
+
+// ---- FAQ ----
+function generateFaq() {
+  setStatus('faqStatus', 'generating', '生成中');
+  document.getElementById('btnGenFaq').disabled = true;
+  showLive('faqLive', ['Pulling People Also Ask…', 'Injecting FAQ rules…', 'Drafting short answers…'], () => {
+    rememberPrompt('faq', buildInjectedPrompt('faq'));
+    articleState.faq = [
+      { q: 'Should we buy a new sofa when moving in together?', a: 'Only if neither sofa fits your shared criteria for size, durability, and style. Sell or donate first, then buy one hero piece you both like.' },
+      { q: 'What if our furniture styles clash?', a: 'Pick a shared palette and one bridging material (wood tone, metal, or fabric). Keep the best piece from each style rather than forcing a match.' },
+      { q: 'Is fully assembled furniture worth it for a move-in?', a: 'Yes when your timeline is tight. You skip tool time and missing-parts delays, which matters more when two households merge in one weekend.' },
+      { q: 'How do we split furniture costs fairly?', a: 'Inventory what each person already owns, then split new purchases by who needs the item most—or 50/50 for shared living-room pieces.' },
+      { q: 'What should we do with duplicates?', a: 'Keep the better condition or better fit. Photograph the rest, list locally within a week, and donate what does not sell.' },
+    ];
+    articleState.phaseDone.faq = true;
+    renderFaqEditor();
+    setStatus('faqStatus', 'ready', '已完成');
+    document.getElementById('btnGenFaq').disabled = false;
+    document.getElementById('btnGenFaq').textContent = '重新生成 FAQ';
+    document.getElementById('btnAddFaq').disabled = false;
+    document.getElementById('btnFaqNext').disabled = false;
+    document.getElementById('btnGenMeta').disabled = false;
+    saveToRun();
+    logStep(3, 'faq', 'FAQ 已生成（注入 ' + enabledRuleTexts('global', 'faq').length + ' 条规则）');
+    updatePhasePills();
+    showToast('FAQ 已生成（已注入板块规则），可直接修改', 'success');
+  });
+}
+
+function renderFaqEditor() {
+  const box = document.getElementById('faqEditor');
+  box.innerHTML = '';
+  articleState.faq.forEach((item, idx) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'section-card ready open';
+    wrap.style.marginBottom = '10px';
+    wrap.innerHTML = `
+      <div class="section-body" style="display:block;border:none;padding:14px 16px;">
+        <div class="section-field" style="margin-bottom:8px;">
+          <label>问题 ${idx + 1}</label>
+          <input type="text" value="${item.q.replace(/"/g, '&quot;')}" oninput="onFaqEdit(${idx},'q',this.value)">
+        </div>
+        <div class="section-field">
+          <label>答案</label>
+          <textarea rows="3" oninput="onFaqEdit(${idx},'a',this.value)">${item.a}</textarea>
+        </div>
+        <div class="wb-actions" style="margin-top:8px;">
+          <button class="btn btn-danger-ghost btn-sm" onclick="removeFaqItem(${idx})">删除</button>
+        </div>
+      </div>`;
+    box.appendChild(wrap);
+  });
+}
+
+function onFaqEdit(idx, field, val) {
+  articleState.faq[idx][field] = val;
+  articleState.phaseDone.faq = true;
+  setStatus('faqStatus', 'edited', '已修改');
+  saveToRun();
+}
+
+function addFaqItem() {
+  articleState.faq.push({ q: 'New question?', a: 'Short answer (40–60 words).' });
+  renderFaqEditor();
+  setStatus('faqStatus', 'edited', '已修改');
+  saveToRun();
+}
+
+function removeFaqItem(idx) {
+  articleState.faq.splice(idx, 1);
+  renderFaqEditor();
+  setStatus('faqStatus', 'edited', '已修改');
+  saveToRun();
+}
+
+// ---- Meta ----
+function generateMeta() {
+  setStatus('metaStatus', 'generating', '生成中');
+  document.getElementById('btnGenMeta').disabled = true;
+  setTimeout(() => {
+    rememberPrompt('meta', buildInjectedPrompt('meta'));
+    const title = articleState.topic.title;
+    const focus = (articleState.topic.keywords || '').split(',')[0].trim() || 'furniture';
+    let metaTitle = title.length <= 60 ? title : title.slice(0, 57) + '…';
+    if (metaTitle.length < 50) metaTitle = metaTitle.replace(/\?$/, '') + ' | Practical Guide';
+    if (metaTitle.length > 60) metaTitle = metaTitle.slice(0, 60);
+    const desc = `Learn how to merge two homes without regret—inventory checklist, keep/sell/donate table, and fully assembled picks for a faster move-in. Built for couples sorting ${focus}.`;
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 75);
+    articleState.meta = {
+      title: metaTitle.slice(0, 60),
+      description: desc.slice(0, 160),
+      slug,
+      focus,
+    };
+    articleState.phaseDone.meta = true;
+    fillMetaFields();
+    enableMetaFields(true);
+    setStatus('metaStatus', 'ready', '已完成');
+    document.getElementById('btnGenMeta').disabled = false;
+    document.getElementById('btnGenMeta').textContent = '重新生成';
+    document.getElementById('btnMetaNext').disabled = false;
+    saveToRun();
+    logStep(3, 'meta', 'SEO 元信息已生成（注入 ' + enabledRuleTexts('global', 'meta').length + ' 条规则）');
+    updatePhasePills();
+    showToast('SEO 元信息已生成（已注入板块规则）', 'success');
+  }, 600);
+}
+
+function enableMetaFields(on) {
+  ['metaTitle','metaDesc','metaSlug','metaFocus'].forEach(id => {
+    document.getElementById(id).disabled = !on;
+  });
+}
+
+function fillMetaFields() {
+  document.getElementById('metaTitle').value = articleState.meta.title || '';
+  document.getElementById('metaDesc').value = articleState.meta.description || '';
+  document.getElementById('metaSlug').value = articleState.meta.slug || '';
+  document.getElementById('metaFocus').value = articleState.meta.focus || '';
+  onMetaEdit();
+}
+
+function onMetaEdit() {
+  if (!articleState) return;
+  articleState.meta.title = document.getElementById('metaTitle').value;
+  articleState.meta.description = document.getElementById('metaDesc').value;
+  articleState.meta.slug = document.getElementById('metaSlug').value;
+  articleState.meta.focus = document.getElementById('metaFocus').value;
+  updateCharCount('metaTitleCount', articleState.meta.title.length, 50, 60);
+  updateCharCount('metaDescCount', articleState.meta.description.length, 150, 160);
+  updateCharCount('metaSlugCount', articleState.meta.slug.length, 1, 75);
+  if (articleState.meta.title) {
+    articleState.phaseDone.meta = true;
+    setStatus('metaStatus', 'edited', '已修改');
+    document.getElementById('btnMetaNext').disabled = false;
+  }
+  saveToRun();
+}
+
+function updateCharCount(id, n, min, max) {
+  const el = document.getElementById(id);
+  el.textContent = n + ' / ' + max + (min ? `（建议 ${min}–${max}）` : '');
+  el.className = 'char-count ' + (n < min ? 'warn' : (n > max ? 'bad' : 'ok'));
+}
+
+// ---- Preview & publish ----
+function buildArticleBody() {
+  let body = '';
+  articleState.sections.forEach(sec => {
+    const chunks = formatSectionHtml(sec.content);
+    if (sec.type === 'Intro') {
+      let inList = false;
+      chunks.forEach(c => {
+        if (c.startsWith('<li>')) { if (!inList) { body += '<ul>'; inList = true; } body += c; }
+        else { if (inList) { body += '</ul>'; inList = false; } body += c; }
+      });
+      if (inList) body += '</ul>';
+    } else if (sec.type === 'Conclusion') {
+      body += '<div class="conclusion"><h2>Conclusion</h2>';
+      chunks.forEach(c => { body += c.startsWith('<li>') ? `<ul>${c}</ul>` : c; });
+      body += '</div>';
+    } else {
+      body += `<h2>${escapeHtml(sec.title)}</h2>`;
+      let inList = false;
+      chunks.forEach(c => {
+        if (c.startsWith('<li>')) { if (!inList) { body += '<ul>'; inList = true; } body += c; }
+        else { if (inList) { body += '</ul>'; inList = false; } body += c; }
+      });
+      if (inList) body += '</ul>';
+    }
+  });
+  if (articleState.faq && articleState.faq.length) {
+    body += '<section class="faq-section"><h2>Frequently Asked Questions</h2>';
+    articleState.faq.forEach(f => {
+      body += `<div class="faq-item"><h3 onclick="toggleFaq(this)">${escapeHtml(f.q)}</h3><p>${escapeHtml(f.a)}</p></div>`;
+    });
+    body += '</section>';
+  }
+  return body;
+}
+
+function buildFaqJsonLd() {
+  if (!articleState.faq || !articleState.faq.length) return '';
+  const entities = articleState.faq.map(f => ({
+    '@type': 'Question', name: f.q,
+    acceptedAnswer: { '@type': 'Answer', text: f.a },
+  }));
+  return '<script type="application/ld+json">' + JSON.stringify({
+    '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: entities,
+  }, null, 2) + '</' + 'script>';
+}
+
+function buildGalleryItems() {
+  let html = '';
+  for (let i = 0; i < 10; i++) {
+    const url = PEXELS_GALLERY[i % PEXELS_GALLERY.length];
+    const cap = GALLERY_CAPTIONS[i % GALLERY_CAPTIONS.length];
+    html += `<a class="gallery-item" href="${url}" target="_blank"><img src="${url}" alt="${escapeAttr(cap)}" loading="lazy"><p>${escapeHtml(cap)}</p></a>`;
+  }
+  return html;
+}
+
+function topicCategoryLabel() {
+  const ct = (articleState.topic && articleState.topic.content_type) || '';
+  if (/buying/i.test(ct)) return 'Buying Guide';
+  if (/comparison/i.test(ct)) return 'Comparison';
+  if (/scenario|longform/i.test(ct)) return 'Lifestyle';
+  return 'Guide';
+}
+
+function hashString(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h) + s.charCodeAt(i); h |= 0; }
+  return h;
+}
+
+function fillBlogTemplate() {
+  const m = articleState.meta || {};
+  const topic = articleState.topic || {};
+  const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const heroIdx = Math.abs(hashString(m.title || topic.title || '')) % PEXELS_HEROES.length;
+  const heroCap = topic.title ? topic.title.slice(0, 80) : 'POVISON furniture inspiration';
+  const reps = {
+    '{{META_TITLE}}': escapeHtml(m.title || ''),
+    '{{META_DESC}}': escapeAttr(m.description || ''),
+    '{{CANONICAL_URL}}': escapeAttr(m.slug || ''),
+    '{{H1_TITLE}}': escapeHtml(topic.title || m.title || ''),
+    '{{BLOG_CATEGORY}}': escapeHtml(topicCategoryLabel()),
+    '{{AUTHOR}}': 'POVISON Editorial',
+    '{{DATE}}': date,
+    '{{HERO_IMG_URL}}': PEXELS_HEROES[heroIdx],
+    '{{HERO_IMG_CAPTION}}': escapeHtml(heroCap),
+    '{{ARTICLE_BODY}}': buildArticleBody(),
+    '{{FAQ_JSON_LD}}': buildFaqJsonLd(),
+    '{{GALLERY_ITEMS}}': buildGalleryItems(),
+  };
+  let html = BLOG_POST_TEMPLATE;
+  Object.keys(reps).forEach(k => { html = html.split(k).join(reps[k]); });
+  return html;
+}
+
+function assemblePreview() {
+  if (!articleState) return;
+  if (!articleState.meta || !articleState.meta.title) {
+    showToast('请先生成 SEO 元信息', '');
+    return;
+  }
+  const html = fillBlogTemplate();
+  articleState.previewHtml = html;
+  articleState.validation = runClientValidation();
+  articleState.phaseDone.preview = true;
+  document.getElementById('previewFrame').srcdoc = html;
+  document.getElementById('previewUrl').textContent = (articleState.meta.slug || 'preview') + '.html';
+  renderChecklist();
+  setGenPhase('preview');
+  saveToRun();
+  logStep(3, 'preview', '组装预览完成（blog-post-template 填槽 + FAQ JSON-LD）');
+  var run = getActiveRun();
+  if (run) run.genStatus = 'preview';
+  showToast('预览已组装（正式模板），请对照检查清单终审', 'success');
+}
+
+function wordsList(text) {
+  return String(text || '').match(/[A-Za-z0-9']+/g) || [];
+}
+function ngramsSet(tokens, n) {
+  var set = {};
+  if (tokens.length < n) return set;
+  for (var i = 0; i <= tokens.length - n; i++) {
+    set[tokens.slice(i, i + n).join(' ').toLowerCase()] = 1;
+  }
+  return set;
+}
+function faqOverlapRatio() {
+  var body = (articleState.sections || []).map(function(s){ return s.content || ''; }).join('\n');
+  var bodyNg = ngramsSet(wordsList(body), 3);
+  var faqText = (articleState.faq || []).map(function(f){ return (f.q||'') + ' ' + (f.a||''); }).join(' ');
+  var faqNg = ngramsSet(wordsList(faqText), 3);
+  var keys = Object.keys(faqNg);
+  if (!keys.length) return 0;
+  var inter = 0;
+  keys.forEach(function(k){ if (bodyNg[k]) inter++; });
+  return inter / keys.length;
+}
+function runClientValidation() {
+  var body = (articleState.sections || []).map(function(s){ return s.content || ''; }).join('\n');
+  var wc = wordsList(body).length;
+  var m = articleState.meta || {};
+  var title = m.title || '';
+  var desc = m.description || '';
+  var slug = m.slug || '';
+  var faq = articleState.faq || [];
+  var products = (articleState.products || []).filter(function(p){ return p.status === 'accepted'; });
+  var links = (articleState.links || []).filter(function(l){ return l.status === 'accepted'; });
+  var overlap = faqOverlapRatio();
+  var checks = [
+    { id: 'word_count', ok: wc >= 1500, label: '正文约 ' + wc + ' 词（目标 ≥1500）', value: wc },
+    { id: 'outline_confirmed', ok: !!articleState.outlineConfirmed, label: '大纲已人工确认' },
+    { id: 'placements_confirmed', ok: !!articleState.placementsConfirmed, label: '产品与内链已确认' },
+    { id: 'products', ok: products.length <= 2, label: '产品植入 ' + products.length + '（建议 1–2）' },
+    { id: 'links', ok: links.length === 0 || (links.length >= 2 && links.length <= 3), label: '内链 ' + links.length + '（建议 2–3）' },
+    { id: 'faq_count', ok: faq.length >= 4 && faq.length <= 6, label: 'FAQ ' + faq.length + '（4–6）' },
+    { id: 'faq_overlap', ok: overlap <= 0.2, label: 'FAQ/正文重叠 ' + Math.round(overlap * 100) + '%（≤20%）', value: Math.round(overlap * 1000) / 1000 },
+    { id: 'meta_title', ok: title.length >= 50 && title.length <= 60, label: 'Meta Title ' + title.length + ' 字符（50–60）' },
+    { id: 'meta_desc', ok: desc.length >= 150 && desc.length <= 160, label: 'Meta Description ' + desc.length + ' 字符（150–160）' },
+    { id: 'slug', ok: slug.length > 0 && slug.length <= 75 && slug === slug.toLowerCase() && slug.indexOf(' ') < 0, label: 'URL slug ' + slug.length + '（≤75，小写）' },
+  ];
+  var passed = checks.filter(function(c){ return c.ok; }).length;
+  return { version: '1.0', passed: passed, total: checks.length, ok: passed === checks.length, checks: checks };
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatSectionHtml(content) {
+  return String(content || '').split('\n').filter(Boolean).map(line => {
+    let t = escapeHtml(line)
+      .replace(/\[Product:\s*[^\]]+\]/g, '')
+      .replace(/\[Internal link:[^\]]+\]/g, '')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>');
+    t = t.trim();
+    if (!t) return '';
+    if (t.startsWith('•') || t.startsWith('·')) return `<li>${t.slice(1).trim()}</li>`;
+    return `<p>${t}</p>`;
+  }).filter(Boolean);
+}
+
+function renderChecklist() {
+  const result = articleState.validation || runClientValidation();
+  articleState.validation = result;
+  document.getElementById('previewChecklist').innerHTML =
+    '<h4>发布前检查（对齐 validate-article R3/R4）· ' + result.passed + '/' + result.total + '</h4>' +
+    result.checks.map(c => `<div class="check-row"><span class="ck ${c.ok?'':'fail'}">${c.ok?'✓':'!'}</span>${c.label}</div>`).join('') +
+    '<p style="font-size:12px;color:var(--text-secondary);margin-top:10px;">脚本复核：<code>python3 scripts/validate-article.py -i article-state.json</code></p>';
+}
+
+function openPreviewWindow() {
+  if (!articleState || !articleState.previewHtml) return;
+  const w = window.open('', '_blank');
+  w.document.write(articleState.previewHtml);
+  w.document.close();
+}
+
+function exportPreviewHtml() {
+  if (!articleState) return;
+  if (!articleState.previewHtml) assemblePreview();
+  var slug = (articleState.meta && articleState.meta.slug) || 'preview';
+  var blob = new Blob([articleState.previewHtml], { type: 'text/html;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = slug + '.html'; a.click();
+  URL.revokeObjectURL(url);
+  logStep(3, 'export_html', '导出 preview HTML');
+  showToast('已导出 ' + slug + '.html', 'success');
+}
+
+function importArticleState(input) {
+  var file = input.files && input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function() {
+    try {
+      var data = JSON.parse(reader.result);
+      if (!data.topic && !data.sections) throw new Error('缺少 topic/sections');
+      articleState = data;
+      if (data.generation_rules) applyRulesEnvelope(data.generation_rules);
+      currentGenTopic = articleState.topic || currentGenTopic;
+      document.getElementById('genEmpty').style.display = 'none';
+      document.getElementById('genWorkbench').style.display = 'block';
+      document.getElementById('genActionBar').style.display = 'flex';
+      if (articleState.topic) document.getElementById('wbTopicTitle').textContent = articleState.topic.title;
+      restoreWorkbenchUI();
+      if (articleState.previewHtml) {
+        document.getElementById('previewFrame').srcdoc = articleState.previewHtml;
+      }
+      saveToRun();
+      logStep(3, 'import_article_state', file.name);
+      showToast('已导入 article-state', 'success');
+      switchView('generation');
+    } catch (e) {
+      showToast('导入失败：' + e.message, '');
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
+function rejectArticle() {
+  if (!confirm('驳回后将清空正文/产品内链/FAQ/Meta，保留大纲供重写。确定吗？')) return;
+  articleState.sections.forEach(s => { s.content = ''; s.status = 'idle'; });
+  articleState.products = [];
+  articleState.links = [];
+  articleState.placementsConfirmed = false;
+  articleState.faq = [];
+  articleState.meta = { title: '', description: '', slug: '', focus: '' };
+  articleState.phaseDone.sections = false;
+  articleState.phaseDone.placements = false;
+  articleState.phaseDone.faq = false;
+  articleState.phaseDone.meta = false;
+  articleState.phaseDone.preview = false;
+  articleState.previewHtml = '';
+  articleState.validation = null;
+  renderSectionStack();
+  renderPlacements();
+  document.getElementById('faqEditor').innerHTML = '';
+  fillMetaFields();
+  enableMetaFields(false);
+  setStatus('sectionsStatus', 'idle', '待生成');
+  document.getElementById('btnApplyPlacements').disabled = true;
+  document.getElementById('btnFaqNext').disabled = true;
+  document.getElementById('btnMetaNext').disabled = true;
+  document.getElementById('btnGenAllSections').disabled = false;
+  document.getElementById('btnGenFaq').disabled = true;
+  saveToRun();
+  logStep(3, 'reject', '人工驳回，要求重写正文');
+  showToast('已驳回，请从正文板块重新生成', '');
+  setGenPhase('sections');
+}
+
+/** MVP: export HTML for MCP/manual WP; one-click draft is V1.2 */
+function finalizeMvpExport() {
+  const result = runClientValidation();
+  articleState.validation = result;
+  renderChecklist();
+  if (!result.ok) {
+    if (!confirm('检查清单未全部通过（' + result.passed + '/' + result.total + '）。仍要导出 HTML？')) return;
+  }
+  exportPreviewHtml();
+  document.getElementById('genTopicInfo').innerHTML = '✅ 终审通过 · 已导出 HTML（WP 一键见 V1.2）';
+  var run = getActiveRun();
+  if (run) {
+    run.genStatus = 'exported';
+    run.status = 'completed';
+    saveToRun();
+    logStep(3, 'exported', '人工终审通过，导出 HTML（MVP）');
+  }
+  showToast('已导出 HTML。请按 wp-mvp-handoff 用 MCP/人工上传草稿', 'success');
+}
+
+function publishToWordPress() {
+  finalizeMvpExport();
+}
+
+// ==================== Rules (block → prompt injection) ====================
+function rulesEnvelope() {
+  var blocks = {};
+  RULE_BLOCKS.forEach(function(b) {
+    blocks[b.id] = { label: b.label, desc: b.desc, rules: (rules[b.id] || []).map(function(r) {
+      return { text: r.text, enabled: !!r.enabled };
+    }) };
+  });
+  return { version: '1.0', blocks: blocks };
+}
+
+function applyRulesEnvelope(doc) {
+  if (!doc) return false;
+  var src = doc.blocks || doc;
+  var next = {};
+  RULE_BLOCKS.forEach(function(b) {
+    var block = src[b.id];
+    var list = Array.isArray(block) ? block : (block && block.rules) || DEFAULT_RULES[b.id] || [];
+    next[b.id] = list.map(function(r) {
+      return { text: String(r.text || '').trim(), enabled: r.enabled !== false };
+    }).filter(function(r) { return r.text; });
+  });
+  rules = next;
+  try { localStorage.setItem('povison_seo_generation_rules', JSON.stringify(rulesEnvelope())); } catch (e) {}
+  renderRules();
+  return true;
+}
+
+function loadRulesFromStorage() {
+  try {
+    var raw = localStorage.getItem('povison_seo_generation_rules');
+    if (raw) applyRulesEnvelope(JSON.parse(raw));
+  } catch (e) {}
+}
+
+function persistRules() {
+  try { localStorage.setItem('povison_seo_generation_rules', JSON.stringify(rulesEnvelope())); } catch (e) {}
+}
+
+function enabledRuleTexts() {
+  var ids = Array.prototype.slice.call(arguments);
+  var out = [];
+  ids.forEach(function(id) {
+    (rules[id] || []).forEach(function(r) {
+      if (r.enabled && (r.text || '').trim()) out.push(r.text.trim());
+    });
+  });
+  return out;
+}
+
+function formatRulesMarkdown(texts) {
+  if (!texts.length) return '## Operator rules\n(none enabled — follow content-guidelines.md defaults)';
+  return '## Operator rules (must follow; enabled only)\n' + texts.map(function(t) { return '- ' + t; }).join('\n');
+}
+
+/** Map Studio phase / section type → rule block ids (always includes global). */
+function ruleBlockIdsFor(mode, sectionType) {
+  if (mode === 'section' || mode === 'intro' || mode === 'h2' || mode === 'conclusion') {
+    var st = sectionType || (mode === 'section' ? 'H2' : mode);
+    if (mode === 'intro' || st === 'Intro' || st === 'intro') return ['global', 'intro'];
+    if (mode === 'conclusion' || st === 'Conclusion' || st === 'conclusion') return ['global', 'conclusion'];
+    if (mode === 'h2' || st === 'H2' || st === 'h2') return ['global', 'h2'];
+    var map = { Intro: 'intro', H2: 'h2', Conclusion: 'conclusion' };
+    return ['global', map[st] || 'h2'];
+  }
+  if (mode === 'outline' || mode === 'placements' || mode === 'faq' || mode === 'meta') {
+    return ['global', mode];
+  }
+  return ['global'];
+}
+
+function buildInjectedPrompt(mode, sectionType) {
+  var templateKey = (mode === 'intro' || mode === 'h2' || mode === 'conclusion') ? 'section' : mode;
+  if (mode === 'section') templateKey = 'section';
+  var template = PROMPT_TEMPLATES[templateKey] || ('# ' + mode + '\n\n{{RULES}}\n');
+  var ids = ruleBlockIdsFor(mode, sectionType);
+  var rulesMd = formatRulesMarkdown(enabledRuleTexts.apply(null, ids));
+  return template.replace('{{RULES}}', rulesMd);
+}
+
+function rememberPrompt(key, promptText) {
+  if (!articleState) return;
+  if (!articleState.prompts) articleState.prompts = {};
+  articleState.prompts[key] = promptText;
+  articleState.generation_rules = rulesEnvelope();
+}
+
+function renderRules() {
+  var container = document.getElementById('rulesContainer');
+  if (!container) return;
+  container.innerHTML = '';
+  RULE_BLOCKS.forEach(function(b) {
+    if (!rules[b.id]) rules[b.id] = [];
+    var section = document.createElement('div');
+    section.className = 'rules-section';
+    section.innerHTML =
+      '<h3>' + b.label + '</h3>' +
+      '<p class="section-desc">' + b.desc + '</p>' +
+      '<p class="rules-inject-hint">注入：' + b.inject + ' · 启用 ' +
+        rules[b.id].filter(function(r){return r.enabled;}).length + '/' + rules[b.id].length +
+      '</p>' +
+      '<div id="' + b.id + 'Rules"></div>' +
+      '<div class="add-rule">' +
+        '<input type="text" placeholder="添加本板块规则" id="newRule_' + b.id + '">' +
+        '<button class="btn btn-primary" type="button" onclick="addRule(\'' + b.id + '\')">添加</button>' +
+      '</div>';
+    container.appendChild(section);
+    var list = section.querySelector('#' + b.id + 'Rules');
+    rules[b.id].forEach(function(rule, idx) {
+      var item = document.createElement('div');
+      item.className = 'rule-item';
+      item.innerHTML =
+        '<div class="rule-drag">⠿</div>' +
+        '<div class="rule-text" data-cat="' + b.id + '" data-idx="' + idx + '">' + rule.text + '</div>' +
+        '<div class="rule-toggle ' + (rule.enabled ? 'on' : '') + '" onclick="toggleRule(\'' + b.id + '\',' + idx + ')"></div>' +
+        '<button class="rule-delete" type="button" onclick="deleteRule(\'' + b.id + '\',' + idx + ')">✕</button>';
+      list.appendChild(item);
+      var textEl = item.querySelector('.rule-text');
+      textEl.addEventListener('click', function() {
+        textEl.contentEditable = true; textEl.focus();
+        var r = document.createRange(); r.selectNodeContents(textEl);
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      });
+      textEl.addEventListener('blur', function() {
+        rules[b.id][idx].text = textEl.textContent.trim();
+        textEl.contentEditable = false;
+        persistRules();
+      });
+      textEl.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); textEl.blur(); }
+      });
+    });
+    var input = document.getElementById('newRule_' + b.id);
+    if (input) {
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); addRule(b.id); }
+      });
+    }
+  });
+}
+
+function toggleRule(cat, idx) {
+  rules[cat][idx].enabled = !rules[cat][idx].enabled;
+  persistRules();
+  renderRules();
+  showToast(rules[cat][idx].enabled ? '规则已启用（将注入 prompt）' : '规则已禁用（不再注入）');
+}
+function deleteRule(cat, idx) {
+  rules[cat].splice(idx, 1);
+  persistRules();
+  renderRules();
+  showToast('规则已删除');
+}
+function addRule(cat) {
+  var input = document.getElementById('newRule_' + cat);
+  var text = input && input.value.trim();
+  if (!text) return;
+  if (!rules[cat]) rules[cat] = [];
+  rules[cat].push({ text: text, enabled: true });
+  input.value = '';
+  persistRules();
+  renderRules();
+  showToast('规则已添加 · 生成时注入本板块 prompt', 'success');
+}
+function resetGenerationRules() {
+  rules = JSON.parse(JSON.stringify(DEFAULT_RULES));
+  persistRules();
+  renderRules();
+  showToast('已恢复默认板块规则', 'success');
+}
+function exportGenerationRules() {
+  var blob = new Blob([JSON.stringify(rulesEnvelope(), null, 2)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'generation-rules.json'; a.click();
+  URL.revokeObjectURL(url);
+  showToast('规则已导出（可交给 section-generate.py --rules）', 'success');
+}
+function importGenerationRules(input) {
+  var file = input.files && input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function() {
+    try {
+      applyRulesEnvelope(JSON.parse(reader.result));
+      showToast('规则已导入', 'success');
+    } catch (e) {
+      showToast('规则 JSON 无效', '');
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+function previewRulesPrompt(mode) {
+  var text;
+  if (mode === 'outline' || mode === 'placements' || mode === 'faq' || mode === 'meta') {
+    text = buildInjectedPrompt(mode);
+  } else if (mode === 'intro') {
+    text = buildInjectedPrompt('section', 'Intro');
+  } else if (mode === 'conclusion') {
+    text = buildInjectedPrompt('section', 'Conclusion');
+  } else {
+    text = buildInjectedPrompt('section', 'H2');
+  }
+  var box = document.getElementById('rulesPromptPreview');
+  if (!box) return;
+  box.style.display = 'block';
+  box.innerHTML = '<h4>注入后的 System Prompt · ' + mode + '</h4>' + escapeHtml(text);
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+// ==================== Toast ====================
+function showToast(msg, type = '') {
+  const c = document.getElementById('toastContainer');
+  const t = document.createElement('div'); t.className = 'toast ' + type; t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => { t.style.animation = 'toastOut 0.3s forwards'; setTimeout(() => t.remove(), 300); }, 2800);
+}
+
+// ==================== Magnifier Hover (macOS Dock style) ====================
+// No hover-pick, no is-lens class, no spring system.
+// Mouse position drives a continuous field: words near cursor enlarge
+// and get pushed radially outward. Everything lerps smoothly.
+
+const _reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const M = {
+  rafId: null,
+  active: false,
+  mx: -9999,   // mouse in cloud-local coords
+  my: -9999,
+  cloudRect: null,
+  // Field params
+  radius: 240,     // influence radius (px) — wider field
+  maxScale: 1.35,   // peak scale at cursor
+  maxPush: 14,     // small push — just enough to clear, not dodge
+  lerp: 0.18,      // smoothing per frame
+  items: [],
+};
+
+function _syncItems() {
+  const cloud = document.getElementById('heatmapCloud');
+  if (!cloud) return;
+  const els = cloud.querySelectorAll('.kw:not(.hidden)');
+  const prev = new Map(M.items.map(it => [it.el, it]));
+  M.items = Array.from(els).map(el => {
+    const old = prev.get(el);
+    return {
+      el,
+      x: old ? old.x : 0,
+      y: old ? old.y : 0,
+      s: old ? old.s : 1,
+    };
+  });
+}
+
+function _initMag() {
+  if (_reduceMotion) return;
+  const cloud = document.getElementById('heatmapCloud');
+  if (!cloud) return;
+
+  const origApply = applyKeywordFilters;
+  applyKeywordFilters = function() { origApply(); _syncItems(); };
+
+  cloud.addEventListener('mouseenter', () => {
+    M.active = true;
+    M.cloudRect = cloud.getBoundingClientRect();
+    _syncItems();
+    if (!M.rafId) _loop();
+  });
+
+  cloud.addEventListener('mouseleave', () => {
+    M.active = false;
+    M.mx = -9999;
+    M.my = -9999;
+    _hideTooltip();
+    if (!M.rafId) _loop();
+  });
+
+  cloud.addEventListener('mousemove', (e) => {
+    M.cloudRect = cloud.getBoundingClientRect();
+    M.mx = e.clientX - M.cloudRect.left + cloud.scrollLeft;
+    M.my = e.clientY - M.cloudRect.top + cloud.scrollTop;
+    if (!M.rafId) _loop();
+  });
+
+  cloud.addEventListener('scroll', () => {
+    M.cloudRect = cloud.getBoundingClientRect();
+  });
+
+  _syncItems();
+}
+
+function _loop() {
+  const items = M.items;
+  if (!items.length) { M.rafId = null; return; }
+
+  let moving = false;
+
+  // First pass: find which keyword the mouse is actually hovering over
+  // Priority 1: mouse is inside the element's bounding box
+  // Priority 2: fallback to closest center if not directly over any word
+  let closestIdx = -1;
+  let closestDist = Infinity;
+  if (M.active) {
+    for (let i = 0; i < items.length; i++) {
+      const el = items[i].el;
+      if (!el || el.classList.contains('hidden')) continue;
+      const left = el.offsetLeft;
+      const top = el.offsetTop;
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      const rcx = left + w / 2;
+      const rcy = top + h / 2;
+      const dx = rcx - M.mx;
+      const dy = rcy - M.my;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // Check if mouse is inside this element's box (with small padding)
+      const pad = 4;
+      if (M.mx >= left - pad && M.mx <= left + w + pad &&
+          M.my >= top - pad && M.my <= top + h + pad) {
+        closestIdx = i;
+        closestDist = 0; // direct hit, highest priority
+        break; // found it, no need to check further
+      }
+
+      // Track closest center as fallback
+      if (dist < closestDist) {
+        closestDist = dist;
+        // Only set as candidate if not yet found a direct hit
+        if (closestIdx === -1) {
+          closestIdx = i;
+        }
+      }
+    }
+    // If we found a direct hit, closestDist is 0, otherwise it's the fallback distance
+    if (closestDist > 0 && closestIdx !== -1) {
+      // Recompute actual distance for the fallback candidate
+      const el = items[closestIdx].el;
+      const rcx = el.offsetLeft + el.offsetWidth / 2;
+      const rcy = el.offsetTop + el.offsetHeight / 2;
+      closestDist = Math.sqrt((rcx - M.mx) ** 2 + (rcy - M.my) ** 2);
+    }
+
+    // Show tooltip for the focused keyword
+    if (closestIdx !== -1 && closestDist < M.radius) {
+      const el = items[closestIdx].el;
+      const kwText = el.dataset.text;
+      const kwData = KEYWORDS.find(k => k.text === kwText);
+      if (kwData) {
+        // Convert cloud-local mouse to client coords for tooltip positioning
+        const cx = M.cloudRect ? M.cloudRect.left + M.mx - (document.getElementById('heatmapCloud').scrollLeft || 0) : 0;
+        const cy = M.cloudRect ? M.cloudRect.top + M.my - (document.getElementById('heatmapCloud').scrollTop || 0) : 0;
+        _showTooltip(kwData, cx, cy);
+      }
+    } else {
+      _hideTooltip();
+    }
+  } else {
+    _hideTooltip();
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const el = it.el;
+    if (!el || el.classList.contains('hidden')) continue;
+
+    // Rest center in cloud-local space
+    const rcx = el.offsetLeft + el.offsetWidth / 2;
+    const rcy = el.offsetTop + el.offsetHeight / 2;
+
+    let tx = 0, ty = 0, ts = 1, op = '';
+
+    if (M.active) {
+      const dx = rcx - M.mx;
+      const dy = rcy - M.my;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < M.radius && dist > 0.1) {
+        const t = dist / M.radius;
+        const bell = Math.cos(t * Math.PI * 0.5);
+
+        if (i === closestIdx && closestDist < M.radius) {
+          // Focused keyword: enlarge + full opacity + lift
+          ts = M.maxScale;
+          el.style.zIndex = '30';
+          op = '1';
+        } else {
+          // Surrounding words: no scale, dimmed for focus
+          ts = 1;
+          el.style.zIndex = String(10 + Math.round((1 - t) * 20));
+          if (!el.classList.contains('faded')) {
+            // Near cursor → very dim, far → slightly dim
+            op = (0.15 + 0.35 * t).toFixed(2);
+          }
+        }
+
+        // Radial push: push outward from cursor
+        const push = bell * M.maxPush;
+        tx = (dx / dist) * push;
+        ty = (dy / dist) * push;
+      } else {
+        // Outside influence: restore full opacity when not faded
+        el.style.zIndex = '';
+        if (!el.classList.contains('faded')) {
+          op = '';
+        }
+      }
+    } else {
+      el.style.zIndex = '';
+    }
+
+    // Lerp
+    const nx = it.x + (tx - it.x) * M.lerp;
+    const ny = it.y + (ty - it.y) * M.lerp;
+    const ns = it.s + (ts - it.s) * M.lerp;
+
+    if (Math.abs(nx - it.x) > 0.15 || Math.abs(ny - it.y) > 0.15 ||
+        Math.abs(ns - it.s) > 0.003) {
+      moving = true;
+    }
+
+    it.x = nx; it.y = ny; it.s = ns;
+
+    el.style.transform = `translate3d(${nx.toFixed(1)}px, ${ny.toFixed(1)}px, 0) scale(${ns.toFixed(3)})`;
+
+    if (!el.classList.contains('faded')) {
+      el.style.opacity = op;
+    }
+  }
+
+  if (M.active || moving) {
+    M.rafId = requestAnimationFrame(_loop);
+  } else {
+    for (const it of items) {
+      if (!it.el) continue;
+      it.x = it.y = 0; it.s = 1;
+      it.el.style.transform = '';
+      it.el.style.zIndex = '';
+      if (!it.el.classList.contains('faded')) it.el.style.opacity = '';
+    }
+    M.rafId = null;
+  }
+}
+
+// ==================== Keyword Tooltip ====================
+const _tooltip = document.getElementById('kwTooltip');
+let _tooltipKw = null;
+
+function _showTooltip(kw, clientX, clientY) {
+  if (!kw) { _hideTooltip(); return; }
+  const intentClass = kw.intent === 'Commercial' ? 'commercial' : 'informational';
+  _tooltip.innerHTML = `
+    <div class="kw-tooltip-title">${kw.text}</div>
+    <div class="kw-tooltip-row">
+      <span class="kw-tooltip-label">搜索量</span>
+      <span class="kw-tooltip-value">${kw.sv.toLocaleString()}</span>
+    </div>
+    <div class="kw-tooltip-row">
+      <span class="kw-tooltip-label">KD</span>
+      <span class="kw-tooltip-value">${kw.kd}</span>
+    </div>
+    <div class="kw-tooltip-row">
+      <span class="kw-tooltip-label">CPC</span>
+      <span class="kw-tooltip-value">$${kw.cpc.toFixed(2)}</span>
+    </div>
+    <div class="kw-tooltip-row">
+      <span class="kw-tooltip-label">意图</span>
+      <span class="kw-tooltip-intent ${intentClass}">${kw.intent}</span>
+    </div>
+  `;
+
+  // Position: above-right of cursor, flip if near edge
+  const tw = 200, th = 150;
+  let x = clientX + 16;
+  let y = clientY - th - 12;
+  if (x + tw > window.innerWidth - 8) x = clientX - tw - 16;
+  if (y < 8) y = clientY + 20;
+
+  _tooltip.style.left = x + 'px';
+  _tooltip.style.top = y + 'px';
+  _tooltip.classList.add('visible');
+  _tooltipKw = kw;
+}
+
+function _hideTooltip() {
+  _tooltip.classList.remove('visible');
+  _tooltipKw = null;
+}
+
+
+// ==================== Bridge API (scripts + agent) ====================
+const BRIDGE_DEFAULT = 'http://127.0.0.1:8765';
+
+function resolveBridgeBase() {
+  // Only same-origin when served by Studio Bridge itself (:8765).
+  // Cursor Live Preview / other http ports must NOT use relative URLs —
+  // they would hit the wrong host and show「Bridge 未连接」.
+  const host = location.hostname;
+  const port = String(location.port || '');
+  const onBridge =
+    (host === '127.0.0.1' || host === 'localhost') && port === '8765';
+  return onBridge ? '' : BRIDGE_DEFAULT;
+}
+
+function isOnBridgeOrigin() {
+  const host = location.hostname;
+  const port = String(location.port || '');
+  return (location.protocol === 'http:' || location.protocol === 'https:') &&
+    (host === '127.0.0.1' || host === 'localhost') &&
+    port === '8765';
+}
+
+function showWrongHostBannerIfNeeded() {
+  const el = document.getElementById('bridgeWrongHost');
+  if (!el) return;
+  if (isOnBridgeOrigin()) {
+    el.classList.remove('show');
+    return;
+  }
+  el.classList.add('show');
+  const a = document.getElementById('bridgeCorrectUrl');
+  if (a) a.href = BRIDGE_DEFAULT + '/';
+}
+
+const BRIDGE = {
+  base: resolveBridgeBase(),
+  runId: null,
+  online: false,
+};
+
+async function bridgeFetch(path, opts) {
+  const url = BRIDGE.base + path;
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, (opts && opts.headers) || {});
+  const res = await fetch(url, Object.assign({}, opts || {}, { headers }));
+  const textBody = await res.text();
+  let data = null;
+  try { data = textBody ? JSON.parse(textBody) : null; } catch (e) { data = { raw: textBody }; }
+  if (!res.ok) {
+    const msg = (data && (data.detail || data.error)) || res.statusText;
+    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+  }
+  return data;
+}
+
+function setBridgeUi(online, msg) {
+  BRIDGE.online = online;
+  const dot = document.getElementById('bridgeDot');
+  const st = document.getElementById('bridgeStatus');
+  if (dot) { dot.className = 'bridge-dot ' + (online ? 'on' : 'off'); }
+  if (st) st.textContent = msg || (online ? 'Bridge 已连接' : 'Bridge 未连接');
+}
+
+function setBridgeJob(msg) {
+  const el = document.getElementById('bridgeJob');
+  if (el) el.textContent = msg || '';
+}
+
+async function bridgeHealth() {
+  showWrongHostBannerIfNeeded();
+  try {
+    const h = await bridgeFetch('/api/health');
+    const prof = h.profile || 'povison-seo';
+    setBridgeUi(!!h.ok, 'Bridge 已连接 · ' + prof + (h.scripts_ok ? ' · skill OK' : ' · 缺脚本') + (h.gateway_key_set ? '' : ' · 无 Gateway Key'));
+    try {
+      if (!BRIDGE.runId) await bridgeEnsureRun();
+    } catch (runErr) {
+      setBridgeJob('Run 创建失败：' + (runErr && runErr.message ? runErr.message : runErr));
+    }
+    return !!h.ok;
+  } catch (e) {
+    const hint = isOnBridgeOrigin()
+      ? ('请运行 playground/seo-studio/./start.sh — ' + e.message)
+      : ('请用浏览器打开 ' + BRIDGE_DEFAULT + '/ — ' + e.message);
+    setBridgeUi(false, 'Bridge 未连接 · ' + hint);
+    return false;
+  }
+}
+
+async function bridgeEnsureRun() {
+  if (BRIDGE.runId) return BRIDGE.runId;
+  const run = getActiveRun && getActiveRun();
+  const label = run ? ('studio-' + run.id) : null;
+  const meta = await bridgeFetch('/api/runs', { method: 'POST', body: JSON.stringify({ label: label }) });
+  BRIDGE.runId = meta.id;
+  try { localStorage.setItem('seo_bridge_run_id', BRIDGE.runId); } catch (e) {}
+  setBridgeJob('Run ' + BRIDGE.runId);
+  return BRIDGE.runId;
+}
+
+async function bridgePollJob(jobId, timeoutMs) {
+  const t0 = Date.now();
+  const limit = timeoutMs || 30 * 60 * 1000;
+  while (Date.now() - t0 < limit) {
+    const job = await bridgeFetch('/api/jobs/' + jobId);
+    setBridgeJob(job.kind + ' · ' + job.status);
+    if (job.status === 'succeeded') return job;
+    if (job.status === 'failed') throw new Error(job.error || 'job failed');
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  throw new Error('job timeout');
+}
+
+async function bridgeLoadFile(name) {
+  const rid = await bridgeEnsureRun();
+  return bridgeFetch('/api/runs/' + rid + '/file/' + encodeURIComponent(name));
+}
+
+async function bridgeSaveFile(name, data) {
+  const rid = await bridgeEnsureRun();
+  return bridgeFetch('/api/runs/' + rid + '/file/' + encodeURIComponent(name), {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+async function bridgeDiscoverKeywords() {
+  if (!(await bridgeHealth())) return;
+  showToast('正在跑 keyword-discovery（可能较久）…', '');
+  try {
+    const rid = await bridgeEnsureRun();
+    const { job_id } = await bridgeFetch('/api/runs/' + rid + '/keywords/discover', {
+      method: 'POST',
+      body: JSON.stringify({ sources: 'brand media', min_freq: 2 }),
+    });
+    await bridgePollJob(job_id);
+    const raw = await bridgeLoadFile('kw.raw.json');
+    // auto enrich demo metrics for Studio usability
+    const en = await bridgeFetch('/api/runs/' + rid + '/keywords/enrich', {
+      method: 'POST',
+      body: JSON.stringify({ seed_demo: true }),
+    });
+    await bridgePollJob(en.job_id);
+    const kw = await bridgeLoadFile('kw.json');
+    const list = Array.isArray(kw) ? kw : (kw.keywords || []);
+    KEYWORDS = list.map(normalizeScriptKeyword).filter(Boolean);
+    renderKwList();
+    logStep(1, 'bridge_discover', 'Bridge 导入 ' + KEYWORDS.length + ' 词');
+    showToast('关键词已从脚本导入 ' + KEYWORDS.length + ' 条', 'success');
+  } catch (e) {
+    showToast('发现失败：' + e.message, '');
+  }
+}
+
+async function bridgeEnrichKeywords() {
+  if (!(await bridgeHealth())) return;
+  try {
+    const rid = await bridgeEnsureRun();
+    // push current KEYWORDS as raw if no file
+    try {
+      await bridgeLoadFile('kw.raw.json');
+    } catch (e) {
+      await bridgeSaveFile('kw.raw.json', KEYWORDS.map(function(k){
+        return { text: k.text, source: k.source, type: k.type || '', freq: k.freq || 1 };
+      }));
+    }
+    const en = await bridgeFetch('/api/runs/' + rid + '/keywords/enrich', {
+      method: 'POST',
+      body: JSON.stringify({ seed_demo: true }),
+    });
+    await bridgePollJob(en.job_id);
+    const kw = await bridgeLoadFile('kw.json');
+    const list = Array.isArray(kw) ? kw : (kw.keywords || []);
+    KEYWORDS = list.map(normalizeScriptKeyword).filter(Boolean);
+    renderKwList();
+    showToast('指标已补齐', 'success');
+  } catch (e) {
+    showToast('补数失败：' + e.message, '');
+  }
+}
+
+async function bridgeBrainstormTopics() {
+  if (!(await bridgeHealth())) return;
+  if (selectedKeywords.size === 0) {
+    showToast('请先用权重选出关键词', '');
+    return;
+  }
+  try {
+    const rid = await bridgeEnsureRun();
+    await bridgeSaveFile('kw.json', KEYWORDS.map(function(k){
+      return {
+        text: k.text, source: k.source, type: k.type || '', freq: k.freq || 1,
+        sv: k.sv, kd: k.kd, cpc: k.cpc, intent: k.intent,
+        metrics_status: k.metrics_status || (k.sv != null ? 'ok' : 'needs_manual'),
+      };
+    }));
+    const n = parseInt(document.getElementById('bsCount').value, 10) || 10;
+    const { job_id } = await bridgeFetch('/api/runs/' + rid + '/topics/brainstorm', {
+      method: 'POST',
+      body: JSON.stringify({
+        keywords: Array.from(selectedKeywords),
+        n: n,
+        demo: true,
+      }),
+    });
+    document.getElementById('bsLive').classList.add('show');
+    setBridgeJob('topic-brainstorm…');
+    await bridgePollJob(job_id);
+    const topicsDoc = await bridgeLoadFile('topics.json');
+    const topicList = topicsDoc.topics || topicsDoc;
+    brainstormTopics = (Array.isArray(topicList) ? topicList : []).map(function(t, i){ return normalizeTopicItem(t, i + 1); });
+    selectedTopics.clear();
+    renderTopics();
+    document.getElementById('bsActionBar').style.display = 'flex';
+    document.getElementById('bsLiveLabel').textContent = '脚本完成';
+    logStep(2, 'bridge_brainstorm', brainstormTopics.length + ' topics');
+    showToast('主题已从 topic-brainstorm 导入', 'success');
+  } catch (e) {
+    showToast('选题失败：' + e.message, '');
+  }
+}
+
+async function bridgeGenerateSection(mode, sectionId) {
+  if (!(await bridgeHealth())) return;
+  try {
+    const rid = await bridgeEnsureRun();
+    if (brainstormTopics.length) {
+      await bridgeSaveFile('topics.json', {
+        version: '1.0',
+        generated_at: new Date().toISOString(),
+        input_keywords: Array.from(selectedKeywords),
+        topics: brainstormTopics,
+      });
+    }
+    if (typeof rulesEnvelope === 'function') {
+      await bridgeSaveFile('generation-rules.json', rulesEnvelope());
+    }
+    if (articleState) {
+      await bridgeSaveFile('article-state.json', articleState);
+    }
+    const topicId = (currentGenTopic && (currentGenTopic.schema_id || currentGenTopic.id)) || 't01';
+    const body = { mode: mode, topic_id: String(topicId), demo: true };
+    if (sectionId) body.section_id = sectionId;
+    const { job_id } = await bridgeFetch('/api/runs/' + rid + '/sections/generate', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    await bridgePollJob(job_id);
+    const state = await bridgeLoadFile('article-state.json');
+    articleState = state;
+    currentGenTopic = articleState.topic || currentGenTopic;
+    document.getElementById('genEmpty').style.display = 'none';
+    document.getElementById('genWorkbench').style.display = 'block';
+    document.getElementById('genActionBar').style.display = 'flex';
+    if (articleState.topic) document.getElementById('wbTopicTitle').textContent = articleState.topic.title;
+    restoreWorkbenchUI();
+    saveToRun();
+    logStep(3, 'bridge_generate', mode + (sectionId ? ':' + sectionId : ''));
+    showToast('脚本已生成：' + mode, 'success');
+  } catch (e) {
+    showToast('生成失败：' + e.message, '');
+  }
+}
+
+async function bridgeValidateAndPreview() {
+  if (!(await bridgeHealth())) return;
+  try {
+    const rid = await bridgeEnsureRun();
+    if (articleState) await bridgeSaveFile('article-state.json', articleState);
+    const v = await bridgeFetch('/api/runs/' + rid + '/validate', { method: 'POST', body: '{}' });
+    articleState.validation = v.validation;
+    await bridgeFetch('/api/runs/' + rid + '/preview', { method: 'POST', body: '{}' });
+    const html = await (await fetch(BRIDGE.base + '/api/runs/' + rid + '/file/preview.html')).text();
+    articleState.previewHtml = html;
+    document.getElementById('previewFrame').srcdoc = html;
+    renderChecklist();
+    setGenPhase('preview');
+    showToast('校验 ' + (v.validation && v.validation.passed) + '/' + (v.validation && v.validation.total) + ' · 预览已组装', 'success');
+  } catch (e) {
+    showToast('校验/预览失败：' + e.message, '');
+  }
+}
+
+async function bridgeAskAgent(step) {
+  if (!(await bridgeHealth())) return;
+  try {
+    const rid = await bridgeEnsureRun();
+    if (articleState) await bridgeSaveFile('article-state.json', articleState);
+    const prompt = [
+      'Use skill povison-seo-blog.',
+      'Run directory: see Bridge run ' + rid + ' under skill runs/.',
+      'Step: ' + step,
+      'Prefer scripts for deterministic IO; write outputs into the run directory.',
+      'Topic: ' + (currentGenTopic ? (currentGenTopic.title || '') : ''),
+      'When done, list written file paths.',
+    ].join('\n');
+    const data = await bridgeFetch('/api/runs/' + rid + '/agent', {
+      method: 'POST',
+      body: JSON.stringify({ step: step, prompt: prompt, yolo: false }),
+    });
+    logStep(0, 'bridge_agent', step + ' ' + JSON.stringify(data.gateway && data.gateway.run_id));
+    showToast('已请求 Agent（Gateway）。完成后点「从 Bridge 刷新状态」', 'success');
+  } catch (e) {
+    showToast('Agent 启动失败：' + e.message + '（需 Gateway 在线）', '');
+  }
+}
+
+async function bridgeReloadState() {
+  if (!(await bridgeHealth())) return;
+  try {
+    const state = await bridgeLoadFile('article-state.json');
+    articleState = state;
+    restoreWorkbenchUI();
+    showToast('已从 Bridge 刷新 article-state', 'success');
+  } catch (e) {
+    showToast('刷新失败：' + e.message, '');
+  }
+}
+
+
+// ==================== Init ====================
+showWrongHostBannerIfNeeded();
+try {
+  renderKwList();
+  loadRulesFromStorage();
+  renderRules();
+  createRun(); // Initialize first run
+} catch (initErr) {
+  console.error('Studio init error', initErr);
+}
+try { BRIDGE.runId = localStorage.getItem('seo_bridge_run_id'); } catch (e) {}
+bridgeHealth();
+</script>
+</body>
+</html>
