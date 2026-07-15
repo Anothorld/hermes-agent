@@ -134,6 +134,7 @@ def check_intent_gate(
     customer_email: str | None = None,
     env: str = "LIVE",
     info: Optional[dict[str, Any]] = None,
+    force_reclassify: bool = False,
 ) -> IntentGateResult:
     """Return whether watcher should launch automation for this session.
 
@@ -141,6 +142,10 @@ def check_intent_gate(
     service (pre-fetches body + dispatch-context, calls POST /classify, gates
     on ``in_scope``). Falls through to the legacy QuickCEP-tag logic when the
     classifier is unreachable or the switch is off.
+
+    When ``force_reclassify=True``, skips the classifier cache and re-runs
+    POST /classify. Used when a session is reopened by a new customer message
+    to detect intent changes (e.g. logistics_inquiry → order_management).
     """
     if _cs_intent_enabled():
         result = _classifier_gate(
@@ -148,6 +153,7 @@ def check_intent_gate(
             env=env,
             customer_email=customer_email,
             info=info,
+            force_reclassify=force_reclassify,
         )
         if result is not None:
             return result
@@ -229,6 +235,7 @@ def _classifier_gate(
     env: str,
     customer_email: str | None,
     info: Optional[dict[str, Any]],
+    force_reclassify: bool = False,
 ) -> Optional[IntentGateResult]:
     """Call the cs-intent-classifier service. Returns IntentGateResult or None on failure.
 
@@ -245,6 +252,7 @@ def _classifier_gate(
         env=env,
         customer_email=customer_email,
         info=info,
+        force_reclassify=force_reclassify,
     )
     try:
         return future.result(timeout=_seam_timeout())
@@ -310,6 +318,7 @@ def _classifier_gate_work(
     env: str,
     customer_email: str | None,
     info: Optional[dict[str, Any]],
+    force_reclassify: bool = False,
 ) -> Optional[IntentGateResult]:
     """Blocking body of the classifier seam (runs inside _SEAM_EXECUTOR)."""
     import urllib.error
@@ -323,16 +332,17 @@ def _classifier_gate_work(
     # out → graceful fallback → transient skip (no CAL dedup) → next REST
     # tick re-POSTs → server runs LLM again → wasted call. The cache short
     # -circuits this loop after the first successful server-side classify.
-    try:
-        cached = _fetch_cached_gate_extract(session_id=session_id, env=env)
-    except Exception as exc:
-        # Defensive: _fetch_cached_gate_extract already catches internally, but
-        # never let a cache-check crash propagate and block the gate.
-        log.debug("cache check crashed for session %s: %s", session_id, exc)
-        cached = None
-    if cached is not None:
-        log.info("cs-intent-classifier cache hit for session %s — skipping POST /classify", session_id)
-        return _gate_result_from_ge(cached)
+    if not force_reclassify:
+        try:
+            cached = _fetch_cached_gate_extract(session_id=session_id, env=env)
+        except Exception as exc:
+            log.debug("cache check crashed for session %s: %s", session_id, exc)
+            cached = None
+        if cached is not None:
+            log.info("cs-intent-classifier cache hit for session %s — skipping POST /classify", session_id)
+            return _gate_result_from_ge(cached)
+    else:
+        log.info("force_reclassify for session %s — bypassing classifier cache", session_id)
 
     subject = (info or {}).get("email_subject") or ""
     visitor_info = (info or {}).get("visitorInfo") or {}

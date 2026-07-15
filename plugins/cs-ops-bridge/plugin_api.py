@@ -682,7 +682,21 @@ def save_session_draft(
 
     # Server-side guard for Console-originated drafts (agent path guards in
     # cs_bridge_tool; both must enforce the same policy — PR1.9).
-    block = guard_draft_content(body.draft_html, body.attachments)
+    # Fetch allowed_attachment_urls from resuming escalation so vault-sourced
+    # PDFs pass the guard (same logic as attachment-guard-context endpoint).
+    _esc = cal.get_resuming_escalation_for_session(
+        quickcep_session_id=quickcep_session_id,
+        env=body.env,
+    )
+    _allowed_urls: list[str] = []
+    if _esc:
+        _ctx = _esc.get("resume_context") or {}
+        _allowed_urls = list(_ctx.get("allowed_attachment_urls") or [])
+    block = guard_draft_content(
+        body.draft_html,
+        body.attachments,
+        allowed_attachment_urls=_allowed_urls,
+    )
     if block:
         raise HTTPException(status_code=422, detail=block)
 

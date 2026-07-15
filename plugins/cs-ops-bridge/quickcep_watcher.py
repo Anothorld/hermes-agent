@@ -384,12 +384,20 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         )
         return None
 
+    # Detect if this is a reopened session (prior CAL record with terminal status).
+    # If so, force re-classification — the customer's new message may have a different intent.
+    _existing_sess = cal.get_session(quickcep_session_id=session_id, env=_ENV)
+    _force_reclassify = bool(_existing_sess and str(_existing_sess.get("status") or "") in (
+        "operator_replied", "reviewed", "draft_ready", "failed",
+    ))
+
     gate = check_intent_gate(
         session_id,
         info.get("intentionTags"),
         customer_email=str(email) if email else None,
         env=_ENV,
         info=info,
+        force_reclassify=_force_reclassify,
     )
     if not gate.allowed:
         log.info(
@@ -649,6 +657,26 @@ def run_rest_reconcile_once() -> dict[str, Any]:
             sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
             if sess and str(sess.get("last_message_id") or "") == msg_id:
                 continue
+            # For reopened sessions (operator_replied/reviewed), verify the last
+            # QuickCEP message is from a visitor — not a system action (close,
+            # transfer, tag change) or operator note/reply that bumped lastMsgTime.
+            if sess and str(sess.get("status") or "") in ("operator_replied", "reviewed"):
+                last_msg_type = str(row.get("lastMsgContentType") or "")
+                if last_msg_type in ("text", "internalNote"):
+                    log.info(
+                        "REST skip session %s — lastMsg is %s (system/operator), status=%s",
+                        sid, last_msg_type, sess.get("status"),
+                    )
+                    continue
+                if last_msg_type == "html":
+                    last_owner = str(row.get("lastMsgOwnerId") or "")
+                    chat_sid = str(row.get("chatSessionId") or "")
+                    if last_owner and chat_sid and last_owner != chat_sid:
+                        log.info(
+                            "REST skip session %s — lastMsg is operator reply (ownerId=%s != chatSessionId=%s)",
+                            sid, last_owner, chat_sid,
+                        )
+                        continue
             vi = row.get("visitorInfo") if isinstance(row.get("visitorInfo"), dict) else {}
             # Extract email_subject and content from lastMsgContent for ad detection.
             rest_subject, rest_content = parse_rest_last_msg_content(row)

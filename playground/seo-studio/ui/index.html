@@ -155,6 +155,30 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
   padding: 0 48px 16px;
   max-width: 960px;
 }
+.discover-sources {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 0 48px 14px; max-width: 960px;
+}
+.discover-sources-label {
+  font-size: 12px; font-weight: 600; color: var(--text-secondary);
+  margin-right: 4px; flex-shrink: 0;
+}
+.discover-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: var(--r-pill);
+  font-size: 12px; font-weight: 500; color: var(--text-secondary);
+  background: rgba(0,0,0,0.04); border: 1px solid transparent;
+  cursor: pointer; transition: all var(--t-fast); user-select: none;
+}
+.discover-chip input { display: none; }
+.discover-chip.on {
+  background: rgba(0,113,227,0.1); color: var(--accent);
+  border-color: rgba(0,113,227,0.25);
+}
+.discover-chip-all {
+  font-size: 12px; color: var(--accent); background: none; border: none;
+  cursor: pointer; padding: 6px 8px; font-weight: 500;
+}
 .kw-list {
   background: #fff;
   border-radius: 16px;
@@ -292,9 +316,37 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 }
 .audit-run:hover { background: rgba(0,0,0,0.02); }
 .audit-run.active { background: rgba(0,113,227,0.06); }
-.audit-run-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.audit-run-id { font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.audit-run-status { font-size: 10px; font-weight: 600; }
+.audit-run-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 8px; }
+.audit-run-id { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-run-status { font-size: 10px; font-weight: 600; flex-shrink: 0; }
+.audit-status-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 980px; font-size: 10px; font-weight: 600;
+  letter-spacing: -0.1px; line-height: 1.4;
+}
+.audit-status-pill::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+}
+.audit-status-pill.idle {
+  background: rgba(0,0,0,0.04); color: var(--text-secondary);
+}
+.audit-status-pill.idle::before { background: var(--text-tertiary); }
+.audit-status-pill.running {
+  background: rgba(0,113,227,0.1); color: var(--accent);
+}
+.audit-status-pill.running::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(0,113,227,0.45);
+  animation: auditPulse 1.4s ease-in-out infinite;
+}
+.audit-status-pill.completed {
+  background: rgba(48,209,88,0.12); color: #1a7f37;
+}
+.audit-status-pill.completed::before { background: var(--success); }
+@keyframes auditPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0,113,227,0.4); opacity: 1; }
+  50% { box-shadow: 0 0 0 4px rgba(0,113,227,0); opacity: 0.7; }
+}
 .audit-run-meta { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
 .audit-step {
   width: 18px; height: 18px; border-radius: 50%; font-size: 10px; font-weight: 600;
@@ -303,15 +355,12 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
   transition: all 0.2s;
 }
 .audit-step.done { background: var(--success); color: #fff; }
+.audit-step.running {
+  background: var(--accent); color: #fff;
+  animation: auditPulse 1.4s ease-in-out infinite;
+}
 .audit-step-line { width: 12px; height: 1.5px; background: rgba(0,0,0,0.08); }
 .audit-run-detail { font-size: 10px; color: var(--text-tertiary); margin-bottom: 6px; }
-.audit-run-forks { display: flex; gap: 4px; }
-.fork-btn {
-  font-size: 9px; padding: 2px 7px; border-radius: 980px;
-  background: rgba(175,82,222,0.1); color: var(--purple); border: none;
-  cursor: pointer; font-weight: 600; transition: all 0.15s;
-}
-.fork-btn:hover { background: rgba(175,82,222,0.2); transform: scale(1.05); }
 
 /* ── Keyword tooltip (Apple-style floating card) ── */
 .kw-tooltip {
@@ -422,7 +471,23 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .bs-live-stream::-webkit-scrollbar { width: 4px; }
 .bs-live-stream::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
 .bs-live-line { color: rgba(255,255,255,0.7); animation: lineIn 0.3s ease; }
+.bs-live-line.done { color: #7dea9e; }
+.bs-live-line.error { color: #ff6961; }
 @keyframes lineIn { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:translateX(0); } }
+
+/* Generation live (Agent progress — all stages) — same visual language as bs-live */
+.gen-live { background: #1d1d1f; border-radius: var(--r-md); overflow: hidden; margin: 0 0 16px; display: none; }
+.gen-live.show { display: block; }
+.gen-live-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.gen-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 1.5s ease-in-out infinite; flex-shrink: 0; }
+.gen-live-label { font-size: 13px; font-weight: 600; color: #fff; }
+.gen-live-detail { font-size: 12px; color: rgba(255,255,255,0.5); margin-left: auto; }
+.gen-live-stream { padding: 16px; max-height: 240px; overflow-y: auto; font-family: "SF Mono","Monaco","Menlo",monospace; font-size: 13px; line-height: 1.7; }
+.gen-live-stream::-webkit-scrollbar { width: 4px; }
+.gen-live-stream::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+.gen-live-line { color: rgba(255,255,255,0.7); animation: lineIn 0.3s ease; }
+.gen-live-line.done { color: #7dea9e; }
+.gen-live-line.error { color: #ff6961; }
 
 /* Topic results grid */
 .topic-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -528,6 +593,30 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .outline-remove:hover { opacity: 1; color: var(--danger); }
 
 .section-stack { display: flex; flex-direction: column; gap: 12px; }
+.section-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.section-layout .section-stack { min-width: 0; }
+.section-preview {
+  position: sticky; top: 16px;
+  background: var(--bg-secondary); border-radius: var(--r-lg);
+  border: 1px solid var(--border); overflow: hidden;
+  max-height: calc(100vh - 120px); display: flex; flex-direction: column;
+}
+.section-preview-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+  font-size: 13px; font-weight: 600; color: var(--text-secondary);
+}
+.section-preview-header .pv-count { font-size: 11px; color: var(--text-tertiary); font-weight: 400; }
+.section-preview-body {
+  overflow-y: auto; padding: 16px 20px; font-size: 13px; line-height: 1.6;
+}
+.section-preview-body .pv-h1 { font-size: 18px; font-weight: 700; margin: 0 0 12px; color: var(--text-primary); }
+.section-preview-body .pv-h2 { font-size: 15px; font-weight: 600; margin: 16px 0 6px; color: var(--text-primary); }
+.section-preview-body .pv-h3 { font-size: 13px; font-weight: 600; margin: 10px 0 4px; color: var(--text-secondary); }
+.section-preview-body .pv-para { margin: 0 0 8px; color: var(--text-primary); white-space: pre-wrap; }
+.section-preview-body .pv-empty { color: var(--text-tertiary); font-style: italic; font-size: 12px; }
+.section-preview-body .pv-type { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--text-tertiary); letter-spacing: 0.4px; }
+@media (max-width: 1100px) { .section-layout { grid-template-columns: 1fr; } .section-preview { position: static; max-height: 400px; } }
 .section-card {
   background: var(--bg-secondary); border-radius: var(--r-lg);
   border: 1px solid var(--border); overflow: hidden;
@@ -546,6 +635,13 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
   letter-spacing: 0.4px; color: var(--text-tertiary); min-width: 48px;
 }
 .section-head .sec-title { flex: 1; font-size: 14px; font-weight: 600; }
+.sec-img-count { font-size: 11px; color: var(--text-tertiary); margin-right: 4px; }
+.sec-img-bar { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 10px; }
+.sec-img-thumb { position: relative; width: 120px; border-radius: var(--r-sm); overflow: hidden; border: 1px solid var(--border); }
+.sec-img-thumb img { width: 100%; height: 80px; object-fit: cover; display: block; }
+.sec-img-credit { display: block; font-size: 9px; color: var(--text-tertiary); padding: 2px 4px; background: var(--bg-tertiary); }
+.place-product-img { margin: 8px 0; border-radius: var(--r-sm); overflow: hidden; border: 1px solid var(--border); max-width: 200px; }
+.place-product-img img { width: 100%; display: block; }
 .section-body { display: none; padding: 0 16px 16px; border-top: 1px solid var(--border); }
 .section-card.open .section-body { display: block; padding-top: 14px; }
 .section-editor {
@@ -596,7 +692,9 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
   background: rgba(175,82,222,0.08); color: var(--purple); font-weight: 500;
 }
 .serp-list { font-size: 13px; color: var(--text-secondary); line-height: 1.7; margin-bottom: 8px; }
-.serp-list li { margin-left: 18px; }
+.serp-list li { margin-left: 18px; margin-bottom: 6px; }
+.serp-cluster { font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
+.serp-result-line { display: block; font-size: 12px; color: var(--text-secondary); padding-left: 10px; }
 
 .preview-wrapper { background: var(--bg-secondary); border-radius: var(--r-lg); box-shadow: var(--shadow-md); border: 1px solid var(--border); overflow: hidden; }
 .preview-toolbar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary); }
@@ -674,6 +772,27 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .spinner { width: 20px; height: 20px; border: 2.5px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ==================== Bridge Job Progress (Apple-style) ==================== */
+.btn.is-loading { position: relative; color: transparent !important; pointer-events: none; opacity: 0.55; }
+.btn.is-loading::after { content: ""; position: absolute; top: 50%; left: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
+.btn-secondary.is-loading::after { border-color: rgba(0,0,0,0.18); border-top-color: var(--text-primary); }
+
+.job-progress { position: fixed; top: 20px; left: 50%; transform: translateX(-50%) translateY(-12px); z-index: 9000; min-width: 320px; max-width: 460px; padding: 16px 20px; background: rgba(255,255,255,0.82); backdrop-filter: blur(28px) saturate(180%); -webkit-backdrop-filter: blur(28px) saturate(180%); border: 0.5px solid rgba(0,0,0,0.08); border-radius: 18px; box-shadow: 0 12px 40px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.04); opacity: 0; pointer-events: none; transition: opacity 0.35s cubic-bezier(0.25,0.1,0.25,1), transform 0.35s cubic-bezier(0.25,0.1,0.25,1); font-family: var(--sf-font); }
+.job-progress.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+.job-progress-row { display: flex; align-items: center; gap: 12px; }
+.job-progress .jp-spinner { width: 18px; height: 18px; border: 2.5px solid rgba(0,113,227,0.18); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+.job-progress .jp-title { font-size: 14px; font-weight: 600; color: var(--text-primary); letter-spacing: -0.01em; }
+.job-progress .jp-status { font-size: 12px; color: var(--text-secondary); margin-top: 2px; line-height: 1.3; }
+.job-progress .jp-time { margin-left: auto; font-size: 12px; font-weight: 500; color: var(--text-tertiary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.job-progress .jp-bar { margin-top: 12px; height: 4px; border-radius: 2px; background: rgba(0,0,0,0.06); overflow: hidden; position: relative; }
+.job-progress .jp-bar::after { content: ""; position: absolute; top: 0; left: -40%; width: 40%; height: 100%; border-radius: 2px; background: var(--accent); animation: jpBar 1.3s cubic-bezier(0.65,0,0.35,1) infinite; }
+@keyframes jpBar { 0% { left: -40%; width: 40%; } 50% { left: 30%; width: 50%; } 100% { left: 100%; width: 40%; } }
+.job-progress.success .jp-spinner { border-color: rgba(48,209,88,0.25); border-top-color: var(--success); animation: none; background: var(--success); border: none; }
+.job-progress.success .jp-bar::after { animation: none; left: 0; width: 100%; background: var(--success); }
+.job-progress.failed .jp-spinner { border-color: rgba(255,59,48,0.25); border-top-color: var(--danger); animation: none; background: var(--danger); border: none; }
+.job-progress.failed .jp-title { color: var(--danger); }
+.job-progress.failed .jp-bar::after { animation: none; left: 0; width: 100%; background: var(--danger); opacity: 0.4; }
+
 @media (max-width: 900px) {
   .sidebar { width: 64px; }
   .sidebar-logo .logo-text, .nav-item span:not(.nav-step-num), .sidebar-footer .wp-status span:not(.status-dot) { display: none; }
@@ -687,6 +806,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
 <div class="app">
@@ -743,8 +863,8 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
     <div class="box">
       <h2>请用系统浏览器打开 Studio</h2>
       <p>当前不是 Bridge 地址（Cursor 预览 / file:// / 其它端口都会导致「Bridge 未连接」，且页面可能显示异常）。</p>
-      <p><a id="bridgeCorrectUrl" href="http://127.0.0.1:8765/">http://127.0.0.1:8765/</a></p>
-      <button type="button" class="btn btn-primary" onclick="window.open('http://127.0.0.1:8765/','_blank')">打开正确地址</button>
+      <p><a id="bridgeCorrectUrl" href="http://127.0.0.1:8766/">http://127.0.0.1:8766/</a></p>
+      <button type="button" class="btn btn-primary" onclick="window.open('http://127.0.0.1:8766/','_blank')">打开正确地址</button>
     </div>
   </div>
 
@@ -792,6 +912,20 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
           <span>共 <strong id="kwTotalCount">0</strong> 个关键词</span>
         </div>
       </div>
+      <div class="discover-sources" id="discoverSources">
+        <span class="discover-sources-label">发现来源</span>
+        <label class="discover-chip on" data-src="brand"><input type="checkbox" checked>竞品品牌</label>
+        <label class="discover-chip on" data-src="media"><input type="checkbox" checked>家居媒体</label>
+        <label class="discover-chip" data-src="trend"><input type="checkbox">搜索趋势</label>
+        <label class="discover-chip" data-src="news"><input type="checkbox">热点新闻</label>
+        <label class="discover-chip" data-src="lifestyle"><input type="checkbox">生活厨艺</label>
+        <label class="discover-chip" data-src="health"><input type="checkbox">健康医疗</label>
+        <label class="discover-chip" data-src="fitness"><input type="checkbox">运动健身</label>
+        <label class="discover-chip" data-src="education"><input type="checkbox">教育亲子</label>
+        <label class="discover-chip" data-src="lifestyle_news"><input type="checkbox">生活热点</label>
+        <button type="button" class="discover-chip-all" onclick="toggleAllDiscoverSources(true)">全选</button>
+        <button type="button" class="discover-chip-all" onclick="toggleAllDiscoverSources(false)">仅默认</button>
+      </div>
       <div class="kw-list-container">
         <div class="kw-list" id="kwList"></div>
       </div>
@@ -802,6 +936,11 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
           <option value="media">家居媒体</option>
           <option value="trend">搜索趋势</option>
           <option value="news">热点新闻</option>
+          <option value="lifestyle">生活厨艺</option>
+          <option value="health">健康医疗</option>
+          <option value="fitness">运动健身</option>
+          <option value="education">教育亲子</option>
+          <option value="lifestyle_news">生活热点</option>
         </select>
         <button class="btn btn-secondary btn-sm" onclick="addKeywordManual()">添加</button>
       </div>
@@ -817,10 +956,16 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 
     <!-- Step 2: Brainstorm -->
     <div class="view" id="view-brainstorm">
-      <div class="view-header"><h2>主题头脑风暴</h2><p><strong>生产路径：</strong>运行 <code>topic-brainstorm.py</code> 后点「导入主题 JSON」。下方「本地 Demo」仅用于界面演示，不作为生产选题来源。</p></div>
+      <div class="view-header"><h2>主题头脑风暴</h2><p><strong>生产路径：</strong>点击「开始生成」由 <strong>Agent</strong> 做 SERP 驱动选题（实时进度见下方面板）。脚本 <code>topic-brainstorm.py</code> 仅作备用。</p></div>
       <div class="brainstorm-container">
         <div class="brainstorm-input">
-          <div class="bs-label">已选关键词</div>
+          <div class="bs-label" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>已选关键词</span>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="rerollKeywords()" title="重新随机关键词" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="16" cy="8" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="8" cy="16" r="1.2" fill="currentColor"/><circle cx="16" cy="16" r="1.2" fill="currentColor"/></svg>
+              换一批
+            </button>
+          </div>
           <div class="bs-keywords" id="bsKeywords"></div>
           <div class="bs-options">
             <div class="bs-count-group">
@@ -833,10 +978,10 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               导入主题 JSON
               <input type="file" id="topicImportFile" accept=".json,application/json" style="display:none;" onchange="importTopicsFromSchema(this)">
             </label>
-            <button type="button" class="btn btn-primary btn-sm" onclick="bridgeBrainstormTopics()">桥接：跑 topic-brainstorm</button>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="bridgeBrainstormTopics()" title="备用：直接跑 topic-brainstorm.py（LLM）">桥接：脚本选题</button>
 
-            <button class="btn btn-secondary" id="bsGenerateBtn" onclick="runBrainstormDemo()" title="仅本地 mock，非生产">
-              本地 Demo
+            <button class="btn btn-primary" id="bsGenerateBtn" onclick="runBrainstormDemo()">
+              开始生成
             </button>
           </div>
           <p class="wb-hint" style="margin-top:10px;">脚本示例：<code>python3 scripts/topic-brainstorm.py -i kw.json --demo -n 10 -o topics.json</code></p>
@@ -890,6 +1035,15 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
             <button class="btn btn-secondary btn-sm" onclick="switchView('brainstorm')">换主题</button>
           </div>
 
+          <div class="gen-live" id="genLive">
+            <div class="gen-live-header">
+              <div class="gen-live-dot"></div>
+              <span class="gen-live-label" id="genLiveLabel">Agent 执行中</span>
+              <span class="gen-live-detail" id="genLiveDetail">等待任务更新…</span>
+            </div>
+            <div class="gen-live-stream" id="genLiveStream"></div>
+          </div>
+
           <div class="gen-phase-pills" id="genPhasePills">
             <button class="gen-phase-pill active" data-phase="serp" onclick="setGenPhase('serp')"><span class="pill-num">1</span>SERP 洞察</button>
             <button class="gen-phase-pill" data-phase="outline" onclick="setGenPhase('outline')"><span class="pill-num">2</span>大纲</button>
@@ -917,7 +1071,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                   <div class="serp-gaps" id="serpGaps"></div>
                 </div>
                 <div class="wb-actions" style="margin-top:14px;">
-                  <button class="btn btn-primary" id="btnGenSerp" onclick="generateSerp()">生成 SERP 分析</button>
+                  <button class="btn btn-primary" id="btnGenSerp" onclick="generateSerp()">请 Agent 分析 SERP</button>
                   <button class="btn btn-secondary" id="btnSerpNext" onclick="setGenPhase('outline')" disabled>下一步：大纲</button>
                 </div>
               </div>
@@ -936,9 +1090,8 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <div class="gen-live-mini" id="outlineLive"></div>
                 <div class="outline-list" id="outlineList"></div>
                 <div class="wb-actions">
-                  <button class="btn btn-primary" id="btnGenOutline" onclick="generateOutline()">生成大纲（本地 Demo）</button>
-                  <button class="btn btn-secondary" type="button" onclick="bridgeGenerateSection('outline')">桥接：脚本生成大纲</button>
-                  <button class="btn btn-ghost" type="button" onclick="bridgeAskAgent('serp')">请 Agent（SERP）</button>
+                  <button class="btn btn-primary" id="btnGenOutline" onclick="generateOutline()">请 Agent 生成大纲</button>
+                  <button class="btn btn-secondary" type="button" onclick="bridgeGenerateSection('outline')">脚本生成（备选）</button>
                   <button class="btn btn-secondary" onclick="addOutlineItem('h2')" id="btnAddH2" disabled>加 H2</button>
                   <button class="btn btn-secondary" onclick="addOutlineItem('h3')" id="btnAddH3" disabled>加 H3</button>
                   <div class="spacer"></div>
@@ -959,9 +1112,8 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               <div class="wb-card-body">
                 <p class="wb-hint">按 Intro → 各 H2 → Conclusion 逐块生成。每块可编辑、可单独重写；全部就绪后进入产品植入与内链审核。</p>
                 <div class="wb-actions">
-                  <button class="btn btn-primary" id="btnGenAllSections" onclick="generateAllSections()" disabled>一键生成全部板块（Demo）</button>
-                  <button class="btn btn-secondary" type="button" onclick="bridgeGenerateSection('section')" id="btnBridgeGenSections">桥接：脚本生成正文</button>
-                  <button class="btn btn-ghost" type="button" onclick="bridgeAskAgent('section')">请 Agent 写正文</button>
+                  <button class="btn btn-primary" id="btnGenAllSections" onclick="generateAllSections()" disabled>请 Agent 写全部正文</button>
+                  <button class="btn btn-secondary" type="button" onclick="bridgeGenerateSection('section')" id="btnBridgeGenSections">脚本生成（备选）</button>
                   <button class="btn btn-ghost" type="button" onclick="bridgeReloadState()">从 Bridge 刷新</button>
                   <div class="spacer"></div>
                   <button class="btn btn-ghost" onclick="setGenPhase('outline')">回改大纲</button>
@@ -969,7 +1121,16 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 </div>
               </div>
             </div>
-            <div class="section-stack" id="sectionStack"></div>
+            <div class="section-layout">
+              <div class="section-stack" id="sectionStack"></div>
+              <div class="section-preview" id="sectionPreview">
+                <div class="section-preview-header">
+                  <span>总体预览</span>
+                  <span class="pv-count" id="pvWordCount">0 词</span>
+                </div>
+                <div class="section-preview-body" id="sectionPreviewBody"></div>
+              </div>
+            </div>
           </div>
 
           <!-- Phase: Product placements & internal links -->
@@ -1014,7 +1175,16 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               <div class="wb-card-body">
                 <p class="wb-hint">4–6 个常见问题。答案应短于正文，与正文重复率控制在 20% 以内。可直接改问题与答案。</p>
                 <div class="gen-live-mini" id="faqLive"></div>
-                <div id="faqEditor"></div>
+                <div class="section-layout">
+                  <div id="faqEditor"></div>
+                  <div class="section-preview" id="faqPreview">
+                    <div class="section-preview-header">
+                      <span>总体预览</span>
+                      <span class="pv-count" id="faqPvWordCount">0 词</span>
+                    </div>
+                    <div class="section-preview-body" id="faqPreviewBody"></div>
+                  </div>
+                </div>
                 <div class="wb-actions" style="margin-top:14px;">
                   <button class="btn btn-primary" id="btnGenFaq" onclick="generateFaq()" disabled>生成 FAQ</button>
                   <button class="btn btn-secondary" onclick="addFaqItem()" id="btnAddFaq" disabled>加一问</button>
@@ -1089,7 +1259,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               <div class="spacer"></div>
               <button class="btn btn-primary" id="btnPublishDraft" onclick="finalizeMvpExport()">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v8M8 6l4 4 4-4M5 14v6h14v-6"/></svg>
-                审核通过，导出 HTML（MVP）
+                审核通过，导出到 WordPress 草稿
               </button>
             </div>
           </div>
@@ -1122,72 +1292,34 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 </div>
 <div class="kw-tooltip" id="kwTooltip"></div>
 <div class="toast-container" id="toastContainer"></div>
+<div class="job-progress" id="jobProgress" role="status" aria-live="polite">
+  <div class="job-progress-row">
+    <span class="jp-spinner"></span>
+    <div>
+      <div class="jp-title" id="jpTitle">正在处理…</div>
+      <div class="jp-status" id="jpStatus">请稍候</div>
+    </div>
+    <span class="jp-time" id="jpTime">0:00</span>
+  </div>
+  <div class="jp-bar"></div>
+</div>
 
 <script>
 // #region agent log
 fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:1126',message:'JS_EXEC_START: main script tag entered',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H3'})}).catch(()=>{});
 // #endregion
 // ==================== Keyword Data ====================
-// DEMO seed only. Production Step 1 = keyword-discovery.py → import JSON below.
+// Keywords are loaded exclusively from keyword-discovery.py via the Bridge.
+// Run「桥接：发现关键词」to populate; nothing is hardcoded.
 // Script output shape: [{ text, source, type, freq }] (+ optional sv/kd/cpc/intent after Semrush).
 const KEYWORD_SCRIPT_PATH = '~/.hermes/skills/productivity/povison-seo-blog/scripts/keyword-discovery.py';
-let KEYWORDS = [
-  // Brand-sourced (blue) — 14 keywords
-  { text: "fully assembled furniture", source: "brand", heat: "xl", sv: 18100, kd: 32, cpc: 2.4, intent: "Commercial" },
-  { text: "mid-century modern sofa", source: "brand", heat: "xl", sv: 9900, kd: 28, cpc: 1.8, intent: "Commercial" },
-  { text: "modular sofa", source: "brand", heat: "lg", sv: 14800, kd: 41, cpc: 3.1, intent: "Commercial" },
-  { text: "sectional sofa", source: "brand", heat: "lg", sv: 27100, kd: 55, cpc: 4.2, intent: "Commercial" },
-  { text: "pet-friendly upholstery", source: "brand", heat: "lg", sv: 6600, kd: 19, cpc: 1.2, intent: "Informational" },
-  { text: "lift top coffee table", source: "brand", heat: "md", sv: 8100, kd: 35, cpc: 2.0, intent: "Commercial" },
-  { text: "power recliner", source: "brand", heat: "md", sv: 9900, kd: 38, cpc: 3.5, intent: "Commercial" },
-  { text: "accent chair", source: "brand", heat: "md", sv: 12100, kd: 44, cpc: 2.8, intent: "Commercial" },
-  { text: "upholstered bed frame", source: "brand", heat: "md", sv: 4400, kd: 22, cpc: 1.5, intent: "Commercial" },
-  { text: "dining bench with back", source: "brand", heat: "sm", sv: 2400, kd: 18, cpc: 1.3, intent: "Commercial" },
-  { text: "console table with drawers", source: "brand", heat: "sm", sv: 1900, kd: 15, cpc: 1.0, intent: "Commercial" },
-  { text: "bar cart on wheels", source: "brand", heat: "xs", sv: 1300, kd: 12, cpc: 0.9, intent: "Commercial" },
-  { text: "entryway bench with storage", source: "brand", heat: "xs", sv: 880, kd: 10, cpc: 0.7, intent: "Commercial" },
-  { text: "tv stand with fireplace", source: "brand", heat: "sm", sv: 3600, kd: 30, cpc: 2.3, intent: "Commercial" },
-  // Media-sourced (green) — 13 keywords
-  { text: "small space living", source: "media", heat: "xl", sv: 22200, kd: 24, cpc: 1.0, intent: "Informational" },
-  { text: "apartment therapy", source: "media", heat: "lg", sv: 33100, kd: 48, cpc: 2.5, intent: "Informational" },
-  { text: "before and after", source: "media", heat: "lg", sv: 14800, kd: 18, cpc: 0.5, intent: "Informational" },
-  { text: "minimalist decor", source: "media", heat: "md", sv: 6600, kd: 25, cpc: 1.3, intent: "Informational" },
-  { text: "rental friendly upgrades", source: "media", heat: "md", sv: 4400, kd: 14, cpc: 0.6, intent: "Informational" },
-  { text: "gallery wall ideas", source: "media", heat: "md", sv: 9900, kd: 29, cpc: 1.1, intent: "Informational" },
-  { text: "biophilic design", source: "media", heat: "sm", sv: 2900, kd: 16, cpc: 0.9, intent: "Informational" },
-  { text: "curved furniture trend", source: "media", heat: "sm", sv: 1900, kd: 11, cpc: 0.8, intent: "Informational" },
-  { text: "japandi style", source: "media", heat: "sm", sv: 1900, kd: 13, cpc: 0.7, intent: "Informational" },
-  { text: "room layout planner", source: "media", heat: "sm", sv: 3600, kd: 20, cpc: 0.8, intent: "Informational" },
-  { text: "color blocking decor", source: "media", heat: "xs", sv: 880, kd: 8, cpc: 0.4, intent: "Informational" },
-  { text: "mixing furniture styles", source: "media", heat: "xs", sv: 590, kd: 7, cpc: 0.3, intent: "Informational" },
-  // Trend-sourced (pink) — 12 keywords
-  { text: "sustainable furniture", source: "trend", heat: "xl", sv: 12100, kd: 36, cpc: 1.6, intent: "Informational" },
-  { text: "multifunctional furniture", source: "trend", heat: "lg", sv: 8100, kd: 22, cpc: 1.0, intent: "Informational" },
-  { text: "outdoor living", source: "trend", heat: "lg", sv: 6600, kd: 28, cpc: 1.4, intent: "Informational" },
-  { text: "smart home office", source: "trend", heat: "md", sv: 3600, kd: 20, cpc: 1.2, intent: "Commercial" },
-  { text: "earth tones decor", source: "trend", heat: "md", sv: 4400, kd: 17, cpc: 0.8, intent: "Informational" },
-  { text: "vintage revival furniture", source: "trend", heat: "md", sv: 2400, kd: 15, cpc: 0.7, intent: "Informational" },
-  { text: "boucle fabric", source: "trend", heat: "sm", sv: 1900, kd: 13, cpc: 0.9, intent: "Informational" },
-  { text: "cane furniture", source: "trend", heat: "sm", sv: 1300, kd: 10, cpc: 0.6, intent: "Informational" },
-  { text: "terrazzo decor", source: "trend", heat: "xs", sv: 590, kd: 7, cpc: 0.4, intent: "Informational" },
-  { text: "rounded corners furniture", source: "trend", heat: "xs", sv: 720, kd: 9, cpc: 0.5, intent: "Informational" },
-  { text: "furniture subscription", source: "trend", heat: "sm", sv: 1600, kd: 14, cpc: 1.1, intent: "Commercial" },
-  { text: "modular furniture system", source: "trend", heat: "md", sv: 3200, kd: 19, cpc: 1.3, intent: "Commercial" },
-  // News-sourced (orange) — 11 keywords
-  { text: "moving in together", source: "news", heat: "xl", sv: 18100, kd: 26, cpc: 1.5, intent: "Informational" },
-  { text: "remote work from home", source: "news", heat: "lg", sv: 135000, kd: 58, cpc: 4.5, intent: "Informational" },
-  { text: "home renovation tips", source: "news", heat: "lg", sv: 22200, kd: 45, cpc: 3.2, intent: "Informational" },
-  { text: "first apartment essentials", source: "news", heat: "md", sv: 8100, kd: 24, cpc: 1.3, intent: "Informational" },
-  { text: "tiny home furniture", source: "news", heat: "md", sv: 9900, kd: 33, cpc: 1.8, intent: "Informational" },
-  { text: "empty nester downsizing", source: "news", heat: "sm", sv: 2900, kd: 16, cpc: 0.9, intent: "Informational" },
-  { text: "downsizing your home", source: "news", heat: "sm", sv: 4400, kd: 21, cpc: 1.1, intent: "Informational" },
-  { text: "co-living space", source: "news", heat: "xs", sv: 880, kd: 12, cpc: 0.6, intent: "Informational" },
-  { text: "furniture for aging in place", source: "news", heat: "sm", sv: 1900, kd: 15, cpc: 1.4, intent: "Informational" },
-  { text: "back to office furniture", source: "news", heat: "md", sv: 5400, kd: 27, cpc: 2.0, intent: "Commercial" },
-  { text: "eco friendly packaging furniture", source: "news", heat: "xs", sv: 720, kd: 11, cpc: 0.5, intent: "Informational" },
-];
+let KEYWORDS = [];
 
-const SOURCE_LABELS = { brand: "竞品品牌", media: "家居媒体", trend: "搜索趋势", news: "热点新闻" };
+const SOURCE_LABELS = {
+  brand: "竞品品牌", media: "家居媒体", trend: "搜索趋势", news: "热点新闻",
+  lifestyle: "生活厨艺", health: "健康医疗", fitness: "运动健身",
+  education: "教育亲子", lifestyle_news: "生活热点", llm: "AI 清洗",
+};
 
 // ==================== Topic Templates ====================
 const TOPIC_TEMPLATES = [
@@ -1268,6 +1400,15 @@ body{font-family:Georgia,'Times New Roman',serif;background:var(--bg);color:var(
 .article-body ul li{position:relative;padding-left:28px;margin-bottom:12px}
 .article-body ul li::before{content:"";position:absolute;left:0;top:12px;width:8px;height:8px;background:var(--accent-light);border-radius:50%}
 .article-body ul li strong{color:var(--text);font-weight:700}
+.article-body table{width:100%;border-collapse:collapse;margin-bottom:24px;font-size:15px;font-family:'Helvetica Neue',Arial,sans-serif}
+.article-body table th{background:var(--table-header);padding:10px 14px;text-align:left;font-weight:700;border:1px solid var(--border)}
+.article-body table td{padding:10px 14px;border:1px solid var(--border);vertical-align:top}
+.article-body table tr:nth-child(even) td{background:var(--table-stripe)}
+.article-body strong{font-weight:700}
+.article-body blockquote{border-left:3px solid var(--accent-light);padding:8px 16px;margin:16px 0;color:var(--text-light);font-style:italic}
+.article-body hr{border:none;border-top:1px solid var(--border);margin:32px 0}
+.article-body ol{margin-bottom:24px;padding-left:24px}
+.article-body ol li{margin-bottom:8px}
 .experience-note{background:#f9f5f0;border-left:3px solid var(--accent);padding:16px 20px;margin:24px 0;font-style:italic;font-size:16px;color:var(--text-light);border-radius:0 4px 4px 0}
 .conclusion{margin-top:56px;padding:32px;background:var(--card-bg);border:1px solid var(--border);border-radius:4px;text-align:center}
 .conclusion h2{margin-top:0}
@@ -1280,14 +1421,13 @@ body{font-family:Georgia,'Times New Roman',serif;background:var(--bg);color:var(
 .faq-item h3.active::after{content:"\\u2212"}
 .faq-item p{font-size:15px;color:var(--text-light);font-family:'Helvetica Neue',Arial,sans-serif;line-height:1.7;display:none}
 .faq-item.open p{display:block}
-.image-gallery{margin-top:56px}
-.image-gallery h2{font-size:22px;margin-bottom:24px}
-.gallery-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
-.gallery-item{border-radius:4px;overflow:hidden;text-decoration:none;border:1px solid var(--border)}
-.gallery-item:hover{box-shadow:0 4px 16px rgba(0,0,0,0.08)}
-.gallery-item img{width:100%;height:140px;object-fit:cover;display:block}
-.gallery-item p{padding:12px 14px;font-family:'Helvetica Neue',Arial,sans-serif;font-size:13px;color:var(--text-light);line-height:1.5}
-@media (max-width:640px){.blog-container{padding:40px 16px 60px}.blog-header h1{font-size:26px}.article-body h2{font-size:22px}.article-body h3{font-size:18px}.hero-image{height:240px}.gallery-grid{grid-template-columns:1fr}}
+.article-figure{margin:28px 0;text-align:center}
+.article-figure img{width:100%;max-width:680px;border-radius:6px;display:block;margin:0 auto}
+.article-figure figcaption{margin-top:10px;font-size:13px;color:var(--text-light);font-family:'Helvetica Neue',Arial,sans-serif;line-height:1.5}
+.article-figure .fig-credit{color:var(--text-tertiary);font-size:11px;margin-left:6px}
+.article-figure.product-figure{background:#f9f5f0;border:1px solid var(--border);border-radius:6px;padding:16px}
+.article-figure.product-figure img{max-width:320px;border-radius:4px}
+@media (max-width:640px){.blog-container{padding:40px 16px 60px}.blog-header h1{font-size:26px}.article-body h2{font-size:22px}.article-body h3{font-size:18px}.hero-image{height:240px}}
 </style>
 </head>
 <body>
@@ -1299,7 +1439,6 @@ body{font-family:Georgia,'Times New Roman',serif;background:var(--bg);color:var(
 </header>
 <div class="hero-image"><img src="{{HERO_IMG_URL}}" alt="{{HERO_IMG_CAPTION}}" loading="eager"><div class="hero-caption">{{HERO_IMG_CAPTION}}</div></div>
 <article class="article-body">{{ARTICLE_BODY}}</article>
-<section class="image-gallery"><h2>Visual Inspiration</h2><div class="gallery-grid">{{GALLERY_ITEMS}}</div></section>
 </div>
 <script>function toggleFaq(e){var i=e.parentElement,o=i.classList.contains('open');document.querySelectorAll('.faq-item').forEach(function(el){el.classList.remove('open');el.querySelector('h3').classList.remove('active')});if(!o){i.classList.add('open');e.classList.add('active')}}<\/script>
 </body>
@@ -1310,24 +1449,6 @@ const PEXELS_HEROES = [
   'https://images.pexels.com/photos/1648776/pexels-photo-1648776.jpeg?auto=compress&cs=tinysrgb&w=1200',
   'https://images.pexels.com/photos/276583/pexels-photo-276583.jpeg?auto=compress&cs=tinysrgb&w=1200',
 ];
-const PEXELS_GALLERY = [
-  'https://images.pexels.com/photos/1571460/pexels-photo-1571460.jpeg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/1648776/pexels-photo-1648776.jpeg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/276583/pexels-photo-276583.jpeg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/1080721/pexels-photo-1080721.jpeg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/6492397/pexels-photo-6492397.jpeg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/6444/timeline-clothing-rack-pants.jpg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/1668860/pexels-photo-1668860.jpeg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/3935350/pexels-photo-3935350.jpeg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/2253870/pexels-photo-2253870.jpeg?auto=compress&cs=tinysrgb&w=600',
-  'https://images.pexels.com/photos/4498596/pexels-photo-4498596.jpeg?auto=compress&cs=tinysrgb&w=600',
-];
-const GALLERY_CAPTIONS = [
-  'Living room layout ideas', 'Bedroom storage solutions', 'Dining setup for two',
-  'Workspace corner', 'Entryway bench', 'Closet edit',
-  'Reading nook', 'Open shelving', 'Neutral palette', 'Modular sofa',
-];
-
 // #region agent log
 fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:DEFAULT_RULES',message:'JS_EXEC_AFTER_TEMPLATE: reached DEFAULT_RULES (past BLOG_POST_TEMPLATE)',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H7'})}).catch(()=>{});
 // #endregion
@@ -1407,35 +1528,66 @@ function freshArticleState(topic) {
   };
 }
 
-// ==================== Audit Trail & Fork System ====================
-let runs = [];
+// ==================== Audit Trail & Fork System (DB tasks) ====================
+let runs = []; // legacy in-memory mirror (kept for syncFromRun / saveToRun)
 let activeRunId = null;
 let runCounter = 0;
+let dbTasks = []; // from GET /api/tasks
+let activeTaskId = null;
 
-function createRun(parentId, forkStep) {
+const TASK_STATUS_LABEL = { idle: '闲置', running: '运行中', completed: '已完成' };
+
+async function createRun(parentId, forkStep) {
+  // Prefer DB task create; fall back to in-memory if bridge offline
+  try {
+    if (await bridgeHealth()) {
+      const body = {};
+      if (parentId && typeof parentId === 'string' && parentId.startsWith('task-')) {
+        body.parent_task_id = parentId;
+        body.fork_step = forkStep || 1;
+      } else if (activeTaskId && forkStep) {
+        body.parent_task_id = activeTaskId;
+        body.fork_step = forkStep;
+      }
+      const res = await bridgeFetch('/api/tasks', { method: 'POST', body: JSON.stringify(body) });
+      const task = res.task;
+      // Starting a new flow stops any agent poll loop for the previous task and
+      // clears its leftover JobProgress bar / disabled buttons.
+      _activePollTaskId = null;
+      if (JobProgress._timer) { clearInterval(JobProgress._timer); JobProgress._timer = null; }
+      if (JobProgress._el) JobProgress._el.className = 'job-progress';
+      (JobProgress._buttons || []).forEach(b => { if (b) { b.classList.remove('is-loading'); b.disabled = false; } });
+      JobProgress._buttons = [];
+      activeTaskId = task.task_id;
+      BRIDGE.runId = task.task_id;
+      BRIDGE.taskId = task.task_id;
+      try { localStorage.setItem('seo_bridge_run_id', task.task_id); localStorage.setItem('seo_bridge_task_id', task.task_id); } catch (e) {}
+      // Mirror into local runs for existing UI helpers
+      runCounter++;
+      const run = {
+        id: runCounter, taskId: task.task_id, parentId: task.parent_task_id || null,
+        forkStep: task.fork_step || null, createdAt: new Date(task.created_at || Date.now()),
+        status: task.status || 'idle',
+        keywords: new Set(), kwFilter: 'all', kwCatalog: [],
+        topics: [], selectedTopics: new Set(),
+        genTopic: null, genStatus: null, articleState: null, log: [],
+      };
+      runs.push(run);
+      activeRunId = run.id;
+      await loadTaskIntoUI(task.task_id);
+      await refreshAuditTrail();
+      return run;
+    }
+  } catch (e) { console.warn('createRun via DB failed', e); }
+  // Offline fallback
   runCounter++;
   const run = {
     id: runCounter, parentId: parentId || null, forkStep: forkStep || null,
-    createdAt: new Date(), status: 'active',
-    keywords: new Set(), kwFilter: 'all',
+    createdAt: new Date(), status: 'idle',
+    keywords: new Set(), kwFilter: 'all', kwCatalog: [],
     topics: [], selectedTopics: new Set(),
     genTopic: null, genStatus: null, articleState: null, log: [],
   };
-  if (parentId) {
-    const parent = runs.find(function(r){return r.id===parentId;});
-    if (parent) {
-      run.keywords = new Set(parent.keywords);
-      run.kwFilter = parent.kwFilter;
-      if (forkStep >= 2) { run.topics = JSON.parse(JSON.stringify(parent.topics)); run.selectedTopics = new Set(parent.selectedTopics); }
-      if (forkStep >= 3) {
-        run.genTopic = parent.genTopic ? JSON.parse(JSON.stringify(parent.genTopic)) : null;
-        run.genStatus = parent.genStatus;
-        run.articleState = parent.articleState ? JSON.parse(JSON.stringify(parent.articleState)) : null;
-      }
-      parent.status = 'forked';
-      run.log.push({ step: forkStep, action: 'fork', detail: '从 Run #' + parentId + ' 第' + forkStep + '步分叉', ts: new Date() });
-    }
-  }
   runs.push(run);
   activeRunId = run.id;
   syncFromRun(run);
@@ -1449,6 +1601,10 @@ function syncFromRun(run) {
   if (!run) return;
   selectedKeywords = new Set(run.keywords);
   kwFilter = run.kwFilter;
+  if (Array.isArray(run.kwCatalog) && run.kwCatalog.length) {
+    KEYWORDS = run.kwCatalog.map(normalizeScriptKeyword).filter(Boolean);
+    renderKwList();
+  }
   brainstormTopics = JSON.parse(JSON.stringify(run.topics));
   selectedTopics = new Set(run.selectedTopics);
   currentGenTopic = run.genTopic ? JSON.parse(JSON.stringify(run.genTopic)) : null;
@@ -1459,53 +1615,439 @@ function saveToRun() {
   var run = getActiveRun(); if (!run) return;
   run.keywords = new Set(selectedKeywords);
   run.kwFilter = kwFilter;
+  run.kwCatalog = KEYWORDS.slice();
   run.topics = JSON.parse(JSON.stringify(brainstormTopics));
   run.selectedTopics = new Set(selectedTopics);
   run.genTopic = currentGenTopic ? JSON.parse(JSON.stringify(currentGenTopic)) : null;
   run.articleState = articleState ? JSON.parse(JSON.stringify(articleState)) : null;
 }
 
+// Merge the in-memory articleState (user edits) over the DB articleState
+// (agent-saved authoritative data), so persistArticleState never clobbers
+// agent-saved fields the UI didn't touch.
+function mergeArticleState(dbState, memState) {
+  if (!dbState || !dbState.topic) return memState;
+  var merged = JSON.parse(JSON.stringify(dbState)); // start from DB (authoritative)
+  // User-toggled booleans — always take in-memory.
+  merged.outlineConfirmed = !!memState.outlineConfirmed;
+  merged.placementsConfirmed = !!memState.placementsConfirmed;
+  // User-edited fields — take in-memory.
+  merged.meta = memState.meta || merged.meta;
+  merged.products = (memState.products && memState.products.length) ? memState.products : (merged.products || []);
+  merged.links = (memState.links && memState.links.length) ? memState.links : (merged.links || []);
+  merged.previewHtml = (memState.previewHtml != null) ? memState.previewHtml : merged.previewHtml;
+  merged.validation = memState.validation || merged.validation;
+  // FAQ — take whichever is fuller (user may edit, agent may generate).
+  if ((memState.faq || []).length >= (merged.faq || []).length) merged.faq = memState.faq;
+  // Outline — take whichever is fuller (agent generates; UI rarely edits).
+  if ((memState.outline || []).length > (merged.outline || []).length) merged.outline = memState.outline;
+  // Sections — per-section merge: keep DB content if in-memory is empty (agent
+  // saved it after UI loaded), else take in-memory (user edit or loaded copy).
+  var dbSecs = merged.sections || [];
+  var memSecs = memState.sections || [];
+  var memById = {};
+  memSecs.forEach(function(s){ if (s && s.id != null) memById[s.id] = s; });
+  merged.sections = dbSecs.map(function(ds) {
+    var ms = memById[ds.id];
+    if (ms && ms.content && String(ms.content).trim()) {
+      // In-memory has content — user edit or fresh load. Use it, but preserve
+      // agent-added fields the in-memory copy may lack (images, transition).
+      var copy = JSON.parse(JSON.stringify(ms));
+      if (!copy.images && ds.images) copy.images = ds.images;
+      if (!copy.transition && ds.transition) copy.transition = ds.transition;
+      if (!copy.subheads && ds.subheads) copy.subheads = ds.subheads;
+      return copy;
+    }
+    return ds; // keep DB section (agent saved content the UI doesn't have)
+  });
+  // phaseDone — union (true if either source says true).
+  var pd = merged.phaseDone || {};
+  var mpd = memState.phaseDone || {};
+  Object.keys(pd).forEach(function(k){ if (mpd[k]) pd[k] = true; });
+  merged.phaseDone = pd;
+  return merged;
+}
+
+// Persist article-state to Bridge DB step 3 (debounced)
+var _persistTimer = null;
+function persistArticleState() {
+  if (_persistTimer) clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(async function() {
+    _persistTimer = null;
+    if (!articleState) return;
+    try {
+      if (activeTaskId) {
+        // Merge with the DB state first so we don't overwrite agent-saved data
+        // (sections/serp/outline) that the in-memory copy may be missing.
+        var toSave = articleState;
+        try {
+          var dbState = await bridgeFetch('/api/tasks/' + activeTaskId + '/steps/3/data');
+          if (dbState && dbState.topic) toSave = mergeArticleState(dbState, articleState);
+        } catch (e) { /* DB read failed — save in-memory as-is */ }
+        await bridgeFetch('/api/tasks/' + activeTaskId + '/steps/3/data', {
+          method: 'PUT', body: JSON.stringify(toSave),
+        });
+        // Refresh in-memory state with the merged result so the UI picks up
+        // agent-saved fields (e.g. section content) the in-memory copy was missing.
+        // This fixes stale-state symptoms like word-count showing 0.
+        if (toSave !== articleState) {
+          articleState = toSave;
+          if (typeof runClientValidation === 'function') {
+            articleState.validation = runClientValidation();
+          }
+        }
+      } else {
+        await bridgeSaveFile('article-state.json', articleState);
+      }
+    } catch (e) { /* bridge may be down */ }
+  }, 800);
+}
+
 function logStep(step, action, detail) {
-  var run = getActiveRun(); if (!run) return;
-  run.log.push({ step: step, action: action, detail: detail, ts: new Date() });
+  var run = getActiveRun();
+  if (run) {
+    run.log.push({ step: step, action: action, detail: detail, ts: new Date() });
+    renderAuditTrail();
+  }
+  // Persist to DB audit_log so operator confirmations survive page refresh.
+  if (activeTaskId && BRIDGE && BRIDGE.online) {
+    try {
+      bridgeFetch('/api/tasks/' + activeTaskId + '/audit', {
+        method: 'POST',
+        body: JSON.stringify({ action: action, detail: detail, status: 'ok', step_num: (typeof step === 'number' ? step : null) }),
+      });
+    } catch (e) { /* best-effort */ }
+  }
+}
+
+async function switchToRun(runIdOrTaskId) {
+  // Numeric = legacy in-memory run; string task-* = DB task
+  if (typeof runIdOrTaskId === 'string' && (runIdOrTaskId.startsWith('task-') || runIdOrTaskId.startsWith('run-'))) {
+    await switchToTask(runIdOrTaskId);
+    return;
+  }
+  var run = runs.find(function(r){return r.id===runIdOrTaskId;});
+  if (!run) return;
+  activeRunId = runIdOrTaskId;
+  if (run.taskId) {
+    await switchToTask(run.taskId);
+    return;
+  }
+  syncFromRun(run);
   renderAuditTrail();
+  showToast('已切换到 Run #' + runIdOrTaskId, '');
 }
 
-function forkFromStep(step) {
+async function switchToTask(taskId) {
+  // Stop any in-flight agent poll loop for the previous task so its UI updates
+  // don't bleed into the task we're opening.
+  _activePollTaskId = null;
+  // Hide any leftover job progress bar from the previous task and re-enable its
+  // disabled buttons so the operator can act on the newly opened task.
+  if (JobProgress._timer) { clearInterval(JobProgress._timer); JobProgress._timer = null; }
+  if (JobProgress._el) JobProgress._el.className = 'job-progress';
+  (JobProgress._buttons || []).forEach(b => { if (b) { b.classList.remove('is-loading'); b.disabled = false; } });
+  JobProgress._buttons = [];
+  try {
+    // completed → idle on open
+    await bridgeFetch('/api/tasks/' + taskId + '/activate', { method: 'POST', body: '{}' });
+  } catch (e) {}
+  activeTaskId = taskId;
+  BRIDGE.runId = taskId;
+  BRIDGE.taskId = taskId;
+  try { localStorage.setItem('seo_bridge_task_id', taskId); localStorage.setItem('seo_bridge_run_id', taskId); } catch (e) {}
+  await loadTaskIntoUI(taskId);
+  await refreshAuditTrail();
+  var short = taskId.replace(/^task-/, '').slice(0, 14);
+  showToast('已打开任务 ' + short, '');
+  // If this task is still running an agent, resume the progress bar + live panel.
+  resumeTaskAgentPolling(taskId);
+}
+
+/** Clear all per-task generation UI state so unfinished steps show empty.
+ *  Keywords are a shared pool and are NOT cleared here. */
+function resetGenerationUI() {
+  brainstormTopics = [];
+  selectedTopics = new Set();
+  selectedKeywords = new Set();
+  articleState = null;
+  currentGenTopic = null;
+  currentGenPhase = 'serp';
+  // Step 2 (brainstorm) UI
+  var topicGrid = document.getElementById('topicGrid'); if (topicGrid) topicGrid.innerHTML = '';
+  var bsActionBar = document.getElementById('bsActionBar'); if (bsActionBar) bsActionBar.style.display = 'none';
+  var bsLive = document.getElementById('bsLive'); if (bsLive) bsLive.classList.remove('show');
+  renderBsKeywords(); // refresh selected-keyword chips (now empty)
+  // Step 3 (generation) UI
+  var genEmpty = document.getElementById('genEmpty'); if (genEmpty) genEmpty.style.display = 'block';
+  var genWorkbench = document.getElementById('genWorkbench'); if (genWorkbench) genWorkbench.style.display = 'none';
+  var genActionBar = document.getElementById('genActionBar'); if (genActionBar) genActionBar.style.display = 'none';
+  var wbTopicTitle = document.getElementById('wbTopicTitle'); if (wbTopicTitle) wbTopicTitle.textContent = '选择主题后开始';
+  var genLive = document.getElementById('genLive'); if (genLive) genLive.classList.remove('show');
+  document.querySelectorAll('.wb-panel').forEach(p => p.classList.remove('active'));
+  var phaseSerp = document.getElementById('phase-serp'); if (phaseSerp) phaseSerp.classList.add('active');
+  document.querySelectorAll('.gen-phase-pill').forEach(p => p.classList.remove('done', 'active'));
+  var pillSerp = document.querySelector('.gen-phase-pill[data-phase="serp"]'); if (pillSerp) pillSerp.classList.add('active');
+  var genTopicInfo = document.getElementById('genTopicInfo'); if (genTopicInfo) genTopicInfo.textContent = '进度：0/7 · 当前 SERP';
+}
+
+/** Compare two keyword collections as sets (order-insensitive). */
+function sameKeywordSet(a, b) {
+  var A = new Set((a || []).map(String));
+  var B = new Set((b || []).map(String));
+  if (A.size !== B.size) return false;
+  for (var x of A) if (!B.has(x)) return false;
+  return true;
+}
+
+/** Normalise a section object from the agent's schema (heading, lowercase type)
+ *  to the UI's expected schema (title, capitalized type). Idempotent. */
+function _normalizeSection(sec) {
+  if (!sec) return sec;
+  if (!sec.title && sec.heading) sec.title = sec.heading;
+  if (!sec.title) sec.title = '';
+  // Map lowercase agent type to the capitalized labels the UI checks.
+  var t = String(sec.type || '').toLowerCase();
+  if (t === 'intro') sec.type = 'Intro';
+  else if (t === 'conclusion') sec.type = 'Conclusion';
+  else if (t === 'h2' || t === 'section') sec.type = 'h2';
+  else if (!sec.type) sec.type = 'h2';
+  return sec;
+}
+
+/** Normalise a product placement from the agent's schema (section, placement)
+ *  to the UI's expected schema (sectionId, blurb, status, image). Idempotent. */
+function _normalizeProduct(p) {
+  if (!p) return p;
+  if (!p.sectionId && p.section) p.sectionId = p.section;
+  if (!p.blurb && (p.placement || p.description)) p.blurb = p.placement || p.description;
+  if (!p.status) p.status = 'pending';
+  if (!p.image) p.image = '';
+  if (!p.id) p.id = 'p' + Math.random().toString(36).slice(2, 8);
+  return p;
+}
+
+/** Render an articleState blob into the Step 3 workbench (no data fetch). */
+function applyArticleState(state) {
+  if (!state || !state.topic) return false;
+  if (Array.isArray(state.sections)) state.sections.forEach(_normalizeSection);
+  if (Array.isArray(state.products)) state.products.forEach(_normalizeProduct);
+  articleState = state;
+  currentGenTopic = state.topic;
+  document.getElementById('genEmpty').style.display = 'none';
+  document.getElementById('genWorkbench').style.display = 'block';
+  document.getElementById('genActionBar').style.display = 'flex';
+  if (state.topic.title) document.getElementById('wbTopicTitle').textContent = state.topic.title;
+  restoreWorkbenchUI();
+  setGenPhase(state.phaseDone && state.phaseDone.meta ? 'preview' :
+    state.phaseDone && state.phaseDone.faq ? 'meta' :
+    state.phaseDone && state.phaseDone.placements ? 'faq' :
+    state.phaseDone && state.phaseDone.sections ? 'placements' :
+    state.outlineConfirmed ? 'sections' :
+    state.phaseDone && state.phaseDone.serp ? 'outline' : 'serp');
+  updateGenProgressBar();
   saveToRun();
-  var run = createRun(activeRunId, step);
-  showToast('已从第' + step + '步分叉 → Run #' + run.id, 'success');
-  if (step === 1) { switchView('keywords'); applyKeywordFilters(); updateKwBar(); }
-  else if (step === 2) { switchView('brainstorm'); renderBsKeywords(); renderTopics(); updateBsBar(); }
-  else if (step === 3) { switchView('generation'); }
+  return true;
 }
 
-function switchToRun(runId) {
-  var run = runs.find(function(r){return r.id===runId;}); if (!run) return;
-  activeRunId = runId; syncFromRun(run); renderAuditTrail();
-  showToast('已切换到 Run #' + runId, '');
+/** Reload the Step 3 article state for a task/run and re-render the workbench.
+ *  Reads from the DB for task-* ids (agent writes via seo_save_step_data),
+ *  falls back to the legacy run-dir file for older run-* ids. */
+async function reloadArticleState(rid) {
+  if (!rid) return false;
+  if (String(rid).startsWith('task-')) {
+    try {
+      const state = await bridgeFetch('/api/tasks/' + rid + '/steps/3/data');
+      if (applyArticleState(state)) return true;
+    } catch (e) {}
+    return false;
+  }
+  try {
+    const state = await bridgeLoadFile('article-state.json');
+    return applyArticleState(state);
+  } catch (e) {}
+  return false;
+}
+
+/** Reload the Step 2 topics for a task and re-render the brainstorm view. */
+async function reloadBrainstormTopics(rid) {
+  if (!rid) return false;
+  try {
+    var topicsDoc = String(rid).startsWith('task-')
+      ? await bridgeFetch('/api/tasks/' + rid + '/steps/2/data')
+      : await bridgeLoadFile('topics.json');
+    var topicList = (topicsDoc && topicsDoc.topics) || topicsDoc;
+    if (Array.isArray(topicList) && topicList.length) {
+      brainstormTopics = topicList.map(function(t, i){ return normalizeTopicItem(t, i + 1); });
+      renderTopics();
+      document.getElementById('bsActionBar').style.display = 'flex';
+      saveToRun();
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+/** Keywords that produced the current task's topics (step 2 input_keywords). */
+async function getTaskBrainstormKeywords(taskId) {
+  if (!taskId) return null;
+  try {
+    var doc = await bridgeFetch('/api/tasks/' + taskId + '/steps/2/data');
+    if (doc && Array.isArray(doc.input_keywords)) return doc.input_keywords;
+  } catch (e) {}
+  return null;
+}
+
+/** Topic id the current task's article is being generated for (step 3 articleState.topic.id). */
+async function getTaskArticleTopicId(taskId) {
+  if (!taskId) return null;
+  try {
+    var st = await bridgeFetch('/api/tasks/' + taskId + '/steps/3/data');
+    if (st && st.topic && st.topic.id) return st.topic.id;
+  } catch (e) {}
+  return null;
+}
+
+async function loadTaskIntoUI(taskId) {
+  // Reset per-task UI state so unfinished steps show empty (no bleed from previous task).
+  resetGenerationUI();
+  try {
+    // Step 1 keywords — shared pool across tasks.
+    // If the task already has step-1 data (fork / imported), load that snapshot.
+    // Otherwise keep the current pool and persist it into the new task's step 1.
+    var kwLoaded = false;
+    try {
+      const kw = await bridgeFetch('/api/tasks/' + taskId + '/steps/1/data');
+      if (Array.isArray(kw) && kw.length) {
+        KEYWORDS = kw.map(normalizeScriptKeyword).filter(Boolean);
+        renderKwList();
+        kwLoaded = true;
+      }
+    } catch (e) {}
+    if (!kwLoaded && KEYWORDS.length) {
+      try {
+        await bridgeFetch('/api/tasks/' + taskId + '/steps/1/data', {
+          method: 'PUT', body: JSON.stringify(KEYWORDS),
+        });
+      } catch (e) {}
+      renderKwList();
+    }
+    // Step 2 topics
+    try {
+      const topicsDoc = await bridgeFetch('/api/tasks/' + taskId + '/steps/2/data');
+      const topicList = topicsDoc.topics || topicsDoc;
+      // Restore the keyword selection that produced (or is producing) these topics.
+      // Done before the topics-length check so a running brainstorm (topics still
+      // empty) still shows the previously selected keywords.
+      if (Array.isArray(topicsDoc.input_keywords) && topicsDoc.input_keywords.length) {
+        selectedKeywords = new Set(topicsDoc.input_keywords);
+        renderBsKeywords();
+      }
+      if (Array.isArray(topicList) && topicList.length) {
+        brainstormTopics = topicList.map(function(t, i){ return normalizeTopicItem(t, i + 1); });
+        renderTopics();
+        document.getElementById('bsActionBar').style.display = 'flex';
+      }
+    } catch (e) {}
+    // Step 3 article
+    try {
+      const state = await bridgeFetch('/api/tasks/' + taskId + '/steps/3/data');
+      if (state && state.topic) {
+        if (Array.isArray(state.sections)) state.sections.forEach(_normalizeSection);
+        if (Array.isArray(state.products)) state.products.forEach(_normalizeProduct);
+        articleState = state;
+        currentGenTopic = state.topic;
+        document.getElementById('genEmpty').style.display = 'none';
+        document.getElementById('genWorkbench').style.display = 'block';
+        document.getElementById('genActionBar').style.display = 'flex';
+        if (state.topic.title) document.getElementById('wbTopicTitle').textContent = state.topic.title;
+        restoreWorkbenchUI();
+      } else {
+        // No step-3 article yet (new task or fork from step 1/2): clear ALL
+        // workbench state so the previously loaded task's article / preview /
+        // sections never bleed into this one. Without this, a fork that hasn't
+        // reached Step 3 would still show the parent's rendered preview.
+        articleState = freshArticleState(null);
+        currentGenTopic = null;
+        document.getElementById('genEmpty').style.display = 'block';
+        document.getElementById('genWorkbench').style.display = 'none';
+        document.getElementById('genActionBar').style.display = 'none';
+        var wbTitle = document.getElementById('wbTopicTitle'); if (wbTitle) wbTitle.textContent = '';
+        restoreWorkbenchUI();
+      }
+    } catch (e) {}
+    saveToRun();
+  } catch (e) {
+    console.warn('loadTaskIntoUI', e);
+  }
+}
+
+async function refreshAuditTrail() {
+  try {
+    if (!(BRIDGE.online)) { renderAuditTrail(); return; }
+    const res = await bridgeFetch('/api/tasks?limit=40');
+    dbTasks = res.tasks || [];
+  } catch (e) {
+    dbTasks = [];
+  }
+  renderAuditTrail();
 }
 
 function renderAuditTrail() {
   var container = document.getElementById('auditTrail'); if (!container) return;
-  if (runs.length === 0) { container.innerHTML = '<div style="padding:16px;color:var(--text-tertiary);font-size:12px;text-align:center;">暂无运行记录</div>'; return; }
+  // Prefer DB tasks list
+  if (dbTasks && dbTasks.length) {
+    var html = '';
+    dbTasks.forEach(function(t) {
+      var isActive = t.task_id === activeTaskId;
+      var st = t.status || 'idle';
+      if (st === 'active') st = 'idle';
+      var label = TASK_STATUS_LABEL[st] || st;
+      var shortId = (t.task_id || '').replace(/^task-/, '');
+      if (shortId.length > 16) shortId = shortId.slice(0, 14) + '…';
+      var chain = t.parent_task_id
+        ? '<span style="color:var(--text-tertiary);font-size:10px;"> ← ' + String(t.parent_task_id).replace(/^task-/, '').slice(0, 10) + '</span>'
+        : '';
+      var steps = t.steps || [];
+      function stepClass(n) {
+        var s = steps.find(function(x){ return x.step_num === n; });
+        if (!s) return '';
+        if (s.status === 'done') return 'done';
+        if (s.status === 'running') return 'running';
+        return '';
+      }
+      html += '<div class="audit-run ' + (isActive ? 'active' : '') + '" onclick="switchToTask(\'' + t.task_id + '\')">';
+      html += '<div class="audit-run-header"><span class="audit-run-id">' + shortId + chain + '</span>';
+      html += '<span class="audit-status-pill ' + st + '">' + label + '</span></div>';
+      html += '<div class="audit-run-meta">';
+      html += '<span class="audit-step ' + stepClass(1) + '">1</span><span class="audit-step-line"></span>';
+      html += '<span class="audit-step ' + stepClass(2) + '">2</span><span class="audit-step-line"></span>';
+      html += '<span class="audit-step ' + stepClass(3) + '">3</span></div>';
+      html += '<div class="audit-run-detail">' + (t.kw_count || 0) + ' 关键词 · ' + (t.topic_count || 0) + ' 主题';
+      if (st === 'running') html += ' · 进行中';
+      if (st === 'completed') html += ' · 已完成';
+      html += '</div>';
+      html += '</div>';
+    });
+    container.innerHTML = html;
+    return;
+  }
+  // Legacy in-memory fallback
+  if (runs.length === 0) {
+    container.innerHTML = '<div style="padding:16px;color:var(--text-tertiary);font-size:12px;text-align:center;">暂无运行记录</div>';
+    return;
+  }
   var html = '';
   for (var i = runs.length - 1; i >= 0; i--) {
     var r = runs[i];
     var isActive = r.id === activeRunId;
-    var statusLabel = r.status === 'active' ? (isActive ? '当前' : '活跃') : (r.status === 'forked' ? '已分叉' : '已完成');
-    var statusColor = r.status === 'active' ? (isActive ? 'var(--accent)' : 'var(--success)') : 'var(--text-tertiary)';
-    var chain = r.parentId ? '<span style="color:var(--text-tertiary);font-size:10px;"> ← #' + r.parentId + '</span>' : '';
-    var kwCount = r.keywords.size;
-    var topicCount = r.topics.length;
-    var selTopicCount = r.selectedTopics.size;
-    var step1Done = kwCount > 0;
-    var step2Done = topicCount > 0;
-    var step3Done = r.genStatus === 'published';
+    var st = r.status === 'forked' ? 'idle' : (r.status || 'idle');
+    if (st === 'active') st = 'idle';
+    var label = TASK_STATUS_LABEL[st] || st;
     html += '<div class="audit-run ' + (isActive ? 'active' : '') + '" onclick="switchToRun(' + r.id + ')">';
-    html += '<div class="audit-run-header"><span class="audit-run-id">Run #' + r.id + chain + '</span><span class="audit-run-status" style="color:' + statusColor + ';">' + statusLabel + '</span></div>';
-    html += '<div class="audit-run-meta"><span class="audit-step ' + (step1Done?'done':'') + '">1</span><span class="audit-step-line"></span><span class="audit-step ' + (step2Done?'done':'') + '">2</span><span class="audit-step-line"></span><span class="audit-step ' + (step3Done?'done':'') + '">3</span></div>';
-    html += '<div class="audit-run-detail">' + kwCount + ' 关键词 · ' + selTopicCount + '/' + topicCount + ' 主题' + (r.genTopic ? ' · ' + (r.genStatus||'生成中') : '') + '</div>';
+    html += '<div class="audit-run-header"><span class="audit-run-id">Run #' + r.id + '</span>';
+    html += '<span class="audit-status-pill ' + st + '">' + label + '</span></div>';
+    html += '<div class="audit-run-detail">' + r.keywords.size + ' 关键词 · ' + r.topics.length + ' 主题</div>';
     html += '</div>';
   }
   container.innerHTML = html;
@@ -1625,7 +2167,11 @@ function switchView(name) {
   // Restore state from active run when navigating back
   var run = getActiveRun();
   if (run) {
-    if (name === 'keywords') { applyKwListFilter(); updateKwTotalCount(); }
+    if (name === 'keywords') {
+      if (KEYWORDS.length && !kwListRendered) renderKwList();
+      else applyKwListFilter();
+      updateKwTotalCount();
+    }
     if (name === 'brainstorm') { renderBsKeywords(); if (brainstormTopics.length > 0) { renderTopics(); document.getElementById('bsActionBar').style.display = 'flex'; } updateBsBar(); }
     if (name === 'generation' && articleState && articleState.topic) {
       document.getElementById('genEmpty').style.display = 'none';
@@ -1706,10 +2252,11 @@ function normalizeScriptKeyword(raw) {
   const sourceRaw = String(raw.source || 'brand').toLowerCase();
   const sourceMap = {
     brand: 'brand', media: 'media', trend: 'trend', news: 'news',
-    lifestyle: 'news', health: 'news', fitness: 'news', education: 'news',
-    lifestyle_news: 'news', llm: 'trend',
+    lifestyle: 'lifestyle', health: 'health', fitness: 'fitness',
+    education: 'education', lifestyle_news: 'lifestyle_news',
+    llm: 'media',
   };
-  const source = sourceMap[sourceRaw] || (['brand','media','trend','news'].includes(sourceRaw) ? sourceRaw : 'media');
+  const source = sourceMap[sourceRaw] || (Object.keys(SOURCE_LABELS).includes(sourceRaw) ? sourceRaw : 'media');
   const sv = Number(raw.sv) || 0;
   const kd = Number(raw.kd) || 0;
   const cpc = Number(raw.cpc) || 0;
@@ -1806,6 +2353,7 @@ function updateKwTotalCount() {
 document.addEventListener('DOMContentLoaded', function() {
   const inp = document.getElementById('kwAddInput');
   if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') addKeywordManual(); });
+  initDiscoverSourceChips();
 });
 
 function filterKeywords(btn, filter) {
@@ -1815,9 +2363,33 @@ function filterKeywords(btn, filter) {
   applyKwListFilter();
 }
 
-function goToBrainstorm() {
+function resetKwFilterAll() {
+  kwFilter = 'all';
+  const seg = document.getElementById('kwSegmented');
+  if (seg) {
+    seg.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    const allBtn = seg.querySelector('button[onclick*="all"]') || seg.querySelector('button');
+    if (allBtn) allBtn.classList.add('active');
+  }
+  applyKwListFilter();
+}
+
+function applyImportedKeywords(list, opts) {
+  const rows = (Array.isArray(list) ? list : []).map(normalizeScriptKeyword).filter(Boolean);
+  if (!rows.length) return 0;
+  KEYWORDS = rows;
+  resetKwFilterAll();
+  renderKwList();
+  saveToRun();
+  if (!(opts && opts.silent)) {
+    switchView('keywords');
+  }
+  return rows.length;
+}
+
+function pickRandomKeywords() {
   var pool = KEYWORDS.filter(k => kwWeights[k.text] > 0);
-  if (pool.length === 0) { showToast('没有可用关键词（权重全为0）', ''); return; }
+  if (pool.length === 0) return false;
 
   selectedKeywords.clear();
   var numToPick = Math.min(Math.floor(Math.random() * 5) + 1, pool.length);
@@ -1840,6 +2412,19 @@ function goToBrainstorm() {
       }
     }
   }
+  return true;
+}
+
+function rerollKeywords() {
+  if (!pickRandomKeywords()) { showToast('没有可用关键词（权重全为0）', ''); return; }
+  renderBsKeywords();
+  saveToRun();
+  logStep(1, 'reroll', '重新随机关键词: ' + Array.from(selectedKeywords).join(', '));
+  showToast('已换 ' + selectedKeywords.size + ' 个关键词', 'success');
+}
+
+function goToBrainstorm() {
+  if (!pickRandomKeywords()) { showToast('没有可用关键词（权重全为0）', ''); return; }
 
   var run = getActiveRun();
   if (run && run.topics.length > 0) {
@@ -1876,9 +2461,189 @@ function removeBsKeyword(kw) {
 }
 
 function runBrainstormDemo() {
-  if (selectedKeywords.size === 0) return;
-  if (!confirm('本地 Demo 使用模板拼凑主题，仅供界面演示。\n生产请运行 topic-brainstorm.py 后「导入主题 JSON」。\n仍要继续 Demo？')) return;
-  runBrainstorm();
+  bridgeBrainstormViaAgent();
+}
+
+/** Live panel helpers for Agent progress (bsLive / genLive). */
+function agentLiveEls(panelId) {
+  var prefix = panelId === 'genLive' ? 'gen' : 'bs';
+  return {
+    root: document.getElementById(panelId),
+    stream: document.getElementById(prefix + 'LiveStream'),
+    label: document.getElementById(prefix + 'LiveLabel'),
+    detail: document.getElementById(prefix + 'LiveDetail'),
+    lineClass: prefix + '-live-line',
+  };
+}
+
+function agentLiveReset(panelId, label, detail) {
+  var els = agentLiveEls(panelId);
+  if (!els.root) return;
+  els.root.classList.add('show');
+  if (els.stream) els.stream.innerHTML = '';
+  if (els.label) els.label.textContent = label || 'Agent 执行中';
+  if (els.detail) els.detail.textContent = detail || '等待任务更新…';
+}
+
+function agentLiveHide(panelId) {
+  var els = agentLiveEls(panelId);
+  if (els.root) els.root.classList.remove('show');
+}
+
+function agentLiveAppend(panelId, text, kind) {
+  var els = agentLiveEls(panelId);
+  if (!els.stream) return;
+  var line = document.createElement('div');
+  line.className = els.lineClass + (kind === 'done' || kind === 'error' ? ' ' + kind : '');
+  line.textContent = text;
+  els.stream.appendChild(line);
+  els.stream.scrollTop = els.stream.scrollHeight;
+}
+
+function agentLiveFormatProgress(rec) {
+  var task = rec.task || '';
+  var conclusion = rec.conclusion || '';
+  var status = rec.status || 'running';
+  var step = rec.step ? '[' + rec.step + '] ' : '';
+  if (status === 'done') {
+    return step + '✓ ' + task + (conclusion ? ' — ' + conclusion : '');
+  }
+  if (status === 'error') {
+    return step + '✗ ' + task + (conclusion ? ' — ' + conclusion : '');
+  }
+  return step + '→ ' + task + (conclusion ? ' — ' + conclusion : '');
+}
+
+async function agentPollProgress(rid, sinceIdx, panelId, stepNum) {
+  try {
+    var path;
+    if (String(rid).startsWith('task-') && stepNum) {
+      path = '/api/tasks/' + rid + '/steps/' + stepNum + '/agent/progress?since=' + (sinceIdx || 0);
+    } else {
+      path = '/api/runs/' + rid + '/agent/progress?since=' + (sinceIdx || 0);
+    }
+    var data = await bridgeFetch(path);
+    var lines = (data && data.lines) || [];
+    var next = sinceIdx || 0;
+    lines.forEach(function(rec) {
+      var idx = typeof rec.idx === 'number' ? rec.idx : next;
+      if (idx < next) return;
+      agentLiveAppend(panelId, agentLiveFormatProgress(rec), rec.status);
+      if (rec.status === 'running' || rec.status === 'done') {
+        var els = agentLiveEls(panelId);
+        if (els.detail) els.detail.textContent = rec.task || els.detail.textContent;
+        if (els.label && rec.step) els.label.textContent = 'Agent · ' + rec.step;
+      }
+      next = idx + 1;
+    });
+    return next;
+  } catch (e) {
+    return sinceIdx || 0;
+  }
+}
+
+// Tracks which task the UI is currently polling for agent status.
+// When the operator switches tasks or starts a new flow, this is reset so the
+// previous poll loop stops touching the shared JobProgress / live panel.
+let _activePollTaskId = null;
+
+/** Resume the agent progress bar + live panel for a task that is still running.
+ *  Called when the operator switches back to a `running` task. No-op if the
+ *  task has no running step. */
+async function resumeTaskAgentPolling(taskId) {
+  if (!taskId || !String(taskId).startsWith('task-') && !String(taskId).startsWith('run-')) return;
+  let task;
+  try { task = await bridgeFetch('/api/tasks/' + taskId); } catch (e) { return; }
+  // Endpoint returns {"ok":true,"task":{...}} — unwrap if needed.
+  if (task && task.task) task = task.task;
+  if (!task) return;
+  const steps = task.steps || [];
+  // Resume if any step is running (with or without agent_run_id); also resume
+  // if the task itself is running even when no step reports running.
+  const runningStep = steps.find(function(s){ return s.status === 'running'; });
+  if (!runningStep && (task.status !== 'running')) return;
+  const stepNum = runningStep ? runningStep.step_num : 3;
+  const panelId = stepNum === 2 ? 'bsLive' : 'genLive';
+  const jobKind = stepNum === 2 ? 'agent-brainstorm' : ('agent-' + ((runningStep && runningStep.step_type) || 'section'));
+  _activePollTaskId = taskId;
+  JobProgress.start(jobKind, []);
+  agentLiveReset(panelId, 'Agent · ' + ((runningStep && runningStep.step_type) || ('step ' + stepNum)), '已恢复进度轮询…');
+  // Replay existing progress lines from DB
+  let progressIdx = await agentPollProgress(taskId, 0, panelId, stepNum);
+  const statusPath = '/api/tasks/' + taskId + '/steps/' + stepNum + '/agent/status';
+  const t0 = Date.now();
+  const limit = 15 * 60 * 1000;
+  let done = false;
+  while (Date.now() - t0 < limit && !done) {
+    if (_activePollTaskId !== taskId) return; // operator switched away
+    await new Promise(function(r){ setTimeout(r, 2000); });
+    if (_activePollTaskId !== taskId) return;
+    progressIdx = await agentPollProgress(taskId, progressIdx, panelId, stepNum);
+    try {
+      const st = await bridgeFetch(statusPath);
+      const gw = st.gateway || {};
+      const status = gw.status || '';
+      if (status === 'completed' || status === 'succeeded') {
+        done = true;
+        // Only refresh the UI if this task is still selected.
+        if (_activePollTaskId !== taskId) return;
+        progressIdx = await agentPollProgress(taskId, progressIdx, panelId, stepNum);
+        // Refresh just the step that finished — don't reset the whole UI.
+        if (stepNum === 2) await reloadBrainstormTopics(taskId);
+        else await reloadArticleState(taskId);
+        JobProgress.done(true, 'Agent 已完成');
+        agentLiveAppend(panelId, '完成', 'done');
+        setTimeout(function(){ agentLiveHide(panelId); }, 1800);
+        await refreshAuditTrail();
+      } else if (status === 'failed' || status === 'error') {
+        done = true;
+        JobProgress.done(false, 'Agent 执行失败');
+        agentLiveAppend(panelId, 'Agent 执行失败', 'error');
+        await refreshAuditTrail();
+      } else if (status === 'waiting_for_approval') {
+        JobProgress.update('等待审批中…请在 Gateway 中批准该运行');
+      } else if (status === 'running') {
+        JobProgress.update('Agent 正在执行…');
+      } else if (st.ok === false && (st.status_code === 404 || (st.detail || '').includes('no agent run'))) {
+        // No gateway run recorded (e.g. step marked running without agent_run_id,
+        // or gateway restarted). Stop polling — operator can re-trigger.
+        done = true;
+        JobProgress.done(false, '该步骤无 Agent 运行记录 — 请重新点击生成');
+      } else {
+        JobProgress.update('Agent 状态：' + (status || '未知') + '…');
+      }
+    } catch (e) { /* keep polling */ }
+  }
+  if (!done && _activePollTaskId === taskId) {
+    JobProgress.done(false, 'Agent 超时（15 分钟）');
+  }
+  if (_activePollTaskId === taskId) _activePollTaskId = null;
+}
+
+async function tryFinishBrainstormFromDisk(rid, minTopics) {
+  try {
+    var topicsDoc;
+    if (String(rid).startsWith('task-')) {
+      try {
+        topicsDoc = await bridgeFetch('/api/tasks/' + rid + '/steps/2/data');
+      } catch (e) {
+        topicsDoc = await bridgeLoadFile('topics.json');
+      }
+    } else {
+      topicsDoc = await bridgeLoadFile('topics.json');
+    }
+    var topicList = topicsDoc.topics || topicsDoc;
+    if (!Array.isArray(topicList) || topicList.length < (minTopics || 1)) return 0;
+    brainstormTopics = topicList.map(function(t, i){ return normalizeTopicItem(t, i + 1); });
+    selectedTopics.clear();
+    renderTopics();
+    document.getElementById('bsActionBar').style.display = 'flex';
+    saveToRun();
+    logStep(2, 'bridge_agent_brainstorm', brainstormTopics.length + ' topics (from disk/db)');
+    return brainstormTopics.length;
+  } catch (e) {
+    return 0;
+  }
 }
 
 function runBrainstorm() {
@@ -2123,23 +2888,22 @@ function updateBsBar() {
 }
 
 // ==================== Step 3: Section Workbench ====================
-function goToGeneration() {
+async function goToGeneration() {
   if (selectedTopics.size === 0) return;
   var run = getActiveRun();
-  if (run && (run.genTopic || run.selectedTopics.size > 0)) {
-    var sameSel = run.selectedTopics.size === selectedTopics.size &&
-      Array.from(selectedTopics).every(function(t){return run.selectedTopics.has(t);});
-    if (!sameSel) {
-      saveToRun();
-      var newRun = createRun(run.id, 2);
-      newRun.topics = JSON.parse(JSON.stringify(brainstormTopics));
-      newRun.selectedTopics = new Set(selectedTopics);
-      logStep(2, 'select', '分叉并选定了 ' + selectedTopics.size + ' 个主题');
-      showToast('主题选择已变更 → 自动分叉为 Run #' + newRun.id, 'success');
-      switchView('generation');
-      initWorkbench();
-      return;
-    }
+  // Fork when the operator picks a different topic than the one the current
+  // task's article is already being generated for. This preserves the old
+  // article and explores the new topic in a branch (copies steps 1..2).
+  var currentArticleTopicId = await getTaskArticleTopicId(activeTaskId);
+  var chosenTopicId = Array.from(selectedTopics)[0];
+  if (currentArticleTopicId && String(currentArticleTopicId) !== String(chosenTopicId)) {
+    saveToRun();
+    await createRun(activeTaskId, 2);
+    logStep(2, 'select', '主题已变更 → 分叉并选定 ' + selectedTopics.size + ' 个主题');
+    showToast('主题已变更 → 自动分叉新任务', 'success');
+    switchView('generation');
+    initWorkbench();
+    return;
   }
   if (run) { saveToRun(); logStep(2, 'select', '选定了 ' + selectedTopics.size + ' 个主题'); }
   switchView('generation');
@@ -2172,7 +2936,44 @@ function initWorkbench() {
   saveToRun();
 }
 
+/** Clear all Step 3 workbench phase panels to their empty/default state.
+ *  Called before restoreWorkbenchUI so a freshly loaded task never shows
+ *  leftover DOM (SERP list, outline, sections, FAQ, meta) from the previous task. */
+function _resetWorkbenchPanels() {
+  // SERP
+  var serpResult = document.getElementById('serpResult'); if (serpResult) serpResult.style.display = 'none';
+  var serpRankList = document.getElementById('serpRankList'); if (serpRankList) serpRankList.innerHTML = '';
+  var serpGaps = document.getElementById('serpGaps'); if (serpGaps) serpGaps.innerHTML = '';
+  setStatus('serpStatus', 'idle', '待生成');
+  var btnSerpNext = document.getElementById('btnSerpNext'); if (btnSerpNext) btnSerpNext.disabled = true;
+  // Outline
+  var ol = document.getElementById('outlineList'); if (ol) ol.innerHTML = '';
+  setStatus('outlineStatus', 'idle', '待生成');
+  // Sections
+  var sc = document.getElementById('sectionStack'); if (sc) sc.innerHTML = '';
+  // Placements
+  var pp = document.getElementById('productPlaceList'); if (pp) pp.innerHTML = '';
+  var lp = document.getElementById('linkPlaceList'); if (lp) lp.innerHTML = '';
+  // FAQ
+  var fq = document.getElementById('faqEditor'); if (fq) fq.innerHTML = '';
+  setStatus('faqStatus', 'idle', '待生成');
+  // Meta
+  ['metaTitle','metaDesc','metaSlug'].forEach(function(id){
+    var el = document.getElementById(id); if (el) el.value = '';
+  });
+  setStatus('metaStatus', 'idle', '待生成');
+  // Preview / publish — clear the iframe + checklist + action bar so a parent
+  // task's rendered preview never bleeds into a fork that hasn't reached preview.
+  var pf = document.getElementById('previewFrame'); if (pf) pf.srcdoc = '';
+  var pc = document.getElementById('previewChecklist'); if (pc) pc.innerHTML = '';
+  var gti = document.getElementById('genTopicInfo'); if (gti) gti.innerHTML = '进度：—';
+  var bpd = document.getElementById('btnPublishDraft'); if (bpd) bpd.disabled = false;
+}
+
 function restoreWorkbenchUI() {
+  // Reset every phase panel to its empty state first, so stale DOM from a
+  // previously loaded task (e.g. a parent we forked from) does not bleed in.
+  _resetWorkbenchPanels();
   if (articleState.serp) {
     renderSerpResult(articleState.serp);
     setStatus('serpStatus', 'ready', '已完成');
@@ -2209,6 +3010,15 @@ function restoreWorkbenchUI() {
     enableMetaFields(true);
     document.getElementById('btnMetaNext').disabled = false;
     document.getElementById('btnGenMeta').disabled = false;
+  } else if (articleState.phaseDone && articleState.phaseDone.faq) {
+    // FAQ done but meta not yet generated — allow generating
+    document.getElementById('btnGenMeta').disabled = false;
+  }
+  // Preview — only render if this task genuinely has a preview HTML; the
+  // reset above already cleared the iframe, so a fork without a preview stays blank.
+  if (articleState.previewHtml) {
+    document.getElementById('previewFrame').srcdoc = articleState.previewHtml;
+    renderChecklist();
   }
   updatePhasePills();
 }
@@ -2268,89 +3078,34 @@ function showLive(id, lines, onDone) {
 
 // ---- SERP ----
 function generateSerp() {
-  if (!articleState) return;
-  setStatus('serpStatus', 'generating', '分析中');
-  document.getElementById('btnGenSerp').disabled = true;
-  showLive('serpLive', [
-    'Searching Google for target keyword…',
-    'Found 10 results on page 1…',
-    'Analyzing content angles & gaps…',
-  ], () => {
-    const serp = {
-      ranks: [
-        { site: 'thespruce.com', angle: 'Room-by-room checklist' },
-        { site: 'apartmenttherapy.com', angle: 'Style-merge tips for couples' },
-        { site: 'westelm.com', angle: 'Product-led living room guide' },
-      ],
-      gaps: [
-        'No fully assembled furniture angle',
-        'Missing keep/sell/donate decision table',
-        'Weak coverage of pet-friendly merge scenarios',
-      ],
-    };
-    articleState.serp = serp;
-    articleState.phaseDone.serp = true;
-    renderSerpResult(serp);
-    setStatus('serpStatus', 'ready', '已完成');
-    document.getElementById('btnGenSerp').disabled = false;
-    document.getElementById('btnGenSerp').textContent = '重新分析';
-    document.getElementById('btnSerpNext').disabled = false;
-    saveToRun();
-    logStep(3, 'serp', 'SERP 分析完成');
-    updatePhasePills();
-    showToast('SERP 分析完成', 'success');
-  });
+  bridgeAskAgent('serp', document.getElementById('btnGenSerp'));
 }
 
 function renderSerpResult(serp) {
   document.getElementById('serpResult').style.display = 'block';
-  document.getElementById('serpRankList').innerHTML = serp.ranks.map(r =>
-    `<li><strong>${r.site}</strong> — ${r.angle}</li>`).join('');
-  document.getElementById('serpGaps').innerHTML = serp.gaps.map(g =>
-    `<span class="serp-gap-chip">${g}</span>`).join('');
+  // Agent SERP schema: ranks[] = {cluster, results:[{title,url,domain,angle}]}
+  // Render each cluster with its top results; fall back to legacy {site, angle}.
+  const ranks = (serp.ranks || []).map(function(r) {
+    if (r.site || r.angle) {
+      return '<li><strong>' + (r.site || '') + '</strong> — ' + (r.angle || '') + '</li>';
+    }
+    const cluster = r.cluster || 'Cluster';
+    const results = Array.isArray(r.results) ? r.results : [];
+    const top = results.slice(0, 3).map(function(x) {
+      return '<span class="serp-result-line"><strong>' + (x.domain || '') + '</strong> — ' + (x.angle || x.title || '') + '</span>';
+    }).join('');
+    return '<li><div class="serp-cluster">' + cluster + '</div>' + top + '</li>';
+  }).join('');
+  document.getElementById('serpRankList').innerHTML = ranks;
+  const gaps = (serp.gaps || []).map(function(g) {
+    return '<span class="serp-gap-chip">' + (typeof g === 'string' ? g : (g.text || g.gap || JSON.stringify(g))) + '</span>';
+  }).join('');
+  document.getElementById('serpGaps').innerHTML = gaps;
 }
 
 // ---- Outline ----
 function generateOutline() {
-  if (!articleState) return;
-  setStatus('outlineStatus', 'generating', '生成中');
-  document.getElementById('btnGenOutline').disabled = true;
-  showLive('outlineLive', [
-    'Mapping SERP gaps to H2 structure…',
-    'Injecting outline + global rules into prompt…',
-    'Drafting question-led headings…',
-    'Adding FAQ placeholders…',
-  ], () => {
-    const prompt = buildInjectedPrompt('outline');
-    rememberPrompt('outline', prompt);
-    const kw = (articleState.topic.keywords || 'furniture').split(',')[0].trim();
-    articleState.outline = [
-      { id: 1, level: 'h2', text: `How do you decide what to keep when merging ${kw}?` },
-      { id: 2, level: 'h3', text: 'Shared inventory checklist' },
-      { id: 3, level: 'h3', text: 'Three criteria that prevent regret' },
-      { id: 4, level: 'h2', text: 'What should you do with furniture that does not fit?' },
-      { id: 5, level: 'h3', text: 'Keep / sell / donate / buy-new comparison' },
-      { id: 6, level: 'h2', text: 'When should you buy new pieces instead of compromising?' },
-      { id: 7, level: 'h3', text: 'Fully assembled options for a faster move-in' },
-      { id: 8, level: 'h2', text: 'How to choose styles that still feel like “us”?' },
-    ];
-    articleState.outlineConfirmed = false;
-    articleState.phaseDone.outline = false;
-    articleState.sections = [];
-    articleState.phaseDone.sections = false;
-    renderOutline();
-    setStatus('outlineStatus', 'edited', '待确认');
-    document.getElementById('btnGenOutline').disabled = false;
-    document.getElementById('btnGenOutline').textContent = '重新生成大纲';
-    document.getElementById('btnAddH2').disabled = false;
-    document.getElementById('btnAddH3').disabled = false;
-    document.getElementById('btnConfirmOutline').disabled = false;
-    saveToRun();
-    var n = enabledRuleTexts('global', 'outline').length;
-    logStep(3, 'outline', '大纲已生成（注入 ' + n + ' 条规则），等待人工确认');
-    updatePhasePills();
-    showToast('大纲已生成（已注入板块规则），请审核后确认', 'success');
-  });
+  bridgeAskAgent('outline', document.getElementById('btnGenOutline'));
 }
 
 function renderOutline() {
@@ -2414,6 +3169,12 @@ function confirmOutline() {
 }
 
 function buildSectionsFromOutline() {
+  // Preserve existing section content (agent-generated or user-edited) by
+  // matching on id; only create empty sections for new outline items.
+  var prevById = {};
+  (articleState.sections || []).forEach(function(s) {
+    if (s && s.id != null) prevById[s.id] = s;
+  });
   const secs = [
     { id: 'intro', type: 'Intro', title: 'Introduction', content: '', status: 'idle' },
   ];
@@ -2424,18 +3185,28 @@ function buildSectionsFromOutline() {
       if (articleState.outline[j].level === 'h2') break;
       kids.push(articleState.outline[j].text);
     }
+    const sid = 'h2-' + i;
+    var prev = prevById[sid];
     secs.push({
-      id: 'h2-' + i,
+      id: sid,
       type: 'H2',
       title: h2.text,
       subheads: kids,
-      content: '',
-      status: 'idle',
+      content: prev ? (prev.content || '') : '',
+      status: prev ? (prev.status || 'idle') : 'idle',
+      images: prev ? (prev.images || []) : [],
+      transition: prev ? prev.transition : undefined,
     });
   });
-  secs.push({ id: 'conclusion', type: 'Conclusion', title: 'Conclusion', content: '', status: 'idle' });
+  var prevConcl = prevById['conclusion'];
+  secs.push({ id: 'conclusion', type: 'Conclusion', title: 'Conclusion', content: prevConcl ? (prevConcl.content || '') : '', status: prevConcl ? (prevConcl.status || 'idle') : 'idle' });
+  var prevIntro = prevById['intro'];
+  if (prevIntro) {
+    secs[0].content = prevIntro.content || '';
+    secs[0].status = prevIntro.status || 'idle';
+  }
   articleState.sections = secs;
-  articleState.phaseDone.sections = false;
+  articleState.phaseDone.sections = secs.every(s => s.content && (s.status === 'ready' || s.status === 'edited'));
   renderSectionStack();
   refreshSectionsGate();
 }
@@ -2451,14 +3222,20 @@ function renderSectionStack() {
     const statusLabel = { idle: '待生成', generating: '生成中', ready: '已完成', edited: '已修改' }[sec.status] || sec.status;
     const statusCls = sec.status === 'edited' ? 'edited' : (sec.status === 'ready' ? 'ready' : (sec.status === 'generating' ? 'generating' : 'idle'));
     const sub = (sec.subheads && sec.subheads.length) ? `<div style="font-size:11px;color:var(--text-tertiary);margin:4px 0 8px;">含 H3：${sec.subheads.join(' · ')}</div>` : '';
+    const imgs = Array.isArray(sec.images) ? sec.images : [];
+    const imgBar = imgs.length
+      ? `<div class="sec-img-bar">${imgs.map(im => `<div class="sec-img-thumb" title="${escapeAttr(im.alt || '')}"><img src="${escapeAttr(im.url)}" alt="${escapeAttr(im.alt || '')}" loading="lazy" onerror="this.parentElement.style.display='none'"><span class="sec-img-credit">${escapeHtml(im.credit || '')}</span></div>`).join('')}</div>`
+      : '';
     card.innerHTML = `
       <div class="section-head" onclick="toggleSectionCard(${idx})">
         <span class="sec-type">${sec.type}</span>
         <span class="sec-title">${sec.title}</span>
+        ${imgs.length ? `<span class="sec-img-count" title="${imgs.length} 张配图">🖼 ${imgs.length}</span>` : ''}
         <span class="wb-status ${statusCls}">${statusLabel}</span>
       </div>
       <div class="section-body">
         ${sub}
+        ${imgBar}
         <textarea class="section-editor" id="sec-editor-${idx}" placeholder="本板块内容将显示在这里，可直接修改…" oninput="onSectionEdit(${idx})">${sec.content || ''}</textarea>
         <div class="wb-actions" style="margin-top:10px;">
           <button class="btn btn-primary btn-sm" onclick="generateOneSection(${idx})">${sec.content ? '重新生成本板块' : '生成本板块'}</button>
@@ -2467,6 +3244,65 @@ function renderSectionStack() {
       </div>`;
     stack.appendChild(card);
   });
+  renderSectionPreview();
+}
+
+function renderSectionPreview() {
+  const body = document.getElementById('sectionPreviewBody');
+  if (!body) return;
+  if (!articleState || !articleState.sections || !articleState.sections.length) {
+    body.innerHTML = '<div class="pv-empty">尚无正文板块</div>';
+    const wc = document.getElementById('pvWordCount');
+    if (wc) wc.textContent = '0 词';
+    return;
+  }
+
+  let html = '';
+  let totalWords = 0;
+  const topicTitle = (articleState.topic && articleState.topic.title) || '';
+
+  if (topicTitle) {
+    html += '<div class="pv-h1">' + escapeHtml(topicTitle) + '</div>';
+  }
+
+  articleState.sections.forEach(function(sec) {
+    const content = (sec.content || '').trim();
+    const wordCount = content ? content.split(/\s+/).length : 0;
+    totalWords += wordCount;
+
+    if (sec.type === 'Intro') {
+      html += '<div class="pv-type">Introduction</div>';
+      if (content) {
+        html += '<div class="pv-para">' + escapeHtml(content) + '</div>';
+      } else {
+        html += '<div class="pv-empty">（待生成）</div>';
+      }
+    } else if (sec.type === 'Conclusion') {
+      html += '<div class="pv-h2">' + escapeHtml(sec.title || 'Conclusion') + '</div>';
+      if (content) {
+        html += '<div class="pv-para">' + escapeHtml(content) + '</div>';
+      } else {
+        html += '<div class="pv-empty">（待生成）</div>';
+      }
+    } else {
+      html += '<div class="pv-h2">' + escapeHtml(sec.title || '') + '</div>';
+      if (content) {
+        html += '<div class="pv-para">' + escapeHtml(content) + '</div>';
+      } else {
+        html += '<div class="pv-empty">（待生成）</div>';
+      }
+    }
+  });
+
+  body.innerHTML = html;
+  const wc = document.getElementById('pvWordCount');
+  if (wc) wc.textContent = totalWords + ' 词';
+}
+
+function escapeHtml(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 function toggleSectionCard(idx) {
@@ -2482,6 +3318,7 @@ function onSectionEdit(idx) {
     articleState.phaseDone.sections = false;
   }
   saveToRun();
+  renderSectionPreview();
 }
 
 function saveSectionEdit(idx) {
@@ -2510,57 +3347,16 @@ function mockSectionContent(sec) {
 }
 
 function generateOneSection(idx) {
-  const sec = articleState.sections[idx];
-  sec.status = 'generating';
-  sec._open = true;
-  renderSectionStack();
-  setTimeout(() => {
-    const prompt = buildInjectedPrompt('section', sec.type);
-    rememberPrompt('section:' + sec.id, prompt);
-    sec.content = mockSectionContent(sec);
-    sec.status = 'ready';
-    sec._open = true;
-    renderSectionStack();
-    refreshSectionsGate();
-    saveToRun();
-    var n = enabledRuleTexts.apply(null, ruleBlockIdsFor('section', sec.type)).length;
-    logStep(3, 'section_gen', '生成板块: ' + sec.title + '（注入 ' + n + ' 条规则）');
-    showToast('已生成：' + sec.type + ' — 已注入板块规则', 'success');
-  }, 700 + Math.random() * 500);
+  const sec = articleState && articleState.sections[idx];
+  bridgeGenerateSection('section', sec ? sec.id : null);
 }
 
 function generateAllSections() {
-  if (!articleState.outlineConfirmed) {
+  if (!articleState || !articleState.outlineConfirmed) {
     showToast('请先确认大纲', '');
     return;
   }
-  setStatus('sectionsStatus', 'generating', '批量生成中');
-  document.getElementById('btnGenAllSections').disabled = true;
-  let i = 0;
-  function next() {
-    if (i >= articleState.sections.length) {
-      setStatus('sectionsStatus', 'ready', '全部就绪');
-      document.getElementById('btnGenAllSections').disabled = false;
-      document.getElementById('btnGenAllSections').textContent = '重新生成全部';
-      document.getElementById('btnGenPlacements').disabled = false;
-      refreshSectionsGate();
-      saveToRun();
-      logStep(3, 'sections', '全部正文板块已生成');
-      showToast('全部正文板块已生成，下一步审核产品与内链', 'success');
-      return;
-    }
-    const sec = articleState.sections[i];
-    sec.status = 'generating';
-    renderSectionStack();
-    setTimeout(() => {
-      rememberPrompt('section:' + sec.id, buildInjectedPrompt('section', sec.type));
-      sec.content = mockSectionContent(sec);
-      sec.status = 'ready';
-      i++;
-      next();
-    }, 450);
-  }
-  next();
+  bridgeAskAgent('section', document.getElementById('btnGenAllSections'));
 }
 
 function refreshSectionsGate() {
@@ -2581,80 +3377,17 @@ function refreshSectionsGate() {
 // ---- Product placements & internal links ----
 function h2SectionOptionsHtml(selectedId) {
   return articleState.sections
-    .filter(s => s.type === 'H2')
-    .map(s => `<option value="${s.id}" ${s.id === selectedId ? 'selected' : ''}>${s.title.slice(0, 56)}</option>`)
+    .filter(s => String(s.type).toLowerCase() === 'h2')
+    .map(s => `<option value="${s.id}" ${s.id === selectedId ? 'selected' : ''}>${(s.title || s.heading || '').slice(0, 56)}</option>`)
     .join('');
 }
 
 function generatePlacements() {
-  if (!articleState.phaseDone.sections) {
+  if (!articleState || !articleState.phaseDone.sections) {
     showToast('请先完成正文板块', '');
     return;
   }
-  setStatus('placementsStatus', 'generating', '推荐中');
-  document.getElementById('btnGenPlacements').disabled = true;
-  showLive('placementsLive', [
-    'Matching POVISON catalog to outline…',
-    'Injecting placements + global rules…',
-    'Scanning povison.com/blog for related posts…',
-    'Drafting natural product blurbs & anchors…',
-  ], () => {
-    rememberPrompt('placements', buildInjectedPrompt('placements'));
-    const h2s = articleState.sections.filter(s => s.type === 'H2');
-    const a = h2s[Math.min(1, h2s.length - 1)] || h2s[0];
-    const b = h2s[Math.min(2, h2s.length - 1)] || h2s[0];
-    articleState.products = [
-      {
-        id: 'p1', status: 'pending',
-        name: 'Arlo Sofa',
-        url: 'https://www.povison.com/products/arlo-sofa',
-        sectionId: a ? a.id : '',
-        blurb: 'If you need one shared seating piece that still feels intentional, the Arlo Sofa arrives fully assembled—so move-in day is about arranging cushions, not hunting for missing hardware. Its clean silhouette works when you are blending two styles without starting from scratch.',
-      },
-      {
-        id: 'p2', status: 'pending',
-        name: 'LumiFlex Bed Frame',
-        url: 'https://www.povison.com/products/lumiflex-bed',
-        sectionId: b ? b.id : '',
-        blurb: 'For the bedroom you both sleep in, the LumiFlex Bed Frame skips the assembly weekend. Soft upholstery and a low profile help a mixed-furniture room look planned, not temporary—especially useful when one partner already owns nightstands in a different wood tone.',
-      },
-    ];
-    articleState.links = [
-      {
-        id: 'l1', status: 'pending',
-        anchor: 'small space living layouts',
-        url: 'https://www.povison.com/blog/small-space-living-layouts',
-        sectionId: a ? a.id : '',
-        note: 'Anchor must already appear (or be edited into) the target H2 sentence.',
-      },
-      {
-        id: 'l2', status: 'pending',
-        anchor: 'pet-friendly upholstery',
-        url: 'https://www.povison.com/blog/pet-friendly-upholstery-guide',
-        sectionId: b ? b.id : '',
-        note: 'Link the natural phrase only—no “click here” or “see this guide”.',
-      },
-      {
-        id: 'l3', status: 'pending',
-        anchor: 'how to choose a modular sofa',
-        url: 'https://www.povison.com/blog/how-to-choose-modular-sofa',
-        sectionId: h2s[0] ? h2s[0].id : '',
-        note: 'Prefer long-tail phrases already used in body copy.',
-      },
-    ];
-    articleState.placementsConfirmed = false;
-    articleState.phaseDone.placements = false;
-    renderPlacements();
-    setStatus('placementsStatus', 'edited', '待审核');
-    document.getElementById('btnGenPlacements').disabled = false;
-    document.getElementById('btnGenPlacements').textContent = '重新推荐';
-    document.getElementById('btnAddProduct').disabled = false;
-    document.getElementById('btnAddLink').disabled = false;
-    refreshPlacementsGate();
-    saveToRun();
-    logStep(3, 'placements', '产品与内链推荐已生成（注入 ' + enabledRuleTexts('global', 'placements').length + ' 条规则），等待人工审核');
-    showToast('已生成产品与内链（已注入板块规则），请审核', 'success');
-  });
+  bridgeGenerateSection('placements');
 }
 
 function renderPlacements() {
@@ -2672,10 +3405,13 @@ function renderPlacements() {
         <span class="wb-status ${p.status === 'accepted' ? 'ready' : (p.status === 'rejected' ? 'idle' : 'edited')}">${
           p.status === 'accepted' ? '已接受' : (p.status === 'rejected' ? '已驳回' : '待审核')}</span>
       </div>
+      ${p.image ? `<div class="place-product-img"><img src="${escapeAttr(p.image)}" alt="${escapeAttr(p.name || '')}" loading="lazy" onerror="this.parentElement.style.display='none'"><span class="sec-img-credit">POVISON 商品图</span></div>` : `<div class="place-product-img empty" style="font-size:11px;color:var(--text-tertiary);padding:6px 0;">暂无商品配图（重新生成植入可补图）</div>`}
       <div class="section-field"><label>产品名</label>
         <input type="text" value="${escapeAttr(p.name)}" oninput="editProduct(${idx},'name',this.value)"></div>
       <div class="section-field"><label>产品链接</label>
         <input type="text" value="${escapeAttr(p.url)}" oninput="editProduct(${idx},'url',this.value)"></div>
+      <div class="section-field"><label>产品配图 URL</label>
+        <input type="text" value="${escapeAttr(p.image || '')}" oninput="editProduct(${idx},'image',this.value)" placeholder="POVISON 商品图直链"></div>
       <div class="section-field"><label>挂载到哪个 H2</label>
         <select onchange="editProduct(${idx},'sectionId',this.value)">${h2SectionOptionsHtml(p.sectionId)}</select></div>
       <div class="section-field"><label>植入文案（40–70 词，链接嵌在产品名上）</label>
@@ -2743,6 +3479,7 @@ function setPlacementStatus(kind, idx, status) {
   renderPlacements();
   refreshPlacementsGate();
   saveToRun();
+  persistArticleState();
   logStep(3, 'placement_' + status, kind + '#' + (idx + 1));
 }
 
@@ -2754,6 +3491,7 @@ function acceptAllPlacements() {
   renderPlacements();
   refreshPlacementsGate();
   saveToRun();
+  persistArticleState();
   logStep(3, 'placement_accept_all', '一键全部接受产品与内链');
   showToast('已全部接受，可确认进入 FAQ', 'success');
 }
@@ -2876,6 +3614,7 @@ function confirmPlacements() {
   document.getElementById('btnGenFaq').disabled = false;
   refreshPlacementsGate();
   saveToRun();
+  persistArticleState();
   logStep(3, 'placements_confirm', `确认植入：产品 ${acceptedP.length} · 内链 ${acceptedL.length}`);
   showToast('产品与内链已确认', 'success');
   setGenPhase('faq');
@@ -2883,30 +3622,7 @@ function confirmPlacements() {
 
 // ---- FAQ ----
 function generateFaq() {
-  setStatus('faqStatus', 'generating', '生成中');
-  document.getElementById('btnGenFaq').disabled = true;
-  showLive('faqLive', ['Pulling People Also Ask…', 'Injecting FAQ rules…', 'Drafting short answers…'], () => {
-    rememberPrompt('faq', buildInjectedPrompt('faq'));
-    articleState.faq = [
-      { q: 'Should we buy a new sofa when moving in together?', a: 'Only if neither sofa fits your shared criteria for size, durability, and style. Sell or donate first, then buy one hero piece you both like.' },
-      { q: 'What if our furniture styles clash?', a: 'Pick a shared palette and one bridging material (wood tone, metal, or fabric). Keep the best piece from each style rather than forcing a match.' },
-      { q: 'Is fully assembled furniture worth it for a move-in?', a: 'Yes when your timeline is tight. You skip tool time and missing-parts delays, which matters more when two households merge in one weekend.' },
-      { q: 'How do we split furniture costs fairly?', a: 'Inventory what each person already owns, then split new purchases by who needs the item most—or 50/50 for shared living-room pieces.' },
-      { q: 'What should we do with duplicates?', a: 'Keep the better condition or better fit. Photograph the rest, list locally within a week, and donate what does not sell.' },
-    ];
-    articleState.phaseDone.faq = true;
-    renderFaqEditor();
-    setStatus('faqStatus', 'ready', '已完成');
-    document.getElementById('btnGenFaq').disabled = false;
-    document.getElementById('btnGenFaq').textContent = '重新生成 FAQ';
-    document.getElementById('btnAddFaq').disabled = false;
-    document.getElementById('btnFaqNext').disabled = false;
-    document.getElementById('btnGenMeta').disabled = false;
-    saveToRun();
-    logStep(3, 'faq', 'FAQ 已生成（注入 ' + enabledRuleTexts('global', 'faq').length + ' 条规则）');
-    updatePhasePills();
-    showToast('FAQ 已生成（已注入板块规则），可直接修改', 'success');
-  });
+  bridgeGenerateSection('faq');
 }
 
 function renderFaqEditor() {
@@ -2932,6 +3648,64 @@ function renderFaqEditor() {
       </div>`;
     box.appendChild(wrap);
   });
+  renderFaqPreview();
+}
+
+function renderFaqPreview() {
+  const body = document.getElementById('faqPreviewBody');
+  if (!body) return;
+  if (!articleState) {
+    body.innerHTML = '<div class="pv-empty">尚无 FAQ 数据</div>';
+    const wc = document.getElementById('faqPvWordCount');
+    if (wc) wc.textContent = '0 词';
+    return;
+  }
+
+  let html = '';
+  let totalWords = 0;
+  const topicTitle = (articleState.topic && articleState.topic.title) || '';
+
+  if (topicTitle) {
+    html += '<div class="pv-h1">' + escapeHtml(topicTitle) + '</div>';
+  }
+
+  // Show sections (compact)
+  (articleState.sections || []).forEach(function(sec) {
+    const content = (sec.content || '').trim();
+    if (content) {
+      if (sec.type === 'Intro') {
+        html += '<div class="pv-type">Introduction</div>';
+      } else {
+        html += '<div class="pv-h2">' + escapeHtml(sec.title || '') + '</div>';
+      }
+      html += '<div class="pv-para">' + escapeHtml(content.slice(0, 200) + (content.length > 200 ? '…' : '')) + '</div>';
+    }
+  });
+
+  // FAQ section
+  const faq = articleState.faq || [];
+  if (faq.length) {
+    html += '<div class="pv-h2">FAQ</div>';
+    faq.forEach(function(item, i) {
+      const q = (item.q || '').trim();
+      const a = (item.a || '').trim();
+      if (q) totalWords += q.split(/\s+/).length;
+      if (a) totalWords += a.split(/\s+/).length;
+      html += '<div class="pv-h3">' + (i + 1) + '. ' + escapeHtml(q || '(空问题)') + '</div>';
+      if (a) {
+        html += '<div class="pv-para">' + escapeHtml(a) + '</div>';
+      } else {
+        html += '<div class="pv-empty">（待填写）</div>';
+      }
+    });
+  } else {
+    html += '<div class="pv-h2">FAQ</div>';
+    html += '<div class="pv-empty">尚无 FAQ</div>';
+  }
+
+  body.innerHTML = html;
+  const wc = document.getElementById('faqPvWordCount');
+  if (wc) wc.textContent = totalWords + ' 词';
 }
 
 function onFaqEdit(idx, field, val) {
@@ -2939,6 +3713,7 @@ function onFaqEdit(idx, field, val) {
   articleState.phaseDone.faq = true;
   setStatus('faqStatus', 'edited', '已修改');
   saveToRun();
+  renderFaqPreview();
 }
 
 function addFaqItem() {
@@ -2957,35 +3732,7 @@ function removeFaqItem(idx) {
 
 // ---- Meta ----
 function generateMeta() {
-  setStatus('metaStatus', 'generating', '生成中');
-  document.getElementById('btnGenMeta').disabled = true;
-  setTimeout(() => {
-    rememberPrompt('meta', buildInjectedPrompt('meta'));
-    const title = articleState.topic.title;
-    const focus = (articleState.topic.keywords || '').split(',')[0].trim() || 'furniture';
-    let metaTitle = title.length <= 60 ? title : title.slice(0, 57) + '…';
-    if (metaTitle.length < 50) metaTitle = metaTitle.replace(/\?$/, '') + ' | Practical Guide';
-    if (metaTitle.length > 60) metaTitle = metaTitle.slice(0, 60);
-    const desc = `Learn how to merge two homes without regret—inventory checklist, keep/sell/donate table, and fully assembled picks for a faster move-in. Built for couples sorting ${focus}.`;
-    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 75);
-    articleState.meta = {
-      title: metaTitle.slice(0, 60),
-      description: desc.slice(0, 160),
-      slug,
-      focus,
-    };
-    articleState.phaseDone.meta = true;
-    fillMetaFields();
-    enableMetaFields(true);
-    setStatus('metaStatus', 'ready', '已完成');
-    document.getElementById('btnGenMeta').disabled = false;
-    document.getElementById('btnGenMeta').textContent = '重新生成';
-    document.getElementById('btnMetaNext').disabled = false;
-    saveToRun();
-    logStep(3, 'meta', 'SEO 元信息已生成（注入 ' + enabledRuleTexts('global', 'meta').length + ' 条规则）');
-    updatePhasePills();
-    showToast('SEO 元信息已生成（已注入板块规则）', 'success');
-  }, 600);
+  bridgeGenerateSection('meta');
 }
 
 function enableMetaFields(on) {
@@ -3026,35 +3773,52 @@ function updateCharCount(id, n, min, max) {
 }
 
 // ---- Preview & publish ----
+function buildInlineImagesHtml(sec) {
+  const imgs = Array.isArray(sec.images) ? sec.images : [];
+  if (!imgs.length) return '';
+  return imgs.map(im => {
+    if (!im || !im.url) return '';
+    return '<figure class="article-figure">' +
+      '<img src="' + escapeAttr(im.url) + '" alt="' + escapeAttr(im.alt || '') + '" loading="lazy">' +
+      (im.caption ? '<figcaption>' + escapeHtml(im.caption) + (im.credit ? ' <span class="fig-credit">' + escapeHtml(im.credit) + '</span>' : '') + '</figcaption>' : '') +
+      '</figure>';
+  }).join('');
+}
+
+function buildProductImageHtml(sec) {
+  // Find accepted products attached to this section; render their POVISON image.
+  const sid = sec.id;
+  const products = (articleState.products || []).filter(p => (p.sectionId || p.section) === sid && p.status !== 'rejected' && p.image);
+  if (!products.length) return '';
+  return products.map(p => {
+    return '<figure class="article-figure product-figure">' +
+      '<img src="' + escapeAttr(p.image) + '" alt="' + escapeAttr(p.name || '') + '" loading="lazy">' +
+      '<figcaption>' + escapeHtml(p.name || '') + ' <span class="fig-credit">POVISON</span></figcaption>' +
+      '</figure>';
+  }).join('');
+}
+
 function buildArticleBody() {
   let body = '';
   articleState.sections.forEach(sec => {
     const chunks = formatSectionHtml(sec.content);
+    const htmlBlock = chunks.join('');
+    const inlineImgs = buildInlineImagesHtml(sec);
+    const productImgs = buildProductImageHtml(sec);
     if (sec.type === 'Intro') {
-      let inList = false;
-      chunks.forEach(c => {
-        if (c.startsWith('<li>')) { if (!inList) { body += '<ul>'; inList = true; } body += c; }
-        else { if (inList) { body += '</ul>'; inList = false; } body += c; }
-      });
-      if (inList) body += '</ul>';
+      body += htmlBlock + inlineImgs;
     } else if (sec.type === 'Conclusion') {
-      body += '<div class="conclusion"><h2>Conclusion</h2>';
-      chunks.forEach(c => { body += c.startsWith('<li>') ? `<ul>${c}</ul>` : c; });
-      body += '</div>';
+      body += '<div class="conclusion"><h2>Conclusion</h2>' + htmlBlock + '</div>';
     } else {
-      body += `<h2>${escapeHtml(sec.title)}</h2>`;
-      let inList = false;
-      chunks.forEach(c => {
-        if (c.startsWith('<li>')) { if (!inList) { body += '<ul>'; inList = true; } body += c; }
-        else { if (inList) { body += '</ul>'; inList = false; } body += c; }
-      });
-      if (inList) body += '</ul>';
+      body += '<h2>' + escapeHtml(sec.title) + '</h2>' + htmlBlock;
+      // Insert body image after the section text, then product image (different source, no conflict).
+      body += inlineImgs + productImgs;
     }
   });
   if (articleState.faq && articleState.faq.length) {
     body += '<section class="faq-section"><h2>Frequently Asked Questions</h2>';
     articleState.faq.forEach(f => {
-      body += `<div class="faq-item"><h3 onclick="toggleFaq(this)">${escapeHtml(f.q)}</h3><p>${escapeHtml(f.a)}</p></div>`;
+      body += '<div class="faq-item"><h3 onclick="toggleFaq(this)">' + escapeHtml(f.q) + '</h3><p>' + escapeHtml(f.a) + '</p></div>';
     });
     body += '</section>';
   }
@@ -3070,16 +3834,6 @@ function buildFaqJsonLd() {
   return '<script type="application/ld+json">' + JSON.stringify({
     '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: entities,
   }, null, 2) + '</' + 'script>';
-}
-
-function buildGalleryItems() {
-  let html = '';
-  for (let i = 0; i < 10; i++) {
-    const url = PEXELS_GALLERY[i % PEXELS_GALLERY.length];
-    const cap = GALLERY_CAPTIONS[i % GALLERY_CAPTIONS.length];
-    html += `<a class="gallery-item" href="${url}" target="_blank"><img src="${url}" alt="${escapeAttr(cap)}" loading="lazy"><p>${escapeHtml(cap)}</p></a>`;
-  }
-  return html;
 }
 
 function topicCategoryLabel() {
@@ -3114,7 +3868,6 @@ function fillBlogTemplate() {
     '{{HERO_IMG_CAPTION}}': escapeHtml(heroCap),
     '{{ARTICLE_BODY}}': buildArticleBody(),
     '{{FAQ_JSON_LD}}': buildFaqJsonLd(),
-    '{{GALLERY_ITEMS}}': buildGalleryItems(),
   };
   let html = BLOG_POST_TEMPLATE;
   Object.keys(reps).forEach(k => { html = html.split(k).join(reps[k]); });
@@ -3196,15 +3949,26 @@ function escapeHtml(s) {
 }
 
 function formatSectionHtml(content) {
-  return String(content || '').split('\n').filter(Boolean).map(line => {
+  var raw = String(content || '').trim();
+  if (!raw) return [];
+  // Strip product/internal-link markers before rendering
+  raw = raw.replace(/\[Product:\s*[^\]]+\]\s*/g, '').replace(/\[Internal link:\s*[^\]]+\]\s*/g, '');
+  // Use marked if available, otherwise fall back to simple line-by-line
+  if (typeof marked !== 'undefined') {
+    try {
+      var html = marked.parse(raw, { breaks: true, gfm: true });
+      // Return as single-chunk array (buildArticleBody handles it as a block)
+      return [html];
+    } catch (e) { /* fall through */ }
+  }
+  // Fallback: simple line-by-line
+  return raw.split('\n').filter(Boolean).map(line => {
     let t = escapeHtml(line)
-      .replace(/\[Product:\s*[^\]]+\]/g, '')
-      .replace(/\[Internal link:[^\]]+\]/g, '')
       .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>');
     t = t.trim();
     if (!t) return '';
-    if (t.startsWith('•') || t.startsWith('·')) return `<li>${t.slice(1).trim()}</li>`;
-    return `<p>${t}</p>`;
+    if (t.startsWith('•') || t.startsWith('·') || t.startsWith('-')) return '<li>' + t.replace(/^[•·-]\s*/, '') + '</li>';
+    return '<p>' + t + '</p>';
   }).filter(Boolean);
 }
 
@@ -3300,24 +4064,60 @@ function rejectArticle() {
   setGenPhase('sections');
 }
 
-/** MVP: export HTML for MCP/manual WP; one-click draft is V1.2 */
-function finalizeMvpExport() {
+/** Export the finalized article to WordPress as a draft (reuses wordpress_mcp). */
+async function finalizeMvpExport() {
   const result = runClientValidation();
   articleState.validation = result;
   renderChecklist();
   if (!result.ok) {
-    if (!confirm('检查清单未全部通过（' + result.passed + '/' + result.total + '）。仍要导出 HTML？')) return;
+    if (!confirm('检查清单未全部通过（' + result.passed + '/' + result.total + '）。仍要导出到 WordPress 草稿？')) return;
   }
-  exportPreviewHtml();
-  document.getElementById('genTopicInfo').innerHTML = '✅ 终审通过 · 已导出 HTML（WP 一键见 V1.2）';
-  var run = getActiveRun();
-  if (run) {
-    run.genStatus = 'exported';
-    run.status = 'completed';
-    saveToRun();
-    logStep(3, 'exported', '人工终审通过，导出 HTML（MVP）');
+  // Persist the latest articleState to DB so the server builds HTML from authoritative data.
+  persistArticleState();
+  const rid = await bridgeEnsureRun();
+  const isTask = String(rid).startsWith('task-');
+  const btn = document.getElementById('btnPublishDraft');
+  const origHtml = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '正在推送到 WordPress…'; }
+  try {
+    const launchPath = isTask
+      ? ('/api/tasks/' + rid + '/wordpress/draft')
+      : null;
+    if (!launchPath) {
+      showToast('WordPress 导出仅支持 task-* 任务，请先保存为任务', '');
+      return;
+    }
+    const res = await bridgeFetch(launchPath, {
+      method: 'POST',
+      body: JSON.stringify({ skip_image_upload: true, status: 'draft' }),
+    });
+    const editUrl = res.edit_url || '';
+    const previewUrl = res.preview_url || '';
+    articleState.wp = {
+      post_id: res.post_id,
+      edit_url: editUrl,
+      preview_url: previewUrl,
+      link: res.link || '',
+      exported_at: new Date().toISOString(),
+    };
+    document.getElementById('genTopicInfo').innerHTML =
+      '✅ 终审通过 · 已导出到 WordPress 草稿（post #' + (res.post_id || '?') + '）'
+      + (editUrl ? ' · <a href="' + editUrl + '" target="_blank" style="color:var(--accent)">在 WP 编辑</a>' : '');
+    var run = getActiveRun();
+    if (run) {
+      run.genStatus = 'exported';
+      run.status = 'completed';
+      saveToRun();
+      logStep(3, 'exported', '人工终审通过，导出到 WordPress 草稿 post #' + (res.post_id || '?'));
+    }
+    persistArticleState();
+    showToast('已导出到 WordPress 草稿 · post #' + (res.post_id || '?'), 'success');
+    if (editUrl) window.open(editUrl, '_blank');
+  } catch (e) {
+    showToast('WordPress 导出失败：' + (e.message || e), '');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
   }
-  showToast('已导出 HTML。请按 wp-mvp-handoff 用 MCP/人工上传草稿', 'success');
 }
 
 function publishToWordPress() {
@@ -3816,16 +4616,16 @@ function _hideTooltip() {
 
 
 // ==================== Bridge API (scripts + agent) ====================
-const BRIDGE_DEFAULT = 'http://127.0.0.1:8765';
+const BRIDGE_DEFAULT = 'http://127.0.0.1:8766';
 
 function resolveBridgeBase() {
-  // Only same-origin when served by Studio Bridge itself (:8765).
+  // Only same-origin when served by Studio Bridge itself (:8766).
   // Cursor Live Preview / other http ports must NOT use relative URLs —
   // they would hit the wrong host and show「Bridge 未连接」.
   const host = location.hostname;
   const port = String(location.port || '');
   const onBridge =
-    (host === '127.0.0.1' || host === 'localhost') && port === '8765';
+    (host === '127.0.0.1' || host === 'localhost') && port === '8766';
   return onBridge ? '' : BRIDGE_DEFAULT;
 }
 
@@ -3834,7 +4634,7 @@ function isOnBridgeOrigin() {
   const port = String(location.port || '');
   return (location.protocol === 'http:' || location.protocol === 'https:') &&
     (host === '127.0.0.1' || host === 'localhost') &&
-    port === '8765';
+    port === '8766';
 }
 
 function showWrongHostBannerIfNeeded() {
@@ -3852,6 +4652,7 @@ function showWrongHostBannerIfNeeded() {
 const BRIDGE = {
   base: resolveBridgeBase(),
   runId: null,
+  taskId: null,
   online: false,
 };
 
@@ -3882,6 +4683,75 @@ function setBridgeJob(msg) {
   if (el) el.textContent = msg || '';
 }
 
+/* ==================== Job Progress Manager (Apple-style) ==================== */
+const JobProgress = {
+  _el: null, _t0: 0, _timer: null, _buttons: [], _state: 'idle',
+  _titles: {
+    'keyword-discovery': '发现关键词',
+    'enrich-keyword-metrics': '补齐搜索指标',
+    'topic-brainstorm': '头脑风暴选题',
+    'section-generate': '生成正文',
+    'validate-article': '校验文章',
+    'agent-serp': 'Agent SERP 洞察',
+    'agent-outline': 'Agent 生成大纲',
+    'agent-section': 'Agent 撰写正文',
+  },
+  _statusHints: {
+    'keyword-discovery': '正在爬取 16 个家居博客站点并提取标题…',
+    'enrich-keyword-metrics': '正在补齐 SV / KD / CPC 指标…',
+    'topic-brainstorm': '正在调用 LLM 生成选题与 SERP 分析…',
+    'section-generate': '正在调用 LLM 撰写正文…',
+    'validate-article': '正在校验文章结构与质量…',
+    'agent-serp': 'Agent 正在分析 SERP 竞品与内容缺口…',
+    'agent-outline': 'Agent 正在基于选题与 SERP 生成大纲…',
+    'agent-section': 'Agent 正在逐块撰写正文…',
+  },
+  start(kind, buttons) {
+    this._state = 'running';
+    this._t0 = Date.now();
+    this._buttons = buttons || [];
+    this._buttons.forEach(b => { if (b) { b.classList.add('is-loading'); b.disabled = true; } });
+    this._el = document.getElementById('jobProgress');
+    this._el.className = 'job-progress show';
+    document.getElementById('jpTitle').textContent = this._titles[kind] || '正在处理…';
+    document.getElementById('jpStatus').textContent = this._statusHints[kind] || '请稍候';
+    this._tick();
+    this._timer = setInterval(() => this._tick(), 1000);
+  },
+  _tick() {
+    const s = Math.floor((Date.now() - this._t0) / 1000);
+    const mm = Math.floor(s / 60), ss = s % 60;
+    const t = document.getElementById('jpTime');
+    if (t) t.textContent = mm + ':' + (ss < 10 ? '0' : '') + ss;
+  },
+  update(statusText) { const el = document.getElementById('jpStatus'); if (el && statusText) el.textContent = statusText; },
+  done(ok, message) {
+    if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    this._buttons.forEach(b => { if (b) { b.classList.remove('is-loading'); b.disabled = false; } });
+    if (this._el) {
+      this._el.className = 'job-progress show ' + (ok ? 'success' : 'failed');
+      if (message) document.getElementById('jpStatus').textContent = message;
+    }
+    this._state = ok ? 'success' : 'failed';
+    setTimeout(() => { if (this._el) this._el.className = 'job-progress'; }, ok ? 1800 : 4000);
+  },
+};
+
+async function bridgeSyncKeywordsFromRun(opts) {
+  try {
+    const rid = await bridgeEnsureRun();
+    const kw = await bridgeLoadFile('kw.json');
+    const list = Array.isArray(kw) ? kw : (kw && kw.keywords) || [];
+    if (!list.length) return 0;
+    const n = applyImportedKeywords(list, Object.assign({ silent: true }, opts || {}));
+    setBridgeJob('已加载 ' + n + ' 个关键词');
+    return n;
+  } catch (e) {
+    // kw.json may not exist yet for a fresh run — not an error
+    return 0;
+  }
+}
+
 async function bridgeHealth() {
   showWrongHostBannerIfNeeded();
   try {
@@ -3889,7 +4759,10 @@ async function bridgeHealth() {
     const prof = h.profile || 'povison-seo';
     setBridgeUi(!!h.ok, 'Bridge 已连接 · ' + prof + (h.scripts_ok ? ' · skill OK' : ' · 缺脚本') + (h.gateway_key_set ? '' : ' · 无 Gateway Key'));
     try {
-      if (!BRIDGE.runId) await bridgeEnsureRun();
+      if (!BRIDGE.runId && !activeTaskId) await bridgeEnsureRun();
+      if (!KEYWORDS.length) await bridgeSyncKeywordsFromRun({ silent: true });
+      await bridgeRestoreFullState();
+      await refreshAuditTrail();
     } catch (runErr) {
       setBridgeJob('Run 创建失败：' + (runErr && runErr.message ? runErr.message : runErr));
     }
@@ -3904,10 +4777,59 @@ async function bridgeHealth() {
 }
 
 async function bridgeEnsureRun() {
+  if (activeTaskId) {
+    BRIDGE.runId = activeTaskId;
+    BRIDGE.taskId = activeTaskId;
+    return activeTaskId;
+  }
+  if (BRIDGE.taskId) {
+    activeTaskId = BRIDGE.taskId;
+    BRIDGE.runId = BRIDGE.taskId;
+    return BRIDGE.taskId;
+  }
+  if (BRIDGE.runId && String(BRIDGE.runId).startsWith('task-')) {
+    activeTaskId = BRIDGE.runId;
+    return BRIDGE.runId;
+  }
+
+  // Prefer latest DB task with data
+  try {
+    const resp = await bridgeFetch('/api/tasks?limit=30');
+    const tasks = (resp && resp.tasks) || [];
+    const withData = tasks.filter(t => (t.kw_count || 0) > 0 || (t.topic_count || 0) > 0);
+    if (withData.length) {
+      const t = withData[0];
+      activeTaskId = t.task_id;
+      BRIDGE.runId = t.task_id;
+      BRIDGE.taskId = t.task_id;
+      try {
+        localStorage.setItem('seo_bridge_task_id', t.task_id);
+        localStorage.setItem('seo_bridge_run_id', t.task_id);
+      } catch (e) {}
+      setBridgeJob('复用任务 ' + t.task_id.replace(/^task-/, '').slice(0, 14));
+      return t.task_id;
+    }
+  } catch (e) {}
+
+  // Create a new DB task
+  try {
+    const res = await bridgeFetch('/api/tasks', { method: 'POST', body: JSON.stringify({}) });
+    const task = res.task;
+    activeTaskId = task.task_id;
+    BRIDGE.runId = task.task_id;
+    BRIDGE.taskId = task.task_id;
+    try {
+      localStorage.setItem('seo_bridge_task_id', task.task_id);
+      localStorage.setItem('seo_bridge_run_id', task.task_id);
+    } catch (e) {}
+    setBridgeJob('任务 ' + task.task_id.replace(/^task-/, '').slice(0, 14));
+    await refreshAuditTrail();
+    return task.task_id;
+  } catch (e) {}
+
+  // Legacy fallback: create run dir
   if (BRIDGE.runId) return BRIDGE.runId;
-  const run = getActiveRun && getActiveRun();
-  const label = run ? ('studio-' + run.id) : null;
-  const meta = await bridgeFetch('/api/runs', { method: 'POST', body: JSON.stringify({ label: label }) });
+  const meta = await bridgeFetch('/api/runs', { method: 'POST', body: JSON.stringify({}) });
   BRIDGE.runId = meta.id;
   try { localStorage.setItem('seo_bridge_run_id', BRIDGE.runId); } catch (e) {}
   setBridgeJob('Run ' + BRIDGE.runId);
@@ -3917,9 +4839,15 @@ async function bridgeEnsureRun() {
 async function bridgePollJob(jobId, timeoutMs) {
   const t0 = Date.now();
   const limit = timeoutMs || 30 * 60 * 1000;
+  let lastStatus = '';
   while (Date.now() - t0 < limit) {
     const job = await bridgeFetch('/api/jobs/' + jobId);
     setBridgeJob(job.kind + ' · ' + job.status);
+    if (job.status !== lastStatus) {
+      lastStatus = job.status;
+      const hint = JobProgress._statusHints[job.kind] || '请稍候';
+      JobProgress.update(job.status === 'running' ? hint : (job.kind + ' · ' + job.status));
+    }
     if (job.status === 'succeeded') return job;
     if (job.status === 'failed') throw new Error(job.error || 'job failed');
     await new Promise(r => setTimeout(r, 1500));
@@ -3940,36 +4868,71 @@ async function bridgeSaveFile(name, data) {
   });
 }
 
+function getSelectedDiscoverSources() {
+  const chips = document.querySelectorAll('#discoverSources .discover-chip input:checked');
+  const sources = Array.from(chips).map(cb => cb.closest('.discover-chip').dataset.src).filter(Boolean);
+  return sources.length ? sources : ['brand', 'media'];
+}
+
+function toggleAllDiscoverSources(all) {
+  document.querySelectorAll('#discoverSources .discover-chip').forEach(chip => {
+    const cb = chip.querySelector('input');
+    if (!cb) return;
+    const on = all || (chip.dataset.src === 'brand' || chip.dataset.src === 'media');
+    cb.checked = on;
+    chip.classList.toggle('on', on);
+  });
+}
+
+function initDiscoverSourceChips() {
+  document.querySelectorAll('#discoverSources .discover-chip').forEach(chip => {
+    chip.addEventListener('click', function(e) {
+      // <label> natively toggles the inner checkbox; only sync the visual class.
+      const cb = chip.querySelector('input');
+      if (!cb) return;
+      // Defer class sync until after the native toggle settles.
+      requestAnimationFrame(() => chip.classList.toggle('on', cb.checked));
+    });
+    const cb = chip.querySelector('input');
+    if (cb) cb.addEventListener('change', () => chip.classList.toggle('on', cb.checked));
+  });
+}
+
 async function bridgeDiscoverKeywords() {
   if (!(await bridgeHealth())) return;
-  showToast('正在跑 keyword-discovery（可能较久）…', '');
+  const sources = getSelectedDiscoverSources();
+  const btnDiscover = document.querySelector('[onclick="bridgeDiscoverKeywords()"]');
+  const btnEnrich = document.querySelector('[onclick="bridgeEnrichKeywords()"]');
+  JobProgress.start('keyword-discovery', [btnDiscover, btnEnrich]);
   try {
     const rid = await bridgeEnsureRun();
     const { job_id } = await bridgeFetch('/api/runs/' + rid + '/keywords/discover', {
       method: 'POST',
-      body: JSON.stringify({ sources: 'brand media', min_freq: 2 }),
+      body: JSON.stringify({ sources: sources, min_freq: 2 }),
     });
     await bridgePollJob(job_id);
-    const raw = await bridgeLoadFile('kw.raw.json');
-    // auto enrich demo metrics for Studio usability
+    JobProgress.update('正在补齐 SV / KD / CPC 指标…');
     const en = await bridgeFetch('/api/runs/' + rid + '/keywords/enrich', {
       method: 'POST',
-      body: JSON.stringify({ seed_demo: true }),
+      body: JSON.stringify({ seed_demo: false }),
     });
     await bridgePollJob(en.job_id);
     const kw = await bridgeLoadFile('kw.json');
     const list = Array.isArray(kw) ? kw : (kw.keywords || []);
-    KEYWORDS = list.map(normalizeScriptKeyword).filter(Boolean);
-    renderKwList();
-    logStep(1, 'bridge_discover', 'Bridge 导入 ' + KEYWORDS.length + ' 词');
-    showToast('关键词已从脚本导入 ' + KEYWORDS.length + ' 条', 'success');
+    const n = applyImportedKeywords(list);
+    logStep(1, 'bridge_discover', 'Bridge 导入 ' + n + ' 词');
+    JobProgress.done(true, '已导入 ' + n + ' 个关键词');
+    showToast('关键词已从脚本导入 ' + n + ' 条', 'success');
   } catch (e) {
+    JobProgress.done(false, e.message || '发现失败');
     showToast('发现失败：' + e.message, '');
   }
 }
 
 async function bridgeEnrichKeywords() {
   if (!(await bridgeHealth())) return;
+  const btn = document.querySelector('[onclick="bridgeEnrichKeywords()"]');
+  JobProgress.start('enrich-keyword-metrics', [btn]);
   try {
     const rid = await bridgeEnsureRun();
     // push current KEYWORDS as raw if no file
@@ -3982,16 +4945,194 @@ async function bridgeEnrichKeywords() {
     }
     const en = await bridgeFetch('/api/runs/' + rid + '/keywords/enrich', {
       method: 'POST',
-      body: JSON.stringify({ seed_demo: true }),
+      body: JSON.stringify({ seed_demo: false }),
     });
     await bridgePollJob(en.job_id);
     const kw = await bridgeLoadFile('kw.json');
     const list = Array.isArray(kw) ? kw : (kw.keywords || []);
-    KEYWORDS = list.map(normalizeScriptKeyword).filter(Boolean);
-    renderKwList();
-    showToast('指标已补齐', 'success');
+    const n = applyImportedKeywords(list);
+    JobProgress.done(true, '指标已补齐');
+    showToast('指标已补齐 · ' + n + ' 词', 'success');
   } catch (e) {
+    JobProgress.done(false, e.message || '补数失败');
     showToast('补数失败：' + e.message, '');
+  }
+}
+
+async function bridgeBrainstormViaAgent() {
+  if (!(await bridgeHealth())) return;
+  if (selectedKeywords.size === 0) {
+    showToast('请先用权重选出关键词', '');
+    return;
+  }
+  var run = getActiveRun();
+  // Fork when the operator changed the keyword selection since the current
+  // topics were generated. Preserves the old topics and re-runs the brainstorm
+  // with the new keywords in a branch (copies steps 1..2).
+  var prevKw = await getTaskBrainstormKeywords(activeTaskId);
+  var kwChanged = prevKw ? !sameKeywordSet(prevKw, Array.from(selectedKeywords)) : false;
+  var hasTopics = (brainstormTopics && brainstormTopics.length > 0) || (run && run.topics && run.topics.length > 0);
+  if (hasTopics && kwChanged) {
+    saveToRun();
+    await createRun(activeTaskId, 2);
+    logStep(2, 'start', '关键词已变更 → 分叉并重新 Agent 头脑风暴');
+    showToast('关键词已变更 → 自动分叉新任务', 'success');
+  } else if (run) {
+    logStep(2, 'start', 'Agent 头脑风暴');
+  }
+  var btn = document.getElementById('bsGenerateBtn');
+  JobProgress.start('agent-brainstorm', [btn]);
+  agentLiveReset('bsLive', 'Agent 头脑风暴中', 'SERP 驱动选题…');
+  document.getElementById('topicGrid').innerHTML = '';
+  document.getElementById('bsActionBar').style.display = 'none';
+  try {
+    var rid = await bridgeEnsureRun();
+    var kwPayload = (KEYWORDS || []).map(function(k){
+      return {
+        text: k.text, source: k.source, type: k.type || '', freq: k.freq || 1,
+        sv: k.sv, kd: k.kd, cpc: k.cpc, intent: k.intent,
+        metrics_status: k.metrics_status || (k.sv != null ? 'ok' : 'needs_manual'),
+      };
+    });
+    // Persist keywords to DB step 1
+    if (String(rid).startsWith('task-') && kwPayload.length) {
+      await bridgeFetch('/api/tasks/' + rid + '/steps/1/data', { method: 'PUT', body: JSON.stringify(kwPayload) });
+    } else if (kwPayload.length) {
+      await bridgeSaveFile('kw.json', kwPayload);
+    }
+    var useTaskApi = String(rid).startsWith('task-');
+    // Persist the selected keywords into step 2 as a partial envelope (status=running)
+    // so switching back to this running task restores the brainstorm keyword chips.
+    if (useTaskApi) {
+      try {
+        await bridgeFetch('/api/tasks/' + rid + '/steps/2/data?status=running', {
+          method: 'PUT',
+          body: JSON.stringify({ version: '1.0', topics: [], input_keywords: Array.from(selectedKeywords) }),
+        });
+      } catch (e) {}
+    }
+    var n = parseInt(document.getElementById('bsCount').value, 10) || 10;
+    var data = useTaskApi
+      ? await bridgeFetch('/api/tasks/' + rid + '/steps/2/agent', {
+          method: 'POST',
+          body: JSON.stringify({ step: 'brainstorm', keywords: Array.from(selectedKeywords), n: n, yolo: false }),
+        })
+      : await bridgeFetch('/api/runs/' + rid + '/agent', {
+          method: 'POST',
+          body: JSON.stringify({ step: 'brainstorm', keywords: Array.from(selectedKeywords), n: n, yolo: false }),
+        });
+    logStep(2, 'bridge_agent', 'brainstorm ' + JSON.stringify(data.gateway && data.gateway.run_id));
+    await refreshAuditTrail();
+    var gwRunId = data.gateway && data.gateway.run_id;
+    if (!gwRunId) {
+      JobProgress.done(false, 'Agent 启动失败：未返回 run_id');
+      showToast('Agent 启动失败', '');
+      return;
+    }
+    JobProgress.update('Agent 已启动，SERP 选题中…');
+    _activePollTaskId = rid;
+    var t0 = Date.now();
+    var limit = 15 * 60 * 1000;
+    var done = false;
+    var progressIdx = 0;
+    var statusPath = useTaskApi
+      ? ('/api/tasks/' + rid + '/steps/2/agent/status')
+      : ('/api/runs/' + rid + '/agent/status');
+    while (Date.now() - t0 < limit && !done) {
+      if (_activePollTaskId !== rid) return; // operator switched away / started new flow
+      await new Promise(function(r){ setTimeout(r, 2000); });
+      if (_activePollTaskId !== rid) return;
+      progressIdx = await agentPollProgress(rid, progressIdx, 'bsLive', 2);
+      try {
+        var st = await bridgeFetch(statusPath);
+        var gw = st.gateway || {};
+        var status = gw.status || '';
+        if (status === 'completed' || status === 'succeeded') {
+          done = true;
+          // Only refresh the UI if this task is still selected.
+          if (_activePollTaskId !== rid) return;
+          progressIdx = await agentPollProgress(rid, progressIdx, 'bsLive', 2);
+          try {
+            var topicsDoc = useTaskApi
+              ? await bridgeFetch('/api/tasks/' + rid + '/steps/2/data')
+              : await bridgeLoadFile('topics.json');
+            var topicList = topicsDoc.topics || topicsDoc;
+            brainstormTopics = (Array.isArray(topicList) ? topicList : []).map(function(t, i){ return normalizeTopicItem(t, i + 1); });
+            selectedTopics.clear();
+            renderTopics();
+            document.getElementById('bsActionBar').style.display = 'flex';
+            saveToRun();
+            logStep(2, 'bridge_agent_brainstorm', brainstormTopics.length + ' topics');
+            JobProgress.done(true, '已生成 ' + brainstormTopics.length + ' 个选题');
+            showToast('Agent 选题完成 · ' + brainstormTopics.length + ' 个主题', 'success');
+            agentLiveAppend('bsLive', '头脑风暴完成 — 共 ' + brainstormTopics.length + ' 个主题', 'done');
+            setTimeout(function(){ agentLiveHide('bsLive'); }, 1800);
+            await refreshAuditTrail();
+          } catch (te) {
+            // Try finish from disk/DB with lower threshold
+            var early = await tryFinishBrainstormFromDisk(rid, 1);
+            if (early > 0) {
+              done = true;
+              JobProgress.done(true, '已加载 ' + early + ' 个选题');
+              await refreshAuditTrail();
+            } else {
+              JobProgress.done(false, 'Agent 完成但 topics 未就绪');
+              showToast('Agent 完成但未读到选题，可稍后刷新', '');
+            }
+          }
+        } else if (status === 'failed' || status === 'error') {
+          done = true;
+          JobProgress.done(false, 'Agent 执行失败');
+          showToast('Agent 执行失败', '');
+          agentLiveAppend('bsLive', 'Agent 执行失败', 'error');
+          await refreshAuditTrail();
+        } else if (status === 'waiting_for_approval') {
+          JobProgress.update('等待审批中…请在 Gateway 中批准该运行');
+          var earlyN = await tryFinishBrainstormFromDisk(rid, 3);
+          if (earlyN > 0) {
+            done = true;
+            JobProgress.done(true, '选题已就绪（' + earlyN + ' 个）');
+            showToast('已加载 ' + earlyN + ' 个主题', 'success');
+            agentLiveAppend('bsLive', '已加载 ' + earlyN + ' 个主题', 'done');
+            setTimeout(function(){ agentLiveHide('bsLive'); }, 1800);
+            await refreshAuditTrail();
+          }
+        } else if (status === 'running') {
+          JobProgress.update('Agent 正在选题…');
+          var runN = await tryFinishBrainstormFromDisk(rid, parseInt(document.getElementById('bsCount').value, 10) || 10);
+          if (runN > 0) {
+            done = true;
+            JobProgress.done(true, '已生成 ' + runN + ' 个选题');
+            showToast('Agent 选题完成 · ' + runN + ' 个主题', 'success');
+            agentLiveAppend('bsLive', '头脑风暴完成 — 共 ' + runN + ' 个主题', 'done');
+            setTimeout(function(){ agentLiveHide('bsLive'); }, 1800);
+            await refreshAuditTrail();
+          }
+        } else if (st.ok === false && (st.status_code === 404 || (st.detail || '').includes('no agent run'))) {
+          done = true;
+          JobProgress.done(false, 'Agent 运行已丢失（Gateway 重启）— 请重新点击');
+          showToast('Agent 运行记录丢失，请重新点击生成', '');
+        } else {
+          JobProgress.update('Agent 状态：' + (status || '未知') + '…');
+        }
+      } catch (e) { /* keep polling */ }
+    }
+    if (!done) {
+      var lateN = await tryFinishBrainstormFromDisk(rid, 1);
+      if (lateN > 0) {
+        JobProgress.done(true, '已加载 ' + lateN + ' 个选题（Agent 未正常结束）');
+        showToast('已加载 ' + lateN + ' 个主题', 'success');
+        agentLiveAppend('bsLive', '超时后加载 ' + lateN + ' 个主题', 'done');
+        setTimeout(function(){ agentLiveHide('bsLive'); }, 1800);
+      } else {
+        JobProgress.done(false, 'Agent 超时（15 分钟）');
+        showToast('Agent 超时，可稍后刷新', '');
+      }
+      await refreshAuditTrail();
+    }
+  } catch (e) {
+    JobProgress.done(false, e.message || '选题失败');
+    showToast('选题失败：' + e.message + '（需 Gateway 在线）', '');
   }
 }
 
@@ -4001,26 +5142,34 @@ async function bridgeBrainstormTopics() {
     showToast('请先用权重选出关键词', '');
     return;
   }
+  // #region agent log
+  fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:bridgeBrainstormTopics',message:'BS_CLICK',data:{kwLen:(KEYWORDS&&KEYWORDS.length)||0,selKw:selectedKeywords.size},timestamp:Date.now(),runId:'repro2',hypothesisId:'H5'})}).catch(()=>{});
+  // #endregion agent log
+  const btn = document.querySelector('[onclick="bridgeBrainstormTopics()"]');
+  JobProgress.start('topic-brainstorm', [btn]);
   try {
     const rid = await bridgeEnsureRun();
-    await bridgeSaveFile('kw.json', KEYWORDS.map(function(k){
-      return {
-        text: k.text, source: k.source, type: k.type || '', freq: k.freq || 1,
-        sv: k.sv, kd: k.kd, cpc: k.cpc, intent: k.intent,
-        metrics_status: k.metrics_status || (k.sv != null ? 'ok' : 'needs_manual'),
-      };
-    }));
+    // Only persist kw.json from in-memory KEYWORDS when non-empty; otherwise let the
+    // server fall back to kw.raw.json (avoids clobbering a good file with an empty list).
+    if (KEYWORDS && KEYWORDS.length) {
+      await bridgeSaveFile('kw.json', KEYWORDS.map(function(k){
+        return {
+          text: k.text, source: k.source, type: k.type || '', freq: k.freq || 1,
+          sv: k.sv, kd: k.kd, cpc: k.cpc, intent: k.intent,
+          metrics_status: k.metrics_status || (k.sv != null ? 'ok' : 'needs_manual'),
+        };
+      }));
+    }
     const n = parseInt(document.getElementById('bsCount').value, 10) || 10;
     const { job_id } = await bridgeFetch('/api/runs/' + rid + '/topics/brainstorm', {
       method: 'POST',
       body: JSON.stringify({
         keywords: Array.from(selectedKeywords),
         n: n,
-        demo: true,
+        demo: false,
       }),
     });
     document.getElementById('bsLive').classList.add('show');
-    setBridgeJob('topic-brainstorm…');
     await bridgePollJob(job_id);
     const topicsDoc = await bridgeLoadFile('topics.json');
     const topicList = topicsDoc.topics || topicsDoc;
@@ -4030,14 +5179,18 @@ async function bridgeBrainstormTopics() {
     document.getElementById('bsActionBar').style.display = 'flex';
     document.getElementById('bsLiveLabel').textContent = '脚本完成';
     logStep(2, 'bridge_brainstorm', brainstormTopics.length + ' topics');
+    JobProgress.done(true, '已生成 ' + brainstormTopics.length + ' 个选题');
     showToast('主题已从 topic-brainstorm 导入', 'success');
   } catch (e) {
+    JobProgress.done(false, e.message || '选题失败');
     showToast('选题失败：' + e.message, '');
   }
 }
 
 async function bridgeGenerateSection(mode, sectionId) {
   if (!(await bridgeHealth())) return;
+  const btns = document.querySelectorAll('[onclick^="bridgeGenerateSection"]');
+  JobProgress.start('section-generate', Array.from(btns));
   try {
     const rid = await bridgeEnsureRun();
     if (brainstormTopics.length) {
@@ -4055,7 +5208,7 @@ async function bridgeGenerateSection(mode, sectionId) {
       await bridgeSaveFile('article-state.json', articleState);
     }
     const topicId = (currentGenTopic && (currentGenTopic.schema_id || currentGenTopic.id)) || 't01';
-    const body = { mode: mode, topic_id: String(topicId), demo: true };
+    const body = { mode: mode, topic_id: String(topicId), demo: false };
     if (sectionId) body.section_id = sectionId;
     const { job_id } = await bridgeFetch('/api/runs/' + rid + '/sections/generate', {
       method: 'POST',
@@ -4072,8 +5225,10 @@ async function bridgeGenerateSection(mode, sectionId) {
     restoreWorkbenchUI();
     saveToRun();
     logStep(3, 'bridge_generate', mode + (sectionId ? ':' + sectionId : ''));
+    JobProgress.done(true, '已生成：' + mode);
     showToast('脚本已生成：' + mode, 'success');
   } catch (e) {
+    JobProgress.done(false, e.message || '生成失败');
     showToast('生成失败：' + e.message, '');
   }
 }
@@ -4097,26 +5252,94 @@ async function bridgeValidateAndPreview() {
   }
 }
 
-async function bridgeAskAgent(step) {
+async function bridgeAskAgent(step, triggerBtn) {
   if (!(await bridgeHealth())) return;
+  const btns = [];
+  // Disable all agent-trigger buttons in the current phase + the explicit trigger
+  document.querySelectorAll('[onclick*="bridgeAskAgent"], [onclick*="generateSerp"], [onclick*="generateOutline"], [onclick*="generateAllSections"]').forEach(b => btns.push(b));
+  if (triggerBtn && !btns.includes(triggerBtn)) btns.push(triggerBtn);
+  const jobKind = 'agent-' + step;
+  JobProgress.start(jobKind, btns);
+  agentLiveReset('genLive', 'Agent · ' + step, '正在执行…');
   try {
     const rid = await bridgeEnsureRun();
+    const isTask = String(rid).startsWith('task-');
     if (articleState) await bridgeSaveFile('article-state.json', articleState);
-    const prompt = [
-      'Use skill povison-seo-blog.',
-      'Run directory: see Bridge run ' + rid + ' under skill runs/.',
-      'Step: ' + step,
-      'Prefer scripts for deterministic IO; write outputs into the run directory.',
-      'Topic: ' + (currentGenTopic ? (currentGenTopic.title || '') : ''),
-      'When done, list written file paths.',
-    ].join('\n');
-    const data = await bridgeFetch('/api/runs/' + rid + '/agent', {
+    // For DB-backed tasks, route to the task step agent endpoint so the agent
+    // persists via seo_save_step_data (DB). Legacy run-* ids use the run endpoint.
+    const launchPath = isTask
+      ? ('/api/tasks/' + rid + '/steps/3/agent')
+      : ('/api/runs/' + rid + '/agent');
+    const data = await bridgeFetch(launchPath, {
       method: 'POST',
-      body: JSON.stringify({ step: step, prompt: prompt, yolo: false }),
+      body: JSON.stringify({ step: step, topic_title: (currentGenTopic ? (currentGenTopic.title || '') : ''), yolo: false }),
     });
     logStep(0, 'bridge_agent', step + ' ' + JSON.stringify(data.gateway && data.gateway.run_id));
-    showToast('已请求 Agent（Gateway）。完成后点「从 Bridge 刷新状态」', 'success');
+
+    // Poll gateway run status until completed/failed
+    const gwRunId = data.gateway && data.gateway.run_id;
+    if (gwRunId) {
+      JobProgress.update('Agent 已启动，等待 Gateway 执行…');
+      _activePollTaskId = rid;
+      const t0 = Date.now();
+      const limit = 10 * 60 * 1000; // 10 min
+      let done = false;
+      let progressIdx = 0;
+      const statusPath = isTask
+        ? ('/api/tasks/' + rid + '/steps/3/agent/status')
+        : ('/api/runs/' + rid + '/agent/status');
+      while (Date.now() - t0 < limit && !done) {
+        if (_activePollTaskId !== rid) return; // operator switched away / started new flow
+        await new Promise(r => setTimeout(r, 2000));
+        if (_activePollTaskId !== rid) return;
+        progressIdx = await agentPollProgress(rid, progressIdx, 'genLive');
+        try {
+          const st = await bridgeFetch(statusPath);
+          const gw = st.gateway || {};
+          const status = gw.status || '';
+          if (status === 'completed' || status === 'succeeded') {
+            done = true;
+            // Only refresh the UI if this task is still the one the operator has
+            // selected; otherwise leave the current view untouched.
+            if (_activePollTaskId !== rid) return;
+            progressIdx = await agentPollProgress(rid, progressIdx, 'genLive');
+            // Agent writes via seo_save_step_data → DB, not the run-dir file.
+            await reloadArticleState(rid);
+            JobProgress.done(true, 'Agent 已完成：' + step);
+            showToast('Agent 已完成：' + step, 'success');
+            agentLiveAppend('genLive', '完成：' + step, 'done');
+            setTimeout(function(){ agentLiveHide('genLive'); }, 1800);
+          } else if (status === 'failed' || status === 'error') {
+            done = true;
+            JobProgress.done(false, 'Agent 执行失败');
+            showToast('Agent 执行失败', '');
+            agentLiveAppend('genLive', 'Agent 执行失败', 'error');
+          } else if (status === 'waiting_for_approval') {
+            JobProgress.update('等待审批中…请在 Gateway 中批准该运行');
+          } else if (status === 'running') {
+            JobProgress.update('Agent 正在执行…');
+          } else if (st.ok === false && (st.status_code === 404 || (st.detail || '').includes('no agent run'))) {
+            // Gateway lost the run (restart / crash) — stop polling, let user retry
+            done = true;
+            JobProgress.done(false, 'Agent 运行已丢失（Gateway 重启）— 请重新点击');
+            showToast('Agent 运行记录丢失，请重新点击生成', '');
+          } else {
+            JobProgress.update('Agent 状态：' + (status || '未知') + '…');
+          }
+        } catch (e) {
+          // status poll failed — keep trying
+        }
+      }
+      if (!done) {
+        JobProgress.done(false, 'Agent 超时（10 分钟）');
+        showToast('Agent 超时，可点「从 Bridge 刷新」手动检查', '');
+      }
+    } else {
+      JobProgress.done(false, 'Agent 启动失败：未返回 run_id');
+      showToast('Agent 启动失败', '');
+    }
   } catch (e) {
+    JobProgress.done(false, e.message || 'Agent 启动失败');
     showToast('Agent 启动失败：' + e.message + '（需 Gateway 在线）', '');
   }
 }
@@ -4134,18 +5357,93 @@ async function bridgeReloadState() {
 }
 
 
+async function bridgeRestoreFullState() {
+  // Restore topics from topics.json
+  try {
+    const topicsDoc = await bridgeLoadFile('topics.json');
+    const topicList = topicsDoc.topics || topicsDoc;
+    if (Array.isArray(topicList) && topicList.length) {
+      brainstormTopics = topicList.map(function(t, i) { return normalizeTopicItem(t, i + 1); });
+      renderTopics();
+      document.getElementById('bsActionBar').style.display = 'flex';
+      saveToRun();
+    }
+  } catch (e) { /* topics.json may not exist yet */ }
+
+  // Restore article workbench state from article-state.json
+  try {
+    const state = await bridgeLoadFile('article-state.json');
+    if (state && state.topic) {
+      // Normalize products/links to UI schema (agent may write in a different format)
+      if (Array.isArray(state.products)) {
+        state.products = state.products.map(function(p) {
+          return {
+            id: p.id || ('p' + Math.random().toString(36).slice(2, 8)),
+            status: p.status || 'pending',
+            name: p.name || '',
+            url: p.url || '',
+            sectionId: p.sectionId || p.section || '',
+            blurb: p.blurb || p.text || '',
+          };
+        });
+      }
+      if (Array.isArray(state.links)) {
+        state.links = state.links.map(function(l) {
+          return {
+            id: l.id || ('l' + Math.random().toString(36).slice(2, 8)),
+            status: l.status || 'pending',
+            anchor: l.anchor || '',
+            url: l.url || '',
+            sectionId: l.sectionId || l.section || '',
+            note: l.note || '',
+          };
+        });
+      }
+      articleState = state;
+      currentGenTopic = state.topic;
+      // Find and select the topic in brainstorm list if present
+      const match = brainstormTopics.find(t => t.id === state.topic.id || t.title === state.topic.title);
+      if (match) {
+        selectedTopics.clear();
+        selectedTopics.add(match.id);
+      }
+      // Show workbench
+      document.getElementById('genEmpty').style.display = 'none';
+      document.getElementById('genWorkbench').style.display = 'block';
+      document.getElementById('genActionBar').style.display = 'flex';
+      if (state.topic.title) document.getElementById('wbTopicTitle').textContent = state.topic.title;
+      restoreWorkbenchUI();
+      setGenPhase(state.phaseDone && state.phaseDone.meta ? 'preview' :
+        state.phaseDone && state.phaseDone.faq ? 'meta' :
+        state.phaseDone && state.phaseDone.placements ? 'faq' :
+        state.phaseDone && state.phaseDone.sections ? 'placements' :
+        state.outlineConfirmed ? 'sections' :
+        state.phaseDone && state.phaseDone.serp ? 'outline' : 'serp');
+      updateGenProgressBar();
+      saveToRun();
+    }
+  } catch (e) { /* article-state.json may not exist yet */ }
+}
+
+
 // ==================== Init ====================
 showWrongHostBannerIfNeeded();
 try {
   renderKwList();
   loadRulesFromStorage();
   renderRules();
-  createRun(); // Initialize first run
 } catch (initErr) {
   console.error('Studio init error', initErr);
 }
-try { BRIDGE.runId = localStorage.getItem('seo_bridge_run_id'); } catch (e) {}
-bridgeHealth();
+try {
+  BRIDGE.taskId = localStorage.getItem('seo_bridge_task_id');
+  BRIDGE.runId = localStorage.getItem('seo_bridge_run_id') || BRIDGE.taskId;
+  if (BRIDGE.taskId) activeTaskId = BRIDGE.taskId;
+} catch (e) {}
+bridgeHealth().then(function() {
+  if (!activeTaskId && !BRIDGE.runId) createRun();
+  else refreshAuditTrail();
+});
 </script>
 </body>
 </html>

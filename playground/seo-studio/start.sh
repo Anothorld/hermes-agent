@@ -5,7 +5,7 @@
 #   ./start.sh                 # bridge + gateway (Ctrl-C stops all)
 #   ./start.sh restart         # stop then start
 #   ./start.sh stop            # stop bridge + gateway
-#   ./start.sh bridge          # Studio Bridge only (8765)
+#   ./start.sh bridge          # Studio Bridge only (8766)
 #   ./start.sh gateway         # hermes -p povison-seo gateway (8644)
 #   ./start.sh install         # create venv + pip install
 #   ./start.sh status          # show listeners
@@ -73,10 +73,13 @@ load_env() {
   fi
 
   : "${SEO_BRIDGE_HOST:=127.0.0.1}"
-  : "${SEO_BRIDGE_PORT:=8765}"
+  : "${SEO_BRIDGE_PORT:=8766}"
   : "${SEO_GATEWAY_PORT:=8644}"
   : "${API_SERVER_ENABLED:=true}"
   : "${API_SERVER_PORT:=$SEO_GATEWAY_PORT}"
+  # LLM for discover / brainstorm / section scripts (playground/seo-studio/.env)
+  : "${SEO_LLM_BASE_URL:=https://ai-endpoint.povison-inc.com/v1}"
+  : "${SEO_LLM_MODEL:=glm-5.2}"
   # Prefer playground copy (kept in repo); fall back to ~/povison-seo-studio.html
   if [[ -z "${SEO_STUDIO_HTML:-}" ]]; then
     if [[ -f "$ROOT/ui/index.html" ]]; then
@@ -112,6 +115,7 @@ load_env() {
   export SEO_SKILL_DIR SEO_RUNS_DIR SEO_STUDIO_HTML
   export HERMES_GATEWAY_BASE HERMES_GATEWAY_KEY
   export API_SERVER_ENABLED API_SERVER_PORT
+  export SEO_LLM_BASE_URL SEO_LLM_API_KEY SEO_LLM_MODEL
   export HERMES_HOME="$PROFILE_DIR"
 }
 
@@ -278,6 +282,9 @@ start_bridge() {
     HERMES_GATEWAY_BASE="$HERMES_GATEWAY_BASE" \
     HERMES_GATEWAY_KEY="${HERMES_GATEWAY_KEY:-}" \
     SEO_PROFILE="$PROFILE" \
+    SEO_LLM_BASE_URL="${SEO_LLM_BASE_URL:-}" \
+    SEO_LLM_API_KEY="${SEO_LLM_API_KEY:-}" \
+    SEO_LLM_MODEL="${SEO_LLM_MODEL:-glm-5.2}" \
     "$PYTHON" -m uvicorn server:app \
       --host "$SEO_BRIDGE_HOST" --port "$SEO_BRIDGE_PORT" >>"$log_file" 2>&1
 }
@@ -379,7 +386,7 @@ start_all() {
   preflight
   ensure_installed
 
-  # Free ports before bind (handles leftover uvicorn on 8765)
+  # Free ports before bind (handles leftover uvicorn on 8766)
   kill_port bridge "$SEO_BRIDGE_PORT" || true
   # Gateway --replace usually handles itself; still clear if stale listener
   # (don't kill unrelated gateways on other ports)
