@@ -107,11 +107,62 @@ def _run_send_email(
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def _guard_draft(content: str, attachments_json: Optional[str]) -> Optional[dict[str, Any]]:
-    """Run the shared draft guard (PR1.9). Returns a block payload or None."""
+def _guard_draft(
+    content: str,
+    attachments_json: Optional[str],
+    *,
+    quickcep_session_id: str = "",
+    env: str = "LIVE",
+) -> Optional[dict[str, Any]]:
+    """Run the shared draft guard (PR1.9). Returns a block payload or None.
+
+    Fetches ``allowed_attachment_urls`` from the resuming escalation (if any)
+    so vault-sourced PDFs pass the guard — same logic as the PUT /draft
+    endpoint in plugin_api.py.  Also includes the URLs of any attachments
+    already stored in the CAL draft (``draft_attachments``), so a draft
+    that was previously saved with vault-sourced PDFs is not blocked on
+    re-save or send when the escalation has since resolved.
+    """
     from .draft_guard import guard_draft_content
 
-    return guard_draft_content(content, attachments_json)
+    allowed: list[str] = []
+
+    # 1. Resuming escalation allow-list (same as plugin_api PUT /draft).
+    if quickcep_session_id:
+        _esc = cal.get_resuming_escalation_for_session(
+            quickcep_session_id=quickcep_session_id,
+            env=env,
+        )
+        if _esc:
+            _ctx = _esc.get("resume_context") or {}
+            allowed.extend(list(_ctx.get("allowed_attachment_urls") or []))
+
+    # 2. Already-stored draft attachment URLs (self-allow).
+    #    When the draft was previously saved with vault-sourced PDFs and the
+    #    escalation has since resolved, those URLs are no longer in the
+    #    resuming-escalation allow-list.  They are already persisted in CAL
+    #    and were vetted on first save, so allow them through.
+    if quickcep_session_id:
+        _sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
+        if _sess:
+            _raw = _sess.get("draft_attachments")
+            if _raw:
+                try:
+                    _items = json.loads(_raw)
+                    if isinstance(_items, list):
+                        for _it in _items:
+                            if isinstance(_it, dict):
+                                _url = str(_it.get("url") or "").strip()
+                                if _url:
+                                    allowed.append(_url)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    return guard_draft_content(
+        content,
+        attachments_json,
+        allowed_attachment_urls=allowed or None,
+    )
 
 
 def send_reply(
@@ -139,7 +190,12 @@ def send_reply(
             attachments = []
     attachments_json = json.dumps(attachments, ensure_ascii=False) if attachments else None
 
-    block = _guard_draft(draft_html, attachments_json)
+    block = _guard_draft(
+        draft_html,
+        attachments_json,
+        quickcep_session_id=quickcep_session_id,
+        env=env,
+    )
     if block:
         return {"ok": False, "error": "guard_blocked", "error_detail": block}
 

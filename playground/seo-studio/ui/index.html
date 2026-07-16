@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>POVISON SEO Studio</title>
+<!-- Feishu H5 JSSDK — 飞书客户端内免登 -->
+<script src="https://lf1-cdn-tos.bytegoofy.com/goofy/lark/op/h5-js-sdk-1.5.26.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -60,6 +62,11 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .nav-step-num { width: 18px; height: 18px; border-radius: 50%; background: var(--bg-tertiary); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: var(--text-secondary); flex-shrink: 0; }
 .nav-item.active .nav-step-num { background: rgba(255,255,255,0.25); color: #fff; }
 .sidebar-footer { padding: 12px 20px 0; border-top: 1px solid var(--border); margin-top: auto; }
+.operator-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; color: var(--text-secondary); }
+.operator-avatar { width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+.operator-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-logout { font-size: 11px; color: var(--text-tertiary); background: none; border: none; cursor: pointer; padding: 0; }
+.btn-logout:hover { color: var(--accent); }
 .wp-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(48,209,88,0.2); }
 
@@ -68,7 +75,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .main::-webkit-scrollbar { width: 6px; }
 .main::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 3px; }
 .view { display: none; animation: viewIn 0.4s cubic-bezier(0.25,0.1,0.25,1); }
-.view.active { display: block; }
+.view.active { display: flex; flex-direction: column; min-height: 100%; }
 @keyframes viewIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ==================== Hero ==================== */
@@ -105,7 +112,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .view-header h2 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 8px; }
 .view-header p { font-size: 15px; color: var(--text-secondary); }
 
-.action-bar { position: sticky; bottom: 0; background: var(--bg-overlay); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-top: 1px solid var(--border); padding: 14px 48px; display: flex; align-items: center; gap: 12px; z-index: 10; }
+.action-bar { position: sticky; bottom: 0; margin-top: auto; background: var(--bg-overlay); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border-top: 1px solid var(--border); padding: 14px 48px; display: flex; align-items: center; gap: 12px; z-index: 10; }
 .action-bar .spacer { flex: 1; }
 
 /* ==================== Step 1: Keyword Heatmap ==================== */
@@ -245,6 +252,76 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
   transition: opacity 0.12s, color 0.12s; flex-shrink: 0;
 }
 .kw-row .kw-remove:hover { opacity: 1; color: var(--danger); }
+
+/* ── Category / Associative sections ── */
+.kw-section { margin-bottom: 18px; }
+.kw-section-header {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 14px 4px 8px;
+}
+.kw-section-header h3 {
+  font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0;
+}
+.kw-section-hint {
+  font-size: 12px; color: var(--text-tertiary);
+}
+.kw-section-count {
+  font-size: 12px; color: var(--text-tertiary); font-weight: 500;
+  margin-left: 4px;
+}
+.kw-section-assoc summary { list-style: none; cursor: pointer; }
+.kw-section-assoc summary::-webkit-details-marker { display: none; }
+.kw-section-assoc summary h3::before {
+  content: '▶'; font-size: 10px; margin-right: 6px;
+  display: inline-block; transition: transform 0.15s; color: var(--text-tertiary);
+}
+.kw-section-assoc[open] summary h3::before { transform: rotate(90deg); }
+.kw-add-category { padding-left: 4px; }
+
+/* Category row: toggle + text + remove */
+.kw-category-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 20px;
+  border-bottom: 1px solid rgba(0,0,0,0.03);
+}
+.kw-category-row:last-child { border-bottom: none; }
+.kw-cat-toggle {
+  position: relative; width: 36px; height: 20px;
+  background: rgba(0,0,0,0.12); border-radius: 10px;
+  cursor: pointer; transition: background 0.18s; flex-shrink: 0;
+}
+.kw-cat-toggle.on { background: var(--success); }
+.kw-cat-toggle::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2); transition: left 0.18s;
+}
+.kw-cat-toggle.on::after { left: 18px; }
+.kw-cat-toggle.locked { opacity: 0.5; cursor: not-allowed; }
+.kw-cat-text {
+  flex: 1; font-size: 14px; font-weight: 500; color: var(--text-primary);
+}
+.kw-cat-text.locked { color: var(--text-tertiary); font-style: italic; }
+.kw-cat-remove {
+  font-size: 14px; color: var(--text-tertiary); cursor: pointer;
+  opacity: 0.3; flex-shrink: 0; transition: opacity 0.12s, color 0.12s;
+}
+.kw-cat-remove:hover { opacity: 1; color: var(--danger); }
+.kw-cat-remove.hidden { visibility: hidden; }
+
+/* Associative binary mode toggle (segmented) */
+.kw-mode-toggle {
+  display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
+  overflow: hidden; flex-shrink: 0;
+}
+.kw-mode-toggle button {
+  font-size: 11px; padding: 4px 10px; border: none; background: #fff;
+  color: var(--text-secondary); cursor: pointer; transition: background 0.12s, color 0.12s;
+  font-family: var(--sf-font);
+}
+.kw-mode-toggle button.active.include { background: var(--success); color: #fff; }
+.kw-mode-toggle button.active.exclude { background: var(--danger); color: #fff; }
+.kw-row.kw-excluded { opacity: 0.5; }
 
 /* Source dot colors */
 .kw-dot[data-src="brand"]  { background: #1a73e8; }
@@ -448,6 +525,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .brainstorm-input .bs-label { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 12px; }
 .bs-keywords { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; min-height: 36px; }
 .bs-keyword-tag { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-tertiary); border-radius: var(--r-sm); padding: 6px 12px; font-size: 13px; font-weight: 500; }
+.bs-keyword-tag.bs-cat-tag { background: rgba(0,113,227,0.12); color: var(--accent); border: 1px solid rgba(0,113,227,0.25); }
 .bs-keyword-tag .tag-x { cursor: pointer; color: var(--text-tertiary); font-size: 15px; line-height: 1; }
 .bs-keyword-tag .tag-x:hover { color: var(--danger); }
 .bs-options { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
@@ -745,6 +823,14 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .bridge-wrong-host p { font-size:14px; color:#a1a1a6; margin-bottom:16px; line-height:1.5; }
 .bridge-wrong-host a { color:#64d2ff; word-break:break-all; }
 .bridge-wrong-host .btn { margin-top:8px; }
+.feishu-setup-overlay { display:none; position:fixed; inset:0; z-index:10001; background:rgba(29,29,31,0.88); align-items:center; justify-content:center; padding:24px; }
+.feishu-setup-overlay.show { display:flex; }
+.feishu-setup-overlay .box { max-width:520px; width:100%; background:#fff; border-radius:18px; padding:24px 22px; box-shadow:var(--shadow-xl); max-height:90vh; overflow:auto; }
+.feishu-setup-overlay h2 { font-size:18px; margin-bottom:8px; color:var(--text-primary); }
+.feishu-setup-overlay p, .feishu-setup-overlay li { font-size:13px; color:var(--text-secondary); line-height:1.55; }
+.feishu-setup-overlay pre { background:#f2f2f7; padding:10px 12px; border-radius:10px; font-size:12px; word-break:break-all; white-space:pre-wrap; margin:8px 0 12px; }
+.feishu-setup-overlay ol { padding-left:18px; margin:8px 0 14px; }
+.feishu-setup-overlay .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
 
 .rules-prompt-box h4 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: #a1a1a6; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
 .rule-item { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--bg-secondary); border-radius: var(--r-md); border: 1px solid var(--border); margin-bottom: 8px; transition: all var(--t-fast); }
@@ -857,14 +943,36 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
       </div>
       <span class="bridge-job" id="bridgeJob"></span>
     </div>
-    <div class="sidebar-footer"><div class="wp-status"><div class="status-dot"></div><span>WordPress 已连接</span></div></div>
+    <div class="sidebar-footer">
+      <div class="operator-bar" id="operatorBar">
+        <div class="operator-avatar" id="operatorAvatar">?</div>
+        <span class="operator-name" id="operatorName">—</span>
+        <button type="button" class="btn-logout" id="btnLogout" style="display:none;" onclick="logoutStudio()">退出</button>
+      </div>
+      <div class="wp-status"><div class="status-dot"></div><span>WordPress 已连接</span></div>
+    </div>
   </aside>
   <div class="bridge-wrong-host" id="bridgeWrongHost" role="dialog" aria-modal="true">
     <div class="box">
       <h2>请用系统浏览器打开 Studio</h2>
       <p>当前不是 Bridge 地址（Cursor 预览 / file:// / 其它端口都会导致「Bridge 未连接」，且页面可能显示异常）。</p>
       <p><a id="bridgeCorrectUrl" href="http://127.0.0.1:8766/">http://127.0.0.1:8766/</a></p>
-      <button type="button" class="btn btn-primary" onclick="window.open('http://127.0.0.1:8766/','_blank')">打开正确地址</button>
+      <button type="button" class="btn btn-primary" onclick="window.open(bridgeOriginUrl(),'_blank')">打开正确地址</button>
+    </div>
+  </div>
+  <div class="feishu-setup-overlay" id="feishuSetupOverlay" role="dialog" aria-modal="true">
+    <div class="box">
+      <h2>飞书免登需要配置开放平台</h2>
+      <p id="feishuSetupSummary">错误 10236：当前页面 URL 未登记到飞书应用。</p>
+      <p><strong>App ID</strong>：<code id="feishuSetupAppId">—</code></p>
+      <p>须原样登记以下 URL（<code>http</code> 非 <code>https</code>，必须以 <code>/</code> 结尾）：</p>
+      <pre id="feishuSetupPageUrl">—</pre>
+      <ol id="feishuSetupChecklist"></ol>
+      <div class="actions">
+        <a class="btn btn-primary" id="feishuSetupOpenConsole" href="https://open.feishu.cn/app" target="_blank" rel="noopener">打开飞书开放平台</a>
+        <a class="btn btn-ghost" id="feishuSetupDetailLink" href="/auth/feishu/setup" target="_blank" rel="noopener">完整配置说明</a>
+        <button type="button" class="btn btn-ghost" onclick="hideFeishuSetupModal()">关闭</button>
+      </div>
     </div>
   </div>
 
@@ -892,58 +1000,79 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 
     <!-- Step 1: Keywords -->
     <div class="view" id="view-keywords">
-      <div class="view-header"><h2>关键词发现</h2><p>数据来自固化脚本 <code>keyword-discovery.py</code>（爬取 → 拆解 → LLM 清洗）。下方可导入脚本输出的 JSON；权重滑块控制头脑风暴抽样。SEO 指标（SV/KD/CPC）由后续 Semrush 步骤补齐。</p></div>
-      <div class="heatmap-controls">
-        <div class="segmented" id="kwSegmented">
-          <button class="active" onclick="filterKeywords(this,'all')">全部来源</button>
-          <button onclick="filterKeywords(this,'brand')">竞品品牌</button>
-          <button onclick="filterKeywords(this,'media')">家居媒体</button>
-          <button onclick="filterKeywords(this,'trend')">搜索趋势</button>
-          <button onclick="filterKeywords(this,'news')">热点新闻</button>
+      <div class="view-header"><h2>关键词发现</h2><p>上方为<strong>品类关键词</strong>（手动添加，开关控制是否参与头脑风暴）；下方为<strong>联想关键词</strong>（由 <code>keyword-discovery.py</code> 发现并导入，二值选择「必定包含 / 必定排除」控制头脑风暴抽样池）。SEO 指标（SV/KD/CPC）由后续 Semrush 步骤补齐。</p></div>
+
+      <!-- 品类关键词 (top, always expanded) -->
+      <div class="kw-section kw-section-category">
+        <div class="kw-section-header">
+          <h3>品类关键词</h3>
+          <span class="kw-section-hint">开关开启的品类将作为头脑风暴的锚点（可多选，合并生成一个主题集）</span>
         </div>
-        <div class="kw-selected-bar" style="margin-left:auto;gap:10px;">
-          <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0;">
-            导入脚本 JSON
-            <input type="file" id="kwImportFile" accept=".json,application/json" style="display:none;" onchange="importKeywordsFromScript(this)">
-          </label>
+        <div class="kw-list" id="kwCategoryList"></div>
+        <div class="kw-add-row kw-add-category">
+          <input type="text" id="kwCategoryAddInput" placeholder="添加品类关键词，回车确认（如：sofa / dining table）" />
+          <button class="btn btn-secondary btn-sm" onclick="addCategoryKeyword()">添加品类</button>
+        </div>
+      </div>
+
+      <!-- 联想关键词 (bottom, collapsed by default) -->
+      <details class="kw-section kw-section-assoc" id="kwAssocDetails">
+        <summary class="kw-section-header">
+          <h3>联想关键词 <span class="kw-section-count" id="kwAssocCount">0</span></h3>
+          <span class="kw-section-hint">展开管理发现/导入的联想关键词（默认折叠）</span>
+        </summary>
+        <div class="heatmap-controls">
+          <div class="segmented" id="kwSegmented">
+            <button class="active" onclick="filterKeywords(this,'all')">全部来源</button>
+            <button onclick="filterKeywords(this,'brand')">竞品品牌</button>
+            <button onclick="filterKeywords(this,'media')">家居媒体</button>
+            <button onclick="filterKeywords(this,'trend')">搜索趋势</button>
+            <button onclick="filterKeywords(this,'news')">热点新闻</button>
+          </div>
+          <div class="kw-selected-bar" style="margin-left:auto;gap:10px;">
+            <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0;">
+              导入脚本 JSON
+              <input type="file" id="kwImportFile" accept=".json,application/json" style="display:none;" onchange="importKeywordsFromScript(this)">
+            </label>
             <button type="button" class="btn btn-primary btn-sm" onclick="bridgeDiscoverKeywords()">桥接：发现关键词</button>
             <button type="button" class="btn btn-secondary btn-sm" onclick="bridgeEnrichKeywords()">桥接：补 SV/KD/CPC</button>
-
-          <span>共 <strong id="kwTotalCount">0</strong> 个关键词</span>
+            <span>共 <strong id="kwTotalCount">0</strong> 个</span>
+          </div>
         </div>
-      </div>
-      <div class="discover-sources" id="discoverSources">
-        <span class="discover-sources-label">发现来源</span>
-        <label class="discover-chip on" data-src="brand"><input type="checkbox" checked>竞品品牌</label>
-        <label class="discover-chip on" data-src="media"><input type="checkbox" checked>家居媒体</label>
-        <label class="discover-chip" data-src="trend"><input type="checkbox">搜索趋势</label>
-        <label class="discover-chip" data-src="news"><input type="checkbox">热点新闻</label>
-        <label class="discover-chip" data-src="lifestyle"><input type="checkbox">生活厨艺</label>
-        <label class="discover-chip" data-src="health"><input type="checkbox">健康医疗</label>
-        <label class="discover-chip" data-src="fitness"><input type="checkbox">运动健身</label>
-        <label class="discover-chip" data-src="education"><input type="checkbox">教育亲子</label>
-        <label class="discover-chip" data-src="lifestyle_news"><input type="checkbox">生活热点</label>
-        <button type="button" class="discover-chip-all" onclick="toggleAllDiscoverSources(true)">全选</button>
-        <button type="button" class="discover-chip-all" onclick="toggleAllDiscoverSources(false)">仅默认</button>
-      </div>
-      <div class="kw-list-container">
-        <div class="kw-list" id="kwList"></div>
-      </div>
-      <div class="kw-add-row">
-        <input type="text" id="kwAddInput" placeholder="手动添加关键词，回车确认（自动去重）" />
-        <select id="kwAddSource">
-          <option value="brand">竞品品牌</option>
-          <option value="media">家居媒体</option>
-          <option value="trend">搜索趋势</option>
-          <option value="news">热点新闻</option>
-          <option value="lifestyle">生活厨艺</option>
-          <option value="health">健康医疗</option>
-          <option value="fitness">运动健身</option>
-          <option value="education">教育亲子</option>
-          <option value="lifestyle_news">生活热点</option>
-        </select>
-        <button class="btn btn-secondary btn-sm" onclick="addKeywordManual()">添加</button>
-      </div>
+        <div class="discover-sources" id="discoverSources">
+          <span class="discover-sources-label">发现来源</span>
+          <label class="discover-chip on" data-src="brand"><input type="checkbox" checked>竞品品牌</label>
+          <label class="discover-chip on" data-src="media"><input type="checkbox" checked>家居媒体</label>
+          <label class="discover-chip" data-src="trend"><input type="checkbox">搜索趋势</label>
+          <label class="discover-chip" data-src="news"><input type="checkbox">热点新闻</label>
+          <label class="discover-chip" data-src="lifestyle"><input type="checkbox">生活厨艺</label>
+          <label class="discover-chip" data-src="health"><input type="checkbox">健康医疗</label>
+          <label class="discover-chip" data-src="fitness"><input type="checkbox">运动健身</label>
+          <label class="discover-chip" data-src="education"><input type="checkbox">教育亲子</label>
+          <label class="discover-chip" data-src="lifestyle_news"><input type="checkbox">生活热点</label>
+          <button type="button" class="discover-chip-all" onclick="toggleAllDiscoverSources(true)">全选</button>
+          <button type="button" class="discover-chip-all" onclick="toggleAllDiscoverSources(false)">仅默认</button>
+        </div>
+        <div class="kw-list-container">
+          <div class="kw-list" id="kwList"></div>
+        </div>
+        <div class="kw-add-row">
+          <input type="text" id="kwAddInput" placeholder="手动添加联想关键词，回车确认（自动去重）" />
+          <select id="kwAddSource">
+            <option value="brand">竞品品牌</option>
+            <option value="media">家居媒体</option>
+            <option value="trend">搜索趋势</option>
+            <option value="news">热点新闻</option>
+            <option value="lifestyle">生活厨艺</option>
+            <option value="health">健康医疗</option>
+            <option value="fitness">运动健身</option>
+            <option value="education">教育亲子</option>
+            <option value="lifestyle_news">生活热点</option>
+          </select>
+          <button class="btn btn-secondary btn-sm" onclick="addKeywordManual()">添加</button>
+        </div>
+      </details>
+
       <div class="action-bar">
         <div class="spacer"></div>
         <button class="btn btn-secondary" onclick="switchView('dashboard')">返回</button>
@@ -973,12 +1102,6 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               <input type="number" id="bsCount" value="10" min="3" max="30">
               个主题
             </div>
-            <label class="bs-generate-btn" style="cursor:pointer;margin:0;">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
-              导入主题 JSON
-              <input type="file" id="topicImportFile" accept=".json,application/json" style="display:none;" onchange="importTopicsFromSchema(this)">
-            </label>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="bridgeBrainstormTopics()" title="备用：直接跑 topic-brainstorm.py（LLM）">桥接：脚本选题</button>
 
             <button class="btn btn-primary" id="bsGenerateBtn" onclick="runBrainstormDemo()">
               开始生成
@@ -1032,7 +1155,6 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               <div class="gt-label">当前选题（已人工确认）</div>
               <div class="gt-title" id="wbTopicTitle">—</div>
             </div>
-            <button class="btn btn-secondary btn-sm" onclick="switchView('brainstorm')">换主题</button>
           </div>
 
           <div class="gen-live" id="genLive">
@@ -1045,7 +1167,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
           </div>
 
           <div class="gen-phase-pills" id="genPhasePills">
-            <button class="gen-phase-pill active" data-phase="serp" onclick="setGenPhase('serp')"><span class="pill-num">1</span>SERP 洞察</button>
+            <button class="gen-phase-pill active" data-phase="serp" onclick="setGenPhase('serp')"><span class="pill-num">1</span>SERP 洞察（可选）</button>
             <button class="gen-phase-pill" data-phase="outline" onclick="setGenPhase('outline')"><span class="pill-num">2</span>大纲</button>
             <button class="gen-phase-pill" data-phase="sections" onclick="setGenPhase('sections')"><span class="pill-num">3</span>正文板块</button>
             <button class="gen-phase-pill" data-phase="placements" onclick="setGenPhase('placements')"><span class="pill-num">4</span>产品与内链</button>
@@ -1062,7 +1184,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <span class="wb-status idle" id="serpStatus">待生成</span>
               </div>
               <div class="wb-card-body">
-                <p class="wb-hint">分析排名前十文章的共性与内容缺口，作为大纲与正文的依据。可重新生成，也可直接进入大纲。</p>
+                <p class="wb-hint">分析排名前十文章的共性与内容缺口，作为大纲与正文的依据。<strong>此步为可选</strong>——可直接进入大纲，不影响后续流程。</p>
                 <div class="gen-live-mini" id="serpLive"></div>
                 <div id="serpResult" style="display:none;">
                   <div style="font-size:13px;font-weight:600;margin-bottom:6px;">排名前列</div>
@@ -1072,7 +1194,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 </div>
                 <div class="wb-actions" style="margin-top:14px;">
                   <button class="btn btn-primary" id="btnGenSerp" onclick="generateSerp()">请 Agent 分析 SERP</button>
-                  <button class="btn btn-secondary" id="btnSerpNext" onclick="setGenPhase('outline')" disabled>下一步：大纲</button>
+                  <button class="btn btn-secondary" id="btnSerpNext" onclick="setGenPhase('outline')">下一步：大纲（可跳过）</button>
                 </div>
               </div>
             </div>
@@ -1091,7 +1213,6 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <div class="outline-list" id="outlineList"></div>
                 <div class="wb-actions">
                   <button class="btn btn-primary" id="btnGenOutline" onclick="generateOutline()">请 Agent 生成大纲</button>
-                  <button class="btn btn-secondary" type="button" onclick="bridgeGenerateSection('outline')">脚本生成（备选）</button>
                   <button class="btn btn-secondary" onclick="addOutlineItem('h2')" id="btnAddH2" disabled>加 H2</button>
                   <button class="btn btn-secondary" onclick="addOutlineItem('h3')" id="btnAddH3" disabled>加 H3</button>
                   <div class="spacer"></div>
@@ -1113,8 +1234,6 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <p class="wb-hint">按 Intro → 各 H2 → Conclusion 逐块生成。每块可编辑、可单独重写；全部就绪后进入产品植入与内链审核。</p>
                 <div class="wb-actions">
                   <button class="btn btn-primary" id="btnGenAllSections" onclick="generateAllSections()" disabled>请 Agent 写全部正文</button>
-                  <button class="btn btn-secondary" type="button" onclick="bridgeGenerateSection('section')" id="btnBridgeGenSections">脚本生成（备选）</button>
-                  <button class="btn btn-ghost" type="button" onclick="bridgeReloadState()">从 Bridge 刷新</button>
                   <div class="spacer"></div>
                   <button class="btn btn-ghost" onclick="setGenPhase('outline')">回改大纲</button>
                   <button class="btn btn-primary" id="btnSectionsNext" onclick="setGenPhase('placements')" disabled>下一步：产品与内链</button>
@@ -1268,7 +1387,6 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
       <div class="action-bar" id="genActionBar" style="display:none;">
         <div class="kw-selected-bar" id="genTopicInfo">进度：—</div>
         <div class="spacer"></div>
-        <button class="btn btn-secondary" onclick="switchView('brainstorm')">重新选主题</button>
       </div>
     </div>
 
@@ -1347,7 +1465,7 @@ const TOPIC_TEMPLATES = [
 
 // ==================== Rules (by generation block) ====================
 const RULE_BLOCKS = [
-  { id: 'global', label: '全局（每块都注入）', desc: '语气、语言、品牌底线；任意板块生成时都会追加到 prompt', inject: '每次生成' },
+  { id: 'global', label: '全局（每块都注入）', desc: '语气、语言、品牌底线、事实核查底线；任意板块生成时都会追加到 prompt', inject: '每次生成' },
   { id: 'outline', label: '大纲 Outline', desc: '生成 / 重写 H2–H3 大纲时注入', inject: 'mode=outline' },
   { id: 'intro', label: '正文 · Intro', desc: '生成 Introduction 时注入（另含全局）', inject: 'section type=Intro' },
   { id: 'h2', label: '正文 · H2 章节', desc: '生成各 H2 正文时注入（另含全局）', inject: 'section type=H2' },
@@ -1355,6 +1473,8 @@ const RULE_BLOCKS = [
   { id: 'placements', label: '产品与内链', desc: '推荐产品植入与内链时注入', inject: 'mode=placements' },
   { id: 'faq', label: 'FAQ', desc: '生成 FAQ 时注入', inject: 'mode=faq' },
   { id: 'meta', label: 'SEO 元信息', desc: '生成 Meta Title / Description / Slug 时注入', inject: 'mode=meta' },
+  { id: 'listicle', label: '榜单类（Top/Best）', desc: '仅当主题为榜单类时生效；随大纲/正文/植入一起注入（规则自带"若为榜单类"前提）', inject: 'outline+h2+placements 时追加' },
+  { id: 'images', label: '配图', desc: '配图与产品图规则；随全局与 Meta 一起注入', inject: 'global+meta 时追加' },
 ];
 
 const PROMPT_TEMPLATES = {
@@ -1452,57 +1572,98 @@ const PEXELS_HEROES = [
 // #region agent log
 fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:DEFAULT_RULES',message:'JS_EXEC_AFTER_TEMPLATE: reached DEFAULT_RULES (past BLOG_POST_TEMPLATE)',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H7'})}).catch(()=>{});
 // #endregion
+const DEFAULT_RULES_VERSION = '2.0';
 const DEFAULT_RULES = {
   global: [
-    { text: '英文输出，美式拼写', enabled: true },
+    { text: '英文输出，美式拼写，统一术语', enabled: true },
     { text: '使用第二人称 you 直接对话读者', enabled: true },
     { text: "避免 'A good example is' 句式", enabled: true },
     { text: '不借鉴已有 POVISON 博客内容', enabled: true },
     { text: '品牌差异化：提及 fully assembled 时要自然、可验证', enabled: true },
+    { text: '所有事实、数据、价格、尺寸、材质必须基于 catalog 或 SERP 真实信息，禁止编造', enabled: true },
+    { text: '不堆砌关键词，保持自然语言流畅度', enabled: true },
+    { text: '段落间保持逻辑连贯，避免突兀跳跃', enabled: true },
+    { text: '避免空洞套话（如 "In today\'s world"、"It goes without saying"）', enabled: true },
   ],
   outline: [
-    { text: '4–6 个 H2；前 2–3 个 H2 使用 How/What/Why 问句', enabled: true },
-    { text: '覆盖 TopicItem.serp_gap 与 angle', enabled: true },
+    { text: '4–6 个 H2；前 2–3 个 H2 使用 How/What/Why 问句（定义概念用 What/Why，可操作步骤用 How to，不要强求每条都是问句）', enabled: true },
+    { text: '覆盖 TopicItem.serp_gap 与 angle，包含排名前列博客共同涵盖的内容', enabled: true },
     { text: '每个关键 H2 下可挂 1–2 个 H3，避免空壳标题', enabled: true },
     { text: '大纲阶段不写产品硬广，不堆关键词', enabled: true },
+    { text: '生成一个含主关键词、贴近搜索者痛点/使用场景或当前热点（如春扫/夏季）的标题，≤10 词（不超过 12 词）', enabled: true },
+    { text: 'FAQ 4–6 个，参考 Google Suggest / People Also Ask / 论坛，避免与正文重复', enabled: true },
+    { text: '若 SERP 分析结论与大纲格式冲突，优先满足 SERP 分析结果', enabled: true },
   ],
   intro: [
-    { text: '约 90 词；首段含 primary_keyword', enabled: true },
+    { text: '约 90–100 词；首段含 primary_keyword', enabled: true },
     { text: 'Intro 不加产品链接与内链', enabled: true },
     { text: '交代读者能获得什么，不剧透全文', enabled: true },
+    { text: '根据主题和主关键词描述目标读者的场景与痛点', enabled: true },
+    { text: '榜单类：需要一个适合主题的简短 H2 标题', enabled: true },
   ],
   h2: [
-    { text: '整篇目标 ≥1500 词；本 H2 写充实，含过渡段 40–60 词', enabled: true },
-    { text: '有 H3 时先过渡再展开；可用 bullet 但保持段落可读', enabled: true },
-    { text: '全文至少 1 个对比表思路或明确对比段；权威数据 1–2 处（可占位来源）', enabled: true },
-    { text: '个人体验细节可穿插（具体、可感知）', enabled: true },
-    { text: '核心关键词全文 3–5 次；本段不硬塞密度', enabled: true },
+    { text: '整篇目标 ≥1200 词；本 H2 写充实，含过渡段 40–80 词', enabled: true },
+    { text: 'H2 与 H3 之间必须加 40–80 词过渡段落，引出本节主题并引导读者阅读后续', enabled: true },
+    { text: '有 H3 时先过渡再展开；可用 bullet 但保持段落可读（除产品介绍与 buying guide 外少用 bullet）', enabled: true },
+    { text: '全文至少 1 个对比表思路或明确对比段；权威数据 1–2 处（来源机构用英文括号标注并作锚文本链向来源）', enabled: true },
+    { text: '一个段落最多 2 个数据，每个 H2 最多 3 个数据；数据必须真实且出自权威机构/杂志，不得虚构，不引用企业博客数据', enabled: true },
+    { text: '2 处个人体验感使用场景（可虚构但需具体有细节，体现真实感受，不用 picture/imagine 说法；不暗示作者亲自购买/测试过具体产品）', enabled: true },
+    { text: '核心关键词全文 3–5 次；本段不硬塞密度，注意 H2 之间内容不重复', enabled: true },
+    { text: '家具术语保持一致准确，不随意切换（如 media console / TV stand / cabinet 除非有明确区分）', enabled: true },
+    { text: '变化句长、段首、过渡与说明方式，避免重复句式；减少连字符/破折号/斜杠/冒号的碎片化表达', enabled: true },
+    { text: '避免套路化对比句式（It\'s not just X. It\'s Y / Whether you want X or Y / From X to Y / Not only X but also Y）反复出现', enabled: true },
   ],
   conclusion: [
-    { text: '约 90 词；总结行动步骤，不引入新论点', enabled: true },
+    { text: '约 90–100 词；总结行动步骤，不引入新论点', enabled: true },
     { text: '可轻点 fully assembled 价值，避免硬 CTA 堆砌', enabled: true },
+    { text: '榜单类：总结如何通过正确家具选择让家更 cozy/comfortable，并用一句话强调 Povison 优势（deeper seating / comfort / ready-to-live-in fully assembled / value for money），结尾 CTA', enabled: true },
   ],
   placements: [
-    { text: '每篇 1–2 个 POVISON 产品；文案 40–70 词；链接嵌在产品名上', enabled: true },
+    { text: '每篇 1–2 个 POVISON 产品；文案 40–70 词；链接嵌在产品名上，与文本自然融合，避免突兀介绍与前文无关的卖点', enabled: true },
     { text: '仅使用 catalog 中的 URL；禁止编造链接', enabled: true },
-    { text: '内链 2–3 条；anchor 须是文中可自然出现的长尾词', enabled: true },
+    { text: '内链 2–3 条；anchor 必须是句中已自然出现的长尾词，禁止 "For more details see..." / "Click here" 等 CTA 句式', enabled: true },
+    { text: '内链周围不得出现 "Povison blog" / "this article/guide" 等说明语，链接应像句子的一部分', enabled: true },
     { text: '每个 H2 最多 1 条内链；挂载 sectionId 必须合理', enabled: true },
+    { text: '榜单类：榜单前 3 名为 Povison 产品，4–10 名可从外部品牌选取（West Elm / CB2 / Article / Pottery Barn / Crate & Barrel / Floyd / Burrow / Joybird / IKEA 等）并附真实产品链接', enabled: true },
+    { text: '榜单类：每个产品块结构为 简短标题 + 价格（读取产品页真实价格，可用区间如 $6.66–$583.25）+ Best For + Highlights(bullet) + 产品亮点(≤100词) + Buyer review(真实评论)', enabled: true },
+    { text: '榜单类：仅其中一个 Povison 产品写 1–2 句个人体验感使用场景；其中一个 Povison 产品含与外部品牌的软性对比（1–2 句，可不提具体品牌），外部品牌小节语气不得强于 Povison 推荐', enabled: true },
+    { text: 'POVISON 产品价格：仅用产品页原价/常规价，不把促销/券后/会员价当永久价；标注价格随促销/地区/变体变化；无法核实则省略价格', enabled: true },
   ],
   faq: [
-    { text: '4–6 个问答；答案 40–60 词', enabled: true },
-    { text: '与正文语义重复率 ≤20%；不复读整段', enabled: true },
+    { text: '4–6 个问答；问题用 H3 展开；答案 40–60 词（榜单类 30–40 词）', enabled: true },
+    { text: '与正文语义重复率 ≤20%；不复读整段；若问题已被正文完整回答则移除', enabled: true },
     { text: '无硬广 CTA；可保留 FAQ Schema 友好的问答结构', enabled: true },
+    { text: 'FAQ 提供额外价值：新场景、更深层决策指导、风险考量、尺寸/材质区分或实用下一步', enabled: true },
   ],
   meta: [
-    { text: 'Meta Title 50–60 字符，含主关键词', enabled: true },
-    { text: 'Meta Description 150–160 字符', enabled: true },
-    { text: 'URL slug 小写+连字符，≤75 字符', enabled: true },
+    { text: 'Meta Title <60 字符，自然含主关键词（尽量靠前但不生硬），体现具体决策角度（尺寸/适配/布局/舒适/收纳/材质/风格/清仓/对比）', enabled: true },
+    { text: 'Meta Title 用实际结果而非泛化短语；避免关键词堆砌、夸张、clickbait；H1 宽泛时用 Meta Title 锐化最有价值的搜索决策', enabled: true },
+    { text: 'Meta Description <145 字符，自然含主关键词，说明读者能获得的实用价值', enabled: true },
+    { text: 'Meta Description 变化句式与开头（利益/问句/痛点/方案/直陈/CTA），避免每篇都用 "Discover/Learn/Find out" 开头', enabled: true },
+    { text: 'URL slug 小写+连字符，≤75 字符，含主关键词或其最清晰简短形式；不含年份、多余词或促销语', enabled: true },
     { text: 'focus = primary_keyword', enabled: true },
+  ],
+  listicle: [
+    { text: '榜单类结构（按顺序）：Title → Introduction(含H2标题,~100词) → 主题相关H2(选择标准/总览) → Quick Summary Table → Best Picks List(默认10个,H3展开) → 信息增量H2(1-2个,问句格式) → Conclusion(≤100词) → FAQ(4-6个,H3展开)', enabled: true },
+    { text: 'Quick Summary Table：列含 Product Name/Best For/Key Features/Price 等，Povison 产品名嵌入链接，表格其余不放链接；表后提示价格随地区/折扣变化', enabled: true },
+    { text: 'Best Picks 前 3 名为 Povison 产品，4–10 名可从外部品牌选取符合主题的产品并附真实产品链接', enabled: true },
+    { text: '信息增量部分可加 1–2 句强调 Povison 相对其他品牌的优势（不提具体品牌名）；若无合适内容可加 Buying Guide（不与前文 criteria 重复，从消费者选择维度出发）', enabled: true },
+    { text: '外部品牌小节语气不得强于对 Povison 的推荐；不允许出现"更推荐某外部品牌而非 Povison"的结论性表述', enabled: true },
+    { text: '榜单类 POV：专业编辑 & 独立评测立场，客观理性但整体略偏 Povison（通过事实与比较体现，非赤裸广告）', enabled: true },
+  ],
+  images: [
+    { text: '文章完成后输出 10 张与内容强相关、无版权问题的配图及对应详情页可点击 URL', enabled: true },
+    { text: '介绍具体 POVISON 产品时，在该段正下方放置该精确产品的官方图片并链接到对应产品详情页', enabled: true },
+    { text: '仅使用精确产品页或官方 POVISON 产品源的图片，禁止使用相似产品/其他变体/第三方零售商/搜索预览图', enabled: true },
+    { text: '解释可见产品特征（柜深/收纳布局/走线/座席延展/材质/开合机构）时，优先选用清晰展示该特征的官方产品图', enabled: true },
+    { text: '其他 lifestyle/室内图可来自 Unsplash/Pexels/Pixabay/Wikimedia Commons 等免版税平台，使用前确认授权条款', enabled: true },
+    { text: '每张图提供简洁英文 alt text，准确描述可见内容并自然使用主关键词，禁止堆砌关键词或编造产品细节', enabled: true },
   ],
 };
 
 // ==================== State ====================
-let selectedKeywords = new Set();
+let selectedKeywords = new Set(); // legacy — associative sample texts (kept for compat)
+let selectedCategories = new Set(); // enabled category keyword texts for brainstorm
 let kwFilter = 'all';
 let rules = JSON.parse(JSON.stringify(DEFAULT_RULES));
 let brainstormTopics = [];
@@ -1541,6 +1702,11 @@ async function createRun(parentId, forkStep) {
   // Prefer DB task create; fall back to in-memory if bridge offline
   try {
     if (await bridgeHealth()) {
+      // Flush any pending keyword edits to the current task before we create a
+      // new one (the new task will inherit the in-memory pool via loadTaskIntoUI,
+      // but the outgoing task's own edits must be saved first so they survive a
+      // later reload of that task).
+      await flushKwPersist();
       const body = {};
       if (parentId && typeof parentId === 'string' && parentId.startsWith('task-')) {
         body.parent_task_id = parentId;
@@ -1600,9 +1766,11 @@ function getActiveRun() { return runs.find(function(r){return r.id===activeRunId
 function syncFromRun(run) {
   if (!run) return;
   selectedKeywords = new Set(run.keywords);
+  selectedCategories = new Set(run.selectedCategories || []);
   kwFilter = run.kwFilter;
   if (Array.isArray(run.kwCatalog) && run.kwCatalog.length) {
     KEYWORDS = run.kwCatalog.map(normalizeScriptKeyword).filter(Boolean);
+    ensureDefaultCategory();
     renderKwList();
   }
   brainstormTopics = JSON.parse(JSON.stringify(run.topics));
@@ -1614,12 +1782,53 @@ function syncFromRun(run) {
 function saveToRun() {
   var run = getActiveRun(); if (!run) return;
   run.keywords = new Set(selectedKeywords);
+  run.selectedCategories = new Set(selectedCategories);
   run.kwFilter = kwFilter;
   run.kwCatalog = KEYWORDS.slice();
   run.topics = JSON.parse(JSON.stringify(brainstormTopics));
   run.selectedTopics = new Set(selectedTopics);
   run.genTopic = currentGenTopic ? JSON.parse(JSON.stringify(currentGenTopic)) : null;
   run.articleState = articleState ? JSON.parse(JSON.stringify(articleState)) : null;
+  // Keyword pool is global and must survive reloads, so persist edits (add /
+  // remove / toggle / mode change) to the DB step-1, debounced to avoid
+  // spamming the API on rapid interactions.
+  scheduleKwPersist();
+}
+
+let _kwPersistTimer = null;
+function scheduleKwPersist() {
+  if (_kwPersistTimer) clearTimeout(_kwPersistTimer);
+  _kwPersistTimer = setTimeout(persistKeywordsToDB, 800);
+}
+async function persistKeywordsToDB() {
+  try {
+    const rid = activeTaskId || BRIDGE.taskId
+      || (BRIDGE.runId && String(BRIDGE.runId).startsWith('task-') ? BRIDGE.runId : null);
+    if (!rid || !String(rid).startsWith('task-')) return;
+    const kwPayload = (KEYWORDS || []).map(function(k) {
+      return {
+        text: k.text, kind: k.kind || 'associative', source: k.source, type: k.type || '',
+        freq: k.freq || 1, mode: k.mode, enabled: k.enabled,
+        sv: k.sv, kd: k.kd, cpc: k.cpc, intent: k.intent,
+        metrics_status: k.metrics_status || (k.sv != null ? 'ok' : 'needs_manual'),
+      };
+    });
+    if (kwPayload.length) {
+      await bridgeFetch('/api/tasks/' + rid + '/steps/1/data', {
+        method: 'PUT', body: JSON.stringify(kwPayload),
+      });
+    }
+  } catch (e) { /* best-effort persist */ }
+}
+
+// Flush any pending debounced keyword persist immediately, targeting the
+// CURRENT activeTaskId. Call before switching/creating a task so the outgoing
+// task's keyword edits (add / toggle / mode change) are saved before the
+// active id changes — otherwise the edit could be written to the wrong task or
+// lost on reload.
+async function flushKwPersist() {
+  if (_kwPersistTimer) { clearTimeout(_kwPersistTimer); _kwPersistTimer = null; }
+  await persistKeywordsToDB();
 }
 
 // Merge the in-memory articleState (user edits) over the DB articleState
@@ -1748,6 +1957,10 @@ async function switchToTask(taskId) {
   if (JobProgress._el) JobProgress._el.className = 'job-progress';
   (JobProgress._buttons || []).forEach(b => { if (b) { b.classList.remove('is-loading'); b.disabled = false; } });
   JobProgress._buttons = [];
+  // Flush any pending keyword edits to the OUTGOING task before activeTaskId
+  // changes, so a toggle/add made on the previous task isn't written to (or
+  // lost from) the task we're about to open.
+  await flushKwPersist();
   try {
     // completed → idle on open
     await bridgeFetch('/api/tasks/' + taskId + '/activate', { method: 'POST', body: '{}' });
@@ -1770,6 +1983,7 @@ function resetGenerationUI() {
   brainstormTopics = [];
   selectedTopics = new Set();
   selectedKeywords = new Set();
+  selectedCategories = new Set();
   articleState = null;
   currentGenTopic = null;
   currentGenPhase = 'serp';
@@ -1844,7 +2058,7 @@ function applyArticleState(state) {
     state.phaseDone && state.phaseDone.placements ? 'faq' :
     state.phaseDone && state.phaseDone.sections ? 'placements' :
     state.outlineConfirmed ? 'sections' :
-    state.phaseDone && state.phaseDone.serp ? 'outline' : 'serp');
+    (state.phaseDone && state.phaseDone.serp) || (Array.isArray(state.outline) && state.outline.length) ? 'outline' : 'serp');
   updateGenProgressBar();
   saveToRun();
   return true;
@@ -1915,16 +2129,20 @@ async function loadTaskIntoUI(taskId) {
     // Step 1 keywords — shared pool across tasks.
     // If the task already has step-1 data (fork / imported), load that snapshot.
     // Otherwise keep the current pool and persist it into the new task's step 1.
-    var kwLoaded = false;
+    // Keyword pool is GLOBAL: category + associative keywords and their toggle
+    // states are shared across all tasks. Merge the task's saved snapshot with
+    // the in-memory pool (union by text) so switching tasks never loses
+    // manually-added category rows or their on/off state, and new tasks
+    // inherit the current pool. Persist the merged pool back to this task.
+    var snapshot = null;
     try {
       const kw = await bridgeFetch('/api/tasks/' + taskId + '/steps/1/data');
-      if (Array.isArray(kw) && kw.length) {
-        KEYWORDS = kw.map(normalizeScriptKeyword).filter(Boolean);
-        renderKwList();
-        kwLoaded = true;
-      }
+      if (Array.isArray(kw) && kw.length) snapshot = kw.map(normalizeScriptKeyword).filter(Boolean);
     } catch (e) {}
-    if (!kwLoaded && KEYWORDS.length) {
+    const merged = mergeKeywordPool(snapshot, KEYWORDS);
+    if (merged.length) {
+      KEYWORDS = merged;
+      ensureDefaultCategory();
       try {
         await bridgeFetch('/api/tasks/' + taskId + '/steps/1/data', {
           method: 'PUT', body: JSON.stringify(KEYWORDS),
@@ -1941,28 +2159,26 @@ async function loadTaskIntoUI(taskId) {
       // empty) still shows the previously selected keywords.
       if (Array.isArray(topicsDoc.input_keywords) && topicsDoc.input_keywords.length) {
         selectedKeywords = new Set(topicsDoc.input_keywords);
-        renderBsKeywords();
       }
+      // Restore the category anchor selection for this brainstorm run too,
+      // otherwise the category chips vanish from the brainstorm page on reload.
+      if (Array.isArray(topicsDoc.input_categories)) {
+        selectedCategories = new Set(topicsDoc.input_categories);
+      }
+      renderBsKeywords();
       if (Array.isArray(topicList) && topicList.length) {
         brainstormTopics = topicList.map(function(t, i){ return normalizeTopicItem(t, i + 1); });
         renderTopics();
         document.getElementById('bsActionBar').style.display = 'flex';
       }
     } catch (e) {}
-    // Step 3 article
+    // Step 3 article — reuse applyArticleState so the phase pills + progress
+    // bar reflect the restored phase (it calls setGenPhase + updateGenProgressBar,
+    // which the inline copy below previously omitted, leaving the UI stuck on
+    // the 'serp' phase after reload).
     try {
       const state = await bridgeFetch('/api/tasks/' + taskId + '/steps/3/data');
-      if (state && state.topic) {
-        if (Array.isArray(state.sections)) state.sections.forEach(_normalizeSection);
-        if (Array.isArray(state.products)) state.products.forEach(_normalizeProduct);
-        articleState = state;
-        currentGenTopic = state.topic;
-        document.getElementById('genEmpty').style.display = 'none';
-        document.getElementById('genWorkbench').style.display = 'block';
-        document.getElementById('genActionBar').style.display = 'flex';
-        if (state.topic.title) document.getElementById('wbTopicTitle').textContent = state.topic.title;
-        restoreWorkbenchUI();
-      } else {
+      if (!applyArticleState(state)) {
         // No step-3 article yet (new task or fork from step 1/2): clear ALL
         // workbench state so the previously loaded task's article / preview /
         // sections never bleed into this one. Without this, a fork that hasn't
@@ -1974,6 +2190,7 @@ async function loadTaskIntoUI(taskId) {
         document.getElementById('genActionBar').style.display = 'none';
         var wbTitle = document.getElementById('wbTopicTitle'); if (wbTitle) wbTitle.textContent = '';
         restoreWorkbenchUI();
+        updateGenProgressBar();
       }
     } catch (e) {}
     saveToRun();
@@ -2079,12 +2296,14 @@ function exportRunPackage() {
     fork_step: run.forkStep,
     kw_weights: Object.assign({}, kwWeights),
     selected_keywords: Array.from(selectedKeywords),
+    selected_categories: Array.from(selectedCategories),
     selected_topic_id: currentGenTopic ? (currentGenTopic.schema_id || currentGenTopic.id) : null,
     keywords: KEYWORDS.slice(),
     topics: {
       version: '1.0',
       generated_at: new Date().toISOString(),
       input_keywords: Array.from(selectedKeywords),
+      input_categories: Array.from(selectedCategories),
       serp_queries: [],
       topics: brainstormTopics,
     },
@@ -2112,6 +2331,7 @@ function importRunPackage(input) {
       var data = JSON.parse(reader.result);
       if (Array.isArray(data.keywords) && data.keywords.length) {
         KEYWORDS = data.keywords.map(normalizeScriptKeyword).filter(Boolean);
+        ensureDefaultCategory();
         if (data.kw_weights) kwWeights = Object.assign({}, data.kw_weights);
         renderKwList();
       }
@@ -2133,6 +2353,9 @@ function importRunPackage(input) {
       if (Array.isArray(data.selected_keywords)) {
         selectedKeywords = new Set(data.selected_keywords);
         renderBsKeywords();
+      }
+      if (Array.isArray(data.selected_categories)) {
+        selectedCategories = new Set(data.selected_categories);
       }
       if (data.article_state) {
         articleState = data.article_state;
@@ -2190,32 +2413,72 @@ let kwListRendered = false;
 let kwWeights = {}; // text → weight (0-1)
 
 function renderKwList() {
+  // Category section (top)
+  const catList = document.getElementById('kwCategoryList');
+  if (catList) {
+    const cats = KEYWORDS.filter(k => k.kind === 'category');
+    // Sort: "不限定品类" first
+    cats.sort((a, b) => (a.text === '不限定品类' ? -1 : b.text === '不限定品类' ? 1 : 0));
+    let html = '';
+    cats.forEach(kw => {
+      const isLocked = kw.text === '不限定品类';
+      const enabled = !!kw.enabled;
+      const safeText = String(kw.text).replace(/'/g, "\\'");
+      html += `<div class="kw-category-row" data-text="${kw.text}">
+        <div class="kw-cat-toggle${enabled ? ' on' : ''}${isLocked ? '' : ''}" onclick="setCategoryEnabled('${safeText}', ${enabled ? 'false' : 'true'})" role="switch" aria-checked="${enabled}"></div>
+        <div class="kw-cat-text${isLocked ? ' locked' : ''}">${kw.text}${isLocked ? ' <span style="font-size:11px;color:var(--text-tertiary);">（默认关闭，开启=不限定品类锚点）</span>' : ''}</div>
+        <span class="kw-cat-remove${isLocked ? ' hidden' : ''}" onclick="removeKeyword('${safeText}')">✕</span>
+      </div>`;
+    });
+    catList.innerHTML = html;
+  }
+
+  // Associative section (bottom)
   const list = document.getElementById('kwList');
-  let html = '<div class="kw-list-header"><div style="flex:1;">关键词</div><div style="min-width:60px;">来源</div><div style="min-width:120px;">SV / KD / CPC</div><div style="min-width:60px;">权重</div><div style="min-width:20px;"></div></div>';
-  KEYWORDS.forEach(kw => {
-    if (kwWeights[kw.text] === undefined) kwWeights[kw.text] = 0.5;
-    const w = kwWeights[kw.text];
-    const needs = kw.metrics_status === 'needs_manual' || kw.metrics_status === 'pending' || (kw.sv == null && kw.sv !== 0);
-    const hasSv = kw.sv != null && kw.sv !== '' && !Number.isNaN(Number(kw.sv));
-    const zeroClass = (w === 0 ? ' kw-zero' : '') + (needs ? ' kw-needs-metrics' : '');
-    const seoText = hasSv
-      ? (Number(kw.sv).toLocaleString() + ' / ' + (kw.kd ?? '—') + ' / $' + Number(kw.cpc || 0).toFixed(1))
-      : '待补数';
-    const flag = needs ? '<span class="metrics-flag">缺指标</span>' : '';
-    const safeText = String(kw.text).replace(/'/g, "\\'");
-    html += `<div class="kw-row${zeroClass}" data-text="${kw.text}" data-src="${kw.source}">
-      <div class="kw-dot" data-src="${kw.source}"></div>
-      <div class="kw-text" data-src="${kw.source}">${kw.text}</div>
-      <div class="kw-src">${SOURCE_LABELS[kw.source] || kw.source}</div>
-      <div class="kw-seo">${seoText}${flag}</div>
-      <input type="range" class="kw-weight" min="0" max="1" step="0.1" value="${w}" oninput="updateKwWeight('${safeText}', this.value); updateKwRowClass(this)"/>
-      <span class="kw-remove" onclick="removeKeyword('${safeText}')">✕</span>
-    </div>`;
-  });
-  list.innerHTML = html;
+  if (list) {
+    let html = '<div class="kw-list-header"><div style="flex:1;">关键词</div><div style="min-width:60px;">来源</div><div style="min-width:120px;">SV / KD / CPC</div><div style="min-width:130px;">必定包含 / 必定排除</div><div style="min-width:20px;"></div></div>';
+    KEYWORDS.filter(k => k.kind !== 'category').forEach(kw => {
+      const mode = kw.mode || 'include';
+      const needs = kw.metrics_status === 'needs_manual' || kw.metrics_status === 'pending' || (kw.sv == null && kw.sv !== 0);
+      const hasSv = kw.sv != null && kw.sv !== '' && !Number.isNaN(Number(kw.sv));
+      const excludedClass = mode === 'exclude' ? ' kw-excluded' : '';
+      const needsClass = needs ? ' kw-needs-metrics' : '';
+      const seoText = hasSv
+        ? (Number(kw.sv).toLocaleString() + ' / ' + (kw.kd ?? '—') + ' / $' + Number(kw.cpc || 0).toFixed(1))
+        : '待补数';
+      const flag = needs ? '<span class="metrics-flag">缺指标</span>' : '';
+      const safeText = String(kw.text).replace(/'/g, "\\'");
+      html += `<div class="kw-row${excludedClass}${needsClass}" data-text="${kw.text}" data-src="${kw.source}">
+        <div class="kw-dot" data-src="${kw.source}"></div>
+        <div class="kw-text" data-src="${kw.source}">${kw.text}</div>
+        <div class="kw-src">${SOURCE_LABELS[kw.source] || kw.source}</div>
+        <div class="kw-seo">${seoText}${flag}</div>
+        <div class="kw-mode-toggle">
+          <button class="${mode === 'include' ? 'active include' : ''}" onclick="setKwMode('${safeText}', 'include')">必定包含</button>
+          <button class="${mode === 'exclude' ? 'active exclude' : ''}" onclick="setKwMode('${safeText}', 'exclude')">必定排除</button>
+        </div>
+        <span class="kw-remove" onclick="removeKeyword('${safeText}')">✕</span>
+      </div>`;
+    });
+    list.innerHTML = html;
+  }
   kwListRendered = true;
   applyKwListFilter();
   updateKwTotalCount();
+  updateKwAssocCount();
+}
+
+function updateKwAssocCount() {
+  const n = KEYWORDS.filter(k => k.kind !== 'category').length;
+  const el = document.getElementById('kwAssocCount');
+  if (el) el.textContent = '(' + n + ')';
+}
+
+function ensureDefaultCategory() {
+  const exists = KEYWORDS.some(k => k.kind === 'category' && k.text === '不限定品类');
+  if (!exists) {
+    KEYWORDS.push({ text: '不限定品类', kind: 'category', enabled: false });
+  }
 }
 
 function updateKwRowClass(slider) {
@@ -2237,13 +2500,45 @@ function updateKwWeight(text, val) {
 }
 
 function removeKeyword(text) {
+  if (text === '不限定品类') { showToast('「不限定品类」不可删除', ''); return; }
   const idx = KEYWORDS.findIndex(k => k.text === text);
   if (idx >= 0) {
     KEYWORDS.splice(idx, 1);
-    delete kwWeights[text];
     renderKwList();
+    saveToRun();
     showToast('已移除: ' + text, '');
   }
+}
+
+function setKwMode(text, mode) {
+  const kw = KEYWORDS.find(k => k.text === text && k.kind !== 'category');
+  if (!kw) return;
+  kw.mode = mode;
+  renderKwList();
+  saveToRun();
+}
+
+function setCategoryEnabled(text, enabled) {
+  const kw = KEYWORDS.find(k => k.text === text && k.kind === 'category');
+  if (!kw) return;
+  kw.enabled = !!enabled;
+  renderKwList();
+  saveToRun();
+}
+
+function addCategoryKeyword() {
+  const input = document.getElementById('kwCategoryAddInput');
+  const text = (input && input.value || '').trim();
+  if (!text) return;
+  if (KEYWORDS.find(k => k.text.toLowerCase() === text.toLowerCase())) {
+    showToast('关键词已存在: ' + text, '');
+    return;
+  }
+  KEYWORDS.push({ text, kind: 'category', enabled: true });
+  renderKwList();
+  saveToRun();
+  input.value = '';
+  showToast('已添加品类: ' + text, 'success');
 }
 
 function normalizeScriptKeyword(raw) {
@@ -2272,6 +2567,9 @@ function normalizeScriptKeyword(raw) {
     text,
     source,
     type: raw.type || '',
+    kind: raw.kind === 'category' ? 'category' : 'associative',
+    mode: raw.mode === 'exclude' ? 'exclude' : 'include',
+    enabled: raw.kind === 'category' ? raw.enabled !== false : true,
     freq: Number(raw.freq) || 0,
     heat,
     sv: raw.sv == null || raw.sv === '' ? null : Number(raw.sv),
@@ -2280,6 +2578,31 @@ function normalizeScriptKeyword(raw) {
     intent: raw.intent || (kd >= 40 ? 'Commercial' : 'Informational'),
     metrics_status: raw.metrics_status || (raw.sv != null ? 'ok' : 'pending'),
   };
+}
+
+// Merge a task's saved keyword snapshot with the in-memory global pool.
+// The pool (category + associative keywords, plus toggle states) is shared
+// across ALL tasks, so switching tasks must never wipe manually-added
+// category rows or their on/off state. Union by keyword text; the in-memory
+// version wins for kind/enabled/mode (the user's latest edits carry over),
+// while the snapshot wins for metrics (sv/kd/cpc/heat/intent) which may be
+// fresher from re-enrichment. Snapshot-only rows (e.g. a fork's extra
+// discovery) are added in.
+function mergeKeywordPool(snapshot, memory) {
+  const byText = new Map();
+  (snapshot || []).forEach(s => { if (s && s.text) byText.set(s.text, s); });
+  (memory || []).forEach(m => {
+    if (!m || !m.text) return;
+    const s = byText.get(m.text);
+    if (s) {
+      byText.set(m.text, Object.assign({}, s, {
+        kind: m.kind, enabled: m.enabled, mode: m.mode,
+      }));
+    } else {
+      byText.set(m.text, m);
+    }
+  });
+  return Array.from(byText.values());
 }
 
 function importKeywordsFromScript(input) {
@@ -2301,19 +2624,20 @@ function importKeywordsFromScript(input) {
         input.value = '';
         return;
       }
-      // Merge: keep existing weights when text matches; append new
+      // Merge: keep existing mode/enabled when text matches; append new associative.
+      // Category keywords are preserved (never wiped by associative import).
       const byText = new Map(KEYWORDS.map(k => [k.text.toLowerCase(), k]));
       let added = 0, updated = 0;
       mapped.forEach(kw => {
         const key = kw.text.toLowerCase();
         if (byText.has(key)) {
           const old = byText.get(key);
-          Object.assign(old, kw);
+          // Only update associative rows; leave category rows untouched.
+          if (old.kind !== 'category') Object.assign(old, kw, { kind: 'associative' });
           updated++;
         } else {
           KEYWORDS.push(kw);
           byText.set(key, kw);
-          if (kwWeights[kw.text] === undefined) kwWeights[kw.text] = 0.5;
           added++;
         }
       });
@@ -2337,8 +2661,7 @@ function addKeywordManual() {
     showToast('关键词已存在: ' + text, '');
     return;
   }
-  KEYWORDS.push({ text, source, heat: 'sm', sv: 0, kd: 0, cpc: 0, intent: 'Informational' });
-  kwWeights[text] = 0.5;
+  KEYWORDS.push({ text, source, kind: 'associative', mode: 'include', heat: 'sm', sv: 0, kd: 0, cpc: 0, intent: 'Informational' });
   renderKwList();
   input.value = '';
   showToast('已添加: ' + text, 'success');
@@ -2353,6 +2676,8 @@ function updateKwTotalCount() {
 document.addEventListener('DOMContentLoaded', function() {
   const inp = document.getElementById('kwAddInput');
   if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') addKeywordManual(); });
+  const catInp = document.getElementById('kwCategoryAddInput');
+  if (catInp) catInp.addEventListener('keydown', e => { if (e.key === 'Enter') addCategoryKeyword(); });
   initDiscoverSourceChips();
 });
 
@@ -2377,7 +2702,11 @@ function resetKwFilterAll() {
 function applyImportedKeywords(list, opts) {
   const rows = (Array.isArray(list) ? list : []).map(normalizeScriptKeyword).filter(Boolean);
   if (!rows.length) return 0;
-  KEYWORDS = rows;
+  // Preserve existing category keywords (manual); import only refills associative rows.
+  const categories = KEYWORDS.filter(k => k.kind === 'category');
+  KEYWORDS = categories.concat(rows);
+  // Ensure the default "不限定品类" category exists (off by default).
+  ensureDefaultCategory();
   resetKwFilterAll();
   renderKwList();
   saveToRun();
@@ -2388,54 +2717,58 @@ function applyImportedKeywords(list, opts) {
 }
 
 function pickRandomKeywords() {
-  var pool = KEYWORDS.filter(k => kwWeights[k.text] > 0);
-  if (pool.length === 0) return false;
+  // Categories: enabled category keywords (anchor). May be empty if all off.
+  selectedCategories = new Set(
+    KEYWORDS.filter(k => k.kind === 'category' && k.enabled).map(k => k.text)
+  );
+  // Associative pool: mode === 'include'.
+  var pool = KEYWORDS.filter(k => k.kind !== 'category' && (k.mode || 'include') === 'include');
+  if (pool.length === 0) { selectedKeywords.clear(); return false; }
 
   selectedKeywords.clear();
-  var numToPick = Math.min(Math.floor(Math.random() * 5) + 1, pool.length);
-
-  var mustInclude = pool.filter(k => kwWeights[k.text] >= 1);
-  var optional = pool.filter(k => kwWeights[k.text] > 0 && kwWeights[k.text] < 1);
-
-  mustInclude.forEach(k => { if (selectedKeywords.size < numToPick) selectedKeywords.add(k.text); });
-
-  while (selectedKeywords.size < numToPick && optional.length > 0) {
-    var totalWeight = optional.reduce((s, k) => s + kwWeights[k.text], 0);
-    var r = Math.random() * totalWeight;
-    var cumulative = 0;
-    for (var i = 0; i < optional.length; i++) {
-      cumulative += kwWeights[optional[i].text];
-      if (r <= cumulative) {
-        selectedKeywords.add(optional[i].text);
-        optional.splice(i, 1);
-        break;
-      }
-    }
-  }
+  // Random 3-8 (clamped to pool size).
+  var numToPick = Math.min(Math.floor(Math.random() * 6) + 3, pool.length);
+  if (numToPick < 1) numToPick = 1;
+  var shuffled = pool.slice().sort(() => Math.random() - 0.5);
+  for (var i = 0; i < numToPick; i++) selectedKeywords.add(shuffled[i].text);
   return true;
 }
 
 function rerollKeywords() {
-  if (!pickRandomKeywords()) { showToast('没有可用关键词（权重全为0）', ''); return; }
+  // Keep categories; re-sample associative only.
+  var pool = KEYWORDS.filter(k => k.kind !== 'category' && (k.mode || 'include') === 'include');
+  if (pool.length === 0) { showToast('没有可用联想关键词（全部为必定排除）', ''); return; }
+  selectedKeywords.clear();
+  var numToPick = Math.min(Math.floor(Math.random() * 6) + 3, pool.length);
+  if (numToPick < 1) numToPick = 1;
+  var shuffled = pool.slice().sort(() => Math.random() - 0.5);
+  for (var i = 0; i < numToPick; i++) selectedKeywords.add(shuffled[i].text);
   renderBsKeywords();
   saveToRun();
-  logStep(1, 'reroll', '重新随机关键词: ' + Array.from(selectedKeywords).join(', '));
-  showToast('已换 ' + selectedKeywords.size + ' 个关键词', 'success');
+  logStep(1, 'reroll', '重新随机联想关键词: ' + Array.from(selectedKeywords).join(', '));
+  showToast('已换 ' + selectedKeywords.size + ' 个联想关键词', 'success');
 }
 
 function goToBrainstorm() {
-  if (!pickRandomKeywords()) { showToast('没有可用关键词（权重全为0）', ''); return; }
+  // Validate categories.
+  var enabledCats = KEYWORDS.filter(k => k.kind === 'category' && k.enabled);
+  if (enabledCats.length === 0) {
+    showToast('请至少开启一个品类关键词（或开启「不限定品类」）', '');
+    return;
+  }
+  if (!pickRandomKeywords()) { showToast('没有可用联想关键词（全部为必定排除）', ''); return; }
 
   var run = getActiveRun();
   if (run && run.topics.length > 0) {
     saveToRun();
     var newRun = createRun(run.id, 1);
     newRun.keywords = new Set(selectedKeywords);
-    logStep(1, 'complete', '随机组合了 ' + selectedKeywords.size + ' 个关键词: ' + Array.from(selectedKeywords).join(', '));
-    showToast('随机组合 ' + selectedKeywords.size + ' 个关键词 → 自动分叉为 Run #' + newRun.id, 'success');
+    newRun.selectedCategories = new Set(selectedCategories);
+    logStep(1, 'complete', '围绕品类 [' + Array.from(selectedCategories).join(', ') + '] 随机结合 ' + selectedKeywords.size + ' 个联想关键词');
+    showToast('围绕品类 + ' + selectedKeywords.size + ' 个联想关键词 → 自动分叉为 Run #' + newRun.id, 'success');
   } else if (run) {
     saveToRun();
-    logStep(1, 'complete', '随机组合了 ' + selectedKeywords.size + ' 个关键词: ' + Array.from(selectedKeywords).join(', '));
+    logStep(1, 'complete', '围绕品类 [' + Array.from(selectedCategories).join(', ') + '] 随机结合 ' + selectedKeywords.size + ' 个联想关键词');
   }
   switchView('brainstorm');
   renderBsKeywords();
@@ -2445,13 +2778,31 @@ function goToBrainstorm() {
 function renderBsKeywords() {
   const div = document.getElementById('bsKeywords');
   div.innerHTML = '';
+  // Category tags (primary, blue)
+  selectedCategories.forEach(kw => {
+    const tag = document.createElement('span');
+    tag.className = 'bs-keyword-tag bs-cat-tag';
+    tag.innerHTML = `${kw} <span class="tag-x" onclick="removeBsCategory('${kw.replace(/'/g, "\\'")}')">✕</span>`;
+    div.appendChild(tag);
+  });
+  // Associative tags (secondary, gray)
   selectedKeywords.forEach(kw => {
     const tag = document.createElement('span');
     tag.className = 'bs-keyword-tag';
-    tag.innerHTML = `${kw} <span class="tag-x" onclick="removeBsKeyword('${kw}')">✕</span>`;
+    tag.innerHTML = `${kw} <span class="tag-x" onclick="removeBsKeyword('${kw.replace(/'/g, "\\'")}')">✕</span>`;
     div.appendChild(tag);
   });
-  document.getElementById('bsGenerateBtn').disabled = selectedKeywords.size === 0;
+  document.getElementById('bsGenerateBtn').disabled = (selectedKeywords.size === 0 && selectedCategories.size === 0);
+}
+
+function removeBsCategory(kw) {
+  // Turning off the category toggle on the keyword page is the canonical way;
+  // here we just clear it from this brainstorm's selection.
+  selectedCategories.delete(kw);
+  var k = KEYWORDS.find(x => x.text === kw && x.kind === 'category');
+  if (k) k.enabled = false;
+  renderBsKeywords();
+  saveToRun();
 }
 
 function removeBsKeyword(kw) {
@@ -2931,7 +3282,7 @@ function initWorkbench() {
     articleState.phaseDone.placements ? 'faq' :
     articleState.phaseDone.sections ? 'placements' :
     articleState.outlineConfirmed ? 'sections' :
-    articleState.phaseDone.serp ? 'outline' : 'serp');
+    (articleState.phaseDone.serp || (Array.isArray(articleState.outline) && articleState.outline.length)) ? 'outline' : 'serp');
   updateGenProgressBar();
   saveToRun();
 }
@@ -2945,7 +3296,9 @@ function _resetWorkbenchPanels() {
   var serpRankList = document.getElementById('serpRankList'); if (serpRankList) serpRankList.innerHTML = '';
   var serpGaps = document.getElementById('serpGaps'); if (serpGaps) serpGaps.innerHTML = '';
   setStatus('serpStatus', 'idle', '待生成');
-  var btnSerpNext = document.getElementById('btnSerpNext'); if (btnSerpNext) btnSerpNext.disabled = true;
+  // SERP is an optional step — "下一步：大纲" is always available so the
+  // operator can skip SERP and go straight to outline.
+  var btnSerpNext = document.getElementById('btnSerpNext'); if (btnSerpNext) btnSerpNext.disabled = false;
   // Outline
   var ol = document.getElementById('outlineList'); if (ol) ol.innerHTML = '';
   setStatus('outlineStatus', 'idle', '待生成');
@@ -2977,8 +3330,10 @@ function restoreWorkbenchUI() {
   if (articleState.serp) {
     renderSerpResult(articleState.serp);
     setStatus('serpStatus', 'ready', '已完成');
-    document.getElementById('btnSerpNext').disabled = false;
   }
+  // SERP is optional — ensure the "next" button is enabled whether or not
+  // SERP was generated.
+  var btnSerpNext = document.getElementById('btnSerpNext'); if (btnSerpNext) btnSerpNext.disabled = false;
   if (articleState.outline.length) {
     renderOutline();
     setStatus('outlineStatus', articleState.outlineConfirmed ? 'ready' : 'edited', articleState.outlineConfirmed ? '已确认' : '可编辑');
@@ -4132,20 +4487,61 @@ function rulesEnvelope() {
       return { text: r.text, enabled: !!r.enabled };
     }) };
   });
-  return { version: '1.0', blocks: blocks };
+  return { version: DEFAULT_RULES_VERSION, blocks: blocks };
+}
+
+// Merge a stored (older-version) ruleset onto the current DEFAULT_RULES:
+//  - Start from DEFAULT_RULES (so new/updated defaults appear).
+//  - Preserve the user's enabled/disabled choice for any default rule whose text matches.
+//  - Preserve any user-added custom rule (text not present in defaults) at the end of its block.
+function mergeRulesWithDefaults(storedDoc) {
+  var src = (storedDoc && storedDoc.blocks) || storedDoc || {};
+  var next = {};
+  RULE_BLOCKS.forEach(function(b) {
+    var defaults = (DEFAULT_RULES[b.id] || []).slice();
+    var storedBlock = src[b.id];
+    var storedList = Array.isArray(storedBlock) ? storedBlock : (storedBlock && storedBlock.rules) || [];
+    // index stored rules by text for quick toggle lookup
+    var storedByText = {};
+    storedList.forEach(function(r) { if (r && r.text) storedByText[String(r.text).trim()] = r; });
+    var usedStored = {};
+    var merged = defaults.map(function(d) {
+      var t = String(d.text).trim();
+      var s = storedByText[t];
+      if (s) { usedStored[t] = true; return { text: t, enabled: s.enabled !== false }; }
+      return { text: t, enabled: d.enabled !== false };
+    });
+    // append user-added custom rules not in defaults
+    storedList.forEach(function(r) {
+      if (!r || !r.text) return;
+      var t = String(r.text).trim();
+      if (!usedStored[t] && !defaults.some(function(d){ return String(d.text).trim() === t; })) {
+        merged.push({ text: t, enabled: r.enabled !== false });
+      }
+    });
+    next[b.id] = merged.filter(function(r) { return r.text; });
+  });
+  return next;
 }
 
 function applyRulesEnvelope(doc) {
   if (!doc) return false;
-  var src = doc.blocks || doc;
-  var next = {};
-  RULE_BLOCKS.forEach(function(b) {
-    var block = src[b.id];
-    var list = Array.isArray(block) ? block : (block && block.rules) || DEFAULT_RULES[b.id] || [];
-    next[b.id] = list.map(function(r) {
-      return { text: String(r.text || '').trim(), enabled: r.enabled !== false };
-    }).filter(function(r) { return r.text; });
-  });
+  var storedVersion = doc.version || '1.0';
+  var next;
+  if (storedVersion !== DEFAULT_RULES_VERSION) {
+    // version mismatch: rebuild from defaults while preserving user toggles + custom rules
+    next = mergeRulesWithDefaults(doc);
+  } else {
+    var src = doc.blocks || doc;
+    next = {};
+    RULE_BLOCKS.forEach(function(b) {
+      var block = src[b.id];
+      var list = Array.isArray(block) ? block : (block && block.rules) || DEFAULT_RULES[b.id] || [];
+      next[b.id] = list.map(function(r) {
+        return { text: String(r.text || '').trim(), enabled: r.enabled !== false };
+      }).filter(function(r) { return r.text; });
+    });
+  }
   rules = next;
   try { localStorage.setItem('povison_seo_generation_rules', JSON.stringify(rulesEnvelope())); } catch (e) {}
   renderRules();
@@ -4181,18 +4577,31 @@ function formatRulesMarkdown(texts) {
 
 /** Map Studio phase / section type → rule block ids (always includes global). */
 function ruleBlockIdsFor(mode, sectionType) {
+  var ids;
   if (mode === 'section' || mode === 'intro' || mode === 'h2' || mode === 'conclusion') {
     var st = sectionType || (mode === 'section' ? 'H2' : mode);
-    if (mode === 'intro' || st === 'Intro' || st === 'intro') return ['global', 'intro'];
-    if (mode === 'conclusion' || st === 'Conclusion' || st === 'conclusion') return ['global', 'conclusion'];
-    if (mode === 'h2' || st === 'H2' || st === 'h2') return ['global', 'h2'];
-    var map = { Intro: 'intro', H2: 'h2', Conclusion: 'conclusion' };
-    return ['global', map[st] || 'h2'];
+    if (mode === 'intro' || st === 'Intro' || st === 'intro') ids = ['global', 'intro'];
+    else if (mode === 'conclusion' || st === 'Conclusion' || st === 'conclusion') ids = ['global', 'conclusion'];
+    else if (mode === 'h2' || st === 'H2' || st === 'h2') ids = ['global', 'h2'];
+    else {
+      var map = { Intro: 'intro', H2: 'h2', Conclusion: 'conclusion' };
+      ids = ['global', map[st] || 'h2'];
+    }
+  } else if (mode === 'outline' || mode === 'placements' || mode === 'faq' || mode === 'meta') {
+    ids = ['global', mode];
+  } else {
+    ids = ['global'];
   }
-  if (mode === 'outline' || mode === 'placements' || mode === 'faq' || mode === 'meta') {
-    return ['global', mode];
+  // listicle rules self-gate with "榜单类：" prefix; append to outline/h2/placements so they ride along when relevant.
+  if (mode === 'outline' || mode === 'h2' || mode === 'placements' || mode === 'section') {
+    ids = ids.concat(['listicle']);
   }
-  return ['global'];
+  // images rules apply globally and at meta time.
+  ids = ids.concat(['images']);
+  // dedup preserving order
+  var seen = {}; var out = [];
+  ids.forEach(function(i){ if(!seen[i]){ seen[i]=1; out.push(i); } });
+  return out;
 }
 
 function buildInjectedPrompt(mode, sectionType) {
@@ -4617,36 +5026,45 @@ function _hideTooltip() {
 
 // ==================== Bridge API (scripts + agent) ====================
 const BRIDGE_DEFAULT = 'http://127.0.0.1:8766';
+const BRIDGE_PORT = '8766';
 
-function resolveBridgeBase() {
-  // Only same-origin when served by Studio Bridge itself (:8766).
-  // Cursor Live Preview / other http ports must NOT use relative URLs —
-  // they would hit the wrong host and show「Bridge 未连接」.
-  const host = location.hostname;
-  const port = String(location.port || '');
-  const onBridge =
-    (host === '127.0.0.1' || host === 'localhost') && port === '8766';
-  return onBridge ? '' : BRIDGE_DEFAULT;
-}
-
+/** True when this page is served by Studio Bridge (any host, port 8766). */
 function isOnBridgeOrigin() {
-  const host = location.hostname;
   const port = String(location.port || '');
   return (location.protocol === 'http:' || location.protocol === 'https:') &&
-    (host === '127.0.0.1' || host === 'localhost') &&
-    port === '8766';
+    port === BRIDGE_PORT;
+}
+
+/** Cursor preview / file:// / wrong port — not the Bridge server. */
+function isWrongPreviewOrigin() {
+  if (location.protocol === 'file:') return true;
+  if (isOnBridgeOrigin()) return false;
+  if (location.protocol === 'http:' || location.protocol === 'https:') return true;
+  return true;
+}
+
+function bridgeOriginUrl() {
+  if (isOnBridgeOrigin()) return location.origin + '/';
+  return BRIDGE_DEFAULT + '/';
+}
+
+function resolveBridgeBase() {
+  // Same-origin when served by Bridge (:8766 on any host — LAN IP, hostname, localhost).
+  // Cursor Live Preview / other ports must use absolute Bridge URL.
+  return isOnBridgeOrigin() ? '' : BRIDGE_DEFAULT;
 }
 
 function showWrongHostBannerIfNeeded() {
   const el = document.getElementById('bridgeWrongHost');
   if (!el) return;
-  if (isOnBridgeOrigin()) {
+  if (!isWrongPreviewOrigin()) {
     el.classList.remove('show');
     return;
   }
   el.classList.add('show');
+  const url = bridgeOriginUrl();
   const a = document.getElementById('bridgeCorrectUrl');
-  if (a) a.href = BRIDGE_DEFAULT + '/';
+  if (a) { a.href = url; a.textContent = url; }
 }
 
 const BRIDGE = {
@@ -4656,14 +5074,168 @@ const BRIDGE = {
   online: false,
 };
 
+let STUDIO_AUTH = { required: false, oidc: false, h5: false, h5AppId: '', authed: false, operator: { name: '操作员' } };
+
+function showFeishuSetupModal(opts) {
+  var el = document.getElementById('feishuSetupOverlay');
+  if (!el) return;
+  var pageUrl = (opts && opts.pageUrl) || (window.location.href || '').split('?')[0].split('#')[0];
+  if (!pageUrl.endsWith('/')) pageUrl += '/';
+  var appId = (opts && opts.appId) || STUDIO_AUTH.h5AppId || '—';
+  var summary = document.getElementById('feishuSetupSummary');
+  if (summary) {
+    summary.textContent = (opts && opts.reason)
+      ? ('免登失败：' + opts.reason + '（飞书错误 10236 = URL 未登记）')
+      : '飞书错误 10236：当前页面 URL 未登记到该应用的重定向 URL 列表。';
+  }
+  var appEl = document.getElementById('feishuSetupAppId');
+  if (appEl) appEl.textContent = appId;
+  var urlEl = document.getElementById('feishuSetupPageUrl');
+  if (urlEl) urlEl.textContent = pageUrl;
+  var list = document.getElementById('feishuSetupChecklist');
+  var items = (opts && opts.checklist) || [
+    '网页应用 → 桌面端主页 = ' + pageUrl.replace(/\/$/, ''),
+    '网页应用 → 移动端主页 = ' + pageUrl.replace(/\/$/, ''),
+    '安全设置 → 重定向 URL = ' + pageUrl,
+    '安全设置 → H5 可信域名 = ' + pageUrl.replace(/\/$/, ''),
+    '版本管理与发布 → 发布新版本（改 URL 后必须发布）',
+    '可用范围包含你的飞书账号',
+  ];
+  if (list) list.innerHTML = items.map(function(t){ return '<li>' + t + '</li>'; }).join('');
+  var detail = document.getElementById('feishuSetupDetailLink');
+  if (detail) detail.href = BRIDGE.base + '/auth/feishu/setup';
+  el.classList.add('show');
+}
+
+function hideFeishuSetupModal() {
+  var el = document.getElementById('feishuSetupOverlay');
+  if (el) el.classList.remove('show');
+}
+
+async function bootstrapStudioAuth() {
+  var h = null;
+  try { h = await fetch(BRIDGE.base + '/api/health', { credentials: 'include' }).then(function(r){ return r.ok ? r.json() : null; }); } catch (e) {}
+  STUDIO_AUTH.oidc = !!(h && h.oidc_configured);
+  STUDIO_AUTH.h5 = !!(h && h.feishu_h5_enabled);
+  STUDIO_AUTH.h5AppId = (h && h.feishu_app_id) || '';
+  STUDIO_AUTH.required = !!(h && h.auth_required);
+
+  if (STUDIO_AUTH.h5 && STUDIO_AUTH.h5AppId && window.h5sdk && window.tt) {
+    try {
+      var code = await getFeishuAuthCode(STUDIO_AUTH.h5AppId);
+      var me = await fetch(BRIDGE.base + '/auth/feishu/h5-token', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code }),
+      }).then(function(r){ return r.ok ? r.json() : null; });
+      if (me) {
+        STUDIO_AUTH.authed = true;
+        STUDIO_AUTH.operator = { name: me.name || '操作员', id: me.oidc_sub || me.operator_id };
+        reflectOperatorBar();
+        return true;
+      }
+    } catch (e) {
+      var errno = e && e.errno, errStr = e && e.errString, msg = (e && e.msg) || String(e);
+      var pageUrl = (window.location.href || '').split('?')[0].split('#')[0];
+      if (!pageUrl.endsWith('/')) pageUrl += '/';
+      console.error('[H5 免登失败]', msg, 'errno=', errno, 'errString=', errStr, 'pageUrl=', pageUrl, e);
+      var hint = (h && h.feishu_setup) || null;
+      if (!hint) {
+        try { hint = await fetch(BRIDGE.base + '/auth/feishu/setup.json', { credentials: 'include' }).then(function(r){ return r.ok ? r.json() : null; }); } catch (err) {}
+      }
+      showFeishuSetupModal({
+        reason: msg + (errStr ? (' · ' + errStr) : ''),
+        pageUrl: (hint && hint.page_url) || pageUrl,
+        appId: (hint && hint.app_id) || STUDIO_AUTH.h5AppId,
+        checklist: hint && hint.checklist,
+      });
+    }
+  }
+
+  if (STUDIO_AUTH.oidc) {
+    try {
+      var sess = await fetch(BRIDGE.base + '/auth/me', { credentials: 'include' }).then(function(r){ return r.ok ? r.json() : null; });
+      if (!sess) { location.href = BRIDGE.base + '/auth/feishu/login'; return false; }
+      STUDIO_AUTH.authed = true;
+      STUDIO_AUTH.operator = { name: sess.name || '操作员', id: sess.oidc_sub || sess.operator_id };
+      reflectOperatorBar();
+      return true;
+    } catch (e) { location.href = BRIDGE.base + '/auth/feishu/login'; return false; }
+  }
+
+  if (STUDIO_AUTH.required && !STUDIO_AUTH.authed) {
+    showStudioAccessRefused();
+    return false;
+  }
+  reflectOperatorBar();
+  return true;
+}
+
+function showStudioAccessRefused() {
+  var msg = STUDIO_AUTH.h5
+    ? '本应用需登录后访问。请用<strong>飞书客户端</strong>打开（自动免登），或配置 AnyCross OIDC 以支持浏览器登录。'
+    : '本应用需登录后访问。请联系管理员配置飞书 OIDC/H5 登录（见 playground/seo-studio/.env.example）。';
+  document.body.innerHTML = '<div style="display:flex;min-height:100vh;align-items:center;justify-content:center;background:#f5f5f7;font-family:-apple-system,system-ui,sans-serif">'
+    + '<div style="text-align:center;max-width:440px;padding:40px;background:#fff;border-radius:14px;box-shadow:0 1px 3px rgba(0,0,0,.08)">'
+    + '<div style="font-size:40px;margin-bottom:12px">🔒</div>'
+    + '<div style="font-size:17px;font-weight:600;color:#1d1d1f;margin-bottom:8px">需登录访问</div>'
+    + '<div style="font-size:13.5px;color:#6e6e73;line-height:1.6">' + msg + '</div></div></div>';
+}
+
+function getFeishuAuthCode(appId) {
+  return new Promise(function(resolve, reject) {
+    if (!window.h5sdk || !window.tt) return reject({ msg: 'no h5sdk（非飞书客户端或 JSSDK 未加载）' });
+    window.h5sdk.ready(function() {
+      var doAuthCode = function() {
+        if (!window.tt.requestAuthCode) return reject({ msg: 'JSSDK 无 requestAuthCode' });
+        window.tt.requestAuthCode({
+          appId: appId,
+          success: function(r) { resolve(r.code); },
+          fail: function(err) { reject({ msg: 'requestAuthCode 失败', errno: err && err.errno, errString: err && err.errString }); },
+        });
+      };
+      if (window.tt.requestAccess) {
+        window.tt.requestAccess({
+          appID: appId, scopeList: [],
+          success: function(r) { resolve(r.code); },
+          fail: function(err) {
+            // errno 103 = client too old; other failures (e.g. URL) → try requestAuthCode
+            doAuthCode();
+          },
+        });
+      } else { doAuthCode(); }
+    });
+  });
+}
+
+function reflectOperatorBar() {
+  var name = STUDIO_AUTH.operator.name || '操作员';
+  var av = document.getElementById('operatorAvatar');
+  var nm = document.getElementById('operatorName');
+  var lo = document.getElementById('btnLogout');
+  if (av) av.textContent = name.slice(0, 1);
+  if (nm) nm.textContent = STUDIO_AUTH.authed ? name : (name + ' / 开放模式');
+  if (lo) lo.style.display = STUDIO_AUTH.authed ? '' : 'none';
+}
+
+async function logoutStudio() {
+  try { await fetch(BRIDGE.base + '/auth/logout', { method: 'POST', credentials: 'include' }); } catch (e) {}
+  location.reload();
+}
+
 async function bridgeFetch(path, opts) {
   const url = BRIDGE.base + path;
   const headers = Object.assign({ 'Content-Type': 'application/json' }, (opts && opts.headers) || {});
-  const res = await fetch(url, Object.assign({}, opts || {}, { headers }));
+  const res = await fetch(url, Object.assign({ credentials: 'include' }, opts || {}, { headers }));
   const textBody = await res.text();
   let data = null;
   try { data = textBody ? JSON.parse(textBody) : null; } catch (e) { data = { raw: textBody }; }
   if (!res.ok) {
+    if (res.status === 401 && STUDIO_AUTH.required) {
+      if (STUDIO_AUTH.oidc) { location.href = BRIDGE.base + '/auth/feishu/login'; return null; }
+      showStudioAccessRefused();
+      throw new Error('unauthenticated');
+    }
     const msg = (data && (data.detail || data.error)) || res.statusText;
     throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
   }
@@ -4740,14 +5312,38 @@ const JobProgress = {
 async function bridgeSyncKeywordsFromRun(opts) {
   try {
     const rid = await bridgeEnsureRun();
-    const kw = await bridgeLoadFile('kw.json');
-    const list = Array.isArray(kw) ? kw : (kw && kw.keywords) || [];
-    if (!list.length) return 0;
+    let list = [];
+    // For DB-backed tasks, prefer the step-1 data endpoint (authoritative) over
+    // kw.json — a fresh task may have step-1 data in the DB before kw.json is
+    // mirrored to the run dir.
+    if (rid && String(rid).startsWith('task-')) {
+      try {
+        const dbKw = await bridgeFetch('/api/tasks/' + rid + '/steps/1/data');
+        if (Array.isArray(dbKw) && dbKw.length) list = dbKw;
+      } catch (e) { /* step-1 data may not exist yet */ }
+    }
+    // Fall back to kw.json in the run dir (legacy / script-written).
+    if (!list.length) {
+      const kw = await bridgeLoadFile('kw.json');
+      const kwList = Array.isArray(kw) ? kw : (kw && kw.keywords) || [];
+      if (kwList.length) list = kwList;
+    }
+    if (!list.length) {
+      ensureDefaultCategory();
+      renderKwList();
+      return 0;
+    }
+    // Separate saved category keywords (manual) from associative (discovery).
+    const savedCats = list.filter(k => k && k.kind === 'category');
+    if (savedCats.length) {
+      KEYWORDS = savedCats.concat(KEYWORDS.filter(k => k.kind !== 'category'));
+    }
     const n = applyImportedKeywords(list, Object.assign({ silent: true }, opts || {}));
     setBridgeJob('已加载 ' + n + ' 个关键词');
     return n;
   } catch (e) {
     // kw.json may not exist yet for a fresh run — not an error
+    ensureDefaultCategory();
     return 0;
   }
 }
@@ -4770,48 +5366,67 @@ async function bridgeHealth() {
   } catch (e) {
     const hint = isOnBridgeOrigin()
       ? ('请运行 playground/seo-studio/./start.sh — ' + e.message)
-      : ('请用浏览器打开 ' + BRIDGE_DEFAULT + '/ — ' + e.message);
+      : ('请用浏览器打开 ' + bridgeOriginUrl() + ' — ' + e.message);
     setBridgeUi(false, 'Bridge 未连接 · ' + hint);
     return false;
   }
 }
 
 async function bridgeEnsureRun() {
+  // If a task is already active in this session, keep it.
   if (activeTaskId) {
     BRIDGE.runId = activeTaskId;
     BRIDGE.taskId = activeTaskId;
     return activeTaskId;
   }
-  if (BRIDGE.taskId) {
-    activeTaskId = BRIDGE.taskId;
-    BRIDGE.runId = BRIDGE.taskId;
-    return BRIDGE.taskId;
-  }
-  if (BRIDGE.runId && String(BRIDGE.runId).startsWith('task-')) {
-    activeTaskId = BRIDGE.runId;
-    return BRIDGE.runId;
+
+  // Build the list of candidate "remembered" task ids (active session hint,
+  // localStorage hint). We validate each against the DB before adopting it,
+  // so a stale empty task (only the default '不限定品类' category row) does
+  // NOT shadow a richer previous task and wipe the shared keyword pool.
+  const hints = [];
+  if (BRIDGE.taskId) hints.push(BRIDGE.taskId);
+  if (BRIDGE.runId && String(BRIDGE.runId).startsWith('task-') && BRIDGE.runId !== BRIDGE.taskId) {
+    hints.push(BRIDGE.runId);
   }
 
-  // Prefer latest DB task with data
+  let tasks = [];
   try {
-    const resp = await bridgeFetch('/api/tasks?limit=30');
-    const tasks = (resp && resp.tasks) || [];
-    const withData = tasks.filter(t => (t.kw_count || 0) > 0 || (t.topic_count || 0) > 0);
-    if (withData.length) {
-      const t = withData[0];
+    const resp = await bridgeFetch('/api/tasks?limit=50');
+    tasks = (resp && resp.tasks) || [];
+  } catch (e) {}
+
+  const hasPool = t => (t.assoc_count || 0) > 0 || (t.topic_count || 0) > 0;
+
+  // 1) Adopt a remembered task only if it actually carries a keyword/topic pool.
+  for (const h of hints) {
+    const t = tasks.find(x => x.task_id === h);
+    if (t && hasPool(t)) {
       activeTaskId = t.task_id;
       BRIDGE.runId = t.task_id;
       BRIDGE.taskId = t.task_id;
-      try {
-        localStorage.setItem('seo_bridge_task_id', t.task_id);
-        localStorage.setItem('seo_bridge_run_id', t.task_id);
-      } catch (e) {}
-      setBridgeJob('复用任务 ' + t.task_id.replace(/^task-/, '').slice(0, 14));
       return t.task_id;
     }
-  } catch (e) {}
+  }
 
-  // Create a new DB task
+  // 2) Otherwise reuse the newest task that has an associative keyword pool.
+  //    Use assoc_count (excludes category rows) so the default '不限定品类'
+  //    row alone never qualifies a task as "with data".
+  const withData = tasks.filter(hasPool);
+  if (withData.length) {
+    const t = withData[0];
+    activeTaskId = t.task_id;
+    BRIDGE.runId = t.task_id;
+    BRIDGE.taskId = t.task_id;
+    try {
+      localStorage.setItem('seo_bridge_task_id', t.task_id);
+      localStorage.setItem('seo_bridge_run_id', t.task_id);
+    } catch (e) {}
+    setBridgeJob('复用任务 ' + t.task_id.replace(/^task-/, '').slice(0, 14));
+    return t.task_id;
+  }
+
+  // 3) Nothing to reuse — create a new DB task.
   try {
     const res = await bridgeFetch('/api/tasks', { method: 'POST', body: JSON.stringify({}) });
     const task = res.task;
@@ -4961,8 +5576,8 @@ async function bridgeEnrichKeywords() {
 
 async function bridgeBrainstormViaAgent() {
   if (!(await bridgeHealth())) return;
-  if (selectedKeywords.size === 0) {
-    showToast('请先用权重选出关键词', '');
+  if (selectedKeywords.size === 0 && selectedCategories.size === 0) {
+    showToast('请先在关键词页选择品类并开启联想关键词', '');
     return;
   }
   var run = getActiveRun();
@@ -4989,7 +5604,8 @@ async function bridgeBrainstormViaAgent() {
     var rid = await bridgeEnsureRun();
     var kwPayload = (KEYWORDS || []).map(function(k){
       return {
-        text: k.text, source: k.source, type: k.type || '', freq: k.freq || 1,
+        text: k.text, kind: k.kind || 'associative', source: k.source, type: k.type || '', freq: k.freq || 1,
+        mode: k.mode, enabled: k.enabled,
         sv: k.sv, kd: k.kd, cpc: k.cpc, intent: k.intent,
         metrics_status: k.metrics_status || (k.sv != null ? 'ok' : 'needs_manual'),
       };
@@ -5001,13 +5617,15 @@ async function bridgeBrainstormViaAgent() {
       await bridgeSaveFile('kw.json', kwPayload);
     }
     var useTaskApi = String(rid).startsWith('task-');
-    // Persist the selected keywords into step 2 as a partial envelope (status=running)
+    var catsArr = Array.from(selectedCategories);
+    var kwsArr = Array.from(selectedKeywords);
+    // Persist the selected keywords + categories into step 2 as a partial envelope (status=running)
     // so switching back to this running task restores the brainstorm keyword chips.
     if (useTaskApi) {
       try {
         await bridgeFetch('/api/tasks/' + rid + '/steps/2/data?status=running', {
           method: 'PUT',
-          body: JSON.stringify({ version: '1.0', topics: [], input_keywords: Array.from(selectedKeywords) }),
+          body: JSON.stringify({ version: '1.0', topics: [], input_keywords: kwsArr, input_categories: catsArr }),
         });
       } catch (e) {}
     }
@@ -5015,11 +5633,11 @@ async function bridgeBrainstormViaAgent() {
     var data = useTaskApi
       ? await bridgeFetch('/api/tasks/' + rid + '/steps/2/agent', {
           method: 'POST',
-          body: JSON.stringify({ step: 'brainstorm', keywords: Array.from(selectedKeywords), n: n, yolo: false }),
+          body: JSON.stringify({ step: 'brainstorm', categories: catsArr, keywords: kwsArr, n: n, yolo: false }),
         })
       : await bridgeFetch('/api/runs/' + rid + '/agent', {
           method: 'POST',
-          body: JSON.stringify({ step: 'brainstorm', keywords: Array.from(selectedKeywords), n: n, yolo: false }),
+          body: JSON.stringify({ step: 'brainstorm', categories: catsArr, keywords: kwsArr, n: n, yolo: false }),
         });
     logStep(2, 'bridge_agent', 'brainstorm ' + JSON.stringify(data.gateway && data.gateway.run_id));
     await refreshAuditTrail();
@@ -5138,12 +5756,12 @@ async function bridgeBrainstormViaAgent() {
 
 async function bridgeBrainstormTopics() {
   if (!(await bridgeHealth())) return;
-  if (selectedKeywords.size === 0) {
-    showToast('请先用权重选出关键词', '');
+  if (selectedKeywords.size === 0 && selectedCategories.size === 0) {
+    showToast('请先在关键词页选择品类并开启联想关键词', '');
     return;
   }
   // #region agent log
-  fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:bridgeBrainstormTopics',message:'BS_CLICK',data:{kwLen:(KEYWORDS&&KEYWORDS.length)||0,selKw:selectedKeywords.size},timestamp:Date.now(),runId:'repro2',hypothesisId:'H5'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:bridgeBrainstormTopics',message:'BS_CLICK',data:{kwLen:(KEYWORDS&&KEYWORDS.length)||0,selKw:selectedKeywords.size,selCat:selectedCategories.size},timestamp:Date.now(),runId:'repro2',hypothesisId:'H5'})}).catch(()=>{});
   // #endregion agent log
   const btn = document.querySelector('[onclick="bridgeBrainstormTopics()"]');
   JobProgress.start('topic-brainstorm', [btn]);
@@ -5154,7 +5772,8 @@ async function bridgeBrainstormTopics() {
     if (KEYWORDS && KEYWORDS.length) {
       await bridgeSaveFile('kw.json', KEYWORDS.map(function(k){
         return {
-          text: k.text, source: k.source, type: k.type || '', freq: k.freq || 1,
+          text: k.text, kind: k.kind || 'associative', source: k.source, type: k.type || '', freq: k.freq || 1,
+          mode: k.mode, enabled: k.enabled,
           sv: k.sv, kd: k.kd, cpc: k.cpc, intent: k.intent,
           metrics_status: k.metrics_status || (k.sv != null ? 'ok' : 'needs_manual'),
         };
@@ -5164,6 +5783,7 @@ async function bridgeBrainstormTopics() {
     const { job_id } = await bridgeFetch('/api/runs/' + rid + '/topics/brainstorm', {
       method: 'POST',
       body: JSON.stringify({
+        categories: Array.from(selectedCategories),
         keywords: Array.from(selectedKeywords),
         n: n,
         demo: false,
@@ -5332,7 +5952,7 @@ async function bridgeAskAgent(step, triggerBtn) {
       }
       if (!done) {
         JobProgress.done(false, 'Agent 超时（10 分钟）');
-        showToast('Agent 超时，可点「从 Bridge 刷新」手动检查', '');
+        showToast('Agent 超时，可刷新页面或重新触发该步骤手动检查', '');
       }
     } else {
       JobProgress.done(false, 'Agent 启动失败：未返回 run_id');
@@ -5418,7 +6038,7 @@ async function bridgeRestoreFullState() {
         state.phaseDone && state.phaseDone.placements ? 'faq' :
         state.phaseDone && state.phaseDone.sections ? 'placements' :
         state.outlineConfirmed ? 'sections' :
-        state.phaseDone && state.phaseDone.serp ? 'outline' : 'serp');
+        (state.phaseDone && state.phaseDone.serp) || (Array.isArray(state.outline) && state.outline.length) ? 'outline' : 'serp');
       updateGenProgressBar();
       saveToRun();
     }
@@ -5429,6 +6049,7 @@ async function bridgeRestoreFullState() {
 // ==================== Init ====================
 showWrongHostBannerIfNeeded();
 try {
+  ensureDefaultCategory();
   renderKwList();
   loadRulesFromStorage();
   renderRules();
@@ -5436,14 +6057,27 @@ try {
   console.error('Studio init error', initErr);
 }
 try {
+  // Remember the last task as a *hint* only — do NOT promote it to activeTaskId
+  // unconditionally. bridgeEnsureRun validates it has associative keywords /
+  // topics before adopting it, so a stale empty task (just the default category)
+  // won't shadow a richer previous task and wipe the shared keyword pool.
   BRIDGE.taskId = localStorage.getItem('seo_bridge_task_id');
   BRIDGE.runId = localStorage.getItem('seo_bridge_run_id') || BRIDGE.taskId;
-  if (BRIDGE.taskId) activeTaskId = BRIDGE.taskId;
 } catch (e) {}
-bridgeHealth().then(function() {
+async function studioInit() {
+  var authOk = await bootstrapStudioAuth();
+  if (!authOk) return;
+  await bridgeHealth();
+  // bridgeHealth only resolves a run when there's no localStorage hint at all.
+  // When a hint exists (BRIDGE.runId set), it skips bridgeEnsureRun — so resolve
+  // it here explicitly. bridgeEnsureRun now validates the hint against the DB
+  // and refuses to adopt a stale empty task (only the default category), falling
+  // back to the newest task that actually carries an associative-keyword pool.
+  if (!activeTaskId) await bridgeEnsureRun();
   if (!activeTaskId && !BRIDGE.runId) createRun();
-  else refreshAuditTrail();
-});
+  else { await loadTaskIntoUI(activeTaskId); await refreshAuditTrail(); }
+}
+studioInit();
 </script>
 </body>
 </html>

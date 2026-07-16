@@ -54,13 +54,14 @@ def metrics_trend_route(
     env: str = Query("LIVE"),
     since: str = Query(..., description="ISO lower bound (inclusive), UTC"),
     until: str = Query(..., description="ISO upper bound (exclusive), UTC"),
+    intent: str | None = Query(None, description="Filter by AI primary_intent (e.g. logistics_inquiry, product_inquiry)"),
 ) -> dict[str, Any]:
     """Per-day 意图分类错误率 series for the Console 数据页签 (read-only).
 
     Beijing natural day buckets (UTC+8). Returns 分子/分母/错误率 per day.
     See docs/features/metrics/GUIDE.md for the audit-locked formula.
     """
-    return db.metrics_trend(env=env, since=since, until=until)
+    return db.metrics_trend(env=env, since=since, until=until, intent=intent)
 
 
 @router.get("/config/intent-scope")
@@ -122,6 +123,29 @@ def get_gate_extract(
     if not row:
         raise HTTPException(status_code=404, detail="not classified")
     return row["gate_extract"]
+
+
+@router.get("/intent/{session_id}/history")
+def get_intent_history(
+    session_id: str,
+    env: str = Query("LIVE"),
+) -> list[dict[str, Any]]:
+    """All classifications for a session, oldest→newest.
+
+    Each entry includes ``classified_at`` (ISO UTC), ``model_version``,
+    ``classifier_source``, and the full ``gate_extract`` dict. Used by the
+    Console message-thread view to render per-message intent tags.
+    """
+    rows = db.all_classifications(session_id=session_id, env=env)
+    return [
+        {
+            "classified_at": r["classified_at"],
+            "model_version": r["model_version"],
+            "classifier_source": r["classifier_source"],
+            "gate_extract": r["gate_extract"],
+        }
+        for r in rows
+    ]
 
 
 @router.get("/intent/{session_id}", response_model=IntentReadResponse)

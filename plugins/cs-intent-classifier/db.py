@@ -171,6 +171,27 @@ def latest_classification(*, session_id: str, env: str) -> Optional[dict[str, An
     return d
 
 
+def all_classifications(*, session_id: str, env: str) -> list[dict[str, Any]]:
+    """Fetch all classifications for a session, oldest→newest.
+
+    Used by the Console message-thread view to render the per-message intent
+    tag — each classification is matched to the inbound email that triggered it
+    by ``classified_at`` timestamp.
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT * FROM cs_intent_classifications
+               WHERE session_id=? AND env=? ORDER BY classified_at ASC""",
+            (session_id, env),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        d["gate_extract"] = json.loads(d.pop("gate_extract_json"))
+        out.append(d)
+    return out
+
+
 def latest_intent_codes_batch(*, session_ids: list[str], env: str) -> dict[str, list[str]]:
     """Return latest classifier intent codes per session (multi-intent aware).
 
@@ -283,6 +304,7 @@ def metrics_trend(
     env: str = "LIVE",
     since: str,
     until: str,
+    intent: str | None = None,
 ) -> dict[str, Any]:
     """Per-day 意图分类错误率 + 承担率分母 series for the Console 数据页签, Beijing-day buckets.
 
@@ -302,15 +324,25 @@ def metrics_trend(
                AND json_extract(predicted,'$.primary_intent')
                    != json_extract(corrected,'$.primary_intent')
         ③ 分母 = DISTINCT session_id of cs_intent_classifications 当日
+
+    When ``intent`` is set (e.g. ``logistics_inquiry``, ``product_inquiry``),
+    all queries filter by ``primary_intent = ?`` so the series reflects only
+    sessions the AI classified as that intent.
     """
+    intent_clause = ""
+    intent_params: tuple[str, ...] = ()
+    if intent:
+        intent_clause = " AND json_extract(gate_extract_json, '$.primary_intent') = ?"
+        intent_params = (intent,)
+
     with connect() as conn:
         denom_rows = conn.execute(
-            """SELECT date(datetime(classified_at, '+8 hours')) AS d,
+            f"""SELECT date(datetime(classified_at, '+8 hours')) AS d,
                       COUNT(DISTINCT session_id) AS n
                FROM cs_intent_classifications
-               WHERE env=? AND classified_at >= ? AND classified_at < ?
+               WHERE env=? AND classified_at >= ? AND classified_at < ?{intent_clause}
                GROUP BY d ORDER BY d""",
-            (env, since, until),
+            (env, since, until, *intent_params),
         ).fetchall()
         spam_rows = conn.execute(
             """SELECT date(datetime(classified_at, '+8 hours')) AS d,
@@ -321,16 +353,21 @@ def metrics_trend(
                GROUP BY d ORDER BY d""",
             (env, since, until),
         ).fetchall()
+        num_intent_clause = ""
+        num_intent_params: tuple[str, ...] = ()
+        if intent:
+            num_intent_clause = " AND json_extract(c.predicted_json, '$.primary_intent') = ?"
+            num_intent_params = (intent,)
         num_rows = conn.execute(
-            """SELECT date(datetime(c.created_at, '+8 hours')) AS d,
+            f"""SELECT date(datetime(c.created_at, '+8 hours')) AS d,
                       COUNT(DISTINCT c.session_id) AS n
                FROM cs_intent_corrections c
                WHERE c.env=? AND c.created_at >= ? AND c.created_at < ?
                  AND c.predicted_json != '{}'
                  AND json_extract(c.predicted_json, '$.primary_intent')
-                     IS NOT json_extract(c.corrected_json, '$.primary_intent')
+                     IS NOT json_extract(c.corrected_json, '$.primary_intent'){num_intent_clause}
                GROUP BY d ORDER BY d""",
-            (env, since, until),
+            (env, since, until, *num_intent_params),
         ).fetchall()
 
     by_date: dict[str, dict[str, int]] = {}

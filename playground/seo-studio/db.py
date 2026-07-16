@@ -272,11 +272,20 @@ def list_tasks(limit: int = 50) -> list[dict[str, Any]]:
                 "SELECT data_json FROM steps WHERE task_id=? AND step_num=2", (r["task_id"],)
             ).fetchone()
             item["kw_count"] = 0
+            item["assoc_count"] = 0
             item["topic_count"] = 0
             if s1 and s1["data_json"]:
                 try:
                     kw = json.loads(s1["data_json"])
-                    item["kw_count"] = len(kw) if isinstance(kw, list) else 0
+                    if isinstance(kw, list):
+                        item["kw_count"] = len(kw)
+                        # Associative keywords only (exclude manual category rows).
+                        # Used to pick the "richest" task without being fooled by the
+                        # default '不限定品类' category row that every task carries.
+                        item["assoc_count"] = sum(
+                            1 for k in kw
+                            if isinstance(k, dict) and k.get("kind") != "category"
+                        )
                 except json.JSONDecodeError:
                     pass
             if s2 and s2["data_json"]:
@@ -623,13 +632,28 @@ def _read_json_file(path: Path) -> Any | None:
 
 
 def _normalize_keywords(data: Any) -> list[dict[str, Any]] | None:
+    raw: list[dict[str, Any]] | None = None
     if isinstance(data, list) and data:
-        return data
-    if isinstance(data, dict):
+        raw = data
+    elif isinstance(data, dict):
         kw = data.get("keywords")
         if isinstance(kw, list) and kw:
-            return kw
-    return None
+            raw = kw
+    if raw is None:
+        return None
+    # Backfill kind/mode/enabled for legacy rows (UI now splits category vs associative).
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        kind = row.get("kind") or "associative"
+        row["kind"] = kind
+        if kind == "category":
+            if "enabled" not in row:
+                row["enabled"] = True
+        else:
+            if "mode" not in row:
+                row["mode"] = "include"
+    return raw
 
 
 def _normalize_topics(data: Any) -> dict[str, Any] | None:

@@ -38,6 +38,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
+from auth import feishu_h5_client, oidc_client, operator_session, operator_store
+from auth.oidc_routes import router as oidc_router
+
 SKILL_DIR = Path(os.environ.get("SEO_SKILL_DIR", "")).resolve() or Path.home() / ".hermes/skills/productivity/povison-seo-blog"
 RUNS_DIR = Path(os.environ.get("SEO_RUNS_DIR", str(SKILL_DIR / "runs"))).resolve()
 STUDIO_HTML = Path(os.environ.get("SEO_STUDIO_HTML", "")).resolve() or (Path(__file__).parent / "ui" / "index.html")
@@ -49,15 +52,77 @@ SCRIPTS = SKILL_DIR / "scripts"
 TEMPLATE = SKILL_DIR / "templates" / "blog-post-template.html"
 
 app = FastAPI(title="POVISON SEO Studio Bridge", version="1.0")
+app.include_router(oidc_router)
 
 # Local dev: allow any origin (file:// standalone + http://127.0.0.1:8766).
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=".*",
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_PUBLIC_PREFIXES = ("/auth",)
+_PUBLIC_PATHS = {"/", "/api/health"}
+
+
+def _auth_required() -> bool:
+    """Whether /api/* (except health) requires a login session.
+
+    ``SEO_STUDIO_REQUIRE_LOGIN``:
+      - ``0``/``false``: never enforce (open mode, dev).
+      - ``1``/``true``: always enforce.
+      - ``auto`` (default): enforce when OIDC OR Feishu H5 is configured.
+    """
+    val = os.environ.get("SEO_STUDIO_REQUIRE_LOGIN", "auto").strip().lower()
+    if val in ("0", "false", "no"):
+        return False
+    if val in ("1", "true", "yes"):
+        return True
+    return oidc_client.is_configured() or feishu_h5_client.is_configured()
+
+
+@app.on_event("startup")
+def _startup_auth() -> None:
+    import logging
+    logger = logging.getLogger("seo-studio")
+    oidc_on = oidc_client.is_configured()
+    h5_on = feishu_h5_client.is_configured()
+    if oidc_on:
+        try:
+            oidc_client.discovery()
+        except oidc_client.OIDCError as exc:
+            logger.error("OIDC discovery failed: %s", exc)
+    if oidc_on or h5_on:
+        try:
+            operator_store.init_db()
+        except Exception as exc:
+            logger.error("operator_store init failed: %s", exc)
+        if not operator_session._secret():
+            logger.error(
+                "SEO_STUDIO_SESSION_SECRET is empty but login is enabled — "
+                "sessions cannot be issued. Set a long random value."
+            )
+    if not oidc_on and not h5_on:
+        logger.warning(
+            "OIDC + H5 both unconfigured — Studio running in OPEN mode (no auth)."
+        )
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+        return await call_next(request)
+    if path.startswith("/api/") and _auth_required():
+        sess = operator_session.verify(request.cookies.get(operator_session.COOKIE_NAME))
+        if not sess:
+            return JSONResponse({"detail": "unauthenticated"}, status_code=401)
+        request.state.operator = sess
+    else:
+        request.state.operator = {"oidc_sub": "studio", "name": "操作员"}
+    return await call_next(request)
 
 _DEBUG_LOG = Path("/Users/arnold/agent_prj/.cursor/debug-5d4e3c.log")
 _DEBUG_ENDPOINT = "http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb"
@@ -174,6 +239,9 @@ def _py() -> str:
 async def health(request: Request) -> dict:
     _dbg("server.py:health", "HEALTH_HIT", {"origin": request.headers.get("origin"), "user_agent": request.headers.get("user-agent", "")[:60]}, "H4")
     scripts_ok = (SCRIPTS / "section-generate.py").exists() and (SCRIPTS / "validate-article.py").exists()
+    from auth import feishu_setup
+
+    feishu_hint = feishu_setup.build_setup_hint(request) if feishu_h5_client.is_configured() else None
     return {
         "ok": True,
         "profile": PROFILE,
@@ -182,6 +250,11 @@ async def health(request: Request) -> dict:
         "skill_dir": str(SKILL_DIR),
         "runs_dir": str(RUNS_DIR),
         "db": _db.stats(),
+        "oidc_configured": oidc_client.is_configured(),
+        "feishu_h5_enabled": feishu_h5_client.is_configured(),
+        "feishu_app_id": feishu_h5_client.app_id() if feishu_h5_client.is_configured() else "",
+        "auth_required": _auth_required(),
+        "feishu_setup": feishu_hint,
     }
 
 
@@ -398,6 +471,10 @@ async def run_step(task_id: str, step_num: int, body: dict | None = None) -> dic
         cmd = [_py(), str(SCRIPTS / "topic-brainstorm.py"), "-i", str(kw_path), "-n", str(b.get("n", 10))]
         if b.get("demo"):
             cmd.append("--demo")
+        # optional category anchors
+        cats = b.get("categories")
+        if cats:
+            cmd += ["--categories", ",".join(str(c) for c in cats)]
         # optional keyword filter
         selected = b.get("keywords")
         if selected:
@@ -474,6 +551,7 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
         raise HTTPException(status_code=503, detail="HERMES_GATEWAY_KEY unset — start gateway first")
     step = b.get("step") or ({1: "keywords", 2: "brainstorm", 3: "section"}.get(step_num, "section"))
     keywords = b.get("keywords") or []
+    categories = b.get("categories") or []
     n_topics = int(b.get("n") or 10)
     db_path = str(_db._db_path())
 
@@ -548,7 +626,10 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
         1: "Discover / enrich keywords. When done call seo_save_step_data(task_id, step_num=1, data=<keyword array>).",
         2: (
             f"SERP-driven topic brainstorm for {n_topics} candidates. "
-            f"Keywords: {', '.join(str(k) for k in keywords) or '(see kw.json)'}. "
+            f"品类关键词 (anchor, merge all enabled): {', '.join(str(c) for c in categories) or '(none — 不限定品类)'}. "
+            f"联想关键词 (random 3-8 combined per topic): {', '.join(str(k) for k in keywords) or '(see kw.json)'}. "
+            "Build each topic AROUND the category keywords (when 不限定品类 only, no category constraint), "
+            "weaving in 3-8 of the associative keywords. "
             "Write topics envelope per topic-brainstorm-schema v1.0. "
             f"When done call seo_save_step_data(task_id='{task_id}', step_num=2, data=<topics envelope>). "
             "Do NOT enter Step 3."
@@ -577,6 +658,7 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
     )
     if step_num == 2:
         prompt += f"Keywords JSON: {json.dumps(keywords, ensure_ascii=False)}\n"
+        prompt += f"Categories JSON: {json.dumps(categories, ensure_ascii=False)}\n"
 
     payload = {
         "input": b.get("prompt") or prompt,

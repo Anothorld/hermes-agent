@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 from pathlib import Path
@@ -295,6 +296,7 @@ def metrics_trend_route(
     env: str = Query("LIVE"),
     since: str = Query(..., description="ISO lower bound (inclusive), UTC, e.g. 2026-07-01T16:00:00+00:00 (= Beijing 07-02 00:00)"),
     until: str = Query(..., description="ISO upper bound (exclusive), UTC"),
+    intent: str | None = Query(None, description="Filter by AI primary_intent (e.g. logistics_inquiry, product_inquiry)"),
 ) -> dict[str, Any]:
     """Per-day metric series for the Console 数据页签 (read-only, no bridge key).
 
@@ -303,7 +305,7 @@ def metrics_trend_route(
     错误率(③) 与承担率分母(classified/spam) 由 cs-intent-classifier 提供,
     Console 后端按日期合并。见 docs/features/metrics/GUIDE.md。
     """
-    base = cal.metrics_trend(env=env, since=since, until=until)
+    base = cal.metrics_trend(env=env, since=since, until=until, intent=intent)
     days = base.get("days", [])
 
     # ④ HindSight 减升率:分母 = CAL 所有升级(与②同源) ∪ tracker 召回免升,
@@ -316,7 +318,7 @@ def metrics_trend_route(
         start_bj = days[0]["date"]
         end_bj = days[-1]["date"]
         try:
-            cal_esc_ids_by_day = cal.escalated_quickcep_ids_by_day(env=env, since=since, until=until)
+            cal_esc_ids_by_day = cal.escalated_quickcep_ids_by_day(env=env, since=since, until=until, intent=intent)
         except Exception as exc:  # noqa: BLE001
             log.warning("metrics/trend: cal escalated ids failed: %s", exc)
         try:
@@ -478,6 +480,14 @@ class CloseSessionBody(BaseModel):
     close_escalations: bool = False
 
 
+class UnassignAllBody(BaseModel):
+    env: str = "LIVE"
+    quickcep_email: str
+    quickcep_password: str
+    operator_id: str = ""
+    operator_name: str = ""
+
+
 @router.post("/sessions/{quickcep_session_id}/send-reply")
 def send_session_reply(
     quickcep_session_id: str,
@@ -534,6 +544,42 @@ def close_session_route(
         raise HTTPException(status_code=500, detail=result)
     if not result.get("ok"):
         raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@router.post("/sessions/unassign-all")
+def unassign_all_route(
+    body: UnassignAllBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Unassign all QuickCEP email sessions for a human operator ("下班" flow).
+
+    Uses the operator's own QuickCEP credentials to login, list sessions
+    assigned to them (via ``operatorIds``), and call ``batchLeaveChat`` for
+    each. Sessions remain open if other operators are still in them.
+    """
+    _require_bridge_key(x_bridge_key)
+    from .unassign_all import unassign_all_sessions
+
+    result = unassign_all_sessions(
+        quickcep_email=body.quickcep_email,
+        quickcep_password=body.quickcep_password,
+        env=body.env,
+        operator_id=body.operator_id,
+        operator_name=body.operator_name,
+    )
+    # Record an audit event in CAL (best-effort, no session_id — operator-level)
+    try:
+        log.info(
+            "operator_unassign_all: operator=%s(%s) total=%d unassigned=%d failed=%d ok=%s",
+            body.operator_name, body.operator_id,
+            result.get("total_assigned", 0),
+            result.get("unassigned", 0),
+            result.get("failed", 0),
+            result.get("ok"),
+        )
+    except Exception as exc:
+        log.warning("unassign_all audit log failed: %s", exc)
     return result
 
 
@@ -692,6 +738,27 @@ def save_session_draft(
     if _esc:
         _ctx = _esc.get("resume_context") or {}
         _allowed_urls = list(_ctx.get("allowed_attachment_urls") or [])
+
+    # Also allow URLs already stored in the CAL draft_attachments.
+    # When the draft was previously saved with vault-sourced PDFs and the
+    # escalation has since resolved, those URLs are no longer in the
+    # resuming-escalation allow-list.  They were vetted on first save and
+    # are already persisted, so allow them through on re-save.
+    _sess_existing = cal.get_session(quickcep_session_id=quickcep_session_id, env=body.env)
+    if _sess_existing:
+        _raw_atts = _sess_existing.get("draft_attachments")
+        if _raw_atts:
+            try:
+                _items = json.loads(_raw_atts)
+                if isinstance(_items, list):
+                    for _it in _items:
+                        if isinstance(_it, dict):
+                            _url = str(_it.get("url") or "").strip()
+                            if _url:
+                                _allowed_urls.append(_url)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
     block = guard_draft_content(
         body.draft_html,
         body.attachments,

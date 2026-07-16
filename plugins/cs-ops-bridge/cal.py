@@ -621,11 +621,54 @@ def _bj_date(ts_col: str) -> str:
     return f"date(datetime({ts_col}, '+8 hours'))"
 
 
+# Maps AI classifier primary_intent → deterministic gate classify category.
+# The gate stores its category in cs_facts(namespace='classify', fact_key='category').
+# Only the intents exposed in the Console trend filter are listed here.
+_INTENT_TO_GATE_CATEGORY: dict[str, str] = {
+    "logistics_inquiry": "logistics",
+    "product_inquiry": "product",
+}
+
+
+def _build_intent_filter(intent: str | None, env: str) -> tuple[str, str, tuple[str, ...]]:
+    """Return (s_filter, e_filter, params) for SQL WHERE clauses.
+
+    ``s_filter`` is appended to queries that alias cs_session as ``s``
+    (gen_rows, sent_rows). ``e_filter`` is appended to queries that reference
+    session_id via ``e.session_id`` (draft_rows, esc_rows). When ``intent``
+    is None or unmapped, both filters are empty strings and params is empty.
+    """
+    if not intent:
+        return "", "", ()
+    category = _INTENT_TO_GATE_CATEGORY.get(intent)
+    if not category:
+        return "", "", ()
+    cat_json = json.dumps(category, ensure_ascii=False)
+    # Both filters use the same param order: (cat_json, env).
+    # s_filter: for queries with cs_session aliased as s (s.id is the session PK).
+    s_filter = (
+        " AND s.id IN ("
+        " SELECT session_id FROM cs_facts"
+        " WHERE namespace='classify' AND fact_key='category'"
+        " AND fact_value_json=? AND env=?)"
+    )
+    # e_filter: for queries referencing session_id via e.session_id (events / escalations).
+    e_filter = (
+        " AND e.session_id IN ("
+        " SELECT s2.id FROM cs_session s2"
+        " INNER JOIN cs_facts f ON f.session_id=s2.id AND f.env=s2.env"
+        " WHERE f.namespace='classify' AND f.fact_key='category'"
+        " AND f.fact_value_json=? AND s2.env=?)"
+    )
+    return s_filter, e_filter, (cat_json, env)
+
+
 def metrics_trend(
     *,
     env: str = "LIVE",
     since: str,
     until: str,
+    intent: str | None = None,
 ) -> dict[str, Any]:
     """Per-day metric series for the Console 数据页签, bucketed by Beijing day.
 
@@ -633,16 +676,35 @@ def metrics_trend(
     意图分类错误率(③)与承担率分母(classified/spam)在 cs-intent-classifier DB,
     由 Console 后端按日期合并。Days with no activity are filled with zeros so the
     frontend gets a contiguous series.
+
+    When ``intent`` is set (e.g. ``logistics_inquiry``, ``product_inquiry``),
+    sessions are filtered by the deterministic gate's classify category
+    (stored in ``cs_facts`` namespace='classify', fact_key='category').
+    See ``_INTENT_TO_GATE_CATEGORY`` for the mapping.
     """
+    # Build intent filter clauses for queries that reference cs_session (s.id)
+    # and for queries that reference session_id directly (e.session_id).
+    s_filter, e_filter, filter_params = _build_intent_filter(intent, env)
+
     with _connect() as conn:
         # ① 分子 — 当日 AI 生成草稿会话 (DISTINCT session)
+        # Bucket by the SESSION's entered-generation timestamp (COALESCE(
+        # agent_processing_at, processing_started_at)), NOT the draft_saved
+        # event time — so ai_draft_sessions is a strict subset of
+        # entered_generation on the same day.  Previously bucketing by
+        # e.created_at caused cross-day drift (session entered gen on D-1
+        # 23:50, draft saved on D 00:10 → counted as different days, making
+        # ai_draft > entered_generation and the ① numerator > ② denominator).
         draft_rows = conn.execute(
-            f"""SELECT {_bj_date('e.created_at')} AS d, e.session_id AS sid
+            f"""SELECT {_bj_date('COALESCE(s.agent_processing_at, s.processing_started_at)')} AS d,
+                      e.session_id AS sid
                 FROM cs_conversation_events e
+                INNER JOIN cs_session s ON s.id = e.session_id AND s.env = e.env
                 WHERE e.env=? AND e.event_type='draft_saved'
                   AND json_extract(e.payload_json, '$.source') IN ('agent','resume_agent')
-                  AND e.created_at >= ? AND e.created_at < ?""",
-            (env, since, until),
+                  AND COALESCE(s.agent_processing_at, s.processing_started_at) >= ?
+                  AND COALESCE(s.agent_processing_at, s.processing_started_at) < ?{e_filter}""",
+            (env, since, until, *filter_params),
         ).fetchall()
         # ② 分母 / 共同基数 — 当日进入生成流程的会话 (DISTINCT session + 其当前 status)
         gen_rows = conn.execute(
@@ -652,8 +714,8 @@ def metrics_trend(
                 WHERE s.env=?
                   AND COALESCE(s.agent_processing_at, s.processing_started_at) IS NOT NULL
                   AND COALESCE(s.agent_processing_at, s.processing_started_at) >= ?
-                  AND COALESCE(s.agent_processing_at, s.processing_started_at) < ?""",
-            (env, since, until),
+                  AND COALESCE(s.agent_processing_at, s.processing_started_at) < ?{s_filter}""",
+            (env, since, until, *filter_params),
         ).fetchall()
         # ② 分子 — 当日"生成中升级"会话 (DISTINCT session)
         esc_rows = conn.execute(
@@ -666,8 +728,8 @@ def metrics_trend(
                       AND ev.event_type='session_handoff'
                       AND json_extract(ev.payload_json, '$.phase')='processing'
                       AND ev.created_at < e.created_at
-                  )""",
-            (env, since, until),
+                  ){e_filter}""",
+            (env, since, until, *filter_params),
         ).fetchall()
         # ④ 分子 — 当日以 AI 原稿发送的会话 (DISTINCT session)
         sent_rows = conn.execute(
@@ -675,8 +737,8 @@ def metrics_trend(
                 FROM cs_session s
                 WHERE s.env=? AND s.sent_draft_source IN ('agent','resume_agent')
                   AND s.sent_draft_at IS NOT NULL
-                  AND s.sent_draft_at >= ? AND s.sent_draft_at < ?""",
-            (env, since, until),
+                  AND s.sent_draft_at >= ? AND s.sent_draft_at < ?{s_filter}""",
+            (env, since, until, *filter_params),
         ).fetchall()
 
     # Index by Beijing date.
@@ -733,6 +795,7 @@ def escalated_quickcep_ids_by_day(
     env: str = "LIVE",
     since: str,
     until: str,
+    intent: str | None = None,
 ) -> dict[str, set[str]]:
     """Per Beijing day → set of quickcep_session_id that escalated (生成中口径).
 
@@ -740,14 +803,18 @@ def escalated_quickcep_ids_by_day(
     (keyed by quickcep_session_id) so the route can union with HindSight
     hit-auto ids for the ④ 减升率 denominator. Same口径 as ② → "升级" stays
     consistent across ② and ④.
+
+    When ``intent`` is set, only escalations for sessions whose deterministic
+    gate classify category matches are returned (see ``_INTENT_TO_GATE_CATEGORY``).
     """
+    s_filter, _e_filter, filter_params = _build_intent_filter(intent, env)
     with _connect() as conn:
         rows = conn.execute(
             f"""SELECT {_bj_date('e.created_at')} AS d,
                       s.quickcep_session_id AS qid
                 FROM cs_escalations e
                 INNER JOIN cs_session s ON s.id = e.session_id AND s.env = e.env
-                WHERE e.env=? AND e.created_at >= ? AND e.created_at < ?
+                WHERE e.env=? AND e.created_at >= ? AND e.created_at < ?{s_filter}
                   AND EXISTS (
                     SELECT 1 FROM cs_conversation_events ev
                     WHERE ev.session_id = e.session_id
@@ -755,7 +822,7 @@ def escalated_quickcep_ids_by_day(
                       AND json_extract(ev.payload_json, '$.phase')='processing'
                       AND ev.created_at < e.created_at
                   )""",
-            (env, since, until),
+            (env, since, until, *filter_params),
         ).fetchall()
     out: dict[str, set[str]] = {}
     for r in rows:

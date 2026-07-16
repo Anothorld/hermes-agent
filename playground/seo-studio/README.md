@@ -35,7 +35,12 @@ Other modes: `./start.sh bridge` (UI only) · `./start.sh gateway` (agent only) 
 | Endpoint | Wraps / does |
 |----------|--------------|
 | `GET /` | Serves the Studio HTML |
-| `GET /api/health` | profile, scripts_ok, gateway_key_set, db stats |
+| `GET /api/health` | profile, scripts_ok, gateway_key_set, db stats, **Feishu auth flags** |
+| `GET /auth/feishu/login` | AnyCross OIDC 登录跳转 |
+| `GET /auth/feishu/callback` | OIDC 回调 → session cookie |
+| `POST /auth/feishu/h5-token` | 飞书客户端 H5 免登 |
+| `GET /auth/me` | 当前登录操作员 |
+| `POST /auth/logout` | 清除 session |
 | `POST /api/tasks` | Create task (3 steps) or fork (`parent_task_id` + `fork_step`) |
 | `POST /api/tasks/import` | Import legacy `run-*` dirs from `SEO_RUNS_DIR` into tasks/steps |
 | `POST /api/tasks/reset` | Wipe all tasks; keep the keyword pool by default (`{"drop_keywords":true}` to wipe all) |
@@ -93,6 +98,12 @@ must use the `terminal` tool for shell commands. Changing this requires editing 
 resets to「全部来源」, and the view switches to Step 1 so operators see results immediately.
 (LLM-cleaned keywords are tagged `搜索趋势` — filtering by brand/media alone may show zero rows.)
 
+**Keyword kinds (Step 1):** keywords are split into two groups:
+- **品类关键词 (category, top section)** — manually added; each has an on/off toggle that controls whether it participates in the next brainstorm. A built-in `不限定品类` row always exists (default **off**, not removable); turning it on means "no category anchor". Multiple enabled categories are **merged into one topic set** per brainstorm run.
+- **联想关键词 (associative, bottom section, collapsed by default)** — produced by `keyword-discovery.py` / import. Each has a binary **必定包含 / 必定排除** toggle (replaces the old 0–1 weight slider): 必定包含 = in the random pool (default for new/imported); 必定排除 = never used.
+
+**Brainstorm (Step 2) trigger:** requires ≥1 enabled category AND ≥1 associative 必定包含 keyword. The brainstorm builds topics **around the enabled category keywords**, randomly combining 3–8 associative keywords per topic. The Agent path is primary; the script fallback (`topic-brainstorm.py --categories`) mirrors the same logic.
+
 ## Env (set by `start.sh`)
 
 | Var | Default | Purpose |
@@ -108,6 +119,17 @@ resets to「全部来源」, and the view switches to Step 1 so operators see re
 | `SEO_LLM_MODEL` | `glm-5.2` | Model id (`glm-2` is not available on this endpoint; use `glm-5.2`) |
 
 Copy `.env.example` → `.env` and set `SEO_LLM_API_KEY` before running brainstorm or section generation.
+
+**Feishu 应用登录**（参考 povison-cs-console）：复制 `.env.example` 中的 `SEO_STUDIO_*` 块，配置 H5 免登和/或 AnyCross OIDC。详见 [docs/seo-studio-feishu.md](../../../docs/seo-studio-feishu.md)。
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `SEO_STUDIO_FEISHU_APP_ID` | — | 飞书自建应用 App ID（客户端内免登） |
+| `SEO_STUDIO_FEISHU_APP_SECRET` | — | 飞书自建应用 Secret |
+| `SEO_STUDIO_OIDC_*` | — | AnyCross OIDC 四元组（浏览器登录） |
+| `SEO_STUDIO_SESSION_SECRET` | — | Session 签名密钥（启用登录时必填） |
+| `SEO_STUDIO_REQUIRE_LOGIN` | `auto` | `auto` / `1` / `0` |
+| `SEO_STUDIO_COOKIE_SECURE` | `1` | 内网 HTTP 设为 `0` |
 
 ## Deterministic vs open-ended
 
@@ -231,3 +253,32 @@ sync:
 ```bash
 cp ui/index.html ~/povison-seo-studio.html   # or vice-versa after UI edits
 ```
+
+## Rule blocks (生成规则)
+
+Operator-editable writing rules live in the Studio **规则设置** panel and are
+injected into agent prompts at generation time. Defaults are defined in
+`DEFAULT_RULES` (`ui/index.html`) and surfaced via the `RULE_BLOCKS` registry.
+
+| Block id | Injected when | Purpose |
+|----------|---------------|---------|
+| `global` | every generation | 语气、语言、品牌底线、事实核查底线 |
+| `outline` | `mode=outline` | H2–H3 大纲结构与 SERP 覆盖 |
+| `intro` | section `type=Intro` | Introduction 写作约束 |
+| `h2` | section `type=H2` | 各 H2 正文写作约束（过渡段、数据、体验感等） |
+| `conclusion` | section `type=Conclusion` | Conclusion 写作约束 |
+| `placements` | `mode=placements` | 产品植入与内链规则 |
+| `faq` | `mode=faq` | FAQ 写作约束 |
+| `meta` | `mode=meta` | Meta Title / Description / Slug 规则 |
+| `listicle` | outline + h2 + placements（追加） | 榜单类（Top/Best）专属结构；规则自带"榜单类"前提，非榜单主题时自然失效 |
+| `images` | global + meta（追加） | 配图与产品图规则 |
+
+### Versioning
+
+Rules persisted to `localStorage` carry a `version` field (current
+`DEFAULT_RULES_VERSION = '2.0'`). When a stored envelope's version differs from
+the current default, `applyRulesEnvelope` rebuilds from `DEFAULT_RULES` while
+preserving the operator's enabled/disabled toggles on matching rule texts and
+appending any user-added custom rules. This lets default rule updates roll out
+to existing users without wiping their customizations.
+

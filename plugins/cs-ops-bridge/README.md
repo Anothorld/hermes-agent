@@ -232,6 +232,7 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 | POST | `/sessions/{id}/relaunch` | key | Retry failed/stuck session (auto-routes to resume retry when an escalation with expert answer exists) |
 | POST | `/internal/run-finished` | key | Gateway `on_session_end` callback for resume failure detection |
 | POST | `/sessions/{id}/close` | key | QuickCEP `leave-chat` + optional CAL `reviewed` (Console **结束工单**). Body `close_escalations=true` (垃圾/无关关闭流程) 同时 resolve 该会话所有 open 升级 |
+| POST | `/sessions/unassign-all` | key | **下班** flow: uses operator's QuickCEP credentials to list sessions assigned to them and call `batchLeaveChat` for each. Token-cache safe (`--token` passthrough, no AI account cache overwrite). |
 
 **Close confirmation:** Email sessions record `leaveChat` in message history; live chat uses `chat_end`. Bridge `close_session.py` and profile `quickcep_cli leave-chat` accept both; legacy CLI-only `chat_end` checks caused false `chat_end_not_confirmed`.
 
