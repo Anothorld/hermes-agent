@@ -1262,8 +1262,11 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               <div class="wb-card-body">
                 <p class="wb-hint">Agent 推荐 1–2 个产品段落与 2–3 条内链；你审核合理性后可改文案、换挂载板块、接受或驳回。确认后可一键写入对应正文板块。</p>
                 <div class="gen-live-mini" id="placementsLive"></div>
+                <div id="placementWarningsBanner" style="display:none;background:#fef3f2;border:1px solid #fda4af;color:#9f1239;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;"></div>
                 <div class="wb-actions">
                   <button class="btn btn-primary" id="btnGenPlacements" onclick="generatePlacements()" disabled>生成推荐</button>
+                  <button class="btn btn-secondary" id="btnEnrichProductImgs" onclick="enrichMissingProductImages()" disabled>补全缺图</button>
+                  <button class="btn btn-secondary" id="btnVerifyPlacementUrls" onclick="verifyPlacementUrls()" disabled>校验链接有效性</button>
                   <button class="btn btn-secondary" id="btnAcceptAllPlacements" onclick="acceptAllPlacements()" disabled>一键全部接受</button>
                   <button class="btn btn-secondary" id="btnApplyPlacements" onclick="applyPlacementsToSections()" disabled>写入已接受项到正文</button>
                   <div class="spacer"></div>
@@ -1474,7 +1477,7 @@ const RULE_BLOCKS = [
   { id: 'faq', label: 'FAQ', desc: '生成 FAQ 时注入', inject: 'mode=faq' },
   { id: 'meta', label: 'SEO 元信息', desc: '生成 Meta Title / Description / Slug 时注入', inject: 'mode=meta' },
   { id: 'listicle', label: '榜单类（Top/Best）', desc: '仅当主题为榜单类时生效；随大纲/正文/植入一起注入（规则自带"若为榜单类"前提）', inject: 'outline+h2+placements 时追加' },
-  { id: 'images', label: '配图', desc: '配图与产品图规则；随全局与 Meta 一起注入', inject: 'global+meta 时追加' },
+  { id: 'images', label: '配图', desc: '配图与产品图规则；含 image_queries + stock API 候选池约束；随全局与 Meta 一起注入', inject: 'global+meta 时追加' },
 ];
 
 const PROMPT_TEMPLATES = {
@@ -1533,20 +1536,19 @@ body{font-family:Georgia,'Times New Roman',serif;background:var(--bg);color:var(
 .conclusion{margin-top:56px;padding:32px;background:var(--card-bg);border:1px solid var(--border);border-radius:4px;text-align:center}
 .conclusion h2{margin-top:0}
 .conclusion p{text-align:left;font-size:17px}
-.faq-section{margin-top:56px}
-.faq-section h2{text-align:center}
-.faq-item{border-bottom:1px solid var(--border);padding:20px 0}
-.faq-item h3{font-size:17px;font-weight:600;margin-top:0;margin-bottom:8px;cursor:pointer;position:relative;padding-right:28px}
-.faq-item h3::after{content:"+";position:absolute;right:0;top:0;font-size:20px;color:var(--accent);font-weight:400}
-.faq-item h3.active::after{content:"\\u2212"}
-.faq-item p{font-size:15px;color:var(--text-light);font-family:'Helvetica Neue',Arial,sans-serif;line-height:1.7;display:none}
-.faq-item.open p{display:block}
+.faq-section{margin-top:24px}
+.faq-section h2{margin-bottom:8px}
+.faq-item{border-bottom:1px solid #e8e8e8;padding:8px 0 20px}
+.faq-item h3{font-size:1.25em;font-weight:600;margin:1.1em 0 0.55em;line-height:1.35;color:#1a1a1a}
+.faq-item p{font-size:1.05em;color:#333;font-family:'Helvetica Neue',Arial,sans-serif;line-height:1.75;margin:0}
+.article-toc{margin:36px 0}
+.article-toc h2{font-size:1.5em;font-weight:600;margin:0 0 16px;line-height:1.3}
+.article-toc ul{font-size:1.05em;line-height:1.75}
+.article-toc a{color:#1a1a1a;text-decoration:underline}
 .article-figure{margin:28px 0;text-align:center}
 .article-figure img{width:100%;max-width:680px;border-radius:6px;display:block;margin:0 auto}
-.article-figure figcaption{margin-top:10px;font-size:13px;color:var(--text-light);font-family:'Helvetica Neue',Arial,sans-serif;line-height:1.5}
-.article-figure .fig-credit{color:var(--text-tertiary);font-size:11px;margin-left:6px}
-.article-figure.product-figure{background:#f9f5f0;border:1px solid var(--border);border-radius:6px;padding:16px}
-.article-figure.product-figure img{max-width:320px;border-radius:4px}
+.article-figure figcaption,.wp-element-caption{margin-top:12px;font-size:15px;color:#444;font-family:'Helvetica Neue',Arial,sans-serif;line-height:1.55}
+.article-figure .fig-credit{color:var(--text-tertiary);font-size:12px;margin-left:6px}
 @media (max-width:640px){.blog-container{padding:40px 16px 60px}.blog-header h1{font-size:26px}.article-body h2{font-size:22px}.article-body h3{font-size:18px}.hero-image{height:240px}}
 </style>
 </head>
@@ -1572,7 +1574,7 @@ const PEXELS_HEROES = [
 // #region agent log
 fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:DEFAULT_RULES',message:'JS_EXEC_AFTER_TEMPLATE: reached DEFAULT_RULES (past BLOG_POST_TEMPLATE)',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H7'})}).catch(()=>{});
 // #endregion
-const DEFAULT_RULES_VERSION = '2.0';
+const DEFAULT_RULES_VERSION = '2.3';
 const DEFAULT_RULES = {
   global: [
     { text: '英文输出，美式拼写，统一术语', enabled: true },
@@ -1581,9 +1583,7 @@ const DEFAULT_RULES = {
     { text: '不借鉴已有 POVISON 博客内容', enabled: true },
     { text: '品牌差异化：提及 fully assembled 时要自然、可验证', enabled: true },
     { text: '所有事实、数据、价格、尺寸、材质必须基于 catalog 或 SERP 真实信息，禁止编造', enabled: true },
-    { text: '不堆砌关键词，保持自然语言流畅度', enabled: true },
-    { text: '段落间保持逻辑连贯，避免突兀跳跃', enabled: true },
-    { text: '避免空洞套话（如 "In today\'s world"、"It goes without saying"）', enabled: true },
+    { text: '不堆砌关键词，保持自然语言流畅度；段落间逻辑连贯，避免突兀跳跃与空洞套话（如 "In today\'s world"）', enabled: true },
   ],
   outline: [
     { text: '4–6 个 H2；前 2–3 个 H2 使用 How/What/Why 问句（定义概念用 What/Why，可操作步骤用 How to，不要强求每条都是问句）', enabled: true },
@@ -1591,73 +1591,60 @@ const DEFAULT_RULES = {
     { text: '每个关键 H2 下可挂 1–2 个 H3，避免空壳标题', enabled: true },
     { text: '大纲阶段不写产品硬广，不堆关键词', enabled: true },
     { text: '生成一个含主关键词、贴近搜索者痛点/使用场景或当前热点（如春扫/夏季）的标题，≤10 词（不超过 12 词）', enabled: true },
-    { text: 'FAQ 4–6 个，参考 Google Suggest / People Also Ask / 论坛，避免与正文重复', enabled: true },
+    { text: '大纲预留 FAQ 占位（数量/措辞见 FAQ 板块规则），避免 FAQ 主题与正文 H2 撞车', enabled: true },
     { text: '若 SERP 分析结论与大纲格式冲突，优先满足 SERP 分析结果', enabled: true },
   ],
   intro: [
     { text: '约 90–100 词；首段含 primary_keyword', enabled: true },
     { text: 'Intro 不加产品链接与内链', enabled: true },
-    { text: '交代读者能获得什么，不剧透全文', enabled: true },
-    { text: '根据主题和主关键词描述目标读者的场景与痛点', enabled: true },
-    { text: '榜单类：需要一个适合主题的简短 H2 标题', enabled: true },
+    { text: '根据主题和主关键词描述目标读者的场景与痛点；交代读者能获得什么，不剧透全文', enabled: true },
+    { text: '榜单类：Intro 需要一个适合主题的简短 H2 标题', enabled: true },
   ],
   h2: [
-    { text: '整篇目标 ≥1200 词；本 H2 写充实，含过渡段 40–80 词', enabled: true },
-    { text: 'H2 与 H3 之间必须加 40–80 词过渡段落，引出本节主题并引导读者阅读后续', enabled: true },
-    { text: '有 H3 时先过渡再展开；可用 bullet 但保持段落可读（除产品介绍与 buying guide 外少用 bullet）', enabled: true },
+    { text: '整篇目标 ≥1500 词；本 H2 写充实；H2 与 H3 之间必须加 40–80 词过渡段（有 H3 时先过渡再展开）；可用 bullet 但保持段落可读（除产品介绍与 buying guide 外少用 bullet）', enabled: true },
     { text: '全文至少 1 个对比表思路或明确对比段；权威数据 1–2 处（来源机构用英文括号标注并作锚文本链向来源）', enabled: true },
     { text: '一个段落最多 2 个数据，每个 H2 最多 3 个数据；数据必须真实且出自权威机构/杂志，不得虚构，不引用企业博客数据', enabled: true },
     { text: '2 处个人体验感使用场景（可虚构但需具体有细节，体现真实感受，不用 picture/imagine 说法；不暗示作者亲自购买/测试过具体产品）', enabled: true },
     { text: '核心关键词全文 3–5 次；本段不硬塞密度，注意 H2 之间内容不重复', enabled: true },
     { text: '家具术语保持一致准确，不随意切换（如 media console / TV stand / cabinet 除非有明确区分）', enabled: true },
-    { text: '变化句长、段首、过渡与说明方式，避免重复句式；减少连字符/破折号/斜杠/冒号的碎片化表达', enabled: true },
-    { text: '避免套路化对比句式（It\'s not just X. It\'s Y / Whether you want X or Y / From X to Y / Not only X but also Y）反复出现', enabled: true },
+    { text: '变化句长、段首与过渡方式；减少连字符/破折号/斜杠/冒号碎片化；避免套路对比句式（It\'s not just X. It\'s Y / Whether X or Y / From X to Y / Not only X but also Y）反复出现', enabled: true },
   ],
   conclusion: [
-    { text: '约 90–100 词；总结行动步骤，不引入新论点', enabled: true },
-    { text: '可轻点 fully assembled 价值，避免硬 CTA 堆砌', enabled: true },
+    { text: '约 90–100 词；总结行动步骤，不引入新论点；可轻点 fully assembled 价值，避免硬 CTA 堆砌', enabled: true },
     { text: '榜单类：总结如何通过正确家具选择让家更 cozy/comfortable，并用一句话强调 Povison 优势（deeper seating / comfort / ready-to-live-in fully assembled / value for money），结尾 CTA', enabled: true },
   ],
   placements: [
     { text: '每篇 1–2 个 POVISON 产品；文案 40–70 词；链接嵌在产品名上，与文本自然融合，避免突兀介绍与前文无关的卖点', enabled: true },
-    { text: '仅使用 catalog 中的 URL；禁止编造链接', enabled: true },
-    { text: '内链 2–3 条；anchor 必须是句中已自然出现的长尾词，禁止 "For more details see..." / "Click here" 等 CTA 句式', enabled: true },
-    { text: '内链周围不得出现 "Povison blog" / "this article/guide" 等说明语，链接应像句子的一部分', enabled: true },
-    { text: '每个 H2 最多 1 条内链；挂载 sectionId 必须合理', enabled: true },
-    { text: '榜单类：榜单前 3 名为 Povison 产品，4–10 名可从外部品牌选取（West Elm / CB2 / Article / Pottery Barn / Crate & Barrel / Floyd / Burrow / Joybird / IKEA 等）并附真实产品链接', enabled: true },
-    { text: '榜单类：每个产品块结构为 简短标题 + 价格（读取产品页真实价格，可用区间如 $6.66–$583.25）+ Best For + Highlights(bullet) + 产品亮点(≤100词) + Buyer review(真实评论)', enabled: true },
-    { text: '榜单类：仅其中一个 Povison 产品写 1–2 句个人体验感使用场景；其中一个 Povison 产品含与外部品牌的软性对比（1–2 句，可不提具体品牌），外部品牌小节语气不得强于 Povison 推荐', enabled: true },
-    { text: 'POVISON 产品价格：仅用产品页原价/常规价，不把促销/券后/会员价当永久价；标注价格随促销/地区/变体变化；无法核实则省略价格', enabled: true },
+    { text: '产品 URL 必须来自「生成推荐」Agent 调用的 catalog API（scripts/povison-catalog.py /api/povison-products/*）；禁止编造 PDP URL（会 404）', enabled: true },
+    { text: '内链 2–3 条；每个 H2 最多 1 条；anchor 必须是句中已自然出现的长尾词，禁止 CTA 句式与 "Povison blog"/"this article" 等说明语', enabled: true },
+    { text: '内链 URL 必须来自「生成推荐」Agent 调用的 blog API（scripts/povison-blog.py /api/povison-blog/*，sitemap 真实博客）；禁止编造 blog URL（会 404）', enabled: true },
+    { text: 'POVISON 产品价格：仅用产品页原价/常规价，不把促销/券后/会员价当永久价；无法核实则省略价格', enabled: true },
   ],
   faq: [
     { text: '4–6 个问答；问题用 H3 展开；答案 40–60 词（榜单类 30–40 词）', enabled: true },
     { text: '与正文语义重复率 ≤20%；不复读整段；若问题已被正文完整回答则移除', enabled: true },
-    { text: '无硬广 CTA；可保留 FAQ Schema 友好的问答结构', enabled: true },
-    { text: 'FAQ 提供额外价值：新场景、更深层决策指导、风险考量、尺寸/材质区分或实用下一步', enabled: true },
+    { text: '无硬广 CTA；提供额外价值（新场景、决策指导、风险/尺寸/材质区分或实用下一步）；保留 FAQ Schema 友好结构', enabled: true },
   ],
   meta: [
-    { text: 'Meta Title <60 字符，自然含主关键词（尽量靠前但不生硬），体现具体决策角度（尺寸/适配/布局/舒适/收纳/材质/风格/清仓/对比）', enabled: true },
-    { text: 'Meta Title 用实际结果而非泛化短语；避免关键词堆砌、夸张、clickbait；H1 宽泛时用 Meta Title 锐化最有价值的搜索决策', enabled: true },
-    { text: 'Meta Description <145 字符，自然含主关键词，说明读者能获得的实用价值', enabled: true },
-    { text: 'Meta Description 变化句式与开头（利益/问句/痛点/方案/直陈/CTA），避免每篇都用 "Discover/Learn/Find out" 开头', enabled: true },
+    { text: 'Meta Title 50–60 字符，自然含主关键词（尽量靠前但不生硬），体现具体决策角度；避免堆砌、夸张、clickbait', enabled: true },
+    { text: 'Meta Description 150–160 字符，自然含主关键词，说明实用价值；变化句式与开头，避免每篇都用 Discover/Learn/Find out', enabled: true },
     { text: 'URL slug 小写+连字符，≤75 字符，含主关键词或其最清晰简短形式；不含年份、多余词或促销语', enabled: true },
     { text: 'focus = primary_keyword', enabled: true },
   ],
   listicle: [
     { text: '榜单类结构（按顺序）：Title → Introduction(含H2标题,~100词) → 主题相关H2(选择标准/总览) → Quick Summary Table → Best Picks List(默认10个,H3展开) → 信息增量H2(1-2个,问句格式) → Conclusion(≤100词) → FAQ(4-6个,H3展开)', enabled: true },
     { text: 'Quick Summary Table：列含 Product Name/Best For/Key Features/Price 等，Povison 产品名嵌入链接，表格其余不放链接；表后提示价格随地区/折扣变化', enabled: true },
-    { text: 'Best Picks 前 3 名为 Povison 产品，4–10 名可从外部品牌选取符合主题的产品并附真实产品链接', enabled: true },
-    { text: '信息增量部分可加 1–2 句强调 Povison 相对其他品牌的优势（不提具体品牌名）；若无合适内容可加 Buying Guide（不与前文 criteria 重复，从消费者选择维度出发）', enabled: true },
-    { text: '外部品牌小节语气不得强于对 Povison 的推荐；不允许出现"更推荐某外部品牌而非 Povison"的结论性表述', enabled: true },
+    { text: 'Best Picks 前 3 名为 Povison 产品，4–10 名可从外部品牌选取（West Elm / CB2 / Article / Pottery Barn / Crate & Barrel / Floyd / Burrow / Joybird / IKEA 等）并附真实产品链接；每个产品块：短标题 + 真实价格 + Best For + Highlights + 亮点(≤100词) + Buyer review', enabled: true },
+    { text: '仅其中一个 Povison 产品写 1–2 句个人体验；可含与外部品牌的软性对比（1–2 句）；外部品牌小节语气不得强于 Povison，禁止"更推荐外部品牌"结论', enabled: true },
+    { text: '信息增量可强调 Povison 相对优势（不点名竞品）；若无合适内容可加 Buying Guide（不与前文 criteria 重复）', enabled: true },
     { text: '榜单类 POV：专业编辑 & 独立评测立场，客观理性但整体略偏 Povison（通过事实与比较体现，非赤裸广告）', enabled: true },
   ],
   images: [
-    { text: '文章完成后输出 10 张与内容强相关、无版权问题的配图及对应详情页可点击 URL', enabled: true },
-    { text: '介绍具体 POVISON 产品时，在该段正下方放置该精确产品的官方图片并链接到对应产品详情页', enabled: true },
-    { text: '仅使用精确产品页或官方 POVISON 产品源的图片，禁止使用相似产品/其他变体/第三方零售商/搜索预览图', enabled: true },
-    { text: '解释可见产品特征（柜深/收纳布局/走线/座席延展/材质/开合机构）时，优先选用清晰展示该特征的官方产品图', enabled: true },
-    { text: '其他 lifestyle/室内图可来自 Unsplash/Pexels/Pixabay/Wikimedia Commons 等免版税平台，使用前确认授权条款', enabled: true },
-    { text: '每张图提供简洁英文 alt text，准确描述可见内容并自然使用主关键词，禁止堆砌关键词或编造产品细节', enabled: true },
+    { text: '正文配图前先写 section.image_queries：2–3 个具体英文搜图词（家具/房间/布局），禁止用整篇标题或 moving/lifestyle/together 等空泛词', enabled: true },
+    { text: '正文配图必须从 Unsplash/Pexels API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search），禁止编造 URL、禁止浏览器随便抓图', enabled: true },
+    { text: '正文配图必须能看出家具、室内或房间布局；禁止搬家纸箱特写、握手、抽象纹理、无关户外、无家具人像；找不到合格图时 images=[]，同一 URL 不得跨 section 复用', enabled: true },
+    { text: '介绍具体 POVISON 产品时，必须在该段正下方放该精确产品官方图；caption 用产品名；图片与 caption 都链接到 product.url；图源仅 catalog API（Detail 优先、爬商详回退），禁止 Unsplash/Pexels/相似产品/第三方图顶替', enabled: true },
+    { text: '正文生活图：简洁英文 alt + caption；credit 用候选返回的 Photo: Unsplash/Pexels。产品图 caption 只用产品名，不加库存图 credit', enabled: true },
   ],
 };
 
@@ -1842,12 +1829,19 @@ function mergeArticleState(dbState, memState) {
   merged.placementsConfirmed = !!memState.placementsConfirmed;
   // User-edited fields — take in-memory.
   merged.meta = memState.meta || merged.meta;
-  merged.products = (memState.products && memState.products.length) ? memState.products : (merged.products || []);
-  merged.links = (memState.links && memState.links.length) ? memState.links : (merged.links || []);
+  // products/links: an empty array is an intentional clear (operator deleted all).
+  // Do NOT fall back to DB when memState.products === [] — that was restoring
+  // deleted 404 recommendations (e.g. Arlo Sofa) while Agent was still running.
+  merged.products = Array.isArray(memState.products) ? memState.products : (merged.products || []);
+  merged.links = Array.isArray(memState.links) ? memState.links : (merged.links || []);
   merged.previewHtml = (memState.previewHtml != null) ? memState.previewHtml : merged.previewHtml;
   merged.validation = memState.validation || merged.validation;
   // FAQ — take whichever is fuller (user may edit, agent may generate).
-  if ((memState.faq || []).length >= (merged.faq || []).length) merged.faq = memState.faq;
+  // Empty mem FAQ is intentional only when user cleared; prefer mem if array present
+  // and (non-empty OR db also empty). Otherwise keep fuller DB.
+  if (Array.isArray(memState.faq)) {
+    if (memState.faq.length >= (merged.faq || []).length) merged.faq = memState.faq;
+  }
   // Outline — take whichever is fuller (agent generates; UI rarely edits).
   if ((memState.outline || []).length > (merged.outline || []).length) merged.outline = memState.outline;
   // Sections — per-section merge: keep DB content if in-memory is empty (agent
@@ -1869,11 +1863,21 @@ function mergeArticleState(dbState, memState) {
     }
     return ds; // keep DB section (agent saved content the UI doesn't have)
   });
-  // phaseDone — union (true if either source says true).
-  var pd = merged.phaseDone || {};
+  // phaseDone — union for most flags, but honor explicit in-memory false for
+  // placements (operator cleared / re-opened the gate).
+  var pd = Object.assign({}, merged.phaseDone || {});
   var mpd = memState.phaseDone || {};
-  Object.keys(pd).forEach(function(k){ if (mpd[k]) pd[k] = true; });
+  Object.keys(mpd).forEach(function(k) {
+    if (mpd[k]) pd[k] = true;
+    else if (k === 'placements') pd[k] = false;
+  });
   merged.phaseDone = pd;
+  // Clear stale URL-check banners when operator wiped placements
+  if (Array.isArray(memState.products) && memState.products.length === 0 &&
+      Array.isArray(memState.links) && memState.links.length === 0) {
+    delete merged.placementWarnings;
+    delete merged.placementUrlCheck;
+  }
   return merged;
 }
 
@@ -1883,33 +1887,52 @@ function persistArticleState() {
   if (_persistTimer) clearTimeout(_persistTimer);
   _persistTimer = setTimeout(async function() {
     _persistTimer = null;
-    if (!articleState) return;
-    try {
-      if (activeTaskId) {
-        // Merge with the DB state first so we don't overwrite agent-saved data
-        // (sections/serp/outline) that the in-memory copy may be missing.
-        var toSave = articleState;
-        try {
-          var dbState = await bridgeFetch('/api/tasks/' + activeTaskId + '/steps/3/data');
-          if (dbState && dbState.topic) toSave = mergeArticleState(dbState, articleState);
-        } catch (e) { /* DB read failed — save in-memory as-is */ }
-        await bridgeFetch('/api/tasks/' + activeTaskId + '/steps/3/data', {
-          method: 'PUT', body: JSON.stringify(toSave),
-        });
-        // Refresh in-memory state with the merged result so the UI picks up
-        // agent-saved fields (e.g. section content) the in-memory copy was missing.
-        // This fixes stale-state symptoms like word-count showing 0.
-        if (toSave !== articleState) {
-          articleState = toSave;
-          if (typeof runClientValidation === 'function') {
-            articleState.validation = runClientValidation();
-          }
-        }
-      } else {
-        await bridgeSaveFile('article-state.json', articleState);
-      }
-    } catch (e) { /* bridge may be down */ }
+    await _persistArticleStateNow();
   }, 800);
+}
+
+/** Flush pending debounce and write step-3 immediately (before Agent launch / after delete). */
+async function flushArticlePersist() {
+  if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null; }
+  await _persistArticleStateNow();
+}
+
+async function _persistArticleStateNow() {
+  if (!articleState) return;
+  try {
+    if (activeTaskId) {
+      // Merge with the DB state first so we don't overwrite agent-saved data
+      // (sections/serp/outline) that the in-memory copy may be missing.
+      var toSave = articleState;
+      try {
+        var dbState = await bridgeFetch('/api/tasks/' + activeTaskId + '/steps/3/data');
+        if (dbState && dbState.topic) toSave = mergeArticleState(dbState, articleState);
+      } catch (e) { /* DB read failed — save in-memory as-is */ }
+      await bridgeFetch('/api/tasks/' + activeTaskId + '/steps/3/data', {
+        method: 'PUT', body: JSON.stringify(toSave),
+      }).then(resp => {
+        // Surface server-side URL-validation warnings immediately.
+        if (resp && Array.isArray(resp.placementWarnings)) {
+          articleState.placementWarnings = resp.placementWarnings;
+        } else if (articleState.placementWarnings) {
+          delete articleState.placementWarnings;
+        }
+        if (typeof refreshPlacementsGate === 'function') refreshPlacementsGate();
+      }).catch(() => { /* ignore */ });
+      // Refresh in-memory state with the merged result so the UI picks up
+      // agent-saved fields (e.g. section content) the in-memory copy was missing.
+      if (toSave !== articleState) {
+        articleState = toSave;
+        if (typeof runClientValidation === 'function') {
+          articleState.validation = runClientValidation();
+        }
+        if (typeof renderPlacements === 'function') renderPlacements();
+        if (typeof refreshPlacementsGate === 'function') refreshPlacementsGate();
+      }
+    } else if (BRIDGE && BRIDGE.online) {
+      await bridgeSaveFile('article-state.json', articleState);
+    }
+  } catch (e) { /* bridge may be down */ }
 }
 
 function logStep(step, action, detail) {
@@ -3349,6 +3372,8 @@ function restoreWorkbenchUI() {
     renderPlacements();
     refreshPlacementsGate();
     document.getElementById('btnGenPlacements').disabled = false;
+    document.getElementById('btnEnrichProductImgs').disabled = false;
+    document.getElementById('btnVerifyPlacementUrls').disabled = false;
     document.getElementById('btnAddProduct').disabled = false;
     document.getElementById('btnAddLink').disabled = false;
   }
@@ -3720,6 +3745,8 @@ function refreshSectionsGate() {
   articleState.phaseDone.sections = allReady;
   document.getElementById('btnSectionsNext').disabled = !allReady;
   document.getElementById('btnGenPlacements').disabled = !allReady;
+  document.getElementById('btnEnrichProductImgs').disabled = !allReady;
+  document.getElementById('btnVerifyPlacementUrls').disabled = !allReady;
   if (allReady) {
     setStatus('sectionsStatus', 'ready', '全部就绪');
     document.getElementById('btnAddProduct').disabled = false;
@@ -3742,7 +3769,131 @@ function generatePlacements() {
     showToast('请先完成正文板块', '');
     return;
   }
-  bridgeGenerateSection('placements');
+  // Launch the Hermes Agent for the placements substep. The agent prompt instructs
+  // it to call povison-catalog.py recommend (products) AND povison-blog.py
+  // recommend-links (internal links) and write both into articleState in one shot
+  // — real URLs only, never fabricated. (Replaces the old script path that used
+  // the static placement-catalog.json seed and produced 404 URLs.)
+  // Flush any pending deletes first so Agent reads the cleared lists from DB.
+  flushArticlePersist().then(function() {
+    bridgeAskAgent('placements', document.getElementById('btnGenPlacements'));
+  });
+}
+
+function verifyPlacementUrls() {
+  if (!articleState) {
+    showToast('请先加载文章', '');
+    return;
+  }
+  const products = articleState.products || [];
+  const links = articleState.links || [];
+  const urls = [];
+  products.forEach(p => { if (p && p.url) urls.push(p.url); });
+  links.forEach(l => { if (l && l.url) urls.push(l.url);
+  });
+  if (!urls.length) {
+    showToast('暂无产品/内链 URL 可校验', '');
+    return;
+  }
+  const btn = document.getElementById('btnVerifyPlacementUrls');
+  btn.disabled = true;
+  btn.textContent = '校验中…';
+  // Prefer the task-scoped endpoint (writes placementUrlCheck into the DB),
+  // fall back to the generic batch endpoint for legacy runs.
+  const useTask = !!activeTaskId && BRIDGE && BRIDGE.online;
+  const req = useTask
+    ? fetch(BRIDGE.base + '/api/tasks/' + activeTaskId + '/steps/3/verify-placements', { method: 'POST', credentials: 'include' })
+    : fetch(BRIDGE.base + '/api/povison-placements/verify-urls', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls })
+      });
+  req.then(r => r.json()).then(data => {
+    if (!data || data.ok === false) {
+      showToast('校验失败：' + (data && data.error || '未知错误'), 'error');
+      return;
+    }
+    const results = data.results || [];
+    const dead = results.filter(x => !x.live);
+    articleState.placementUrlCheck = {
+      checked_at: data.checked_at,
+      total: data.total,
+      dead_count: data.dead_count,
+      results
+    };
+    refreshPlacementsGate();
+    saveToRun();
+    persistArticleState();
+    logStep(3, 'placement_verify_urls', data.dead_count + ' 死链 / ' + data.total + ' 总数');
+    if (data.dead_count) {
+      showToast('发现 ' + data.dead_count + ' 个死链（已禁用确认）', 'error');
+    } else {
+      showToast('全部 ' + data.total + ' 个 URL 有效', 'success');
+    }
+  }).catch(err => {
+    showToast('校验请求失败：' + err.message, 'error');
+  }).finally(() => {
+    btn.disabled = false;
+    btn.textContent = '校验链接有效性';
+  });
+}
+
+function enrichMissingProductImages() {
+  if (!articleState || !Array.isArray(articleState.products) || !articleState.products.length) {
+    showToast('暂无产品可补图', '');
+    return;
+  }
+  const btn = document.getElementById('btnEnrichProductImgs');
+  btn.disabled = true;
+  btn.textContent = '补图中…';
+  const items = articleState.products
+    .map((p, idx) => ({ idx, url: p.url, name: p.name, hasImage: !!(p.image && p.image.trim()) }))
+    .filter(x => x.url && !x.hasImage);
+  if (!items.length) {
+    showToast('所有产品都已配图', '');
+    btn.disabled = false;
+    btn.textContent = '补全缺图';
+    return;
+  }
+  fetch('/api/povison-products/enrich-batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ products: items.map(x => ({ url: x.url, name: x.name })) })
+  }).then(r => r.json()).then(data => {
+    if (!data.ok) {
+      showToast('补图失败：' + (data.error || '未知错误'), 'error');
+      return;
+    }
+    const results = data.products || [];
+    let updated = 0;
+    results.forEach((res, i) => {
+      const idx = items[i] && items[i].idx;
+      if (typeof idx !== 'number') return;
+      if (res && res.image) {
+        articleState.products[idx].image = res.image;
+        if (res.name && !articleState.products[idx].name) articleState.products[idx].name = res.name;
+        if (res.url && !articleState.products[idx].url) articleState.products[idx].url = res.url;
+        updated++;
+      }
+    });
+    if (updated) {
+      articleState.placementsConfirmed = false;
+      articleState.phaseDone.placements = false;
+      renderPlacements();
+      refreshPlacementsGate();
+      saveToRun();
+      persistArticleState();
+      logStep(3, 'placement_enrich_images', '补图 ' + updated + ' 个');
+      showToast('已为 ' + updated + ' 个产品补图', 'success');
+    } else {
+      showToast('未能补到任何图片', '');
+    }
+  }).catch(err => {
+    showToast('补图请求失败：' + err.message, 'error');
+  }).finally(() => {
+    btn.disabled = false;
+    btn.textContent = '补全缺图';
+  });
 }
 
 function renderPlacements() {
@@ -3760,7 +3911,8 @@ function renderPlacements() {
         <span class="wb-status ${p.status === 'accepted' ? 'ready' : (p.status === 'rejected' ? 'idle' : 'edited')}">${
           p.status === 'accepted' ? '已接受' : (p.status === 'rejected' ? '已驳回' : '待审核')}</span>
       </div>
-      ${p.image ? `<div class="place-product-img"><img src="${escapeAttr(p.image)}" alt="${escapeAttr(p.name || '')}" loading="lazy" onerror="this.parentElement.style.display='none'"><span class="sec-img-credit">POVISON 商品图</span></div>` : `<div class="place-product-img empty" style="font-size:11px;color:var(--text-tertiary);padding:6px 0;">暂无商品配图（重新生成植入可补图）</div>`}
+      ${(typeof p.fitScore === 'number') ? `<div class="place-fit" style="font-size:11px;color:var(--text-secondary);margin:4px 0 6px;">主题契合度 <b>${p.fitScore.toFixed(2)}</b>${p.fitReason ? ' · ' + escapeAttr(p.fitReason) : ''}${p.source === 'catalog' ? ' · 商品库推荐' : ''}</div>` : ''}
+      ${p.image ? `<div class="place-product-img"><img src="${escapeAttr(p.image)}" alt="${escapeAttr(p.name || '')}" loading="lazy" onerror="this.parentElement.style.display='none'"><span class="sec-img-credit">POVISON 商品图</span></div>` : `<div class="place-product-img empty" style="font-size:11px;color:var(--text-tertiary);padding:6px 0;">暂无商品配图（点"补全缺图"或重新生成植入可补图）</div>`}
       <div class="section-field"><label>产品名</label>
         <input type="text" value="${escapeAttr(p.name)}" oninput="editProduct(${idx},'name',this.value)"></div>
       <div class="section-field"><label>产品链接</label>
@@ -3789,6 +3941,7 @@ function renderPlacements() {
         <span class="wb-status ${l.status === 'accepted' ? 'ready' : (l.status === 'rejected' ? 'idle' : 'edited')}">${
           l.status === 'accepted' ? '已接受' : (l.status === 'rejected' ? '已驳回' : '待审核')}</span>
       </div>
+      ${(typeof l.score === 'number') ? `<div class="place-fit" style="font-size:11px;color:var(--text-secondary);margin:4px 0 6px;">主题契合度 <b>${l.score.toFixed(2)}</b>${l.reasons ? ' · ' + escapeAttr(l.reasons) : ''}${l.source === 'blog-sitemap' ? ' · 博客 sitemap' : ''}</div>` : (l.source === 'blog-sitemap' ? `<div class="place-fit" style="font-size:11px;color:var(--text-secondary);margin:4px 0 6px;">博客 sitemap 真实链接</div>` : '')}
       <div class="section-field"><label>Anchor text（须是文中已有/将写入的自然长尾词）</label>
         <input type="text" value="${escapeAttr(l.anchor)}" oninput="editLink(${idx},'anchor',this.value)"></div>
       <div class="section-field"><label>目标 URL（povison.com/blog/…）</label>
@@ -3855,9 +4008,16 @@ function removePlacement(kind, idx) {
   articleState[kind].splice(idx, 1);
   articleState.placementsConfirmed = false;
   articleState.phaseDone.placements = false;
+  // Clearing all products/links is intentional — persist immediately so the next
+  // Agent launch materializes an empty list from DB (not the old 404 URLs).
+  if (!(articleState.products || []).length && !(articleState.links || []).length) {
+    delete articleState.placementWarnings;
+    delete articleState.placementUrlCheck;
+  }
   renderPlacements();
   refreshPlacementsGate();
   saveToRun();
+  persistArticleState();
 }
 
 function addProductPlacement() {
@@ -3891,8 +4051,13 @@ function refreshPlacementsGate() {
   const pending = products.concat(links).some(x => x.status === 'pending');
   const hasAny = products.length + links.length > 0;
   const allRejected = hasAny && products.concat(links).every(x => x.status === 'rejected');
-  // 无待审核项，且至少接受一项（或全部驳回）即可点确认
-  const canConfirm = hasAny && !pending && (acceptedP.length + acceptedL.length > 0 || allRejected);
+  const warnings = articleState.placementWarnings || [];
+  const hasWarnings = warnings.length > 0;
+  const urlCheck = articleState.placementUrlCheck;
+  const deadUrls = (urlCheck && urlCheck.results) ? urlCheck.results.filter(x => !x.live) : [];
+  const hasDeadUrls = deadUrls.length > 0;
+  // 无待审核项，且至少接受一项（或全部驳回）即可点确认；存在 URL 模式告警或死链时禁止确认
+  const canConfirm = hasAny && !pending && !hasWarnings && !hasDeadUrls && (acceptedP.length + acceptedL.length > 0 || allRejected);
   const allHandled = hasAny && products.concat(links).every(x => x.status === 'accepted' || x.status === 'rejected');
 
   const btnAcceptAll = document.getElementById('btnAcceptAllPlacements');
@@ -3904,7 +4069,35 @@ function refreshPlacementsGate() {
   if (btnNext) btnNext.disabled = !canConfirm;
   if (btnFaq) btnFaq.disabled = !articleState.phaseDone.placements;
 
+  // Render URL-validation warning banner (pattern check + liveness check)
+  const banner = document.getElementById('placementWarningsBanner');
+  if (banner) {
+    const parts = [];
+    if (hasWarnings) {
+      parts.push('<b>URL 模式校验：' + warnings.length + ' 个可疑 URL（疑似编造，会 404）</b><ul style="margin:4px 0 0 18px;padding:0;">' +
+        warnings.map(w => '<li>[' + w.kind + '] ' + escapeAttr(w.problem) + (w.url ? ' <code>' + escapeAttr(w.url) + '</code>' : '') + '</li>').join('') +
+        '</ul>');
+    }
+    if (hasDeadUrls) {
+      parts.push('<b>链接有效性校验：' + deadUrls.length + ' 个死链（HTTP 4xx/5xx 或不可达）</b><ul style="margin:4px 0 0 18px;padding:0;">' +
+        deadUrls.map(d => '<li>[' + (d.kind || '?') + '] <code>' + escapeAttr(d.url) + '</code> ' + (d.status_code ? 'HTTP ' + d.status_code : '') + (d.error ? ' · ' + escapeAttr(d.error) : '') + '</li>').join('') +
+        '</ul>');
+    }
+    if (parts.length) {
+      banner.style.display = '';
+      banner.innerHTML = parts.join('<hr style="margin:6px 0;border:none;border-top:1px solid #fda4af;">') +
+        '<div style="margin-top:6px;">请点「生成推荐」让 Agent 重新选品，或手动修正 URL 后点「校验链接有效性」复检。</div>';
+    } else if (urlCheck && urlCheck.results && urlCheck.results.length) {
+      banner.style.display = '';
+      banner.innerHTML = '<b style="color:#15803d;">链接有效性校验通过：' + urlCheck.total + ' 个 URL 全部有效 ✓</b>';
+    } else {
+      banner.style.display = 'none';
+      banner.innerHTML = '';
+    }
+  }
+
   if (!hasAny) setStatus('placementsStatus', 'idle', '待生成');
+  else if (hasWarnings || hasDeadUrls) setStatus('placementsStatus', 'edited', hasDeadUrls ? '存在死链' : 'URL 校验失败');
   else if (articleState.placementsConfirmed) setStatus('placementsStatus', 'ready', '已确认');
   else if (pending) setStatus('placementsStatus', 'edited', '待审核');
   else setStatus('placementsStatus', 'edited', '已审 · 可确认');
@@ -4128,54 +4321,152 @@ function updateCharCount(id, n, min, max) {
 }
 
 // ---- Preview & publish ----
+function buildCenteredImageHtml(url, alt, caption, credit, maxWidth, extraWrapStyle, linkUrl) {
+  if (!url) return '';
+  maxWidth = maxWidth || 680;
+  extraWrapStyle = extraWrapStyle || '';
+  var href = String(linkUrl || '').trim();
+  if (href && !/^https?:\/\//i.test(href)) href = '';
+  var capInner = escapeHtml(caption || '');
+  if (credit && !href) {
+    capInner += ' <span style="color:#9b9b9b;font-size:12px;margin-left:6px;">' + escapeHtml(credit) + '</span>';
+  }
+  if (href && capInner) {
+    capInner = '<a href="' + escapeAttr(href) + '" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:underline;">' +
+      capInner + '</a>';
+  }
+  var capHtml = '';
+  if (capInner) {
+    capHtml = '<figcaption class="wp-element-caption" style="display:block;text-align:center !important;margin:12px auto 0;font-size:15px;color:#444;line-height:1.55;font-family:\'Helvetica Neue\',Arial,sans-serif;">' +
+      capInner + '</figcaption>';
+  }
+  var imgTag = '<img class="aligncenter size-full" src="' + escapeAttr(url) + '" alt="' + escapeAttr(alt || '') + '" loading="lazy" width="' + maxWidth + '" ' +
+    'style="display:block !important;margin-left:auto !important;margin-right:auto !important;max-width:100%;height:auto;width:auto;border-radius:6px;">';
+  if (href) {
+    imgTag = '<a href="' + escapeAttr(href) + '" target="_blank" rel="noopener noreferrer" style="display:inline-block;">' + imgTag + '</a>';
+  }
+  return '<div class="wp-block-image aligncenter" style="text-align:center !important;margin:28px auto !important;max-width:' + maxWidth + 'px;width:100%;' + extraWrapStyle + '">' +
+    '<figure class="aligncenter size-full" style="display:table !important;margin:0 auto !important;text-align:center !important;max-width:100%;">' +
+    imgTag + capHtml + '</figure></div>';
+}
+
 function buildInlineImagesHtml(sec) {
   const imgs = Array.isArray(sec.images) ? sec.images : [];
   if (!imgs.length) return '';
   return imgs.map(im => {
     if (!im || !im.url) return '';
-    return '<figure class="article-figure">' +
-      '<img src="' + escapeAttr(im.url) + '" alt="' + escapeAttr(im.alt || '') + '" loading="lazy">' +
-      (im.caption ? '<figcaption>' + escapeHtml(im.caption) + (im.credit ? ' <span class="fig-credit">' + escapeHtml(im.credit) + '</span>' : '') + '</figcaption>' : '') +
-      '</figure>';
+    return buildCenteredImageHtml(im.url, im.alt || '', im.caption || '', im.credit || '', 680, '', '');
   }).join('');
 }
 
+function productCaptionName(name) {
+  var raw = String(name || '').trim();
+  if (!raw) return 'POVISON product';
+  if (/^povison\b/i.test(raw)) return raw;
+  return 'Povison ' + raw;
+}
+
 function buildProductImageHtml(sec) {
-  // Find accepted products attached to this section; render their POVISON image.
+  // Accepted products on this section: linked image + product-name caption → PDP.
   const sid = sec.id;
   const products = (articleState.products || []).filter(p => (p.sectionId || p.section) === sid && p.status !== 'rejected' && p.image);
   if (!products.length) return '';
   return products.map(p => {
-    return '<figure class="article-figure product-figure">' +
-      '<img src="' + escapeAttr(p.image) + '" alt="' + escapeAttr(p.name || '') + '" loading="lazy">' +
-      '<figcaption>' + escapeHtml(p.name || '') + ' <span class="fig-credit">POVISON</span></figcaption>' +
-      '</figure>';
+    var caption = productCaptionName(p.name);
+    return buildCenteredImageHtml(
+      p.image, p.name || caption, caption, '', 720, '', p.url || ''
+    );
   }).join('');
+}
+
+function slugifyHeading(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
+
+function buildTocHtml() {
+  const items = [];
+  let hasIntro = false;
+  let hasConclusion = false;
+  (articleState.sections || []).forEach(sec => {
+    if (sec.type === 'Intro') hasIntro = true;
+    else if (sec.type === 'Conclusion') hasConclusion = true;
+    else if (sec.title) items.push({ text: sec.title, id: slugifyHeading(sec.title), children: [] });
+  });
+  const toc = [];
+  if (hasIntro) toc.push({ text: 'Introduction', id: 'introduction', children: [] });
+  toc.push.apply(toc, items);
+  if (hasConclusion) toc.push({ text: 'Conclusion', id: 'conclusion', children: [] });
+  const faqKids = [];
+  (articleState.faq || []).forEach((f, i) => {
+    if (f && f.q) faqKids.push({ text: f.q, id: 'faq-question-' + (i + 1) });
+  });
+  if (faqKids.length) toc.push({ text: 'Q&A', id: 'q-a', children: faqKids });
+  if (toc.length < 2) return '';
+
+  function tocLi(entry) {
+    var nested = '';
+    if (entry.children && entry.children.length) {
+      nested = '<ul style="list-style:disc;padding-left:1.25em;margin:0.35em 0 0;">';
+      entry.children.forEach(function(c) {
+        nested += '<li style="margin:0.25em 0;"><a href="#' + escapeAttr(c.id) + '" style="color:#1a1a1a;text-decoration:underline;font-size:inherit;line-height:inherit;">' +
+          escapeHtml(c.text) + '</a></li>';
+      });
+      nested += '</ul>';
+    }
+    return '<li style="margin:0.45em 0;"><a href="#' + escapeAttr(entry.id) + '" style="color:#1a1a1a;text-decoration:underline;font-size:inherit;line-height:inherit;">' +
+      escapeHtml(entry.text) + '</a>' + nested + '</li>';
+  }
+
+  let html = '<div class="wp-block-rank-math-toc-block article-toc" id="rank-math-toc" style="margin:36px 0;padding:24px 28px;background:#f7f7f7;border:1px solid #e2e2e2;border-radius:4px;">';
+  html += '<h2 style="font-size:1.5em;font-weight:600;margin:0 0 16px;line-height:1.3;color:#1a1a1a;">Table of Contents</h2>';
+  html += '<nav><ul style="list-style:disc;padding-left:1.4em;margin:0;font-size:1.05em;line-height:1.75;color:#1a1a1a;">';
+  toc.forEach(function(h) { html += tocLi(h); });
+  html += '</ul></nav></div>';
+  return html;
 }
 
 function buildArticleBody() {
   let body = '';
+  let tocInserted = false;
+  const tocHtml = buildTocHtml();
   articleState.sections.forEach(sec => {
     const chunks = formatSectionHtml(sec.content);
-    const htmlBlock = chunks.join('');
+    let htmlBlock = chunks.join('');
     const inlineImgs = buildInlineImagesHtml(sec);
     const productImgs = buildProductImageHtml(sec);
     if (sec.type === 'Intro') {
+      if (!/<h2[^>]*>\s*Introduction\s*<\/h2>/i.test(htmlBlock)) {
+        body += '<h2 id="introduction">Introduction</h2>';
+      } else {
+        htmlBlock = htmlBlock.replace(/<h2([^>]*)>\s*Introduction\s*<\/h2>/i, '<h2$1 id="introduction">Introduction</h2>');
+      }
       body += htmlBlock + inlineImgs;
     } else if (sec.type === 'Conclusion') {
-      body += '<div class="conclusion"><h2>Conclusion</h2>' + htmlBlock + '</div>';
+      body += '<div class="conclusion"><h2 id="conclusion">Conclusion</h2>' + htmlBlock + '</div>';
     } else {
-      body += '<h2>' + escapeHtml(sec.title) + '</h2>' + htmlBlock;
-      // Insert body image after the section text, then product image (different source, no conflict).
+      if (!tocInserted && tocHtml) {
+        body += tocHtml;
+        tocInserted = true;
+      }
+      const headingId = slugifyHeading(sec.title);
+      body += '<h2 id="' + escapeAttr(headingId) + '">' + escapeHtml(sec.title) + '</h2>' + htmlBlock;
       body += inlineImgs + productImgs;
     }
   });
   if (articleState.faq && articleState.faq.length) {
-    body += '<section class="faq-section"><h2>Frequently Asked Questions</h2>';
-    articleState.faq.forEach(f => {
-      body += '<div class="faq-item"><h3 onclick="toggleFaq(this)">' + escapeHtml(f.q) + '</h3><p>' + escapeHtml(f.a) + '</p></div>';
+    // Plain HTML FAQ — do NOT emit Rank Math Gutenberg block comments.
+    // Styled like published POVISON posts: Q&A h2 + body-sized h3/p.
+    body += '<h2 id="q-a">Q&amp;A</h2>';
+    body += '<div class="faq-section" style="margin-top:8px;">';
+    articleState.faq.forEach((f, i) => {
+      var qid = 'faq-question-' + (i + 1);
+      body += '<div class="faq-item rank-math-list-item" id="' + escapeAttr(qid) + '" itemscope itemtype="https://schema.org/Question" style="border-bottom:1px solid #e8e8e8;padding:8px 0 20px;margin:0;">' +
+        '<h3 class="rank-math-question" itemprop="name" style="font-size:1.25em;font-weight:600;margin:1.1em 0 0.55em;line-height:1.35;color:#1a1a1a;">' + escapeHtml(f.q) + '</h3>' +
+        '<div class="rank-math-answer" itemprop="acceptedAnswer" itemscope itemtype="https://schema.org/Answer">' +
+        '<p itemprop="text" style="font-size:1.05em;color:#333;line-height:1.75;margin:0;">' + escapeHtml(f.a) + '</p>' +
+        '</div></div>';
     });
-    body += '</section>';
+    body += '</div>';
   }
   return body;
 }
@@ -4414,6 +4705,7 @@ function rejectArticle() {
   document.getElementById('btnGenAllSections').disabled = false;
   document.getElementById('btnGenFaq').disabled = true;
   saveToRun();
+  persistArticleState();
   logStep(3, 'reject', '人工驳回，要求重写正文');
   showToast('已驳回，请从正文板块重新生成', '');
   setGenPhase('sections');
@@ -4444,7 +4736,7 @@ async function finalizeMvpExport() {
     }
     const res = await bridgeFetch(launchPath, {
       method: 'POST',
-      body: JSON.stringify({ skip_image_upload: true, status: 'draft' }),
+      body: JSON.stringify({ skip_image_upload: false, status: 'draft' }),
     });
     const editUrl = res.edit_url || '';
     const previewUrl = res.preview_url || '';
@@ -5396,7 +5688,12 @@ async function bridgeEnsureRun() {
     tasks = (resp && resp.tasks) || [];
   } catch (e) {}
 
-  const hasPool = t => (t.assoc_count || 0) > 0 || (t.topic_count || 0) > 0;
+  // A task "has data" if it carries associative keywords, topics, OR
+  // user-added category keywords (beyond the auto '不限定品类' default).
+  // Without the category check, a task whose only content is manually-added
+  // categories is treated as empty on a fresh page load (in-memory KEYWORDS is
+  // [] then), gets skipped, and the categories vanish.
+  const hasPool = t => (t.assoc_count || 0) > 0 || (t.topic_count || 0) > 0 || (t.category_count || 0) > 0;
 
   // 1) Adopt a remembered task only if it actually carries a keyword/topic pool.
   for (const h of hints) {
@@ -5409,12 +5706,20 @@ async function bridgeEnsureRun() {
     }
   }
 
-  // 2) Otherwise reuse the newest task that has an associative keyword pool.
-  //    Use assoc_count (excludes category rows) so the default '不限定品类'
-  //    row alone never qualifies a task as "with data".
+  // 2) Otherwise reuse the task with the richest keyword pool.
+  //    hasPool now also counts user-added category keywords, so a task whose
+  //    only content is manually-added categories still qualifies. Among the
+  //    candidates, prefer the one with the most total keywords (kw_count) so
+  //    the task carrying the user's category rows wins over a newer but
+  //    thinner task; break ties by recency (tasks are sorted created_at DESC).
   const withData = tasks.filter(hasPool);
   if (withData.length) {
-    const t = withData[0];
+    const t = withData.reduce(function(best, cur) {
+      if (!best) return cur;
+      var bk = (best.kw_count || 0), ck = (cur.kw_count || 0);
+      if (ck > bk) return cur;
+      return best; // keep best (earlier = newer) on tie
+    }, null);
     activeTaskId = t.task_id;
     BRIDGE.runId = t.task_id;
     BRIDGE.taskId = t.task_id;
@@ -6075,7 +6380,47 @@ async function studioInit() {
   // back to the newest task that actually carries an associative-keyword pool.
   if (!activeTaskId) await bridgeEnsureRun();
   if (!activeTaskId && !BRIDGE.runId) createRun();
-  else { await loadTaskIntoUI(activeTaskId); await refreshAuditTrail(); }
+  else { await loadTaskIntoUI(activeTaskId); await recoverCategoryKeywords(activeTaskId); await refreshAuditTrail(); }
+}
+
+// Safety net for the global keyword pool: the in-memory KEYWORDS is empty on a
+// fresh page load, so if bridgeEnsureRun picked a task that doesn't carry the
+// user's manually-added category keywords (e.g. a newer task with more
+// associative keywords but no categories), those categories would be lost.
+// Scan the task list for tasks that DO have user-added categories
+// (category_count > 0), fetch their step-1 data, and merge any missing
+// user-added category keywords into the global pool. Runs once on init only.
+async function recoverCategoryKeywords(currentTaskId) {
+  try {
+    const hasUserCategory = (KEYWORDS || []).some(
+      k => k.kind === 'category' && k.text !== '不限定品类'
+    );
+    if (hasUserCategory) return; // current task already has user categories
+    const resp = await bridgeFetch('/api/tasks?limit=50');
+    const tasks = (resp && resp.tasks) || [];
+    const donors = tasks.filter(t => (t.category_count || 0) > 0 && t.task_id !== currentTaskId);
+    if (!donors.length) return;
+    let added = false;
+    for (const d of donors) {
+      try {
+        const kw = await bridgeFetch('/api/tasks/' + d.task_id + '/steps/1/data');
+        if (!Array.isArray(kw)) continue;
+        kw.forEach(function(raw) {
+          const n = normalizeScriptKeyword(raw);
+          if (!n || n.kind !== 'category' || n.text === '不限定品类') return;
+          if (!KEYWORDS.some(k => k.text === n.text)) {
+            KEYWORDS.push(n);
+            added = true;
+          }
+        });
+      } catch (e) {}
+    }
+    if (added) {
+      ensureDefaultCategory();
+      renderKwList();
+      scheduleKwPersist();
+    }
+  } catch (e) { /* best-effort recovery */ }
 }
 studioInit();
 </script>

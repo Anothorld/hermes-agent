@@ -64,7 +64,7 @@ class CustomerRegion(BaseModel):
     country: Optional[str] = None
     province_state: Optional[str] = None
     source: str = Field(default="unknown", pattern="^(order_address|visitor_geo|email_mention|email_tld|unknown)$")
-    confidence: str = Field(default="low", pattern="^(high|medium|low)$")
+    confidence: Optional[str] = Field(default="low", pattern="^(high|medium|low)$")
 
 
 class EmotionSignal(BaseModel):

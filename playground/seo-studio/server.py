@@ -31,6 +31,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import sys
@@ -276,6 +277,50 @@ def _step_num_for_agent(step: str) -> int:
     return 3  # serp/outline/section/faq/meta/placements
 
 
+# ---- placement URL validation (root-cause fix for 404 placements) -------------
+
+_PDP_RE = re.compile(r"^https?://(?:[\w-]+\.)*povison\.com/[^?#]*\.html(?:[?#]|$)", re.I)
+_BLOG_RE = re.compile(r"^https?://(?:[\w-]+\.)*povison\.com/blog/[^?#]*\.html(?:[?#]|$)", re.I)
+_POVISON_HOST_RE = re.compile(r"^(?:[\w-]+\.)*povison\.com$", re.I)
+
+
+def _validate_placement_urls(data: dict) -> list[dict]:
+    """Flag fabricated product / internal-link URLs.
+
+    Returns a list of warnings: ``[{kind, idx, url, problem}]``. Empty = clean.
+    Product URLs must be povison PDPs (``.html`` + povison host); link URLs must
+    be povison blog articles (``/blog/<...>.html``). Fabricated URLs are the
+    root cause of 404 placements — this validator blocks confirming placements
+    until they're fixed or sourced from the catalog/blog APIs.
+    """
+    warnings: list[dict] = []
+    if not isinstance(data, dict):
+        return warnings
+    for i, p in enumerate(data.get("products") or []):
+        if not isinstance(p, dict):
+            continue
+        url = (p.get("url") or "").strip()
+        if not url:
+            warnings.append({"kind": "product", "idx": i, "url": "", "problem": "product.url is empty"})
+            continue
+        host = urlparse(url).hostname or ""
+        if not _POVISON_HOST_RE.match(host):
+            warnings.append({"kind": "product", "idx": i, "url": url, "problem": f"product.url host is not povison.com ({host})"})
+            continue
+        if not _PDP_RE.match(url):
+            warnings.append({"kind": "product", "idx": i, "url": url, "problem": "product.url is not a real PDP (must end with .html; real PDPs look like /<slug>.html?variant=<id>) — likely fabricated, will 404"})
+    for i, l in enumerate(data.get("links") or []):
+        if not isinstance(l, dict):
+            continue
+        url = (l.get("url") or "").strip()
+        if not url:
+            warnings.append({"kind": "link", "idx": i, "url": "", "problem": "link.url is empty"})
+            continue
+        if not _BLOG_RE.match(url):
+            warnings.append({"kind": "link", "idx": i, "url": url, "problem": "link.url is not a real povison.com/blog/ article (must start with https://www.povison.com/blog/ and end with .html) — likely fabricated, will 404"})
+    return warnings
+
+
 @app.post("/api/tasks")
 async def create_task(body: dict | None = None) -> dict:
     """Create a task (3 steps) or fork from a parent at fork_step."""
@@ -384,6 +429,20 @@ async def put_step_data(task_id: str, step_num: int, request: Request) -> dict:
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"invalid JSON: {e}") from e
     status = (request.query_params.get("status") or "done").strip()
+    # Root-cause fix for 404 placements: validate product/link URLs on save.
+    # If any URL looks fabricated, block placementsConfirmed and surface warnings.
+    placement_warnings: list[dict] = []
+    if step_num == 3 and isinstance(data, dict):
+        placement_warnings = _validate_placement_urls(data)
+        if placement_warnings:
+            data["placementWarnings"] = placement_warnings
+            # Force the gate closed so the operator must fix URLs before proceeding.
+            if data.get("placementsConfirmed"):
+                data["placementsConfirmed"] = False
+                if isinstance(data.get("phaseDone"), dict):
+                    data["phaseDone"]["placements"] = False
+        else:
+            data.pop("placementWarnings", None)
     step = _db.save_step_data(task_id, step_num, data, status=status)
     # Mirror to run dir for script compatibility
     try:
@@ -394,7 +453,10 @@ async def put_step_data(task_id: str, step_num: int, request: Request) -> dict:
             (d / name).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except OSError:
         pass
-    return {"ok": True, "step": step}
+    resp = {"ok": True, "step": step}
+    if placement_warnings:
+        resp["placementWarnings"] = placement_warnings
+    return resp
 
 
 @app.post("/api/tasks/{task_id}/steps/{step_num}/run")
@@ -583,20 +645,31 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
         "section": (
             "Generate body sections for the confirmed outline. "
             "Each articleState.sections[] item MUST use this schema: "
-            "{id, type, title, content, status, subheads?, transition?} where "
+            "{id, type, title, content, status, image_queries?, images?, subheads?, transition?} where "
             "type is one of 'Intro' (capitalized) for the intro, 'h2' for body sections, "
             "'Conclusion' (capitalized) for the conclusion; title is the section heading text "
             "(empty string for Intro); content is the markdown body; status='ready' when done. "
             "Set articleState.phaseDone.sections = true when all sections have content.\n"
-            "IMAGES: For each section that warrants a visual (not every short section needs one), "
-            "find 1 copyright-free image from Unsplash or Pexels (use web search or browser to get "
-            "the direct image URL — e.g. https://images.unsplash.com/photo-... or "
-            "https://images.pexels.com/.../...jpeg). Attach them to the section as "
-            "section.images = [{url, alt, caption, credit}]. Rules:\n"
-            "- Source MUST be Unsplash or Pexels (license-free). NEVER use POVISON product photos here.\n"
-            "- alt = descriptive alt text; caption = short figure caption; credit = 'Photo: Unsplash' or 'Photo: Pexels'.\n"
-            "- Pick images that match the section's topic; skip if no good match (don't force a wrong image).\n"
-            "- Do NOT duplicate an image across sections."
+            "IMAGES (P0+P1 — structured queries + stock API candidate pool):\n"
+            "1) For each H2 that warrants a visual, FIRST write section.image_queries = "
+            "[2-3 concrete ENGLISH search phrases]. Good: 'couple arranging living room sofa', "
+            "'modern apartment furniture inventory checklist'. Bad: the whole article title, "
+            "vague terms like 'moving', 'home', 'lifestyle', 'together'.\n"
+            "2) Search the stock API — do NOT invent URLs and do NOT browser-scrape random pages. "
+            "Prefer: `python3 scripts/search-stock-images.py -q \"<query>\" -n 5 -o /tmp/stock.json` "
+            "(or POST http://127.0.0.1:8766/api/stock-images/search with {query, per_page:5}). "
+            "Try queries in order until you get candidates.\n"
+            "3) Pick ONE candidate from the returned pool whose photo clearly shows furniture, "
+            "an interior room, or a layout relevant to THIS section. Set "
+            "section.images = [{url, alt, caption, credit}] using the candidate's url/alt/credit. "
+            "caption = short English figure caption matching the section.\n"
+            "4) HARD RULES — skip the section (images=[]) if no good match:\n"
+            "   - Source MUST be Unsplash or Pexels from the API pool. NEVER POVISON product photos here.\n"
+            "   - MUST depict furniture / room interior / layout. FORBIDDEN: moving boxes close-ups, "
+            "     generic handshakes, abstract textures, outdoor scenes unrelated to the section, "
+            "     pure portraits with no furniture.\n"
+            "   - Do NOT duplicate an image URL across sections.\n"
+            "   - Prefer fewer accurate images over forcing a weak match."
         ),
         "faq": (
             "Generate FAQ (4-6 Q&A). Update articleState.faqs and set articleState.phaseDone.faq = true."
@@ -613,13 +686,34 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "40-70 word placement copy; status is 'pending'; image is the POVISON product "
             "image URL (empty string if not found). Update articleState.products and "
             "articleState.internalLinks (or links), then set articleState.phaseDone.placements = true.\n"
-            "PRODUCT IMAGES: For each product in articleState.products, attach a real product image "
-            "from POVISON. Use the povison_product tool or browse the POVISON product page to get the "
-            "product's main image URL, then set product.image = <direct image URL>. Rules:\n"
-            "- Product images MUST come from POVISON (povison.com) — NEVER from Unsplash/Pexels.\n"
-            "- This keeps body images (Unsplash/Pexels lifestyle) and product images (POVISON product shots) "
-            "from conflicting — they are always from different sources.\n"
-            "- If a product image URL cannot be found, leave product.image = '' rather than substituting a stock photo."
+            "HARD RULE — NEVER FABRICATE URLs (root-cause fix for 404 placements). You MUST produce BOTH products and internal links in this single placements run by calling the two tools below. Do NOT defer to the operator buttons — YOU call the tools and write the results.\n"
+            "STEP 1 — PRODUCTS: Call "
+            "`python3 scripts/povison-catalog.py recommend --topic '<JSON>' --sections <file> --limit 2` "
+            "(or POST http://127.0.0.1:8766/api/povison-products/recommend with "
+            "{topic:{primary_keyword,secondary_keywords,category_keywords}, sections, limit}). "
+            "Write the returned products[] straight into articleState.products (each item already has "
+            "name, url, image, sku, fit_score, sectionId, blurb — keep them; set status='pending'). "
+            "Real PDP URLs look like `https://www.povison.com/<slug>.html?variant=<id>` — they ALWAYS "
+            "contain `.html` and a `?variant=` param. If a URL you'd write does not match this shape, it "
+            "is fabricated and will 404 — DO NOT write it.\n"
+            "STEP 2 — INTERNAL LINKS: Call "
+            "`python3 scripts/povison-blog.py recommend-links --topic '<JSON>' --sections <file> --limit 3` "
+            "(or POST http://127.0.0.1:8766/api/povison-blog/recommend-links with "
+            "{topic, sections, existing_urls, limit}). Write the returned links[] straight into "
+            "articleState.links (each item has anchor, url, sectionId, score, reasons — keep them; "
+            "set status='pending'). Real blog URLs look like "
+            "`https://www.povison.com/blog/<category>/<slug>.html` — they ALWAYS start with "
+            "`https://www.povison.com/blog/` and end with `.html`. Never invent a blog URL; if the API "
+            "returns no good match, write fewer links (0-1) rather than a fabricated one.\n"
+            "STEP 3 — SAVE: REPLACE articleState.products and articleState.links entirely with the "
+            "API results (do not keep any previous products/links from the loaded articleState — "
+            "the operator may have deleted them before re-running). Write BOTH into articleState "
+            "in one seo_save_step_data call, then set articleState.phaseDone.placements = true.\n"
+            "PRODUCT IMAGES: The catalog API already fills image (Detail API main image). Do NOT "
+            "substitute stock photos for product images. If a product image is missing, leave image=''.\n"
+            "INTERNAL LINK anchors: anchor text MUST be a natural long-tail phrase that already appears "
+            "(or will appear) in the section's body — never 'click here' / 'see this guide' / 'Povison blog'. "
+            "The API returns a suggested anchor derived from the article slug; adjust it to read naturally in-sentence."
         ),
     }
     step_guidance = {
@@ -738,6 +832,342 @@ async def wordpress_health() -> dict:
         return {"configured": False, "rest_api": "error", "auth": "error", "error": str(e)}
 
 
+# ---- Stock images (Unsplash / Pexels) ----------------------------------------
+@app.get("/api/stock-images/health")
+async def stock_images_health() -> dict:
+    """Report whether Unsplash/Pexels API keys are configured (no secrets)."""
+    try:
+        import stock_images as _stock
+
+        return _stock.config_snapshot()
+    except Exception as e:
+        return {"configured": False, "error": str(e)}
+
+
+@app.post("/api/stock-images/search")
+async def stock_images_search(body: dict | None = None) -> dict:
+    """Search Unsplash/Pexels for body-image candidates.
+
+    Body: ``{query, source?: auto|unsplash|pexels, per_page?: 1-10}``.
+    Returns a candidate pool the agent/operator must pick from — never invent URLs.
+    """
+    try:
+        import stock_images as _stock
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"stock_images module missing: {e}") from e
+    b = body or {}
+    query = str(b.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    result = _stock.search_stock_images(
+        query,
+        source=str(b.get("source") or "auto"),
+        per_page=int(b.get("per_page") or 5),
+    )
+    if not result.get("ok"):
+        # 200 with ok=false so the agent can read the error and skip the section
+        return result
+    return result
+
+
+# ---- POVISON product catalog (keyword search + detail + recommend) -----------
+@app.get("/api/povison-products/health")
+async def povison_products_health() -> dict:
+    """Report POVISON catalog API reachability (no secrets; storeId=3 only)."""
+    try:
+        import povison_catalog as _cat
+        return _cat.health()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/povison-products/search")
+async def povison_products_search(body: dict | None = None) -> dict:
+    """Search POVISON catalog by keyword. Returns candidates with image + tags.
+
+    Body: ``{keyword, limit?: 1-30}``.
+    """
+    try:
+        import povison_catalog as _cat
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_catalog module missing: {e}") from e
+    b = body or {}
+    keyword = str(b.get("keyword") or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword is required")
+    return _cat.search_products(keyword, page=1, page_size=int(b.get("limit") or 15))
+
+
+@app.post("/api/povison-products/lookup")
+async def povison_products_lookup(body: dict | None = None) -> dict:
+    """Look up a single product by URL/path + optional variant/sku.
+
+    Body: ``{url, sku?, variant?}``. Returns name, url, image, specs, dimensions.
+    """
+    try:
+        import povison_catalog as _cat
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_catalog module missing: {e}") from e
+    b = body or {}
+    url = str(b.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    return _cat.lookup_detail(url, variant=b.get("variant"))
+
+
+@app.post("/api/povison-products/recommend")
+async def povison_products_recommend(body: dict | None = None) -> dict:
+    """Recommend 1-2 products for an article based on topic + sections.
+
+    Body: ``{topic: {...}, sections: [...]}``. Returns ``products[]`` ready to
+    write into ``articleState.products`` (status=pending, with image).
+    """
+    try:
+        import povison_catalog as _cat
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_catalog module missing: {e}") from e
+    b = body or {}
+    topic = b.get("topic") or {}
+    sections = b.get("sections") or []
+    if not topic:
+        raise HTTPException(status_code=400, detail="topic is required")
+    return _cat.recommend_placements(topic, sections, limit=int(b.get("limit") or 2))
+
+
+@app.post("/api/povison-products/scrape")
+async def povison_products_scrape(body: dict | None = None) -> dict:
+    """Fallback PDP scrape (JSON-LD Product). For link verification / Detail fail.
+
+    Body: ``{url}``.
+    """
+    try:
+        import povison_catalog as _cat
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_catalog module missing: {e}") from e
+    b = body or {}
+    url = str(b.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    return _cat.scrape_pdp(url)
+
+
+@app.post("/api/povison-products/enrich-image")
+async def povison_products_enrich_image(body: dict | None = None) -> dict:
+    """Enrich a single product's image by looking up its PDP via Detail API.
+
+    Body: ``{url}``. Returns ``{ok, image, name?}`` — never raises.
+    """
+    try:
+        import povison_catalog as _cat
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_catalog module missing: {e}") from e
+    b = body or {}
+    url = str(b.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "error": "url is required"}
+    detail = _cat.lookup_detail(url)
+    if detail.get("ok"):
+        return {"ok": True, "image": detail.get("image") or "", "name": detail.get("name") or ""}
+    # Fallback to scrape.
+    sc = _cat.scrape_pdp(url)
+    if sc.get("ok"):
+        return {"ok": True, "image": sc.get("image") or "", "name": sc.get("name") or ""}
+    return {"ok": False, "error": detail.get("error") or "enrich failed"}
+
+
+@app.post("/api/povison-products/enrich-batch")
+async def povison_products_enrich_batch(body: dict | None = None) -> dict:
+    """Best-effort image enrichment for products missing image but having url.
+
+    Body: ``{products: [{id?, url, name?}, ...]}``. Only enriches items where
+    ``image`` is empty and ``url`` is present. Returns updated products list.
+    """
+    try:
+        import povison_catalog as _cat
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_catalog module missing: {e}") from e
+    b = body or {}
+    products = b.get("products") or []
+    if not isinstance(products, list):
+        raise HTTPException(status_code=400, detail="products must be a list")
+    out = []
+    for p in products:
+        if not isinstance(p, dict):
+            continue
+        if p.get("image") or not p.get("url"):
+            out.append(p)
+            continue
+        res = await povison_products_enrich_image({"url": p["url"]})
+        if res.get("ok") and res.get("image"):
+            enriched = dict(p)
+            enriched["image"] = res["image"]
+            if not enriched.get("name") and res.get("name"):
+                enriched["name"] = res["name"]
+            out.append(enriched)
+        else:
+            out.append(p)
+    return {"ok": True, "products": out}
+
+
+# ---- POVISON blog internal-link catalog (sitemap-based; no secrets) ----
+
+@app.get("/api/povison-blog/health")
+async def povison_blog_health() -> dict:
+    """Report POVISON blog sitemap reachability + cached article count."""
+    try:
+        import povison_blog as _blog
+        return _blog.health()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/povison-blog/search")
+async def povison_blog_search(body: dict | None = None) -> dict:
+    """Search povison.com/blog articles by keyword (matches URL slug).
+
+    Body: ``{keyword, limit?: 1-50}``. Returns ranked candidates with
+    ``url``, ``slug``, ``title_guess``, ``category``, ``score``, ``reasons``.
+    """
+    try:
+        import povison_blog as _blog
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_blog module missing: {e}") from e
+    b = body or {}
+    keyword = str(b.get("keyword") or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword is required")
+    return _blog.search_articles(keyword, limit=int(b.get("limit") or 10))
+
+
+@app.post("/api/povison-blog/recommend-links")
+async def povison_blog_recommend_links(body: dict | None = None) -> dict:
+    """Recommend 2-3 internal links for an article based on topic + sections.
+
+    Body: ``{topic: {primary_keyword, secondary_keywords, category_keywords},
+    sections: [...], existing_urls?: [...], limit?: 1-5}``. Returns
+    ``links[]`` ready to append to ``articleState.links`` (status=pending).
+    All URLs are real povison.com/blog/ articles from the sitemap — never
+    fabricated.
+    """
+    try:
+        import povison_blog as _blog
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_blog module missing: {e}") from e
+    b = body or {}
+    topic = b.get("topic") or {}
+    sections = b.get("sections") or []
+    if not topic:
+        raise HTTPException(status_code=400, detail="topic is required")
+    return _blog.recommend_links(
+        topic,
+        sections,
+        existing_urls=b.get("existing_urls"),
+        limit=int(b.get("limit") or 3),
+    )
+
+
+@app.post("/api/povison-blog/verify")
+async def povison_blog_verify(body: dict | None = None) -> dict:
+    """Verify a URL is a real povison.com/blog/ article present in the sitemap.
+
+    Body: ``{url}``. Returns ``{ok, verified, url, article?}``. Never raises.
+    """
+    try:
+        import povison_blog as _blog
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_blog module missing: {e}") from e
+    b = body or {}
+    url = str(b.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "verified": False, "error": "url is required"}
+    return _blog.verify_url(url)
+
+
+# ---- Placement URL liveness guard (HTTP reachability) ----
+
+@app.get("/api/povison-placements/health")
+async def povison_placements_guard_health() -> dict:
+    """Report placement-guard reachability (probes one povison URL)."""
+    try:
+        import placement_guard as _guard
+        return _guard.health()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/povison-placements/verify-urls")
+async def povison_placements_verify_urls(body: dict | None = None) -> dict:
+    """Live HTTP liveness check for a batch of placement URLs.
+
+    Body: ``{urls: ["..."]}``. Probes each URL (HEAD→GET, follow redirects,
+    10s timeout, povison host whitelist). Returns
+    ``{ok, checked_at, total, dead_count, results: [{url, live, status_code, final_url, error}]}``.
+    Use this as the second guard rail after the pattern validator — catches
+    real-shaped but dead (404) URLs that the pattern check misses.
+    """
+    try:
+        import placement_guard as _guard
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"placement_guard module missing: {e}") from e
+    b = body or {}
+    urls = b.get("urls") or []
+    if not isinstance(urls, list):
+        raise HTTPException(status_code=400, detail="urls must be a list")
+    return _guard.check_urls(urls, workers=int(b.get("workers") or 6))
+
+
+@app.post("/api/tasks/{task_id}/steps/3/verify-placements")
+async def verify_task_placements(task_id: str) -> dict:
+    """Verify all product + link URLs in a task's step-3 articleState are live.
+
+    Loads the task's step-3 data, collects every ``products[].url`` and
+    ``links[].url`` (plus ``products[].image`` if you want — skipped by default
+    since images are static.povison.com and rarely 404), runs the liveness
+    guard in parallel, writes the result into
+    ``articleState.placementUrlCheck`` so the UI can render it, and returns
+    the same. The UI's 「确认，写 FAQ」 button stays disabled while any URL is
+    dead.
+    """
+    _task_or_404(task_id)
+    try:
+        import placement_guard as _guard
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"placement_guard module missing: {e}") from e
+    data = _db.get_step_data(task_id, 3) or {}
+    urls: list[str] = []
+    url_kinds: dict[str, str] = {}  # url -> "product"/"link"
+    for p in data.get("products") or []:
+        if isinstance(p, dict):
+            u = (p.get("url") or "").strip()
+            if u:
+                urls.append(u)
+                url_kinds[u] = "product"
+    for l in data.get("links") or []:
+        if isinstance(l, dict):
+            u = (l.get("url") or "").strip()
+            if u:
+                urls.append(u)
+                url_kinds[u] = "link"
+    check = _guard.check_urls(urls, workers=6)
+    # Annotate each result with kind
+    for r in check.get("results") or []:
+        r["kind"] = url_kinds.get(r.get("url") or "", "unknown")
+    # Persist into articleState so the UI gate can read it
+    data["placementUrlCheck"] = {
+        "checked_at": check.get("checked_at"),
+        "total": check.get("total"),
+        "dead_count": check.get("dead_count"),
+        "results": check.get("results"),
+    }
+    # If any URL is dead, force the confirm gate closed
+    if check.get("dead_count"):
+        data["placementsConfirmed"] = False
+        if isinstance(data.get("phaseDone"), dict):
+            data["phaseDone"]["placements"] = False
+    _db.save_step_data(task_id, 3, data, status="done")
+    return {"ok": True, **check}
+
+
 @app.post("/api/tasks/{task_id}/wordpress/draft")
 async def wordpress_draft(task_id: str, body: dict | None = None) -> dict:
     """Export the task's article to WordPress as a draft.
@@ -746,14 +1176,29 @@ async def wordpress_draft(task_id: str, body: dict | None = None) -> dict:
     delegates to the operator's ``wordpress_mcp`` publisher (same pipeline the
     agent uses via MCP). The parser extracts ``<article class="article-body">``
     as post content and reads title/slug/meta-description/FAQ-schema from the
-    head. Images are referenced by their original URL (no media sideload) for
-    the MVP — pass ``skip_image_upload: false`` in the body to sideload them.
+    head. By default images are sideloaded into the WP Media Library so the
+    first becomes the featured image — pass ``skip_image_upload: true`` to keep
+    original URLs instead.
     """
     _task_or_404(task_id)
     b = body or {}
     state = _db.get_step_data(task_id, 3)
     if not state or not (state.get("topic") or (state.get("meta") or {}).get("title")):
         raise HTTPException(status_code=400, detail="no article to export — generate content first")
+    # Best-effort: enrich missing product images from PDP Detail API before export.
+    try:
+        products = state.get("products") or []
+        need = [p for p in products if isinstance(p, dict) and not p.get("image") and p.get("url") and p.get("status") != "rejected"]
+        if need:
+            import povison_catalog as _cat
+            for p in need:
+                detail = _cat.lookup_detail(p["url"])
+                if detail.get("ok") and detail.get("image"):
+                    p["image"] = detail["image"]
+                    if not p.get("name") and detail.get("name"):
+                        p["name"] = detail["name"]
+    except Exception:
+        pass  # enrichment is best-effort; never block export
     html = fill_blog_template(state)
     # Also refresh the run-dir preview.html so the on-disk copy matches what was pushed.
     try:
@@ -765,7 +1210,7 @@ async def wordpress_draft(task_id: str, body: dict | None = None) -> dict:
             html_content=html,
             category_id=b.get("category_id"),
             tag_ids=b.get("tag_ids"),
-            skip_image_upload=bool(b.get("skip_image_upload", True)),
+            skip_image_upload=bool(b.get("skip_image_upload", False)),
             status=b.get("status", "draft"),
         )
     except Exception as e:
@@ -1088,66 +1533,495 @@ def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+def _strip_content_markers(content: str) -> str:
+    text = content or ""
+    text = re.sub(r"\[Product:\s*[^\]]+\]", "", text)
+    text = re.sub(r"\[Internal link:[^\]]+\]", "", text)
+    return text
+
+
+def _is_md_table_sep(line: str) -> bool:
+    """True for GFM separator rows like ``| --- | :---: |``."""
+    s = line.strip()
+    if "|" not in s:
+        return False
+    cells = [c.strip() for c in s.strip("|").split("|")]
+    if not cells:
+        return False
+    return all(re.fullmatch(r":?-{3,}:?", c) for c in cells if c)
+
+
+def _is_md_table_row(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and s.count("|") >= 2
+
+
+def _md_table_to_html(rows: list[str]) -> str:
+    """Convert a GFM pipe-table block into an HTML <table>."""
+    if len(rows) < 2:
+        return ""
+    header_cells = [c.strip() for c in rows[0].strip().strip("|").split("|")]
+    body_rows = rows[2:] if _is_md_table_sep(rows[1]) else rows[1:]
+    html = (
+        '<table style="width:100%;border-collapse:collapse;margin:24px 0;'
+        "font-size:15px;font-family:'Helvetica Neue',Arial,sans-serif;\">"
+    )
+    html += "<thead><tr>"
+    for cell in header_cells:
+        html += (
+            f'<th style="background:#f5efe6;padding:10px 14px;text-align:left;'
+            f'font-weight:700;border:1px solid #e8e2d8;">{_esc(cell)}</th>'
+        )
+    html += "</tr></thead><tbody>"
+    for i, row in enumerate(body_rows):
+        if not _is_md_table_row(row):
+            continue
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        bg = "background:#fbf9f5;" if i % 2 == 1 else ""
+        html += "<tr>"
+        for cell in cells:
+            # Allow simple markdown links inside cells
+            cell_html = re.sub(
+                r"\[([^\]]+)\]\((https?://[^)]+)\)",
+                r'<a href="\2">\1</a>',
+                _esc(cell),
+            )
+            html += (
+                f'<td style="padding:10px 14px;border:1px solid #e8e2d8;'
+                f'vertical-align:top;{bg}">{cell_html}</td>'
+            )
+        html += "</tr>"
+    html += "</tbody></table>"
+    return html
+
+
 def _section_html(content: str) -> list[str]:
-    out = []
-    for line in (content or "").splitlines():
+    """Convert section markdown to HTML chunks.
+
+    Prefer the ``markdown`` library (GFM tables, lists, links). Fall back to a
+    line-oriented parser that still converts pipe tables — without this,
+    WordPress shows raw ``| col | col |`` text because every line was wrapped
+    in ``<p>``.
+    """
+    text = _strip_content_markers(content).strip()
+    if not text:
+        return []
+
+    try:
+        import markdown as md  # type: ignore
+
+        html = md.markdown(
+            text,
+            extensions=["tables", "nl2br", "sane_lists", "fenced_code"],
+        )
+        # Add inline table styles so WP (which drops <head> CSS) still looks OK
+        html = html.replace(
+            "<table>",
+            '<table style="width:100%;border-collapse:collapse;margin:24px 0;'
+            "font-size:15px;font-family:'Helvetica Neue',Arial,sans-serif;\">",
+        )
+        html = html.replace(
+            "<th>",
+            '<th style="background:#f5efe6;padding:10px 14px;text-align:left;'
+            'font-weight:700;border:1px solid #e8e2d8;">',
+        )
+        html = html.replace(
+            "<td>",
+            '<td style="padding:10px 14px;border:1px solid #e8e2d8;vertical-align:top;">',
+        )
+        # Markdown ![](url) becomes bare <img> — wrap so WP themes center them
+        html = _center_imgs_in_html(html)
+        return [html]
+    except ImportError:
+        pass
+
+    # Fallback: line parser with GFM table detection
+    out: list[str] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _is_md_table_row(line) and i + 1 < len(lines) and _is_md_table_sep(lines[i + 1]):
+            block = [line, lines[i + 1]]
+            i += 2
+            while i < len(lines) and _is_md_table_row(lines[i]):
+                block.append(lines[i])
+                i += 1
+            table_html = _md_table_to_html(block)
+            if table_html:
+                out.append(table_html)
+            continue
         t = _esc(line)
-        t = re.sub(r"\[Product:\s*[^\]]+\]", "", t)
-        t = re.sub(r"\[Internal link:[^\]]+\]", "", t)
         t = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r'<a href="\2">\1</a>', t)
         t = t.strip()
         if not t:
+            i += 1
             continue
-        if t.startswith("•") or t.startswith("·"):
-            out.append(f"<li>{t[1:].strip()}</li>")
+        if t.startswith("•") or t.startswith("·") or t.startswith("- "):
+            out.append(f"<li>{t.lstrip('•·- ').strip()}</li>")
         else:
             out.append(f"<p>{t}</p>")
+        i += 1
     return out
 
 
-def _article_body(state: dict) -> str:
+def _slugify_heading(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s[:60]
+
+
+def _chunks_to_html(chunks: list[str]) -> str:
     body = ""
+    in_list = False
+    for c in chunks:
+        if c.startswith("<li>"):
+            if not in_list:
+                body += "<ul>"
+                in_list = True
+            body += c
+        else:
+            if in_list:
+                body += "</ul>"
+                in_list = False
+            body += c
+    if in_list:
+        body += "</ul>"
+    return body
+
+
+def _centered_image_html(
+    *,
+    url: str,
+    alt: str = "",
+    caption: str = "",
+    credit: str = "",
+    max_width: int = 680,
+    extra_wrap_style: str = "",
+    link_url: str = "",
+) -> str:
+    """Build image HTML that stays centered across most WP themes.
+
+    Many themes override ``figure`` / ``.aligncenter`` (float, width:100%,
+    ``img { display:inline }``). The reliable pattern is:
+
+    1. Outer wrapper with ``text-align:center`` + ``!important`` margins
+    2. ``figure`` as ``display:table; margin-left/right:auto`` (shrink-wraps + centers)
+    3. ``img.aligncenter`` with ``display:block !important; margin:auto !important``
+    4. Caption under the image, also ``text-align:center``
+
+    When ``link_url`` is set (product PDP), both the image and caption wrap in
+    ``<a href>`` — matching published POVISON blog product figures.
+    """
+    if not url:
+        return ""
+    href = (link_url or "").strip()
+    if href and not re.match(r"^https?://", href, re.I):
+        href = ""
+
+    cap_inner = _esc(caption) if caption else ""
+    if credit and not href:
+        # Stock-photo credit only when not a linked product figure.
+        cap_inner += (
+            f' <span style="color:#9b9b9b;font-size:12px;margin-left:6px;">{_esc(credit)}</span>'
+        )
+    if href and cap_inner:
+        cap_inner = (
+            f'<a href="{_esc(href)}" target="_blank" rel="noopener noreferrer" '
+            f'style="color:inherit;text-decoration:underline;">{cap_inner}</a>'
+        )
+    cap_html = ""
+    if cap_inner:
+        cap_html = (
+            f'<figcaption class="wp-element-caption" style="display:block;text-align:center !important;'
+            f"margin:12px auto 0;font-size:15px;color:#444;line-height:1.55;"
+            f"font-family:'Helvetica Neue',Arial,sans-serif;\">"
+            f"{cap_inner}</figcaption>"
+        )
+
+    img_tag = (
+        f'<img class="aligncenter size-full" src="{_esc(url)}" alt="{_esc(alt)}" '
+        f'loading="lazy" width="{max_width}" '
+        'style="display:block !important;margin-left:auto !important;margin-right:auto !important;'
+        f"max-width:100%;height:auto;width:auto;border-radius:6px;\">"
+    )
+    if href:
+        img_tag = (
+            f'<a href="{_esc(href)}" target="_blank" rel="noopener noreferrer" '
+            f'style="display:inline-block;">{img_tag}</a>'
+        )
+
+    wrap_style = (
+        f"text-align:center !important;margin:28px auto !important;max-width:{max_width}px;"
+        f"width:100%;{extra_wrap_style}"
+    )
+    return (
+        f'<div class="wp-block-image aligncenter" style="{wrap_style}">'
+        '<figure class="aligncenter size-full" style="display:table !important;margin:0 auto !important;'
+        'text-align:center !important;max-width:100%;">'
+        f"{img_tag}{cap_html}</figure></div>"
+    )
+
+
+def _center_imgs_in_html(html: str) -> str:
+    """Wrap bare ``<img>`` tags (e.g. from markdown) so they center in WP themes."""
+    if not html or "<img" not in html.lower():
+        return html
+
+    def _from_img_tag(tag: str) -> str:
+        if "aligncenter" in tag and "margin-left:auto" in tag.replace(" ", ""):
+            return tag
+        src_m = re.search(r'\bsrc=["\']([^"\']+)["\']', tag, re.I)
+        alt_m = re.search(r'\balt=["\']([^"\']*)["\']', tag, re.I)
+        if not src_m:
+            return tag
+        return _centered_image_html(
+            url=src_m.group(1),
+            alt=alt_m.group(1) if alt_m else "",
+        )
+
+    # Prefer replacing <p><img></p> so we don't nest <div> inside <p>
+    html = re.sub(
+        r"<p>\s*(<img\b[^>]*>)\s*</p>",
+        lambda m: _from_img_tag(m.group(1)),
+        html,
+        flags=re.I,
+    )
+    # Remaining bare <img> not already inside a figure/div we built
+    def _wrap_bare(match: re.Match) -> str:
+        tag = match.group(0)
+        # Skip if already has our centering styles
+        if "aligncenter" in tag and "margin-left:auto" in tag.replace(" ", ""):
+            return tag
+        return _from_img_tag(tag)
+
+    html = re.sub(r"<img\b[^>]*>", _wrap_bare, html, flags=re.I)
+    return html
+
+
+def _inline_images_html(sec: dict) -> str:
+    """Render section images centered for WordPress themes."""
+    imgs = sec.get("images") or []
+    if not isinstance(imgs, list) or not imgs:
+        return ""
+    out = []
+    for im in imgs:
+        if not isinstance(im, dict) or not im.get("url"):
+            continue
+        out.append(
+            _centered_image_html(
+                url=im["url"],
+                alt=im.get("alt") or "",
+                caption=im.get("caption") or "",
+                credit=im.get("credit") or "",
+                max_width=680,
+            )
+        )
+    return "".join(out)
+
+
+def _product_caption(name: str) -> str:
+    """Caption text for a product figure — prefer a Povison-prefixed display name."""
+    raw = (name or "").strip()
+    if not raw:
+        return "POVISON product"
+    if re.match(r"(?i)^povison\b", raw):
+        return raw
+    return f"Povison {raw}"
+
+
+def _product_images_html(state: dict, sec: dict) -> str:
+    """Render accepted product figures under a section (linked image + name caption)."""
+    sid = sec.get("id")
+    products = [
+        p
+        for p in (state.get("products") or [])
+        if isinstance(p, dict)
+        and (p.get("sectionId") or p.get("section")) == sid
+        and p.get("status") != "rejected"
+        and p.get("image")
+    ]
+    if not products:
+        return ""
+    out = []
+    for p in products:
+        name = (p.get("name") or "").strip()
+        caption = _product_caption(name)
+        out.append(
+            _centered_image_html(
+                url=p["image"],
+                alt=name or caption,
+                caption=caption,
+                credit="",
+                max_width=720,
+                link_url=(p.get("url") or "").strip(),
+            )
+        )
+    return "".join(out)
+
+
+def _toc_html(state: dict) -> str:
+    """Build a TOC block styled like Rank Math / published POVISON posts.
+
+    Uses an ``h2`` title and body-sized links (not a tiny uppercase label).
+    Includes Introduction, body H2s, Conclusion, and nested Q&A questions.
+    """
+    headings: list[dict] = []
+    has_intro = False
+    has_conclusion = False
+    for sec in state.get("sections") or []:
+        stype = sec.get("type")
+        if stype == "Intro":
+            has_intro = True
+        elif stype == "Conclusion":
+            has_conclusion = True
+        elif sec.get("title"):
+            headings.append(
+                {"text": sec["title"], "id": _slugify_heading(sec["title"]), "children": []}
+            )
+
+    items: list[dict] = []
+    if has_intro:
+        items.append({"text": "Introduction", "id": "introduction", "children": []})
+    items.extend(headings)
+    if has_conclusion:
+        items.append({"text": "Conclusion", "id": "conclusion", "children": []})
+
+    faq = state.get("faq") or []
+    faq_children = []
+    for i, f in enumerate(faq):
+        q = str((f or {}).get("q") or "").strip()
+        if not q:
+            continue
+        faq_children.append({"text": q, "id": f"faq-question-{i + 1}"})
+    if faq_children:
+        items.append({"text": "Q&A", "id": "q-a", "children": faq_children})
+
+    if len(items) < 2:
+        return ""
+
+    def _li(entry: dict) -> str:
+        kids = entry.get("children") or []
+        nested = ""
+        if kids:
+            nested = (
+                "<ul style=\"list-style:disc;padding-left:1.25em;margin:0.35em 0 0;\">"
+                + "".join(
+                    f'<li style="margin:0.25em 0;"><a href="#{_esc(c["id"])}" '
+                    f'style="color:#1a1a1a;text-decoration:underline;font-size:inherit;line-height:inherit;">'
+                    f'{_esc(c["text"])}</a></li>'
+                    for c in kids
+                )
+                + "</ul>"
+            )
+        return (
+            f'<li style="margin:0.45em 0;">'
+            f'<a href="#{_esc(entry["id"])}" '
+            f'style="color:#1a1a1a;text-decoration:underline;font-size:inherit;line-height:inherit;">'
+            f'{_esc(entry["text"])}</a>{nested}</li>'
+        )
+
+    lis = "".join(_li(it) for it in items)
+    return (
+        '<div class="wp-block-rank-math-toc-block article-toc" id="rank-math-toc" '
+        'style="margin:36px 0;padding:24px 28px;background:#f7f7f7;border:1px solid #e2e2e2;'
+        'border-radius:4px;">'
+        '<h2 style="font-size:1.5em;font-weight:600;margin:0 0 16px;line-height:1.3;color:#1a1a1a;">'
+        "Table of Contents</h2>"
+        '<nav><ul style="list-style:disc;padding-left:1.4em;margin:0;'
+        'font-size:1.05em;line-height:1.75;color:#1a1a1a;">'
+        f"{lis}</ul></nav></div>"
+    )
+
+
+def _article_body(state: dict) -> str:
+    """Build article body for WP export / preview.
+
+    Includes TOC (after intro), WP-native centered figures, section images,
+    linked product figures, and FAQ (Q&A) microdata so Rank Math can detect FAQ schema.
+    """
+    body = ""
+    toc = _toc_html(state)
+    toc_inserted = False
     for sec in state.get("sections") or []:
         chunks = _section_html(sec.get("content") or "")
+        inline_imgs = _inline_images_html(sec)
+        product_imgs = _product_images_html(state, sec)
         if sec.get("type") == "Intro":
-            in_list = False
-            for c in chunks:
-                if c.startswith("<li>"):
-                    if not in_list:
-                        body += "<ul>"; in_list = True
-                    body += c
-                else:
-                    if in_list:
-                        body += "</ul>"; in_list = False
-                    body += c
-            if in_list:
-                body += "</ul>"
+            intro_html = _chunks_to_html(chunks)
+            if not re.search(r"<h2[^>]*>\s*Introduction\s*</h2>", intro_html, re.I):
+                body += '<h2 id="introduction">Introduction</h2>'
+            else:
+                # Ensure TOC can anchor even if agent already wrote the H2.
+                intro_html = re.sub(
+                    r"<h2([^>]*)>\s*Introduction\s*</h2>",
+                    r'<h2\1 id="introduction">Introduction</h2>',
+                    intro_html,
+                    count=1,
+                    flags=re.I,
+                )
+                if 'id="introduction"' not in intro_html.lower():
+                    intro_html = re.sub(
+                        r"<h2([^>]*)>",
+                        r'<h2\1 id="introduction">',
+                        intro_html,
+                        count=1,
+                        flags=re.I,
+                    )
+            body += intro_html + inline_imgs
         elif sec.get("type") == "Conclusion":
-            body += '<div class="conclusion"><h2>Conclusion</h2>'
-            for c in chunks:
-                body += f"<ul>{c}</ul>" if c.startswith("<li>") else c
+            body += '<div class="conclusion"><h2 id="conclusion">Conclusion</h2>'
+            body += _chunks_to_html(chunks)
             body += "</div>"
         else:
-            body += f'<h2>{_esc(sec.get("title") or "")}</h2>'
-            in_list = False
-            for c in chunks:
-                if c.startswith("<li>"):
-                    if not in_list:
-                        body += "<ul>"; in_list = True
-                    body += c
-                else:
-                    if in_list:
-                        body += "</ul>"; in_list = False
-                    body += c
-            if in_list:
-                body += "</ul>"
+            if not toc_inserted and toc:
+                body += toc
+                toc_inserted = True
+            heading_id = _slugify_heading(sec.get("title") or "")
+            body += f'<h2 id="{_esc(heading_id)}">{_esc(sec.get("title") or "")}</h2>'
+            body += _chunks_to_html(chunks)
+            body += inline_imgs + product_imgs
     faq = state.get("faq") or []
     if faq:
-        body += '<section class="faq-section"><h2>Frequently Asked Questions</h2>'
-        for f in faq:
-            body += f'<div class="faq-item"><h3 onclick="toggleFaq(this)">{_esc(f.get("q") or "")}</h3><p>{_esc(f.get("a") or "")}</p></div>'
-        body += "</section>"
+        body += f'<h2 id="q-a">{_esc("Q&A")}</h2>' + _faq_block_html(faq)
     return body
+
+
+def _faq_block_html(faq: list) -> str:
+    """Emit FAQ HTML that always renders on the WordPress frontend.
+
+    Do **not** wrap in ``<!-- wp:rank-math/faq-block -->`` unless the block
+    comment's ``questions`` JSON exactly matches Rank Math's save() output —
+    any mismatch makes Gutenberg report "Block contains unexpected or invalid
+    content" and the frontend often renders **nothing** under the FAQ heading
+    (exactly what operators saw).
+
+    Plain semantic HTML always displays. Heading is ``Q&A`` (caller). Question
+    ``h3`` / answer ``p`` use body-relative sizes to match published posts.
+    Schema is injected separately via ``wp_publish._inject_rank_math_faq_schema``.
+    """
+    items = ""
+    for i, f in enumerate(faq or []):
+        q = str((f or {}).get("q") or "").strip()
+        a = str((f or {}).get("a") or "").strip()
+        if not q:
+            continue
+        qid = f"faq-question-{i + 1}"
+        items += (
+            f'<div class="faq-item rank-math-list-item" id="{_esc(qid)}" '
+            'itemscope itemtype="https://schema.org/Question" '
+            'style="border-bottom:1px solid #e8e8e8;padding:8px 0 20px;margin:0;">'
+            f'<h3 class="rank-math-question" itemprop="name" '
+            f'style="font-size:1.25em;font-weight:600;margin:1.1em 0 0.55em;line-height:1.35;'
+            f'color:#1a1a1a;">{_esc(q)}</h3>'
+            '<div class="rank-math-answer" itemprop="acceptedAnswer" itemscope '
+            'itemtype="https://schema.org/Answer">'
+            f'<p itemprop="text" style="font-size:1.05em;color:#333;line-height:1.75;margin:0;">'
+            f"{_esc(a)}</p>"
+            "</div></div>"
+        )
+    if not items:
+        return ""
+    return f'<div class="faq-section" style="margin-top:8px;">{items}</div>'
 
 
 def _faq_jsonld(state: dict) -> str:
@@ -1260,7 +2134,11 @@ async def agent_run(rid: str, body: dict | None = None) -> dict:
         "section": (
             "Generate body sections for the confirmed outline. Write to article-state.json: "
             "update articleState.sections[].content and set status='ready' for each. "
-            "Set articleState.phaseDone.sections = true when all sections have content."
+            "Set articleState.phaseDone.sections = true when all sections have content. "
+            "IMAGES: for each H2 that needs a visual, set image_queries (2-3 concrete English "
+            "phrases), run `python3 scripts/search-stock-images.py -q \"...\" -n 5`, pick ONE "
+            "candidate that shows furniture/room/layout into section.images=[{url,alt,caption,credit}]. "
+            "Skip (images=[]) if no good match — never invent URLs or use moving-box/handshake stock."
         ),
         "faq": (
             "Generate FAQ (4–6 Q&A). Update article-state.json faqs and phaseDone.faq = true."

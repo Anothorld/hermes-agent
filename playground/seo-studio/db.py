@@ -273,6 +273,7 @@ def list_tasks(limit: int = 50) -> list[dict[str, Any]]:
             ).fetchone()
             item["kw_count"] = 0
             item["assoc_count"] = 0
+            item["category_count"] = 0
             item["topic_count"] = 0
             if s1 and s1["data_json"]:
                 try:
@@ -285,6 +286,17 @@ def list_tasks(limit: int = 50) -> list[dict[str, Any]]:
                         item["assoc_count"] = sum(
                             1 for k in kw
                             if isinstance(k, dict) and k.get("kind") != "category"
+                        )
+                        # User-added category keywords (excludes the auto '不限定品类'
+                        # default). A task whose only content is manually-added
+                        # categories must still qualify as "has data" on reload, otherwise
+                        # bridgeEnsureRun skips it and the categories vanish (in-memory
+                        # pool is empty on a fresh page load).
+                        item["category_count"] = sum(
+                            1 for k in kw
+                            if isinstance(k, dict)
+                            and k.get("kind") == "category"
+                            and (k.get("text") or "") != "不限定品类"
                         )
                 except json.JSONDecodeError:
                     pass

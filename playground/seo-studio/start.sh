@@ -109,14 +109,20 @@ load_env() {
     HERMES_GATEWAY_KEY="$API_SERVER_KEY"
   fi
 
+  # Studio root (stock image module + Bridge scripts live here)
+  : "${SEO_STUDIO_DIR:=$ROOT}"
+
   export SEO_PROFILE="$PROFILE"
   export SEO_PROFILE_DIR="$PROFILE_DIR"
   export SEO_BRIDGE_HOST SEO_BRIDGE_PORT SEO_GATEWAY_PORT
-  export SEO_SKILL_DIR SEO_RUNS_DIR SEO_STUDIO_HTML
+  export SEO_SKILL_DIR SEO_RUNS_DIR SEO_STUDIO_HTML SEO_STUDIO_DIR
   export HERMES_GATEWAY_BASE HERMES_GATEWAY_KEY
   export API_SERVER_ENABLED API_SERVER_PORT
   export SEO_LLM_BASE_URL SEO_LLM_API_KEY SEO_LLM_MODEL
   export HERMES_HOME="$PROFILE_DIR"
+  # Pass stock image API keys through if present in .env (never hardcode).
+  export UNSPLASH_ACCESS_KEY="${UNSPLASH_ACCESS_KEY:-}"
+  export PEXELS_API_KEY="${PEXELS_API_KEY:-}"
 }
 
 venv_usable() {
@@ -277,6 +283,7 @@ start_bridge() {
   exec env \
     SEO_SKILL_DIR="$SEO_SKILL_DIR" \
     SEO_RUNS_DIR="$SEO_RUNS_DIR" \
+    SEO_STUDIO_DIR="$SEO_STUDIO_DIR" \
     SEO_STUDIO_HTML="$SEO_STUDIO_HTML" \
     SEO_BRIDGE_PORT="$SEO_BRIDGE_PORT" \
     HERMES_GATEWAY_BASE="$HERMES_GATEWAY_BASE" \
@@ -285,6 +292,8 @@ start_bridge() {
     SEO_LLM_BASE_URL="${SEO_LLM_BASE_URL:-}" \
     SEO_LLM_API_KEY="${SEO_LLM_API_KEY:-}" \
     SEO_LLM_MODEL="${SEO_LLM_MODEL:-glm-5.2}" \
+    UNSPLASH_ACCESS_KEY="${UNSPLASH_ACCESS_KEY:-}" \
+    PEXELS_API_KEY="${PEXELS_API_KEY:-}" \
     "$PYTHON" -m uvicorn server:app \
       --host "$SEO_BRIDGE_HOST" --port "$SEO_BRIDGE_PORT" >>"$log_file" 2>&1
 }

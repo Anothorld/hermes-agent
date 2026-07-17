@@ -73,11 +73,47 @@ def close_session(
     When ``close_escalations`` is True (spam/irrelevant close flow), any open
     awaiting_answer / resuming escalations for this session are also resolved
     so the operator's single "关闭工单" action fully tears down the ticket.
+
+    **Tag-before-close ordering (fixed 2026-07-17):** The reviewed handoff
+    (which updates QuickCEP tags) is applied *before* ``leave-chat`` closes the
+    session.  QuickCEP silently drops tag changes on sessions that have already
+    received ``chat_end`` — the API returns HTTP 200 but does not persist the
+    new tags.  Applying tags first ensures AI-已结案 is actually written.
     """
     cli = _quickcep_cli_path()
     if not cli.is_file():
         return {"ok": False, "error": "quickcep_cli_not_found", "path": str(cli)}
 
+    # ── Step 1: Apply reviewed handoff (tags + note) WHILE the session is still open.
+    #    QuickCEP does not persist tag changes after chat_end.
+    reviewed: Optional[dict[str, Any]] = None
+    in_cal = True
+    if mark_reviewed:
+        sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
+        if not sess:
+            in_cal = False
+        elif str(sess.get("status") or "") != "reviewed":
+            op_label = (operator_name or operator_id or "Console").strip()
+            hint = note.strip() or "操作员在工单台结束 QuickCEP 工单"
+            reviewed = apply_handoff(
+                quickcep_session_id=quickcep_session_id,
+                phase="reviewed",
+                env=env,
+                context={
+                    "actions_taken": f"{op_label} 结束 QuickCEP 工单",
+                    "operator_hint": hint,
+                    "customer_need": note.strip(),
+                },
+            )
+            if not reviewed.get("ok"):
+                log.warning(
+                    "reviewed handoff failed before close session=%s: %s",
+                    quickcep_session_id,
+                    reviewed.get("error"),
+                )
+                # Proceed to close the session anyway — don't leave it open.
+
+    # ── Step 2: Close the QuickCEP session (leave-chat → chat_end).
     proc = subprocess.run(
         [sys.executable, str(cli), "leave-chat", quickcep_session_id],
         capture_output=True,
@@ -103,44 +139,18 @@ def close_session(
             "error": "quickcep_close_failed",
             "error_detail": err,
             "quickcep": payload,
+            "reviewed": reviewed,
             "stderr": (proc.stderr or "")[:500],
         }
 
-    reviewed: Optional[dict[str, Any]] = None
-    if mark_reviewed:
-        sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
-        if not sess:
-            return {
-                "ok": True,
-                "quickcep": payload,
-                "reviewed": None,
-                "warning": "session_not_in_cal",
-            }
-        if str(sess.get("status") or "") != "reviewed":
-            op_label = (operator_name or operator_id or "Console").strip()
-            hint = note.strip() or "操作员在工单台结束 QuickCEP 工单"
-            reviewed = apply_handoff(
-                quickcep_session_id=quickcep_session_id,
-                phase="reviewed",
-                env=env,
-                context={
-                    "actions_taken": f"{op_label} 结束 QuickCEP 工单",
-                    "operator_hint": hint,
-                    "customer_need": note.strip(),
-                },
-            )
-            if not reviewed.get("ok"):
-                log.warning(
-                    "QuickCEP closed but reviewed handoff failed session=%s: %s",
-                    quickcep_session_id,
-                    reviewed.get("error"),
-                )
-                return {
-                    "ok": True,
-                    "quickcep": payload,
-                    "reviewed": reviewed,
-                    "warning": "reviewed_handoff_failed",
-                }
+    # If the session was never in CAL, return with a warning (but session is closed).
+    if mark_reviewed and not in_cal:
+        return {
+            "ok": True,
+            "quickcep": payload,
+            "reviewed": None,
+            "warning": "session_not_in_cal",
+        }
 
     cal.write_event(
         quickcep_session_id=quickcep_session_id,

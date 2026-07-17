@@ -6,15 +6,16 @@ MCP. Credentials are read from the profile ``config.yaml``
 (``mcp_servers.wordpress.env``) — the single source of truth — with environment
 variables taking precedence when present.
 
-Images are referenced by their original URL (no media-library upload) for the
-MVP; this keeps the export fast and avoids downloading remote assets on the
-operator's click. Set ``skip_image_upload=False`` to sideload into WP Media.
+Images are sideloaded into the WP Media Library by default so the first image
+becomes the featured image. Set ``skip_image_upload=True`` to keep original
+remote URLs instead (no featured image will be set).
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import json
 from pathlib import Path
 from typing import Any
 
@@ -187,7 +188,7 @@ def publish_draft(
     html_path: str | None = None,
     category_id: int | None = None,
     tag_ids: list[int] | None = None,
-    skip_image_upload: bool = True,
+    skip_image_upload: bool = False,
     status: str = "draft",
 ) -> dict[str, Any]:
     """Create a WordPress draft from the SEO blog HTML.
@@ -195,6 +196,11 @@ def publish_draft(
     Delegates to ``wordpress_mcp.publisher.create_draft_from_html`` so the
     article body, SEO meta (Rank Math), FAQ schema, slug and featured image are
     extracted exactly as the agent's MCP tool does it.
+
+    After the draft is created, a post-processing step injects the FAQ schema
+    into Rank Math's ``rank_math_schema`` meta field (the publisher only puts
+    it under a non-standard ``faq_schema_json`` key which Rank Math ignores),
+    so the FAQ block shows up in Rank Math's Schema Generator.
 
     Args:
         html_content: Full blog template HTML (preferred). Parser extracts
@@ -204,8 +210,9 @@ def publish_draft(
         html_path: Path to an HTML file (alternative to html_content).
         category_id: Override default WP category. None → config default.
         tag_ids: Override default tags. None → config default.
-        skip_image_upload: True (default) keeps original image URLs (MVP — no
-            media-library sideload). False downloads + uploads each image.
+        skip_image_upload: False (default) downloads + uploads each image to
+            the WP Media Library so the first image becomes the featured image.
+            True keeps original URLs (no featured image will be set).
         status: WP post status (draft by default).
 
     Returns:
@@ -228,7 +235,7 @@ def publish_draft(
     if errors:
         raise RuntimeError("WordPress config invalid: " + "; ".join(errors))
     client = WPClient(cfg)
-    return publisher.create_draft_from_html(
+    result = publisher.create_draft_from_html(
         client,
         cfg,
         html_path=html_path,
@@ -238,3 +245,57 @@ def publish_draft(
         tag_ids=tag_ids,
         skip_image_upload=skip_image_upload,
     )
+
+    _inject_rank_math_faq_schema(client, cfg, result, html_content, html_path)
+    return result
+
+
+def _inject_rank_math_faq_schema(
+    client: Any,
+    config: Any,
+    result: dict[str, Any],
+    html_content: str | None,
+    html_path: str | None,
+) -> None:
+    """Write FAQ schema into Rank Math's ``rank_math_schema`` post meta.
+
+    The publisher stores FAQ JSON-LD under ``faq_schema_json`` which Rank Math
+    does not read. Rank Math stores schema data in the ``rank_math_schema``
+    meta field as a JSON object keyed by schema type. This helper re-parses
+    the source HTML for the FAQ JSON-LD, wraps it in Rank Math's expected
+    format, and updates the post meta via the REST API.
+
+    Best-effort: silently skips if there is no FAQ data or the update fails.
+    """
+    if not result or not result.get("post_id"):
+        return
+    if config.seo_plugin != "rankmath":
+        return
+    try:
+        from wordpress_mcp.parser import parse_html_content, parse_html_file  # type: ignore
+    except ImportError:
+        return
+    try:
+        if html_path:
+            parsed = parse_html_file(html_path)
+        elif html_content:
+            parsed = parse_html_content(html_content)
+        else:
+            return
+    except Exception:
+        return
+    faq_data = parsed.get("faq_data")
+    if not faq_data or not faq_data.get("mainEntity"):
+        return
+    # Rank Math stores schemas in rank_math_schema as { "FAQPage-<hash>": { "@type": "FAQPage", ... } }
+    import hashlib
+    schema_key = "FAQPage-" + hashlib.md5(
+        json.dumps(faq_data, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:8]
+    rank_math_schema = {schema_key: faq_data}
+    try:
+        client.update_post(result["post_id"], {
+            "meta": {"rank_math_schema": json.dumps(rank_math_schema, ensure_ascii=False)},
+        })
+    except Exception:
+        pass

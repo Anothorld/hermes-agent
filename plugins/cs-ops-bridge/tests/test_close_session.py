@@ -95,6 +95,40 @@ def test_close_session_success_and_reviewed(close_module, monkeypatch, tmp_path,
     assert sess["status"] == "pending"  # handoff mocked — status unchanged
 
 
+def test_close_session_applies_tags_before_leave_chat(close_module, monkeypatch, tmp_path):
+    """Tags must be applied BEFORE leave-chat closes the session.
+
+    QuickCEP silently drops tag changes on sessions that have already received
+    chat_end.  This test verifies the ordering: apply_handoff is called before
+    subprocess.run (leave-chat).
+    """
+    _stub_cli(tmp_path, monkeypatch, close_module)
+
+    call_order: list[str] = []
+
+    def fake_run(argv, **kwargs):
+        call_order.append("leave-chat")
+        return type("P", (), {"returncode": 0, "stdout": json.dumps({"ok": True}), "stderr": ""})()
+
+    monkeypatch.setattr(close_module.subprocess, "run", fake_run)
+
+    def fake_handoff(**kwargs):
+        call_order.append("apply_handoff")
+        return {"ok": True, "phase": "reviewed"}
+
+    monkeypatch.setattr(close_module, "apply_handoff", fake_handoff)
+
+    result = close_module.close_session(
+        quickcep_session_id="qc-close",
+        operator_id="op1",
+        operator_name="Arnold",
+    )
+    assert result["ok"] is True
+    # apply_handoff must come before leave-chat
+    assert call_order[0] == "apply_handoff"
+    assert call_order[1] == "leave-chat"
+
+
 def test_close_session_quickcep_failure(close_module, monkeypatch, tmp_path):
     _stub_cli(tmp_path, monkeypatch, close_module)
 

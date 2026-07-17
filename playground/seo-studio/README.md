@@ -54,6 +54,22 @@ Other modes: `./start.sh bridge` (UI only) · `./start.sh gateway` (agent only) 
 | `GET /api/tasks/{id}/steps/{n}/agent/status` | Poll gateway run status |
 | `GET /api/tasks/{id}/steps/{n}/agent/progress` | Live progress rows (read-only) |
 | `GET /api/wordpress/health` | WP connection config + REST/auth status (no secrets) |
+| `GET /api/stock-images/health` | Unsplash/Pexels key presence (no secrets) |
+| `POST /api/stock-images/search` | Body `{query, source?, per_page?}` → candidate pool for section images |
+| `GET /api/povison-products/health` | POVISON catalog Search API reachability (no secrets; storeId=3) |
+| `POST /api/povison-products/search` | Body `{keyword, limit?}` → candidates with image + tags |
+| `POST /api/povison-products/lookup` | Body `{url, sku?, variant?}` → name, url, image, specs, dimensions |
+| `POST /api/povison-products/recommend` | Body `{topic: {primary_keyword, secondary_keywords, category_keywords}, sections: [...], limit?}` → `products[]` ready for `articleState.products` (with image + fit_score) |
+| `POST /api/povison-products/scrape` | Body `{url}` → fallback PDP scrape (JSON-LD Product) |
+| `POST /api/povison-products/enrich-image` | Body `{url}` → `{ok, image, name?}` (Detail API first, scrape fallback) |
+| `POST /api/povison-products/enrich-batch` | Body `{products: [{url, name?}]}` → updated products with `image` filled where missing |
+| `GET /api/povison-blog/health` | POVISON blog sitemap reachability + cached article count (no secrets) |
+| `POST /api/povison-blog/search` | Body `{keyword, limit?}` → ranked blog articles `{url, slug, title_guess, category, score, reasons}` |
+| `POST /api/povison-blog/recommend-links` | Body `{topic: {primary_keyword, secondary_keywords, category_keywords}, sections, existing_urls?, limit?}` → `links[]` ready for `articleState.links` (all URLs real povison.com/blog/ articles from the sitemap) |
+| `POST /api/povison-blog/verify` | Body `{url}` → `{ok, verified, url, article?}` — is this a real povison.com/blog/ article? |
+| `GET /api/povison-placements/health` | Placement-guard reachability (probes one povison URL) |
+| `POST /api/povison-placements/verify-urls` | Body `{urls: ["..."], workers?}` → parallel HTTP liveness check (HEAD→GET, 10s timeout, povison host whitelist). Returns `{ok, checked_at, total, dead_count, results: [{url, live, status_code, final_url, error}]}` |
+| `POST /api/tasks/{task_id}/steps/3/verify-placements` | Verify all product + link URLs in the task's step-3 articleState are live; writes `articleState.placementUrlCheck` and forces `placementsConfirmed=false` if any dead |
 | `POST /api/tasks/{id}/wordpress/draft` | Export the task's article to WordPress as a draft (reuses `wordpress_mcp`) |
 | `POST /api/runs` | *(legacy)* Create a run directory |
 | `GET/PUT /api/runs/{id}/file/{name}` | *(legacy)* Read/write run artifacts |
@@ -101,6 +117,8 @@ resets to「全部来源」, and the view switches to Step 1 so operators see re
 **Keyword kinds (Step 1):** keywords are split into two groups:
 - **品类关键词 (category, top section)** — manually added; each has an on/off toggle that controls whether it participates in the next brainstorm. A built-in `不限定品类` row always exists (default **off**, not removable); turning it on means "no category anchor". Multiple enabled categories are **merged into one topic set** per brainstorm run.
 - **联想关键词 (associative, bottom section, collapsed by default)** — produced by `keyword-discovery.py` / import. Each has a binary **必定包含 / 必定排除** toggle (replaces the old 0–1 weight slider): 必定包含 = in the random pool (default for new/imported); 必定排除 = never used.
+
+**Keyword pool is global & survives reloads:** category + associative keywords and their toggle states are shared across all tasks. On a fresh page load the in-memory pool is empty, so `bridgeEnsureRun` adopts the task with the richest pool — `hasPool` counts associative keywords, topics, **and** user-added category keywords (excluding the auto `不限定品类`), and among candidates it prefers the highest `kw_count`. A `recoverCategoryKeywords` safety net then scans other tasks' step-1 data for any user-added categories the chosen task lacks and merges them in, so manually-added categories never vanish across sessions.
 
 **Brainstorm (Step 2) trigger:** requires ≥1 enabled category AND ≥1 associative 必定包含 keyword. The brainstorm builds topics **around the enabled category keywords**, randomly combining 3–8 associative keywords per topic. The Agent path is primary; the script fallback (`topic-brainstorm.py --categories`) mirrors the same logic.
 
@@ -164,15 +182,49 @@ Copy `.env.example` → `.env` and set `SEO_LLM_API_KEY` before running brainsto
   The UI renders each cluster with its top results; gaps render as chips. This SERP
   output is the reference input for the next sub-step (outline generation).
 - **Image policy (Step 3):** the agent inserts two kinds of images, from strictly separate sources so they never conflict:
-  - **Body images** — `articleState.sections[].images = [{url, alt, caption, credit}]`. Source MUST be
-    Unsplash or Pexels (license-free). The agent searches via web/browser for a direct image URL that
-    matches the section topic; skips a section if no good match (never forces a wrong image). Never
-    duplicates an image across sections.
-  - **Product images** — `articleState.products[].image = <POVISON product image URL>`. Source MUST be
-    POVISON (povison.com), fetched via the `povison_product` tool or by browsing the product page. If a
-    product image cannot be found, `image` is left empty (never substituted with a stock photo).
-  - The UI renders body images as `<figure>` after each section's text and product images as a distinct
-    `product-figure` block. The preview template styles both (`.article-figure` / `.article-figure.product-figure`).
+  - **Body images** — `articleState.sections[].images = [{url, alt, caption, credit}]` plus
+    `section.image_queries = [2–3 concrete English phrases]` (P0). Source MUST be
+    Unsplash or Pexels via the **candidate pool** (P1):
+    `python3 scripts/search-stock-images.py -q "..." -n 5` or
+    `POST /api/stock-images/search`. The agent may only pick from returned candidates —
+    never invent URLs / browser-scrape. Hard rules: photo must show furniture / room /
+    layout; forbid moving-box close-ups, handshakes, abstract textures, unrelated outdoors,
+    portraits with no furniture. Skip (`images=[]`) if no good match. Never duplicate URLs.
+  - **API keys:** `UNSPLASH_ACCESS_KEY` and/or `PEXELS_API_KEY` in `.env` (see `.env.example`).
+    Health: `GET /api/stock-images/health`.
+  - **Product images** — `articleState.products[].image = <POVISON product image URL>` and
+    `products[].url = <PDP URL>`. Source MUST be POVISON (povison.com). The preferred path is the
+    POVISON catalog API (keyword search → Detail API takes the main image); PDP scraping is a
+    fallback only when the Detail API fails. If a product image cannot be found, `image` is left
+    empty (never substituted with a stock photo).
+  - **UI buttons (Placements panel):**
+    - **生成推荐** — the single primary entry. Launches the Hermes Agent for the placements
+      substep; the agent prompt instructs it to call BOTH `povison-catalog.py recommend`
+      (products) AND `povison-blog.py recommend-links` (internal links) and write both into
+      `articleState` in one shot — real URLs only (PDP `/<slug>.html?variant=<id>`, blog
+      `/blog/<cat>/<slug>.html`), with images + fit scores + blurbs. Operator then reviews
+      each card (accept/reject/edit).
+    - **补全缺图** — calls `POST /api/povison-products/enrich-batch` for products that have a
+      `url` but no `image`; fills `image` from the Detail API (scrape fallback).
+    - **校验链接有效性** — calls `POST /api/tasks/{id}/steps/3/verify-placements` which does a
+      parallel HTTP liveness check (HEAD→GET, 10s timeout, povison host whitelist) on every
+      product + link URL. Dead URLs (4xx/5xx/unreachable) are written to
+      `articleState.placementUrlCheck` and the **确认，写 FAQ** button stays disabled until
+      they're fixed and re-verified. This is the second guard rail — it catches real-shaped but
+      dead URLs (retired products, unpublished articles) that the pattern validator misses.
+  - **URL validation (root-cause fix for 404 placements):** two guard rails.
+    1. **Pattern check** (on every save of step-3 data): `products[].url` must be a povison PDP
+       (`.html` + povison host); `links[].url` must be `https://www.povison.com/blog/<...>.html`.
+       Fabricated URLs → `articleState.placementWarnings` + confirm disabled.
+    2. **Liveness check** (operator-triggered via 「校验链接有效性」): parallel HTTP probe of
+       every URL; dead URLs → `articleState.placementUrlCheck` + confirm disabled.
+    Both render in a red banner listing each offending URL with its HTTP status.
+  - Export renders each product as a centered `<figure>`: **image and caption both link to the
+    PDP**; caption text is the product name (e.g. `Povison Ansel-…`), matching
+    [published blog figures](https://www.povison.com/blog/buying-guide/low-profile-tv-stand.html).
+    WordPress draft export also pre-enriches any product still missing an image before publishing.
+  - The UI renders body images as centered `<figure>` after each section's text and product images
+    immediately after that section's lifestyle images.
   - The blog template **no longer** includes the legacy footer gallery (`Visual Inspiration` / 10 stock
     Pexels tiles). Preview and WordPress export end after the article body (+ hero in the full preview shell).
 
@@ -190,9 +242,24 @@ Copy `.env.example` → `.env` and set `SEO_LLM_API_KEY` before running brainsto
     (`WP_BASE` / `WP_USER` / `WP_APP_PASS` / `WP_CATEGORY_ID` / `WP_TAG_IDS` / `SEO_PLUGIN`) — the single
     source of truth. Environment variables override config.yaml when set. The Application Password is
     never hardcoded; `wp_publish.py` only reads it at runtime.
-  - **Images:** referenced by their original URL (no media-library sideload) for the MVP — fast and
-    avoids downloading remote assets on the operator's click. Pass `{"skip_image_upload": false}` in
-    the request body to sideload each image into the WP Media Library (and set the first as featured).
+  - **Images:** by default images are downloaded and sideloaded into the WP Media Library so
+    the first image becomes the **featured image** (post cover). Pass `{"skip_image_upload": true}`
+    in the request body to keep original URLs instead (no featured image will be set). All
+    `<figure>`/`<img>`/`<figcaption>` tags use **`wp-block-image aligncenter`** (WordPress-native)
+    plus inline centering styles as fallback. Already-generated articles do **not** need full
+    regeneration — restart Bridge, then re-export the WordPress draft (or re-assemble preview).
+  - **Markdown tables:** section content may contain GFM pipe tables (`| col | col |`). The export
+    path converts them to real HTML `<table>` (via the `markdown` package, with a pipe-table
+    fallback). Without this, WordPress would show raw `|` text.
+  - **Table of Contents:** a TOC block (Rank Math–style `h2` title + body-sized underlined
+    links) is auto-generated from Introduction, body H2s, Conclusion, and nested Q&A
+    questions (≥2 entries required) and inserted after the intro. Each heading gets an `id`
+    anchor. Styled to match published posts such as the
+    [low-profile TV stand guide](https://www.povison.com/blog/buying-guide/low-profile-tv-stand.html).
+  - **FAQ / Q&A:** heading is **`Q&A`** (`id="q-a"`). Questions are `h3` (~1.25em) and answers
+    are body-sized paragraphs — not the older small gray accordion look. Plain HTML only
+    (no forged Rank Math Gutenberg FAQ block). Schema still via template JSON-LD /
+    `rank_math_schema` post meta best-effort.
   - **Category/tags:** defaults come from `WP_CATEGORY_ID` / `WP_TAG_IDS`; override per-export by passing
     `category_id` (int) and `tag_ids` (list[int]) in the request body.
   - **Health:** `GET /api/wordpress/health` reports config presence + REST/auth status (no secrets) for
@@ -243,6 +310,50 @@ python3 scripts/import-legacy-runs.py
 ```
 
 Imported tasks keep the original `run-*` id so script shadow paths stay aligned. Re-import with `--force` or `{"force": true}` to overwrite.
+
+### POVISON catalog CLI (agent tool)
+
+`scripts/povison-catalog.py` exposes the catalog API to the agent without needing the Bridge HTTP server up:
+
+```bash
+# keyword search → candidates (name, url, image, tags)
+python3 scripts/povison-catalog.py search -q "low profile tv stand" -n 8
+
+# PDP URL → detail (Detail API): name, url, image, specs, dimensions
+python3 scripts/povison-catalog.py lookup --url "https://www.povison.com/..."
+
+# PDP URL → JSON-LD Product fallback (when Detail API fails)
+python3 scripts/povison-catalog.py scrape --url "https://www.povison.com/..."
+
+# PDP URL → best-effort {image, name} (Detail API then scrape)
+python3 scripts/povison-catalog.py enrich --url "https://www.povison.com/..."
+
+# topic + sections → scored products[] ready for articleState.products
+python3 scripts/povison-catalog.py recommend \
+  --topic '{"primary_keyword":"low profile tv stand","secondary_keywords":["modern tv stand"]}' \
+  --sections /tmp/sections.json --limit 2
+```
+
+Set `SEO_STUDIO_DIR` if running from elsewhere. The same operations are available over HTTP via `/api/povison-products/*` (see API table above).
+
+### POVISON blog internal-link CLI (agent tool)
+
+`scripts/povison-blog.py` exposes the blog-sitemap search to the agent without needing the Bridge HTTP server up. Internal links MUST come from here (or `/api/povison-blog/*`) — fabricating `povison.com/blog/` URLs is forbidden (they 404):
+
+```bash
+# keyword → ranked real blog articles
+python3 scripts/povison-blog.py search -q "sofa bed materials" -n 5
+
+# is this URL a real povison.com/blog/ article?
+python3 scripts/povison-blog.py verify --url "https://www.povison.com/blog/buying-guide/sofa-bed-vs-sleeper-sofa-essential-differences.html"
+
+# topic + sections → 2-3 internal links ready for articleState.links
+python3 scripts/povison-blog.py recommend-links \
+  --topic '{"primary_keyword":"sofa bed","secondary_keywords":["sleeper sofa"]}' \
+  --sections /tmp/sections.json --limit 3
+```
+
+The sitemap is cached on disk (`.cache/blog_sitemap.xml`, TTL ~6h); pass `--refresh` to `search` to force-refresh. Same operations over HTTP via `/api/povison-blog/*`.
 
 ## Sync with standalone UI
 

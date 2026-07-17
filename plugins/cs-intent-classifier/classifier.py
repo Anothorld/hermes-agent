@@ -999,6 +999,16 @@ def _coerce_llm_nulls(d: dict[str, Any]) -> dict[str, Any]:
         d["customer_region"] = {"country": None, "province_state": None, "source": "unknown", "confidence": "low"}
         if "customer_region" not in (d.get("null_fields") or []):
             d.setdefault("null_fields", []).append("customer_region")
+    # Customer region sub-fields may be null even when the dict exists (LLM returns
+    # {"country": "US", "province_state": null, "source": null, "confidence": null}).
+    # Coerce nulls to schema-safe defaults to prevent pydantic ValidationError.
+    cr = d.get("customer_region")
+    if isinstance(cr, dict):
+        if cr.get("confidence") is None:
+            cr["confidence"] = "low"
+        if cr.get("source") is None:
+            cr["source"] = "unknown"
+        d["customer_region"] = cr
     if d.get("emotion") is None:
         d["emotion"] = {"value": "neutral", "confidence": "low"}
     # Emotion sub-fields may be null even when the dict exists (LLM returns

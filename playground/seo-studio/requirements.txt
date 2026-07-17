@@ -8,3 +8,6 @@ beautifulsoup4>=4.12,<5
 requests>=2.31,<3
 pyyaml>=6,<7
 itsdangerous>=2.1,<3
+# Markdown → HTML for WP export (GFM tables, lists, links). Without this,
+# pipe tables land in WordPress as raw "| col | col |" paragraphs.
+markdown>=3.5,<4

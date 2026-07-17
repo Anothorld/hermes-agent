@@ -363,7 +363,7 @@ def metrics_trend(
                       COUNT(DISTINCT c.session_id) AS n
                FROM cs_intent_corrections c
                WHERE c.env=? AND c.created_at >= ? AND c.created_at < ?
-                 AND c.predicted_json != '{}'
+                 AND c.predicted_json != '{{}}'
                  AND json_extract(c.predicted_json, '$.primary_intent')
                      IS NOT json_extract(c.corrected_json, '$.primary_intent'){num_intent_clause}
                GROUP BY d ORDER BY d""",
