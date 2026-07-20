@@ -233,6 +233,9 @@ On failure, JSON includes `failed_step` (`getUserInfo` or `joinChat`) and `error
 | POST | `/internal/run-finished` | key | Gateway `on_session_end` callback for resume failure detection |
 | POST | `/sessions/{id}/close` | key | QuickCEP `leave-chat` + optional CAL `reviewed` (Console **结束工单**). Body `close_escalations=true` (垃圾/无关关闭流程) 同时 resolve 该会话所有 open 升级 |
 | POST | `/sessions/unassign-all` | key | **下班** flow: uses operator's QuickCEP credentials to list sessions assigned to them and call `batchLeaveChat` for each. Token-cache safe (`--token` passthrough, no AI account cache overwrite). |
+| POST | `/admin/pause` | key | **下班** global pause: sets a flag in `cs_poller_state` so `quickcep_watcher._launch_for_message` skips ALL new AI launches (SIO + REST). In-flight runs complete naturally. Prevents new drafts → new escalations on off-hours. |
+| POST | `/admin/resume` | key | **开工** global resume: clears the pause flag so new AI launches resume. |
+| GET | `/admin/pause-status` | — | Read-only: returns the current global pause flag (no key required). |
 
 **Close confirmation:** Email sessions record `leaveChat` in message history; live chat uses `chat_end`. Bridge `close_session.py` and profile `quickcep_cli leave-chat` accept both; legacy CLI-only `chat_end` checks caused false `chat_end_not_confirmed`.
 

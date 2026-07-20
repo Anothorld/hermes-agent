@@ -326,6 +326,14 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     if not session_id:
         return None
 
+    # ── Global pause (下班) ────────────────────────────────────────
+    # When the operator clicks 下班, the Console sets a global pause flag.
+    # Skip ALL new launches (SIO + REST); in-flight runs complete naturally.
+    # This prevents new AI drafts → new escalations on off-hours.
+    if cal.is_globally_paused():
+        log.info("skip launch session %s — globally paused (下班)", session_id)
+        return None
+
     if not inbound_payload_is_email(info):
         log.info(
             "skip launch session %s non_email channel=%s",

@@ -526,8 +526,20 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .bs-keywords { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; min-height: 36px; }
 .bs-keyword-tag { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-tertiary); border-radius: var(--r-sm); padding: 6px 12px; font-size: 13px; font-weight: 500; }
 .bs-keyword-tag.bs-cat-tag { background: rgba(0,113,227,0.12); color: var(--accent); border: 1px solid rgba(0,113,227,0.25); }
+.bs-keyword-tag.bs-locked { background: rgba(234,179,8,0.12); border: 1px solid rgba(234,179,8,0.35); }
 .bs-keyword-tag .tag-x { cursor: pointer; color: var(--text-tertiary); font-size: 15px; line-height: 1; }
 .bs-keyword-tag .tag-x:hover { color: var(--danger); }
+.bs-keyword-tag .bs-kw-ops { display: inline-flex; align-items: center; gap: 1px; margin-left: 4px; }
+.bs-keyword-tag .bs-kw-op {
+  border: none; background: transparent; cursor: pointer; line-height: 0;
+  color: var(--text-tertiary); padding: 3px; border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.bs-keyword-tag .bs-kw-op svg { width: 13px; height: 13px; display: block; pointer-events: none; }
+.bs-keyword-tag .bs-kw-op:hover { background: rgba(0,0,0,0.06); color: var(--text-primary); }
+.bs-keyword-tag .bs-kw-op.danger:hover { color: var(--danger); background: rgba(255,59,48,0.08); }
+.bs-keyword-tag .bs-kw-op.lock-on { color: #a16207; background: rgba(234,179,8,0.18); }
+.bs-keyword-tag .bs-kw-op.lock-on:hover { color: #854d0e; }
 .bs-options { display: flex; gap: 16px; align-items: center; margin-bottom: 16px; }
 .bs-count-group { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
 .bs-count-group input { width: 60px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 6px 10px; font-size: 14px; font-family: var(--sf-font); outline: none; text-align: center; }
@@ -644,6 +656,11 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 .wb-status.edited { background: rgba(255,159,10,0.12); color: var(--warning); }
 .wb-card-body { padding: 16px 18px; }
 .wb-hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.45; }
+.wb-stale-banner {
+  background: rgba(234,179,8,0.10); border: 1px solid rgba(234,179,8,0.35); color: #854d0e;
+  border-radius: 8px; padding: 8px 12px; margin: 0 0 12px; font-size: 12px; line-height: 1.5;
+  display: flex; align-items: center; gap: 6px;
+}
 .wb-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .wb-actions .spacer { flex: 1; }
 
@@ -1090,12 +1107,13 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
         <div class="brainstorm-input">
           <div class="bs-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>已选关键词</span>
-            <button type="button" class="btn btn-secondary btn-sm" onclick="rerollKeywords()" title="重新随机关键词" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="rerollKeywords()" title="换一批：只替换未锁定的联想关键词" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="16" cy="8" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="8" cy="16" r="1.2" fill="currentColor"/><circle cx="16" cy="16" r="1.2" fill="currentColor"/></svg>
               换一批
             </button>
           </div>
           <div class="bs-keywords" id="bsKeywords"></div>
+          <p class="wb-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-tertiary);">联想词操作：<b>移除</b>=本次头脑风暴不用 · <b>删除</b>=从关键词库永久删掉 · <b>锁定</b>=换一批时保留</p>
           <div class="bs-options">
             <div class="bs-count-group">
               生成数量
@@ -1476,8 +1494,8 @@ const RULE_BLOCKS = [
   { id: 'placements', label: '产品与内链', desc: '推荐产品植入与内链时注入', inject: 'mode=placements' },
   { id: 'faq', label: 'FAQ', desc: '生成 FAQ 时注入', inject: 'mode=faq' },
   { id: 'meta', label: 'SEO 元信息', desc: '生成 Meta Title / Description / Slug 时注入', inject: 'mode=meta' },
-  { id: 'listicle', label: '榜单类（Top/Best）', desc: '仅当主题为榜单类时生效；随大纲/正文/植入一起注入（规则自带"若为榜单类"前提）', inject: 'outline+h2+placements 时追加' },
-  { id: 'images', label: '配图', desc: '配图与产品图规则；含 image_queries + stock API 候选池约束；随全局与 Meta 一起注入', inject: 'global+meta 时追加' },
+  { id: 'listicle', label: '榜单类（Top/Best）', desc: '仅当主题为榜单类时生效；随大纲/正文各块/植入/FAQ 一起注入（规则自带"榜单类"前提，非榜单主题时自然失效）', inject: 'outline+正文+placements+faq 时追加' },
+  { id: 'images', label: '配图', desc: '配图与产品图规则；含 image_queries + stock API 候选池约束；随正文/植入/Meta 一起注入', inject: '正文+placements+meta 时追加' },
 ];
 
 const PROMPT_TEMPLATES = {
@@ -1574,54 +1592,50 @@ const PEXELS_HEROES = [
 // #region agent log
 fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:DEFAULT_RULES',message:'JS_EXEC_AFTER_TEMPLATE: reached DEFAULT_RULES (past BLOG_POST_TEMPLATE)',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H7'})}).catch(()=>{});
 // #endregion
-const DEFAULT_RULES_VERSION = '2.3';
+const DEFAULT_RULES_VERSION = '2.4';
+// Defaults for「规则设置」. Cross-block duplicates are folded here:
+//  - Voice / no-keyword-stuffing / no-fabrication → global only
+//  - Listicle-only constraints (Intro H2 标题、Conclusion CTA、FAQ 答案长度) → listicle only
+//  - Product/blog URL authenticity → one placements rule
+//  - Stock image source + visual constraints → one images rule
 const DEFAULT_RULES = {
   global: [
-    { text: '英文输出，美式拼写，统一术语', enabled: true },
-    { text: '使用第二人称 you 直接对话读者', enabled: true },
-    { text: "避免 'A good example is' 句式", enabled: true },
+    { text: '英文输出，美式拼写，统一术语；使用第二人称 you 直接对话读者', enabled: true },
+    { text: "避免 'A good example is' 句式与空洞套话（如 \"In today's world\"）；不堆砌关键词，保持自然语言流畅；段落间逻辑连贯", enabled: true },
     { text: '不借鉴已有 POVISON 博客内容', enabled: true },
     { text: '品牌差异化：提及 fully assembled 时要自然、可验证', enabled: true },
     { text: '所有事实、数据、价格、尺寸、材质必须基于 catalog 或 SERP 真实信息，禁止编造', enabled: true },
-    { text: '不堆砌关键词，保持自然语言流畅度；段落间逻辑连贯，避免突兀跳跃与空洞套话（如 "In today\'s world"）', enabled: true },
   ],
   outline: [
     { text: '4–6 个 H2；前 2–3 个 H2 使用 How/What/Why 问句（定义概念用 What/Why，可操作步骤用 How to，不要强求每条都是问句）', enabled: true },
-    { text: '覆盖 TopicItem.serp_gap 与 angle，包含排名前列博客共同涵盖的内容', enabled: true },
+    { text: '覆盖 TopicItem.serp_gap 与 angle，包含排名前列博客共同涵盖的内容；若与大纲格式冲突，优先 SERP 分析结论', enabled: true },
     { text: '每个关键 H2 下可挂 1–2 个 H3，避免空壳标题', enabled: true },
-    { text: '大纲阶段不写产品硬广，不堆关键词', enabled: true },
+    { text: '大纲阶段不写产品硬广', enabled: true },
     { text: '生成一个含主关键词、贴近搜索者痛点/使用场景或当前热点（如春扫/夏季）的标题，≤10 词（不超过 12 词）', enabled: true },
     { text: '大纲预留 FAQ 占位（数量/措辞见 FAQ 板块规则），避免 FAQ 主题与正文 H2 撞车', enabled: true },
-    { text: '若 SERP 分析结论与大纲格式冲突，优先满足 SERP 分析结果', enabled: true },
   ],
   intro: [
-    { text: '约 90–100 词；首段含 primary_keyword', enabled: true },
+    { text: '约 90–100 词；首段含 primary_keyword；根据主题描述目标读者场景与痛点，交代能获得什么但不剧透全文', enabled: true },
     { text: 'Intro 不加产品链接与内链', enabled: true },
-    { text: '根据主题和主关键词描述目标读者的场景与痛点；交代读者能获得什么，不剧透全文', enabled: true },
-    { text: '榜单类：Intro 需要一个适合主题的简短 H2 标题', enabled: true },
   ],
   h2: [
-    { text: '整篇目标 ≥1500 词；本 H2 写充实；H2 与 H3 之间必须加 40–80 词过渡段（有 H3 时先过渡再展开）；可用 bullet 但保持段落可读（除产品介绍与 buying guide 外少用 bullet）', enabled: true },
-    { text: '全文至少 1 个对比表思路或明确对比段；权威数据 1–2 处（来源机构用英文括号标注并作锚文本链向来源）', enabled: true },
-    { text: '一个段落最多 2 个数据，每个 H2 最多 3 个数据；数据必须真实且出自权威机构/杂志，不得虚构，不引用企业博客数据', enabled: true },
-    { text: '2 处个人体验感使用场景（可虚构但需具体有细节，体现真实感受，不用 picture/imagine 说法；不暗示作者亲自购买/测试过具体产品）', enabled: true },
-    { text: '核心关键词全文 3–5 次；本段不硬塞密度，注意 H2 之间内容不重复', enabled: true },
-    { text: '家具术语保持一致准确，不随意切换（如 media console / TV stand / cabinet 除非有明确区分）', enabled: true },
+    { text: '整篇目标 ≥1500 词；本 H2 写充实；有 H3 时先写 40–80 词过渡段再展开；可用 bullet 但保持段落可读（除产品介绍与 buying guide 外少用 bullet）', enabled: true },
+    { text: '全文至少 1 个对比表或明确对比段；权威数据 1–2 处（来源机构英文括号标注并作锚文本）；每段最多 2 个数据、每个 H2 最多 3 个；仅用权威机构/杂志数据，不引用企业博客', enabled: true },
+    { text: '2 处个人体验感使用场景（可虚构但需具体有细节；不用 picture/imagine；不暗示作者亲自购买/测试过具体产品）', enabled: true },
+    { text: '核心关键词全文 3–5 次；本段不硬塞密度；H2 之间内容不重复；家具术语保持一致（如 media console / TV stand 除非有明确区分）', enabled: true },
     { text: '变化句长、段首与过渡方式；减少连字符/破折号/斜杠/冒号碎片化；避免套路对比句式（It\'s not just X. It\'s Y / Whether X or Y / From X to Y / Not only X but also Y）反复出现', enabled: true },
   ],
   conclusion: [
     { text: '约 90–100 词；总结行动步骤，不引入新论点；可轻点 fully assembled 价值，避免硬 CTA 堆砌', enabled: true },
-    { text: '榜单类：总结如何通过正确家具选择让家更 cozy/comfortable，并用一句话强调 Povison 优势（deeper seating / comfort / ready-to-live-in fully assembled / value for money），结尾 CTA', enabled: true },
   ],
   placements: [
     { text: '每篇 1–2 个 POVISON 产品；文案 40–70 词；链接嵌在产品名上，与文本自然融合，避免突兀介绍与前文无关的卖点', enabled: true },
-    { text: '产品 URL 必须来自「生成推荐」Agent 调用的 catalog API（scripts/povison-catalog.py /api/povison-products/*）；禁止编造 PDP URL（会 404）', enabled: true },
     { text: '内链 2–3 条；每个 H2 最多 1 条；anchor 必须是句中已自然出现的长尾词，禁止 CTA 句式与 "Povison blog"/"this article" 等说明语', enabled: true },
-    { text: '内链 URL 必须来自「生成推荐」Agent 调用的 blog API（scripts/povison-blog.py /api/povison-blog/*，sitemap 真实博客）；禁止编造 blog URL（会 404）', enabled: true },
+    { text: '产品 URL 仅来自 catalog API（scripts/povison-catalog.py /api/povison-products/*），内链 URL 仅来自 blog API（scripts/povison-blog.py /api/povison-blog/*）；禁止编造 URL（会 404）', enabled: true },
     { text: 'POVISON 产品价格：仅用产品页原价/常规价，不把促销/券后/会员价当永久价；无法核实则省略价格', enabled: true },
   ],
   faq: [
-    { text: '4–6 个问答；问题用 H3 展开；答案 40–60 词（榜单类 30–40 词）', enabled: true },
+    { text: '4–6 个问答；问题用 H3 展开；答案 40–60 词（榜单类答案长度见 listicle 板块）', enabled: true },
     { text: '与正文语义重复率 ≤20%；不复读整段；若问题已被正文完整回答则移除', enabled: true },
     { text: '无硬广 CTA；提供额外价值（新场景、决策指导、风险/尺寸/材质区分或实用下一步）；保留 FAQ Schema 友好结构', enabled: true },
   ],
@@ -1632,17 +1646,17 @@ const DEFAULT_RULES = {
     { text: 'focus = primary_keyword', enabled: true },
   ],
   listicle: [
-    { text: '榜单类结构（按顺序）：Title → Introduction(含H2标题,~100词) → 主题相关H2(选择标准/总览) → Quick Summary Table → Best Picks List(默认10个,H3展开) → 信息增量H2(1-2个,问句格式) → Conclusion(≤100词) → FAQ(4-6个,H3展开)', enabled: true },
+    { text: '榜单类结构（按顺序）：Title → Introduction（含适合主题的短 H2 标题；字数见 Intro）→ 主题相关 H2（选择标准/总览）→ Quick Summary Table → Best Picks List（默认 10 个，H3 展开）→ 信息增量 H2（1–2 个，问句格式）→ Conclusion（字数见 Conclusion）→ FAQ（数量见 FAQ；答案 30–40 词）', enabled: true },
     { text: 'Quick Summary Table：列含 Product Name/Best For/Key Features/Price 等，Povison 产品名嵌入链接，表格其余不放链接；表后提示价格随地区/折扣变化', enabled: true },
     { text: 'Best Picks 前 3 名为 Povison 产品，4–10 名可从外部品牌选取（West Elm / CB2 / Article / Pottery Barn / Crate & Barrel / Floyd / Burrow / Joybird / IKEA 等）并附真实产品链接；每个产品块：短标题 + 真实价格 + Best For + Highlights + 亮点(≤100词) + Buyer review', enabled: true },
     { text: '仅其中一个 Povison 产品写 1–2 句个人体验；可含与外部品牌的软性对比（1–2 句）；外部品牌小节语气不得强于 Povison，禁止"更推荐外部品牌"结论', enabled: true },
-    { text: '信息增量可强调 Povison 相对优势（不点名竞品）；若无合适内容可加 Buying Guide（不与前文 criteria 重复）', enabled: true },
+    { text: '信息增量可强调 Povison 相对优势（不点名竞品）；若有合适内容可加 Buying Guide（不与前文 criteria 重复）', enabled: true },
     { text: '榜单类 POV：专业编辑 & 独立评测立场，客观理性但整体略偏 Povison（通过事实与比较体现，非赤裸广告）', enabled: true },
+    { text: '榜单类 Conclusion：总结如何通过正确家具选择让家更 cozy/comfortable，并用一句话强调 Povison 优势（deeper seating / comfort / ready-to-live-in fully assembled / value for money），结尾 CTA', enabled: true },
   ],
   images: [
     { text: '正文配图前先写 section.image_queries：2–3 个具体英文搜图词（家具/房间/布局），禁止用整篇标题或 moving/lifestyle/together 等空泛词', enabled: true },
-    { text: '正文配图必须从 Unsplash/Pexels API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search），禁止编造 URL、禁止浏览器随便抓图', enabled: true },
-    { text: '正文配图必须能看出家具、室内或房间布局；禁止搬家纸箱特写、握手、抽象纹理、无关户外、无家具人像；找不到合格图时 images=[]，同一 URL 不得跨 section 复用', enabled: true },
+    { text: '正文配图必须从 Unsplash/Pexels API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search）；必须能看出家具、室内或房间布局；禁止搬家纸箱特写、握手、抽象纹理、无关户外、无家具人像；禁止编造 URL 或浏览器随便抓图；找不到合格图时 images=[]，同一 URL 不得跨 section 复用', enabled: true },
     { text: '介绍具体 POVISON 产品时，必须在该段正下方放该精确产品官方图；caption 用产品名；图片与 caption 都链接到 product.url；图源仅 catalog API（Detail 优先、爬商详回退），禁止 Unsplash/Pexels/相似产品/第三方图顶替', enabled: true },
     { text: '正文生活图：简洁英文 alt + caption；credit 用候选返回的 Photo: Unsplash/Pexels。产品图 caption 只用产品名，不加库存图 credit', enabled: true },
   ],
@@ -1650,6 +1664,7 @@ const DEFAULT_RULES = {
 
 // ==================== State ====================
 let selectedKeywords = new Set(); // legacy — associative sample texts (kept for compat)
+let lockedKeywords = new Set(); // associative texts kept across 「换一批」
 let selectedCategories = new Set(); // enabled category keyword texts for brainstorm
 let kwFilter = 'all';
 let rules = JSON.parse(JSON.stringify(DEFAULT_RULES));
@@ -1721,7 +1736,7 @@ async function createRun(parentId, forkStep) {
         id: runCounter, taskId: task.task_id, parentId: task.parent_task_id || null,
         forkStep: task.fork_step || null, createdAt: new Date(task.created_at || Date.now()),
         status: task.status || 'idle',
-        keywords: new Set(), kwFilter: 'all', kwCatalog: [],
+        keywords: new Set(), lockedKeywords: new Set(), kwFilter: 'all', kwCatalog: [],
         topics: [], selectedTopics: new Set(),
         genTopic: null, genStatus: null, articleState: null, log: [],
       };
@@ -1737,7 +1752,7 @@ async function createRun(parentId, forkStep) {
   const run = {
     id: runCounter, parentId: parentId || null, forkStep: forkStep || null,
     createdAt: new Date(), status: 'idle',
-    keywords: new Set(), kwFilter: 'all', kwCatalog: [],
+    keywords: new Set(), lockedKeywords: new Set(), kwFilter: 'all', kwCatalog: [],
     topics: [], selectedTopics: new Set(),
     genTopic: null, genStatus: null, articleState: null, log: [],
   };
@@ -1753,6 +1768,11 @@ function getActiveRun() { return runs.find(function(r){return r.id===activeRunId
 function syncFromRun(run) {
   if (!run) return;
   selectedKeywords = new Set(run.keywords);
+  lockedKeywords = new Set(run.lockedKeywords || []);
+  // Drop locks that are no longer in the selected set.
+  lockedKeywords.forEach(function(kw) {
+    if (!selectedKeywords.has(kw)) lockedKeywords.delete(kw);
+  });
   selectedCategories = new Set(run.selectedCategories || []);
   kwFilter = run.kwFilter;
   if (Array.isArray(run.kwCatalog) && run.kwCatalog.length) {
@@ -1769,6 +1789,7 @@ function syncFromRun(run) {
 function saveToRun() {
   var run = getActiveRun(); if (!run) return;
   run.keywords = new Set(selectedKeywords);
+  run.lockedKeywords = new Set(lockedKeywords);
   run.selectedCategories = new Set(selectedCategories);
   run.kwFilter = kwFilter;
   run.kwCatalog = KEYWORDS.slice();
@@ -1816,6 +1837,32 @@ async function persistKeywordsToDB() {
 async function flushKwPersist() {
   if (_kwPersistTimer) { clearTimeout(_kwPersistTimer); _kwPersistTimer = null; }
   await persistKeywordsToDB();
+}
+
+/** Persist brainstorm chip selection (keywords / categories / locks) into step-2. */
+let _bsSelPersistTimer = null;
+function scheduleBsSelectionPersist() {
+  if (_bsSelPersistTimer) clearTimeout(_bsSelPersistTimer);
+  _bsSelPersistTimer = setTimeout(persistBsSelectionToDB, 500);
+}
+async function persistBsSelectionToDB() {
+  try {
+    const rid = activeTaskId || BRIDGE.taskId
+      || (BRIDGE.runId && String(BRIDGE.runId).startsWith('task-') ? BRIDGE.runId : null);
+    if (!rid || !String(rid).startsWith('task-')) return;
+    var existing = {};
+    try { existing = await bridgeFetch('/api/tasks/' + rid + '/steps/2/data') || {}; } catch (e) {}
+    var body = Object.assign({}, existing, {
+      version: existing.version || '1.0',
+      input_keywords: Array.from(selectedKeywords),
+      input_categories: Array.from(selectedCategories),
+      locked_keywords: Array.from(lockedKeywords),
+    });
+    if (!Array.isArray(body.topics)) body.topics = [];
+    await bridgeFetch('/api/tasks/' + rid + '/steps/2/data', {
+      method: 'PUT', body: JSON.stringify(body),
+    });
+  } catch (e) { /* best-effort */ }
 }
 
 // Merge the in-memory articleState (user edits) over the DB articleState
@@ -2006,6 +2053,7 @@ function resetGenerationUI() {
   brainstormTopics = [];
   selectedTopics = new Set();
   selectedKeywords = new Set();
+  lockedKeywords = new Set();
   selectedCategories = new Set();
   articleState = null;
   currentGenTopic = null;
@@ -2188,6 +2236,12 @@ async function loadTaskIntoUI(taskId) {
       if (Array.isArray(topicsDoc.input_categories)) {
         selectedCategories = new Set(topicsDoc.input_categories);
       }
+      // Locked associative keywords (survives reload / 换一批).
+      if (Array.isArray(topicsDoc.locked_keywords)) {
+        lockedKeywords = new Set(topicsDoc.locked_keywords.filter(function(kw) {
+          return selectedKeywords.has(kw);
+        }));
+      }
       renderBsKeywords();
       if (Array.isArray(topicList) && topicList.length) {
         brainstormTopics = topicList.map(function(t, i){ return normalizeTopicItem(t, i + 1); });
@@ -2320,6 +2374,7 @@ function exportRunPackage() {
     kw_weights: Object.assign({}, kwWeights),
     selected_keywords: Array.from(selectedKeywords),
     selected_categories: Array.from(selectedCategories),
+    locked_keywords: Array.from(lockedKeywords),
     selected_topic_id: currentGenTopic ? (currentGenTopic.schema_id || currentGenTopic.id) : null,
     keywords: KEYWORDS.slice(),
     topics: {
@@ -2327,6 +2382,7 @@ function exportRunPackage() {
       generated_at: new Date().toISOString(),
       input_keywords: Array.from(selectedKeywords),
       input_categories: Array.from(selectedCategories),
+      locked_keywords: Array.from(lockedKeywords),
       serp_queries: [],
       topics: brainstormTopics,
     },
@@ -2379,6 +2435,17 @@ function importRunPackage(input) {
       }
       if (Array.isArray(data.selected_categories)) {
         selectedCategories = new Set(data.selected_categories);
+      }
+      if (Array.isArray(data.locked_keywords)) {
+        lockedKeywords = new Set(data.locked_keywords.filter(function(kw) {
+          return selectedKeywords.has(kw);
+        }));
+        renderBsKeywords();
+      } else if (data.topics && Array.isArray(data.topics.locked_keywords)) {
+        lockedKeywords = new Set(data.topics.locked_keywords.filter(function(kw) {
+          return selectedKeywords.has(kw);
+        }));
+        renderBsKeywords();
       }
       if (data.article_state) {
         articleState = data.article_state;
@@ -2527,7 +2594,10 @@ function removeKeyword(text) {
   const idx = KEYWORDS.findIndex(k => k.text === text);
   if (idx >= 0) {
     KEYWORDS.splice(idx, 1);
+    selectedKeywords.delete(text);
+    lockedKeywords.delete(text);
     renderKwList();
+    renderBsKeywords();
     saveToRun();
     showToast('已移除: ' + text, '');
   }
@@ -2746,8 +2816,10 @@ function pickRandomKeywords() {
   );
   // Associative pool: mode === 'include'.
   var pool = KEYWORDS.filter(k => k.kind !== 'category' && (k.mode || 'include') === 'include');
-  if (pool.length === 0) { selectedKeywords.clear(); return false; }
+  if (pool.length === 0) { selectedKeywords.clear(); lockedKeywords.clear(); return false; }
 
+  // Fresh entry to brainstorm: clear previous locks from an earlier session.
+  lockedKeywords.clear();
   selectedKeywords.clear();
   // Random 3-8 (clamped to pool size).
   var numToPick = Math.min(Math.floor(Math.random() * 6) + 3, pool.length);
@@ -2758,18 +2830,35 @@ function pickRandomKeywords() {
 }
 
 function rerollKeywords() {
-  // Keep categories; re-sample associative only.
+  // Keep categories + locked associative keywords; re-sample the rest.
   var pool = KEYWORDS.filter(k => k.kind !== 'category' && (k.mode || 'include') === 'include');
   if (pool.length === 0) { showToast('没有可用联想关键词（全部为必定排除）', ''); return; }
-  selectedKeywords.clear();
-  var numToPick = Math.min(Math.floor(Math.random() * 6) + 3, pool.length);
-  if (numToPick < 1) numToPick = 1;
-  var shuffled = pool.slice().sort(() => Math.random() - 0.5);
-  for (var i = 0; i < numToPick; i++) selectedKeywords.add(shuffled[i].text);
+
+  // Keep locks that are still selected and still in the include pool.
+  var poolTexts = new Set(pool.map(function(k) { return k.text; }));
+  var kept = [];
+  lockedKeywords.forEach(function(kw) {
+    if (selectedKeywords.has(kw) && poolTexts.has(kw)) kept.push(kw);
+    else lockedKeywords.delete(kw);
+  });
+
+  var available = pool.filter(function(k) { return !lockedKeywords.has(k.text); });
+  // Target total size: same 3–8 rule, but never below locked count.
+  var target = Math.min(Math.floor(Math.random() * 6) + 3, pool.length);
+  if (target < kept.length) target = kept.length;
+  var need = Math.max(0, target - kept.length);
+  if (need > available.length) need = available.length;
+
+  selectedKeywords = new Set(kept);
+  var shuffled = available.slice().sort(function() { return Math.random() - 0.5; });
+  for (var i = 0; i < need; i++) selectedKeywords.add(shuffled[i].text);
+
   renderBsKeywords();
   saveToRun();
-  logStep(1, 'reroll', '重新随机联想关键词: ' + Array.from(selectedKeywords).join(', '));
-  showToast('已换 ' + selectedKeywords.size + ' 个联想关键词', 'success');
+  scheduleBsSelectionPersist();
+  var lockNote = kept.length ? '（保留锁定 ' + kept.length + ' 个）' : '';
+  logStep(1, 'reroll', '换一批联想关键词' + lockNote + ': ' + Array.from(selectedKeywords).join(', '));
+  showToast('已换一批：共 ' + selectedKeywords.size + ' 个联想词' + lockNote, 'success');
 }
 
 function goToBrainstorm() {
@@ -2786,6 +2875,7 @@ function goToBrainstorm() {
     saveToRun();
     var newRun = createRun(run.id, 1);
     newRun.keywords = new Set(selectedKeywords);
+    newRun.lockedKeywords = new Set(lockedKeywords);
     newRun.selectedCategories = new Set(selectedCategories);
     logStep(1, 'complete', '围绕品类 [' + Array.from(selectedCategories).join(', ') + '] 随机结合 ' + selectedKeywords.size + ' 个联想关键词');
     showToast('围绕品类 + ' + selectedKeywords.size + ' 个联想关键词 → 自动分叉为 Run #' + newRun.id, 'success');
@@ -2800,22 +2890,71 @@ function goToBrainstorm() {
 // ==================== Step 2: Brainstorm ====================
 function renderBsKeywords() {
   const div = document.getElementById('bsKeywords');
+  if (!div) return;
   div.innerHTML = '';
-  // Category tags (primary, blue)
+  // Category tags (primary, blue) — ✕ only removes from this brainstorm
   selectedCategories.forEach(kw => {
     const tag = document.createElement('span');
     tag.className = 'bs-keyword-tag bs-cat-tag';
-    tag.innerHTML = `${kw} <span class="tag-x" onclick="removeBsCategory('${kw.replace(/'/g, "\\'")}')">✕</span>`;
+    tag.appendChild(document.createTextNode(kw + ' '));
+    const x = document.createElement('span');
+    x.className = 'tag-x';
+    x.title = '本次头脑风暴中移除此品类';
+    x.textContent = '✕';
+    x.addEventListener('click', function() { removeBsCategory(kw); });
+    tag.appendChild(x);
     div.appendChild(tag);
   });
-  // Associative tags (secondary, gray)
+  // Associative tags — icon ops: 移除 / 删除 / 锁定 (title on hover)
+  var iconRemove = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>';
+  var iconDelete = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+  var iconLock = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+  var iconUnlock = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-1.9"/></svg>';
+
   selectedKeywords.forEach(kw => {
+    const isLocked = lockedKeywords.has(kw);
     const tag = document.createElement('span');
-    tag.className = 'bs-keyword-tag';
-    tag.innerHTML = `${kw} <span class="tag-x" onclick="removeBsKeyword('${kw.replace(/'/g, "\\'")}')">✕</span>`;
+    tag.className = 'bs-keyword-tag' + (isLocked ? ' bs-locked' : '');
+
+    const label = document.createElement('span');
+    label.textContent = kw;
+    tag.appendChild(label);
+
+    const ops = document.createElement('span');
+    ops.className = 'bs-kw-ops';
+
+    const btnRemove = document.createElement('button');
+    btnRemove.type = 'button';
+    btnRemove.className = 'bs-kw-op';
+    btnRemove.title = '移除';
+    btnRemove.setAttribute('aria-label', '移除');
+    btnRemove.innerHTML = iconRemove;
+    btnRemove.addEventListener('click', function() { removeBsKeyword(kw); });
+
+    const btnDelete = document.createElement('button');
+    btnDelete.type = 'button';
+    btnDelete.className = 'bs-kw-op danger';
+    btnDelete.title = '删除';
+    btnDelete.setAttribute('aria-label', '删除');
+    btnDelete.innerHTML = iconDelete;
+    btnDelete.addEventListener('click', function() { deleteBsKeywordForever(kw); });
+
+    const btnLock = document.createElement('button');
+    btnLock.type = 'button';
+    btnLock.className = 'bs-kw-op' + (isLocked ? ' lock-on' : '');
+    btnLock.title = isLocked ? '取消锁定' : '锁定';
+    btnLock.setAttribute('aria-label', isLocked ? '取消锁定' : '锁定');
+    btnLock.innerHTML = isLocked ? iconLock : iconUnlock;
+    btnLock.addEventListener('click', function() { toggleBsKeywordLock(kw); });
+
+    ops.appendChild(btnRemove);
+    ops.appendChild(btnDelete);
+    ops.appendChild(btnLock);
+    tag.appendChild(ops);
     div.appendChild(tag);
   });
-  document.getElementById('bsGenerateBtn').disabled = (selectedKeywords.size === 0 && selectedCategories.size === 0);
+  var genBtn = document.getElementById('bsGenerateBtn');
+  if (genBtn) genBtn.disabled = (selectedKeywords.size === 0 && selectedCategories.size === 0);
 }
 
 function removeBsCategory(kw) {
@@ -2828,10 +2967,48 @@ function removeBsCategory(kw) {
   saveToRun();
 }
 
+/** Session-only: drop from this brainstorm; keep in keyword DB. */
 function removeBsKeyword(kw) {
   selectedKeywords.delete(kw);
+  lockedKeywords.delete(kw);
   renderBsKeywords();
-  updateKwBar();
+  saveToRun();
+  scheduleBsSelectionPersist();
+  if (typeof updateKwBar === 'function') updateKwBar();
+  showToast('已从本次头脑风暴移除: ' + kw, '');
+}
+
+/** Permanent: remove from KEYWORDS pool + this brainstorm; persist to DB. */
+function deleteBsKeywordForever(kw) {
+  if (!confirm('确定从关键词库永久删除「' + kw + '」？此操作不可撤销。')) return;
+  selectedKeywords.delete(kw);
+  lockedKeywords.delete(kw);
+  var idx = KEYWORDS.findIndex(function(k) { return k.text === kw && k.kind !== 'category'; });
+  if (idx >= 0) {
+    KEYWORDS.splice(idx, 1);
+    if (typeof renderKwList === 'function') renderKwList();
+  }
+  renderBsKeywords();
+  saveToRun(); // scheduleKwPersist via saveToRun
+  scheduleBsSelectionPersist();
+  if (typeof updateKwBar === 'function') updateKwBar();
+  showToast('已永久删除: ' + kw, '');
+  logStep(1, 'delete_kw', '永久删除联想关键词: ' + kw);
+}
+
+/** Toggle lock so 「换一批」 keeps this associative keyword. */
+function toggleBsKeywordLock(kw) {
+  if (!selectedKeywords.has(kw)) return;
+  if (lockedKeywords.has(kw)) {
+    lockedKeywords.delete(kw);
+    showToast('已取消锁定: ' + kw, '');
+  } else {
+    lockedKeywords.add(kw);
+    showToast('已锁定（换一批时保留）: ' + kw, 'success');
+  }
+  renderBsKeywords();
+  saveToRun();
+  scheduleBsSelectionPersist();
 }
 
 function runBrainstormDemo() {
@@ -3401,6 +3578,7 @@ function restoreWorkbenchUI() {
     renderChecklist();
   }
   updatePhasePills();
+  renderStaleBanners();
 }
 
 function setStatus(id, cls, text) {
@@ -3427,6 +3605,75 @@ function updatePhasePills() {
   document.querySelectorAll('.gen-phase-pill').forEach(p => {
     const ph = p.dataset.phase;
     p.classList.toggle('done', !!articleState.phaseDone[ph]);
+  });
+}
+
+// ---- Downstream-stale hints -------------------------------------------------
+// When an upstream sub-step is re-run or edited AFTER downstream sub-steps are
+// already done, the downstream output is stale (e.g. editing the outline makes
+// the sections/placements/faq/meta/preview built from it obsolete). This closes
+// the downstream gates (phaseDone=false) and shows a small "上游已改·建议重跑"
+// banner on each affected panel so the operator knows to re-run them. It only
+// fires when the downstream step was already completed — on a fresh forward
+// run all phaseDone flags are false, so this is a no-op.
+const PHASE_ORDER = ['serp','outline','sections','placements','faq','meta','preview'];
+const DOWNSTREAM_OF = {
+  serp:       [],
+  outline:    ['sections','placements','faq','meta','preview'],
+  sections:   ['placements','faq','meta','preview'],
+  placements: ['faq','meta','preview'],
+  faq:        ['meta','preview'],
+  meta:       ['preview'],
+  preview:    [],
+};
+const STALE_LABEL = { serp:'SERP', outline:'大纲', sections:'正文', placements:'产品/内链', faq:'FAQ', meta:'元信息', preview:'预览' };
+
+function invalidateDownstream(fromKey) {
+  if (!articleState) return;
+  const ds = DOWNSTREAM_OF[fromKey] || [];
+  if (!ds.length) return;
+  articleState.stale = articleState.stale || {};
+  let changed = false;
+  ds.forEach(function(step) {
+    if (articleState.phaseDone && articleState.phaseDone[step]) {
+      articleState.phaseDone[step] = false;
+      articleState.stale[step] = fromKey;
+      changed = true;
+    }
+  });
+  if (changed) {
+    renderStaleBanners();
+    updatePhasePills();
+    saveToRun();
+  }
+}
+
+function clearStale(stepKey) {
+  if (!articleState || !articleState.stale) return;
+  if (articleState.stale[stepKey]) {
+    delete articleState.stale[stepKey];
+    renderStaleBanners();
+    saveToRun();
+  }
+}
+
+function renderStaleBanners() {
+  PHASE_ORDER.forEach(function(ph) {
+    const panel = document.getElementById('phase-' + ph);
+    if (!panel) return;
+    let banner = panel.querySelector('.wb-stale-banner');
+    const from = articleState && articleState.stale && articleState.stale[ph];
+    if (from) {
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.className = 'wb-stale-banner';
+        const body = panel.querySelector('.wb-card-body');
+        if (body) body.insertBefore(banner, body.firstChild);
+      }
+      banner.textContent = '⚠ 上游「' + (STALE_LABEL[from] || from) + '」已改，本步结果可能陈旧，建议重跑';
+    } else if (banner) {
+      banner.remove();
+    }
   });
 }
 
@@ -3485,6 +3732,8 @@ function renderSerpResult(serp) {
 
 // ---- Outline ----
 function generateOutline() {
+  clearStale('outline');
+  invalidateDownstream('outline');
   bridgeAskAgent('outline', document.getElementById('btnGenOutline'));
 }
 
@@ -3505,6 +3754,7 @@ function renderOutline() {
       articleState.outlineConfirmed = false;
       articleState.phaseDone.outline = false;
       setStatus('outlineStatus', 'edited', '已修改 · 待确认');
+      invalidateDownstream('outline');
       saveToRun();
     });
     te.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); te.blur(); } });
@@ -3519,6 +3769,7 @@ function addOutlineItem(level) {
   articleState.phaseDone.outline = false;
   renderOutline();
   setStatus('outlineStatus', 'edited', '已修改 · 待确认');
+  invalidateDownstream('outline');
   saveToRun();
 }
 
@@ -3528,6 +3779,7 @@ function removeOutlineItem(idx) {
   articleState.phaseDone.outline = false;
   renderOutline();
   setStatus('outlineStatus', 'edited', '已修改 · 待确认');
+  invalidateDownstream('outline');
   saveToRun();
 }
 
@@ -3696,6 +3948,7 @@ function onSectionEdit(idx) {
   if (articleState.sections[idx].status === 'ready') {
     articleState.sections[idx].status = 'edited';
     articleState.phaseDone.sections = false;
+    invalidateDownstream('sections');
   }
   saveToRun();
   renderSectionPreview();
@@ -3736,6 +3989,8 @@ function generateAllSections() {
     showToast('请先确认大纲', '');
     return;
   }
+  clearStale('sections');
+  invalidateDownstream('sections');
   bridgeAskAgent('section', document.getElementById('btnGenAllSections'));
 }
 
@@ -3769,6 +4024,8 @@ function generatePlacements() {
     showToast('请先完成正文板块', '');
     return;
   }
+  clearStale('placements');
+  invalidateDownstream('placements');
   // Launch the Hermes Agent for the placements substep. The agent prompt instructs
   // it to call povison-catalog.py recommend (products) AND povison-blog.py
   // recommend-links (internal links) and write both into articleState in one shot
@@ -4170,6 +4427,8 @@ function confirmPlacements() {
 
 // ---- FAQ ----
 function generateFaq() {
+  clearStale('faq');
+  invalidateDownstream('faq');
   bridgeGenerateSection('faq');
 }
 
@@ -4280,6 +4539,8 @@ function removeFaqItem(idx) {
 
 // ---- Meta ----
 function generateMeta() {
+  clearStale('meta');
+  invalidateDownstream('meta');
   bridgeGenerateSection('meta');
 }
 
@@ -4786,6 +5047,33 @@ function rulesEnvelope() {
 //  - Start from DEFAULT_RULES (so new/updated defaults appear).
 //  - Preserve the user's enabled/disabled choice for any default rule whose text matches.
 //  - Preserve any user-added custom rule (text not present in defaults) at the end of its block.
+//  - Drop retired default texts (superseded by v2.4 consolidations) so they don't linger as "custom".
+var RETIRED_DEFAULT_RULE_TEXTS = {
+  '英文输出，美式拼写，统一术语': 1,
+  '使用第二人称 you 直接对话读者': 1,
+  "避免 'A good example is' 句式": 1,
+  '不堆砌关键词，保持自然语言流畅度；段落间逻辑连贯，避免突兀跳跃与空洞套话（如 "In today\'s world"）': 1,
+  '覆盖 TopicItem.serp_gap 与 angle，包含排名前列博客共同涵盖的内容': 1,
+  '大纲阶段不写产品硬广，不堆关键词': 1,
+  '若 SERP 分析结论与大纲格式冲突，优先满足 SERP 分析结果': 1,
+  '约 90–100 词；首段含 primary_keyword': 1,
+  '根据主题和主关键词描述目标读者的场景与痛点；交代读者能获得什么，不剧透全文': 1,
+  '榜单类：Intro 需要一个适合主题的简短 H2 标题': 1,
+  '整篇目标 ≥1500 词；本 H2 写充实；H2 与 H3 之间必须加 40–80 词过渡段（有 H3 时先过渡再展开）；可用 bullet 但保持段落可读（除产品介绍与 buying guide 外少用 bullet）': 1,
+  '全文至少 1 个对比表思路或明确对比段；权威数据 1–2 处（来源机构用英文括号标注并作锚文本链向来源）': 1,
+  '一个段落最多 2 个数据，每个 H2 最多 3 个数据；数据必须真实且出自权威机构/杂志，不得虚构，不引用企业博客数据': 1,
+  '2 处个人体验感使用场景（可虚构但需具体有细节，体现真实感受，不用 picture/imagine 说法；不暗示作者亲自购买/测试过具体产品）': 1,
+  '核心关键词全文 3–5 次；本段不硬塞密度，注意 H2 之间内容不重复': 1,
+  '家具术语保持一致准确，不随意切换（如 media console / TV stand / cabinet 除非有明确区分）': 1,
+  '榜单类：总结如何通过正确家具选择让家更 cozy/comfortable，并用一句话强调 Povison 优势（deeper seating / comfort / ready-to-live-in fully assembled / value for money），结尾 CTA': 1,
+  '产品 URL 必须来自「生成推荐」Agent 调用的 catalog API（scripts/povison-catalog.py /api/povison-products/*）；禁止编造 PDP URL（会 404）': 1,
+  '内链 URL 必须来自「生成推荐」Agent 调用的 blog API（scripts/povison-blog.py /api/povison-blog/*，sitemap 真实博客）；禁止编造 blog URL（会 404）': 1,
+  '4–6 个问答；问题用 H3 展开；答案 40–60 词（榜单类 30–40 词）': 1,
+  '榜单类结构（按顺序）：Title → Introduction(含H2标题,~100词) → 主题相关H2(选择标准/总览) → Quick Summary Table → Best Picks List(默认10个,H3展开) → 信息增量H2(1-2个,问句格式) → Conclusion(≤100词) → FAQ(4-6个,H3展开)': 1,
+  '正文配图必须从 Unsplash/Pexels API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search），禁止编造 URL、禁止浏览器随便抓图': 1,
+  '正文配图必须能看出家具、室内或房间布局；禁止搬家纸箱特写、握手、抽象纹理、无关户外、无家具人像；找不到合格图时 images=[]，同一 URL 不得跨 section 复用': 1,
+};
+
 function mergeRulesWithDefaults(storedDoc) {
   var src = (storedDoc && storedDoc.blocks) || storedDoc || {};
   var next = {};
@@ -4803,10 +5091,11 @@ function mergeRulesWithDefaults(storedDoc) {
       if (s) { usedStored[t] = true; return { text: t, enabled: s.enabled !== false }; }
       return { text: t, enabled: d.enabled !== false };
     });
-    // append user-added custom rules not in defaults
+    // append user-added custom rules not in defaults (skip retired superseding defaults)
     storedList.forEach(function(r) {
       if (!r || !r.text) return;
       var t = String(r.text).trim();
+      if (RETIRED_DEFAULT_RULE_TEXTS[t]) return;
       if (!usedStored[t] && !defaults.some(function(d){ return String(d.text).trim() === t; })) {
         merged.push({ text: t, enabled: r.enabled !== false });
       }
@@ -4884,12 +5173,13 @@ function ruleBlockIdsFor(mode, sectionType) {
   } else {
     ids = ['global'];
   }
-  // listicle rules self-gate with "榜单类：" prefix; append to outline/h2/placements so they ride along when relevant.
-  if (mode === 'outline' || mode === 'h2' || mode === 'placements' || mode === 'section') {
-    ids = ids.concat(['listicle']);
-  }
-  // images rules apply globally and at meta time.
-  ids = ids.concat(['images']);
+  // listicle rules self-gate with "榜单类" wording; inject on all content-writing modes
+  // so Intro/Conclusion/FAQ listicle constraints live only in the listicle block.
+  var listicleModes = { outline: 1, section: 1, intro: 1, h2: 1, conclusion: 1, placements: 1, faq: 1 };
+  if (listicleModes[mode]) ids = ids.concat(['listicle']);
+  // images: body/product imagery — not needed for outline/faq brainstorms
+  var imageModes = { section: 1, intro: 1, h2: 1, conclusion: 1, placements: 1, meta: 1 };
+  if (imageModes[mode]) ids = ids.concat(['images']);
   // dedup preserving order
   var seen = {}; var out = [];
   ids.forEach(function(i){ if(!seen[i]){ seen[i]=1; out.push(i); } });
@@ -5930,7 +6220,7 @@ async function bridgeBrainstormViaAgent() {
       try {
         await bridgeFetch('/api/tasks/' + rid + '/steps/2/data?status=running', {
           method: 'PUT',
-          body: JSON.stringify({ version: '1.0', topics: [], input_keywords: kwsArr, input_categories: catsArr }),
+          body: JSON.stringify({ version: '1.0', topics: [], input_keywords: kwsArr, input_categories: catsArr, locked_keywords: Array.from(lockedKeywords) }),
         });
       } catch (e) {}
     }

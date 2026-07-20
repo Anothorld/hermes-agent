@@ -27,7 +27,7 @@ Langfuse SDK v4 notes:
   - ``set_trace_io()`` is deprecated; set input/output on root observation directly.
   - ``should_export_span`` controls span export; default only exports LLM spans.
 """
-_PLUGIN_VERSION = "2024-06-22-split-handlers"  # marker for runtime verification
+_PLUGIN_VERSION = "2026-07-20-fix-trace-key"  # marker for runtime verification
 
 import json
 import logging
@@ -226,6 +226,10 @@ def _get_langfuse() -> Optional[Langfuse]:
     if _env("HERMES_LANGFUSE_ENV") and not _env("LANGFUSE_TRACING_ENVIRONMENT"):
         os.environ["LANGFUSE_TRACING_ENVIRONMENT"] = _env("HERMES_LANGFUSE_ENV")
 
+    # Bridge debug flag so the Langfuse SDK itself emits OTLP export logs.
+    if _env_bool("HERMES_LANGFUSE_DEBUG") and not _env("LANGFUSE_DEBUG"):
+        os.environ["LANGFUSE_DEBUG"] = "true"
+
     sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
 
     kwargs: Dict[str, Any] = {
@@ -288,20 +292,28 @@ def _trace_key(
 ) -> str:
     """Build a stable in-process trace scope key for one agent turn.
 
-    Older Hermes paths only expose ``task_id``/``session_id``. Newer paths
+    Older Hermes paths only expose ``task_id``/``session_id``.  Newer paths
     pass ``turn_id`` and ``api_request_id`` in LLM/tool hooks; when present,
-    they must scope trace state so concurrent requests sharing one task/session
-    never collide. ``turn_id`` is preferred over ``api_request_id`` so the
-    turn-level ``post_llm_call`` hook (which carries ``turn_id`` but no
-    ``api_request_id``) resolves to the same key as the request-level hooks.
+    ``turn_id`` scopes trace state so concurrent turns sharing one
+    task/session never collide.
+
+    ``api_request_id`` is intentionally NOT used as a key component.  Within
+    a single agent turn the LLM is called multiple times (once per tool
+    round).  Each call carries a different ``api_request_id`` but the SAME
+    ``turn_id``.  If we keyed on ``api_request_id``, every LLM call would
+    create a separate root trace — only the last one would get flushed by
+    ``on_post_llm_call``, and the earlier ones would accumulate as orphaned
+    state until eviction (which doesn't call ``client.flush()``).  This was
+    the root cause of missing traces for tool-heavy agent loops (discovery
+    runs, kanban workers).
+
+    When ``turn_id`` is empty (older Hermes path), fall back to ``task_id``
+    or ``session_id`` so all LLM calls in the turn share one trace.
     """
     if turn_id:
         return f"{_scope_prefix(task_id, session_id)}:turn:{turn_id}"
-    if api_request_id:
-        return f"{_scope_prefix(task_id, session_id)}:api:{api_request_id}"
-    # Legacy shape: a bare ``task_id`` (NOT the ``task:`` prefix) when present,
-    # otherwise the session/thread prefix. Kept distinct for backward
-    # compatibility with keys minted before turn/request scoping existed.
+    # Legacy shape: no turn_id — use task_id or session prefix so all
+    # LLM calls in this turn share the same trace state.
     if task_id:
         return task_id
     return _scope_prefix(task_id, session_id)
@@ -704,7 +716,15 @@ def _upsert_trace_metadata(client: Langfuse, trace_id: str, session_id: str,
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "") -> TraceState:
-    trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}")
+    # Include a per-run timestamp in the seed so each gateway run gets a
+    # DISTINCT trace_id.  Without this, create_trace_id(seed=...) is
+    # deterministic — the same session_id + task_id always produces the
+    # same trace_id, so observations from today's run get silently
+    # appended to a trace created weeks ago.  The trace then appears
+    # under its original creation timestamp in the Langfuse UI and is
+    # invisible when filtering by "today".
+    run_nonce = str(int(time.time()))
+    trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}::{run_nonce}")
     trace_input = _extract_last_user_message(messages)
     # Langfuse SDK v4 metadata must be dict[str, str] with values ≤200 chars.
     # Store structured context as string values; keep it compact.
@@ -847,28 +867,43 @@ def _evict_stale_locked() -> None:
     ``_MAX_TRACE_STATE - 1`` so that the about-to-be-added entry leaves the dict
     at ``_MAX_TRACE_STATE`` — a true ceiling. The evicted entry's root span is
     ended so it is not left dangling on the Langfuse side.
+
+    After eviction we call ``client.flush()`` **outside** the lock so the
+    evicted traces are actually sent to Langfuse.  Without this flush, evicted
+    traces accumulate in the SDK's in-memory batch and may be lost if the
+    process exits before the next scheduled flush.
     """
     over = len(_TRACE_STATE) - (_MAX_TRACE_STATE - 1)
     if over <= 0:
         return
     # Oldest-first by last_updated_at; evict just enough to make room.
     stale = sorted(_TRACE_STATE.items(), key=lambda kv: kv[1].last_updated_at)[:over]
+    flushed_client: Any = None
     for key, state in stale:
         _TRACE_STATE.pop(key, None)
         try:
             state.root_span.end()
+            flushed_client = _LANGFUSE_CLIENT
         except Exception as exc:  # pragma: no cover - fail-open
             _debug(f"evict stale trace failed: {exc}")
+    # Flush outside the lock to avoid blocking other threads.
+    if flushed_client is not None:
+        try:
+            flushed_client.flush()
+        except Exception:
+            pass
 
 
 def _finish_trace(task_key: str, *, output: Any = None) -> None:
     client = _get_langfuse()
     if client is None:
+        logger.warning("Langfuse _finish_trace: client is None for task_key=%s", task_key)
         return
 
     with _STATE_LOCK:
         state = _TRACE_STATE.pop(task_key, None)
     if state is None:
+        logger.info("Langfuse _finish_trace: no state found for task_key=%s (already finished or never created)", task_key)
         return
 
     try:
@@ -888,13 +923,23 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
             state.root_span.update(output=final_output)
             state.output_set = True
         state.root_span.end()
+        logger.info(
+            "Langfuse _finish_trace: root_span.end() OK for task_key=%s, trace_id=%s, "
+            "generations=%d, tools=%d, output_set=%s",
+            task_key,
+            getattr(state, "trace_id", "?"),
+            len(state.generations),
+            len(state.tools),
+            state.output_set,
+        )
     except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"finish trace failed: {exc}")
+        logger.warning("Langfuse _finish_trace: root_span.end() FAILED for task_key=%s: %s", task_key, exc)
     finally:
         try:
             client.flush()
-        except Exception:
-            pass
+            logger.info("Langfuse _finish_trace: client.flush() OK for task_key=%s", task_key)
+        except Exception as exc:
+            logger.warning("Langfuse _finish_trace: client.flush() FAILED for task_key=%s: %s", task_key, exc)
 
 
 def _assistant_has_tool_calls(message: Any) -> bool:
@@ -1224,20 +1269,31 @@ def _on_post_llm_turn(*, session_id: str = "", task_id: str = "", turn_id: str =
 
     _found = False
     if matched_key is None:
-        # Legacy fallback: scan open traces whose key contains session_id.
+        # Legacy fallback: scan open traces whose key contains session_id
+        # or task_id.  Flush ALL matching traces, not just the first —
+        # in tool-heavy loops with no turn_id, each LLM call previously
+        # created a separate trace keyed on api_request_id.  Those orphaned
+        # traces must all be flushed here.
         with _STATE_LOCK:
+            keys_to_finish: list[str] = []
             for task_key, state in list(_TRACE_STATE.items()):
-                if session_id and session_id in task_key:
-                    matched_key = task_key
+                if (session_id and session_id in task_key) or (task_id and task_id in task_key):
+                    keys_to_finish.append(task_key)
                     if state.root_span and not state.output_set:
                         final_output = _safe_value(assistant_response) if isinstance(assistant_response, str) else None
                         if final_output:
                             merged = _merge_trace_output({"content": final_output}, state)
                             state.root_span.update(output=merged)
                             state.output_set = True
-                            logger.info("Langfuse post_llm_turn: set root trace output for session_id=%s", session_id)
-                        _found = True
-                    break
+                            logger.info("Langfuse post_llm_turn: set root trace output for session_id=%s key=%s", session_id, task_key)
+                    _found = True
+        for key in keys_to_finish:
+            _finish_trace(key, output=None)
+        if keys_to_finish:
+            logger.info(
+                "Langfuse post_llm_turn: finished %d trace(s) for task_id=%s session_id=%s turn_id=%s",
+                len(keys_to_finish), task_id, session_id, turn_id,
+            )
     else:
         with _STATE_LOCK:
             state = _TRACE_STATE.get(matched_key)

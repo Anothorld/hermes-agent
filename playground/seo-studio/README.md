@@ -122,6 +122,8 @@ resets to「全部来源」, and the view switches to Step 1 so operators see re
 
 **Brainstorm (Step 2) trigger:** requires ≥1 enabled category AND ≥1 associative 必定包含 keyword. The brainstorm builds topics **around the enabled category keywords**, randomly combining 3–8 associative keywords per topic. The Agent path is primary; the script fallback (`topic-brainstorm.py --categories`) mirrors the same logic.
 
+**Selected associative chip ops (Step 2):** each associative keyword chip supports **移除** (drop from this brainstorm only), **删除** (permanently remove from the keyword pool / Step 1 DB), and **锁定** (keep on 「换一批」; only unlocked associative keywords are reshuffled). Locked set is stored as `locked_keywords` on the step-2 envelope.
+
 ## Env (set by `start.sh`)
 
 | Var | Default | Purpose |
@@ -373,21 +375,29 @@ injected into agent prompts at generation time. Defaults are defined in
 
 | Block id | Injected when | Purpose |
 |----------|---------------|---------|
-| `global` | every generation | 语气、语言、品牌底线、事实核查底线 |
+| `global` | every generation | 语气、语言、品牌底线、事实核查底线（跨板块共性只写这里） |
 | `outline` | `mode=outline` | H2–H3 大纲结构与 SERP 覆盖 |
-| `intro` | section `type=Intro` | Introduction 写作约束 |
+| `intro` | section `type=Intro` | Introduction 写作约束（通用；榜单 Intro 细则见 listicle） |
 | `h2` | section `type=H2` | 各 H2 正文写作约束（过渡段、数据、体验感等） |
-| `conclusion` | section `type=Conclusion` | Conclusion 写作约束 |
-| `placements` | `mode=placements` | 产品植入与内链规则 |
-| `faq` | `mode=faq` | FAQ 写作约束 |
+| `conclusion` | section `type=Conclusion` | Conclusion 写作约束（通用；榜单 CTA 见 listicle） |
+| `placements` | `mode=placements` | 产品植入与内链规则（URL 真实性合并为一条） |
+| `faq` | `mode=faq` | FAQ 写作约束（榜单答案长度见 listicle） |
 | `meta` | `mode=meta` | Meta Title / Description / Slug 规则 |
-| `listicle` | outline + h2 + placements（追加） | 榜单类（Top/Best）专属结构；规则自带"榜单类"前提，非榜单主题时自然失效 |
-| `images` | global + meta（追加） | 配图与产品图规则 |
+| `listicle` | outline + 正文各块 + placements + faq（追加） | 榜单类（Top/Best）专属结构与细则；规则自带"榜单类"前提，非榜单主题时自然失效 |
+| `images` | 正文各块 + placements + meta（追加） | 配图与产品图规则 |
+
+### Dedup principles (v2.4+)
+
+- Cross-cutting voice / anti-keyword-stuffing / no-fabrication → **`global` only**
+- Listicle-only extras (Intro H2 标题、Conclusion CTA、FAQ 30–40 词答案) → **`listicle` only**
+- Catalog/blog URL authenticity → **one `placements` rule**
+- Stock source + visual constraints → **one `images` rule**
+- Numbers that belong to another block are referenced ("见 FAQ 板块") instead of restated
 
 ### Versioning
 
 Rules persisted to `localStorage` carry a `version` field (current
-`DEFAULT_RULES_VERSION = '2.0'`). When a stored envelope's version differs from
+`DEFAULT_RULES_VERSION = '2.4'`). When a stored envelope's version differs from
 the current default, `applyRulesEnvelope` rebuilds from `DEFAULT_RULES` while
 preserving the operator's enabled/disabled toggles on matching rule texts and
 appending any user-added custom rules. This lets default rule updates roll out

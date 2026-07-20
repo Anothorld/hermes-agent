@@ -225,6 +225,45 @@ def perf_snapshot(env: str = Query("LIVE")) -> dict[str, Any]:
     return cal.perf_snapshot(env=env)
 
 
+# ─── Global pause (下班 → 全局暂停 AI 处理) ──────────────────────────
+
+class PauseBody(BaseModel):
+    by: str = ""
+
+
+@router.get("/admin/pause-status")
+def pause_status(
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Return the global pause flag (no key required — read-only)."""
+    state = cal.get_poller_state("_global_pause")
+    return {"paused": bool(state.get("paused")), "by": state.get("by", ""), "at": state.get("at", "")}
+
+
+@router.post("/admin/pause")
+def pause_global(
+    body: PauseBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Globally pause new AI launches (下班). In-flight runs complete."""
+    _require_bridge_key(x_bridge_key)
+    cal.set_global_pause(paused=True, by=body.by)
+    log.info("global PAUSED by %s", body.by or "console")
+    return {"ok": True, "paused": True}
+
+
+@router.post("/admin/resume")
+def resume_global(
+    body: PauseBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Resume new AI launches (开工)."""
+    _require_bridge_key(x_bridge_key)
+    cal.set_global_pause(paused=False, by=body.by)
+    log.info("global RESUMED by %s", body.by or "console")
+    return {"ok": True, "paused": False}
+
+
 @router.post("/sessions/enqueue")
 def enqueue_session(
     body: EnqueueBody,

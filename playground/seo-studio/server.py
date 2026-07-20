@@ -321,6 +321,58 @@ def _validate_placement_urls(data: dict) -> list[dict]:
     return warnings
 
 
+# ---- article-state field protection (prevent intermediate agent saves from
+# wiping already-generated body content) ---------------------------------------
+#
+# The Agent persists step-3 (articleState) across multiple seo_save_step_data
+# calls within a single run (e.g. placements: write products/links, then
+# post-process, then save again). An intermediate save can briefly carry an
+# empty `sections`/`faqs`/`outline`/... field, and if the UI reloads (or the
+# operator switches tasks) at that instant, the already-generated body would
+# appear lost. This guard backfills any "content" field that the incoming
+# save would reduce to empty with the value already in the DB, so a later
+# sub-step save can never clobber an earlier sub-step's output.
+#
+# Scope is deliberately narrow:
+#   - Only applies to step 3 (articleState).
+#   - Only triggers when the incoming field is EMPTY (None/[]/{}/"") AND the
+#     DB already has a non-empty value — it never overwrites a real new value.
+#   - `products` and `links` are intentionally NOT protected: the operator may
+#     delete them (empty is meaningful) and the placements Agent is instructed
+#     to REPLACE them wholesale.
+
+_ARTICLE_CONTENT_FIELDS = (
+    # field name, "is empty" predicate
+    ("sections", lambda v: not isinstance(v, list) or len(v) == 0),
+    ("outline", lambda v: not isinstance(v, list) or len(v) == 0),
+    ("faqs", lambda v: not isinstance(v, list) or len(v) == 0),
+    ("serp", lambda v: not isinstance(v, dict) or not v),
+    ("meta", lambda v: not isinstance(v, dict) or not v),
+    ("previewHtml", lambda v: not isinstance(v, str) or v == ""),
+    ("validation", lambda v: not isinstance(v, dict) or not v),
+)
+
+
+def _backfill_empty_content_fields(data: dict, db_data: dict | None) -> int:
+    """Backfill empty content fields in ``data`` from ``db_data``.
+
+    Returns the number of fields backfilled (0 = no change). Only fields listed
+    in ``_ARTICLE_CONTENT_FIELDS`` are considered; ``products``/``links`` are
+    untouched. Mutates ``data`` in place.
+    """
+    if not isinstance(data, dict) or not isinstance(db_data, dict):
+        return 0
+    n = 0
+    for field, is_empty in _ARTICLE_CONTENT_FIELDS:
+        incoming = data.get(field)
+        if is_empty(incoming):
+            existing = db_data.get(field)
+            if not is_empty(existing):
+                data[field] = existing
+                n += 1
+    return n
+
+
 @app.post("/api/tasks")
 async def create_task(body: dict | None = None) -> dict:
     """Create a task (3 steps) or fork from a parent at fork_step."""
@@ -429,6 +481,15 @@ async def put_step_data(task_id: str, step_num: int, request: Request) -> dict:
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"invalid JSON: {e}") from e
     status = (request.query_params.get("status") or "done").strip()
+    # Article-state field protection: an intermediate Agent save (e.g. during
+    # the placements sub-step) can briefly carry an empty `sections`/`faqs`/...
+    # field. Backfill those from the DB so a later sub-step never wipes an
+    # earlier sub-step's already-generated output. `products`/`links` are not
+    # touched (empty is meaningful there).
+    backfilled = 0
+    if step_num == 3 and isinstance(data, dict):
+        existing = _db.get_step_data(task_id, step_num)
+        backfilled = _backfill_empty_content_fields(data, existing)
     # Root-cause fix for 404 placements: validate product/link URLs on save.
     # If any URL looks fabricated, block placementsConfirmed and surface warnings.
     placement_warnings: list[dict] = []

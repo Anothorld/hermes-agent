@@ -222,15 +222,27 @@ class TestTraceScopeKey:
         assert "turn:turn-a" in key_a
         assert "turn:turn-b" in key_b
 
-    def test_trace_key_scopes_by_api_request_id_when_turn_missing(self):
+    def test_trace_key_ignores_api_request_id(self):
+        """api_request_id must NOT scope the trace key.
+
+        Within one agent turn, the LLM is called multiple times (once per
+        tool round), each with a different api_request_id but the SAME
+        turn_id.  Keying on api_request_id would create a separate root
+        trace per LLM call — only the last would get flushed, and the
+        earlier ones would accumulate as orphaned state.  This is the
+        root-cause regression test for missing traces in tool-heavy agent
+        loops (discovery runs, kanban workers).
+        """
         plugin = self._fresh_plugin()
 
         key_a = plugin._trace_key("task-1", "session-1", api_request_id="req-a")
         key_b = plugin._trace_key("task-1", "session-1", api_request_id="req-b")
 
-        assert key_a != key_b
-        assert "api:req-a" in key_a
-        assert "api:req-b" in key_b
+        # Same key regardless of api_request_id — all LLM calls in one
+        # turn must share the same trace state.
+        assert key_a == key_b
+        assert "api:" not in key_a
+        assert "api:" not in key_b
 
     def test_trace_key_keeps_legacy_shape_without_turn_or_api_id(self):
         plugin = self._fresh_plugin()
@@ -408,8 +420,10 @@ class TestTurnTraceIsolation:
         tk = mod._trace_key
         assert tk("t", "s", turn_id="u") == "task:t:turn:u"
         assert tk("", "s", turn_id="u") == "session:s:turn:u"
-        assert tk("t", "s", api_request_id="r") == "task:t:api:r"
-        assert tk("", "s", api_request_id="r") == "session:s:api:r"
+        # api_request_id is intentionally NOT part of the key — all LLM
+        # calls in one turn share the same trace state.
+        assert tk("t", "s", api_request_id="r") == "t"
+        assert tk("", "s", api_request_id="r") == "session:s"
         assert tk("t", "s") == "t"                       # legacy: bare task_id
         assert tk("", "s") == "session:s"
         # turn_id wins over api_request_id when both are present.

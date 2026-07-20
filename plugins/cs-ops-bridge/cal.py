@@ -2282,3 +2282,27 @@ def set_poller_state(poller_name: str, state: Mapping[str, Any]) -> None:
             (poller_name, json.dumps(dict(state)), now),
         )
         conn.commit()
+
+
+# ─── Global pause flag (下班 → 全局暂停 AI 处理) ─────────────────────
+# Stored in cs_poller_state under a reserved key so no schema migration needed.
+_GLOBAL_PAUSE_KEY = "_global_pause"
+
+
+def is_globally_paused() -> bool:
+    """True when the system is globally paused (no new AI launches).
+
+    Set by Console「下班」→ bridge ``/admin/pause``. The watcher checks this
+    before launching any new inbound run; in-flight runs complete naturally.
+    """
+    state = get_poller_state(_GLOBAL_PAUSE_KEY)
+    return bool(state.get("paused"))
+
+
+def set_global_pause(*, paused: bool, by: str = "") -> None:
+    """Set or clear the global pause flag."""
+    set_poller_state(_GLOBAL_PAUSE_KEY, {
+        "paused": bool(paused),
+        "by": by,
+        "at": datetime.now(timezone.utc).isoformat(),
+    })
