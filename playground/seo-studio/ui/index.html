@@ -669,9 +669,25 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
   display: flex; gap: 10px; align-items: flex-start;
   padding: 10px 12px; border-radius: var(--r-md);
   border: 1px solid var(--border); background: #fff;
+  position: relative;
 }
 .outline-item.h2 { border-left: 3px solid var(--accent); }
 .outline-item.h3 { margin-left: 22px; border-left: 3px solid var(--povison-light); }
+.outline-item.dragging { opacity: 0.4; }
+.outline-item.drag-over-top::before,
+.outline-item.drag-over-bottom::after {
+  content: ''; position: absolute; left: 0; right: 0; height: 3px;
+  background: var(--accent); border-radius: 2px; pointer-events: none;
+}
+.outline-item.drag-over-top::before { top: -6px; }
+.outline-item.drag-over-bottom::after { bottom: -6px; }
+.outline-handle {
+  cursor: grab; color: var(--text-tertiary); padding: 2px 2px;
+  font-size: 16px; line-height: 1; user-select: none; flex-shrink: 0;
+  touch-action: none;
+}
+.outline-handle:hover { color: var(--accent); }
+.outline-handle:active { cursor: grabbing; }
 .outline-level {
   font-size: 10px; font-weight: 700; color: var(--text-tertiary);
   min-width: 24px; padding-top: 3px;
@@ -1226,7 +1242,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <span class="wb-status idle" id="outlineStatus">待生成</span>
               </div>
               <div class="wb-card-body">
-                <p class="wb-hint">先确认结构再写正文。点击标题可直接改字；可增删条目。确认后才会解锁正文板块生成。</p>
+                <p class="wb-hint">先确认结构再写正文。点击标题可直接改字；可增删条目（新增一律加到最末）；按住条目左侧 ⠿ 图标可上下拖动调整顺序与层级关系。</p>
                 <div class="gen-live-mini" id="outlineLive"></div>
                 <div class="outline-list" id="outlineList"></div>
                 <div class="wb-actions">
@@ -1250,6 +1266,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               </div>
               <div class="wb-card-body">
                 <p class="wb-hint">按 Intro → 各 H2 → Conclusion 逐块生成。每块可编辑、可单独重写；全部就绪后进入产品植入与内链审核。</p>
+                <div class="gen-live-mini" id="sectionsLive"></div>
                 <div class="wb-actions">
                   <button class="btn btn-primary" id="btnGenAllSections" onclick="generateAllSections()" disabled>请 Agent 写全部正文</button>
                   <div class="spacer"></div>
@@ -1278,7 +1295,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <span class="wb-status idle" id="placementsStatus">待生成</span>
               </div>
               <div class="wb-card-body">
-                <p class="wb-hint">Agent 推荐 1–2 个产品段落与 2–3 条内链；你审核合理性后可改文案、换挂载板块、接受或驳回。确认后可一键写入对应正文板块。</p>
+                <p class="wb-hint">Agent 推荐 1–2 个产品段落与 2–3 条内链；你审核合理性后可改文案、换挂载板块、接受或驳回。确认后进 FAQ；最终「组装预览」时会按已接受项自动注入对应正文板块（产品文案 + 内链锚点超链）。</p>
                 <div class="gen-live-mini" id="placementsLive"></div>
                 <div id="placementWarningsBanner" style="display:none;background:#fef3f2;border:1px solid #fda4af;color:#9f1239;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;"></div>
                 <div class="wb-actions">
@@ -1286,7 +1303,6 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                   <button class="btn btn-secondary" id="btnEnrichProductImgs" onclick="enrichMissingProductImages()" disabled>补全缺图</button>
                   <button class="btn btn-secondary" id="btnVerifyPlacementUrls" onclick="verifyPlacementUrls()" disabled>校验链接有效性</button>
                   <button class="btn btn-secondary" id="btnAcceptAllPlacements" onclick="acceptAllPlacements()" disabled>一键全部接受</button>
-                  <button class="btn btn-secondary" id="btnApplyPlacements" onclick="applyPlacementsToSections()" disabled>写入已接受项到正文</button>
                   <div class="spacer"></div>
                   <button class="btn btn-ghost" onclick="setGenPhase('sections')">上一步</button>
                   <button class="btn btn-primary" id="btnPlacementsNext" onclick="confirmPlacements()" disabled>确认，写 FAQ</button>
@@ -1344,21 +1360,22 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <span class="wb-status idle" id="metaStatus">待生成</span>
               </div>
               <div class="wb-card-body">
-                <p class="wb-hint">Meta Title 建议 50–60 字符；Description 150–160 字符；URL 小写连字符且 ≤75。改完即保存。</p>
+                <p class="wb-hint">Meta Title 建议 50–60 字符；Description 150–160 字符；URL 小写连字符且 ≤75。由 LLM 生成（脚本路径，LLM 不可用时降级为模板草稿 + 二次 LLM 改写）。超长时会自动让 LLM 重写 meta title/slug，不会直接复制文章 H1。改完即保存。</p>
+                <div class="gen-live-mini" id="metaLive"></div>
                 <div class="section-meta-grid" id="metaEditor">
                   <div class="section-field">
                     <label>Meta Title</label>
-                    <input type="text" id="metaTitle" maxlength="70" oninput="onMetaEdit()" disabled>
+                    <input type="text" id="metaTitle" oninput="onMetaEdit()" disabled>
                     <div class="char-count" id="metaTitleCount">0 / 60</div>
                   </div>
                   <div class="section-field">
                     <label>Meta Description</label>
-                    <textarea id="metaDesc" rows="3" maxlength="200" oninput="onMetaEdit()" disabled></textarea>
+                    <textarea id="metaDesc" rows="3" oninput="onMetaEdit()" disabled></textarea>
                     <div class="char-count" id="metaDescCount">0 / 160</div>
                   </div>
                   <div class="section-field">
                     <label>URL Slug</label>
-                    <input type="text" id="metaSlug" maxlength="80" oninput="onMetaEdit()" disabled>
+                    <input type="text" id="metaSlug" oninput="onMetaEdit()" disabled>
                     <div class="char-count" id="metaSlugCount">0 / 75</div>
                   </div>
                   <div class="section-field">
@@ -1656,9 +1673,9 @@ const DEFAULT_RULES = {
   ],
   images: [
     { text: '正文配图前先写 section.image_queries：2–3 个具体英文搜图词（家具/房间/布局），禁止用整篇标题或 moving/lifestyle/together 等空泛词', enabled: true },
-    { text: '正文配图必须从 Unsplash/Pexels API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search）；必须能看出家具、室内或房间布局；禁止搬家纸箱特写、握手、抽象纹理、无关户外、无家具人像；禁止编造 URL 或浏览器随便抓图；找不到合格图时 images=[]，同一 URL 不得跨 section 复用', enabled: true },
-    { text: '介绍具体 POVISON 产品时，必须在该段正下方放该精确产品官方图；caption 用产品名；图片与 caption 都链接到 product.url；图源仅 catalog API（Detail 优先、爬商详回退），禁止 Unsplash/Pexels/相似产品/第三方图顶替', enabled: true },
-    { text: '正文生活图：简洁英文 alt + caption；credit 用候选返回的 Photo: Unsplash/Pexels。产品图 caption 只用产品名，不加库存图 credit', enabled: true },
+    { text: '正文配图必须从 Pixabay/Openverse API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search）；必须能看出家具、室内或房间布局；禁止搬家纸箱特写、握手、抽象纹理、无关户外、无家具人像；禁止编造 URL 或浏览器随便抓图；找不到合格图时 images=[]，同一 URL 不得跨 section 复用', enabled: true },
+    { text: '介绍具体 POVISON 产品时，必须在该段正下方放该精确产品官方图；caption 用产品名；图片与 caption 都链接到 product.url；图源仅 catalog API（Detail 优先、爬商详回退），禁止 Pixabay/Openverse/相似产品/第三方图顶替', enabled: true },
+    { text: '正文生活图：简洁英文 alt + caption；credit 用候选返回的 Photo: Pixabay/Openverse。产品图 caption 只用产品名，不加库存图 credit', enabled: true },
   ],
 };
 
@@ -3743,7 +3760,10 @@ function renderOutline() {
   articleState.outline.forEach((item, idx) => {
     const row = document.createElement('div');
     row.className = 'outline-item ' + item.level;
+    row.setAttribute('draggable', 'true');
+    row.dataset.idx = idx;
     row.innerHTML = `
+      <span class="outline-handle" title="拖动调整顺序">⠿</span>
       <span class="outline-level">${item.level.toUpperCase()}</span>
       <div class="outline-text" contenteditable="true" data-idx="${idx}">${item.text}</div>
       <button class="outline-remove" title="删除" onclick="removeOutlineItem(${idx})">✕</button>`;
@@ -3758,7 +3778,68 @@ function renderOutline() {
       saveToRun();
     });
     te.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); te.blur(); } });
+    wireOutlineDrag(row);
   });
+}
+
+// ── Outline drag-and-drop (reorder only; level stays unchanged) ──────────────
+let _outlineDragIdx = null;
+
+function wireOutlineDrag(row) {
+  const handle = row.querySelector('.outline-handle');
+  // Drag starts only from the handle so the contenteditable text stays selectable.
+  handle.addEventListener('mousedown', () => { row.setAttribute('draggable', 'true'); });
+  handle.addEventListener('touchstart', () => { row.setAttribute('draggable', 'true'); }, {passive: true});
+
+  row.addEventListener('dragstart', e => {
+    _outlineDragIdx = Number(row.dataset.idx);
+    row.classList.add('dragging');
+    try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(_outlineDragIdx)); } catch (_) {}
+  });
+  row.addEventListener('dragend', () => {
+    row.classList.remove('dragging');
+    _outlineDragIdx = null;
+    document.querySelectorAll('.outline-item').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
+  });
+  row.addEventListener('dragover', e => {
+    e.preventDefault();
+    if (_outlineDragIdx === null) return;
+    const rect = row.getBoundingClientRect();
+    const after = (e.clientY - rect.top) > rect.height / 2;
+    document.querySelectorAll('.outline-item').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
+    row.classList.add(after ? 'drag-over-bottom' : 'drag-over-top');
+    try { e.dataTransfer.dropEffect = 'move'; } catch (_) {}
+  });
+  row.addEventListener('dragleave', () => {
+    row.classList.remove('drag-over-top','drag-over-bottom');
+  });
+  row.addEventListener('drop', e => {
+    e.preventDefault();
+    const fromIdx = _outlineDragIdx;
+    if (fromIdx === null) return;
+    const rect = row.getBoundingClientRect();
+    const after = (e.clientY - rect.top) > rect.height / 2;
+    let toIdx = Number(row.dataset.idx);
+    if (after) toIdx += 1;
+    moveOutlineItem(fromIdx, toIdx);
+  });
+}
+
+function moveOutlineItem(fromIdx, toIdx) {
+  if (fromIdx === null || fromIdx === toIdx) return;
+  const arr = articleState.outline;
+  if (toIdx < 0 || toIdx > arr.length) return;
+  // Clamp: when moving down within same array, the target shifts by one
+  const adjustedTo = (toIdx > fromIdx) ? toIdx - 1 : toIdx;
+  if (adjustedTo === fromIdx) return;
+  const [moved] = arr.splice(fromIdx, 1);
+  arr.splice(adjustedTo, 0, moved);
+  articleState.outlineConfirmed = false;
+  articleState.phaseDone.outline = false;
+  renderOutline();
+  setStatus('outlineStatus', 'edited', '已修改 · 待确认');
+  invalidateDownstream('outline');
+  saveToRun();
 }
 
 function addOutlineItem(level) {
@@ -4318,11 +4399,9 @@ function refreshPlacementsGate() {
   const allHandled = hasAny && products.concat(links).every(x => x.status === 'accepted' || x.status === 'rejected');
 
   const btnAcceptAll = document.getElementById('btnAcceptAllPlacements');
-  const btnApply = document.getElementById('btnApplyPlacements');
   const btnNext = document.getElementById('btnPlacementsNext');
   const btnFaq = document.getElementById('btnGenFaq');
   if (btnAcceptAll) btnAcceptAll.disabled = !hasAny || allHandled;
-  if (btnApply) btnApply.disabled = !(acceptedP.length + acceptedL.length > 0);
   if (btnNext) btnNext.disabled = !canConfirm;
   if (btnFaq) btnFaq.disabled = !articleState.phaseDone.placements;
 
@@ -4360,39 +4439,6 @@ function refreshPlacementsGate() {
   else setStatus('placementsStatus', 'edited', '已审 · 可确认');
   updatePhasePills();
   updateGenProgressBar();
-}
-
-function applyPlacementsToSections() {
-  const acceptedP = (articleState.products || []).filter(p => p.status === 'accepted');
-  const acceptedL = (articleState.links || []).filter(l => l.status === 'accepted');
-  if (!acceptedP.length && !acceptedL.length) {
-    showToast('请先接受至少一项', '');
-    return;
-  }
-  // Clear previous auto-applied markers then append
-  articleState.sections.forEach(sec => {
-    if (!sec.content) return;
-    sec.content = sec.content
-      .replace(/\n\n\[Product:[\s\S]*?\]/g, '')
-      .replace(/\n\n\[Internal link:[\s\S]*?\]/g, '');
-  });
-  acceptedP.forEach(p => {
-    const sec = articleState.sections.find(s => s.id === p.sectionId);
-    if (!sec) return;
-    const linked = (p.blurb || '').replace(p.name, `[${p.name}](${p.url})`);
-    sec.content = (sec.content || '').trim() + `\n\n[Product: ${p.name}]\n${linked}`;
-    sec.status = 'edited';
-  });
-  acceptedL.forEach(l => {
-    const sec = articleState.sections.find(s => s.id === l.sectionId);
-    if (!sec) return;
-    sec.content = (sec.content || '').trim() + `\n\n[Internal link: "${l.anchor}" → ${l.url}]`;
-    sec.status = 'edited';
-  });
-  renderSectionStack();
-  saveToRun();
-  logStep(3, 'placements_apply', `写入 ${acceptedP.length} 产品 + ${acceptedL.length} 内链到正文`);
-  showToast('已写入正文对应板块，可回正文检查语气', 'success');
 }
 
 function confirmPlacements() {
@@ -4550,12 +4596,27 @@ function enableMetaFields(on) {
   });
 }
 
+function slugifyHeading(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
+
 function fillMetaFields() {
   document.getElementById('metaTitle').value = articleState.meta.title || '';
   document.getElementById('metaDesc').value = articleState.meta.description || '';
   document.getElementById('metaSlug').value = articleState.meta.slug || '';
   document.getElementById('metaFocus').value = articleState.meta.focus || '';
   onMetaEdit();
+  // Warn if the agent wrote over-limit meta (it should fit, not truncate).
+  const t = (articleState.meta.title || '').length;
+  const d = (articleState.meta.description || '').length;
+  const sl = (articleState.meta.slug || '').length;
+  if (t > 60 || d > 160 || sl > 75) {
+    const parts = [];
+    if (t > 60) parts.push('Meta Title ' + t + ' 字符（超 60，请改短）');
+    if (d > 160) parts.push('Meta Description ' + d + ' 字符（超 160，请改短）');
+    if (sl > 75) parts.push('URL Slug ' + sl + ' 字符（超 75，请改短）');
+    showToast(parts.join(' · '), '');
+  }
 }
 
 function onMetaEdit() {
@@ -4640,10 +4701,6 @@ function buildProductImageHtml(sec) {
   }).join('');
 }
 
-function slugifyHeading(text) {
-  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
-}
-
 function buildTocHtml() {
   const items = [];
   let hasIntro = false;
@@ -4686,12 +4743,127 @@ function buildTocHtml() {
   return html;
 }
 
+function stripLegacyPlacements(content) {
+  return String(content || '').replace(/\n\n\[(Product|Internal link):[\s\S]*$/, '');
+}
+
+function stripOrphanedPlacementBlurbs(content, sec) {
+  // Old "写入正文" bug left bare blurbs (no [Product:] marker) stacked in section.content.
+  // Strip every accepted product's blurb (plain + markdown-linked) for this section.
+  var text = String(content || '');
+  var sid = sec && sec.id;
+  if (!sid) return text;
+  (articleState.products || []).forEach(function(p) {
+    if (!p || p.status !== 'accepted') return;
+    if ((p.sectionId || p.section) !== sid) return;
+    var blurb = String(p.blurb || '').trim();
+    var name = String(p.name || '').trim();
+    var url = String(p.url || '').trim();
+    if (!blurb) return;
+    var variants = [blurb];
+    if (name && url) variants.push(blurb.replace(name, '[' + name + '](' + url + ')'));
+    variants.forEach(function(v) {
+      if (!v) return;
+      while (text.indexOf(v) !== -1) text = text.split(v).join('');
+    });
+  });
+  text = text.replace(/\n\n\[Product:\s*[^\]]+\]/g, '');
+  text = text.replace(/\n\n\[Internal link:[^\]]*\]/g, '');
+  return text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function injectProductsMd(sec) {
+  var sid = sec && sec.id;
+  if (!sid) return '';
+  var parts = [];
+  (articleState.products || []).forEach(function(p) {
+    if (!p || p.status !== 'accepted') return;
+    if ((p.sectionId || p.section) !== sid) return;
+    var blurb = String(p.blurb || '').trim();
+    var name = String(p.name || '').trim();
+    var url = String(p.url || '').trim();
+    if (!blurb && !name) return;
+    var text = blurb || name;
+    if (name && url) text = text.replace(name, '[' + name + '](' + url + ')');
+    parts.push(text);
+  });
+  return parts.join('\n\n');
+}
+
+function inlineLinkReplace(content, anchor, url) {
+  // Replace first plain-text occurrence of `anchor` with `[anchor](url)`.
+  // Case-insensitive, word-bounded, preserves body's original casing.
+  // Skips occurrences already inside a markdown link [...](...) to avoid nesting.
+  if (!content || !anchor || !url) return { content: content, replaced: false };
+  var escaped = anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  var re = new RegExp('(?<!\\w)' + escaped + '(?!\\w)', 'gi');
+  // Find spans of existing links (markdown [...](...) and HTML <a ...>...</a>) to skip nesting.
+  var linkRe = /\[[^\]]*\]\([^)]*\)|<a\b[^>]*>[\s\S]*?<\/a>/gi;
+  var linkSpans = [];
+  var lm;
+  while ((lm = linkRe.exec(content)) !== null) {
+    linkSpans.push([lm.index, lm.index + lm[0].length]);
+  }
+  var m;
+  while ((m = re.exec(content)) !== null) {
+    var s = m.index, e = s + m[0].length;
+    var inside = linkSpans.some(function(sp) { return (sp[0] <= s && s < sp[1]) || (sp[0] < e && e <= sp[1]); });
+    if (!inside) {
+      var matched = content.slice(s, e);
+      return { content: content.slice(0, s) + '[' + matched + '](' + url + ')' + content.slice(e), replaced: true };
+    }
+  }
+  return { content: content, replaced: false };
+}
+
+function prepareSectionContent(sec) {
+  var raw = stripLegacyPlacements(sec && sec.content);
+  raw = stripOrphanedPlacementBlurbs(raw, sec);
+  // Inline-link accepted internal links into body prose (first occurrence).
+  var fallbackLinks = [];
+  (articleState.links || []).forEach(function(l) {
+    if (!l || l.status !== 'accepted') return;
+    if ((l.sectionId || l.section) !== (sec && sec.id)) return;
+    var anchor = String(l.anchor || '').trim();
+    var url = String(l.url || '').trim();
+    if (!anchor || !url) return;
+    var r = inlineLinkReplace(raw, anchor, url);
+    if (r.replaced) {
+      raw = r.content;
+    } else {
+      fallbackLinks.push('Related: [' + anchor + '](' + url + ')');
+    }
+  });
+  // Append accepted product blurbs.
+  var productMd = injectProductsMd(sec);
+  var parts = [];
+  if (String(raw || '').trim()) parts.push(raw.replace(/\s+$/, ''));
+  if (productMd) parts.push(productMd);
+  if (fallbackLinks.length) parts.push(fallbackLinks.join('\n\n'));
+  return parts.join('\n\n');
+}
+
+function cleanPersistedPlacementResidue() {
+  // Persist cleaned section.content (markers + orphan blurbs removed; no inject).
+  // Inject stays assembly-only so products/links remain the single source of truth.
+  var changed = false;
+  (articleState.sections || []).forEach(function(sec) {
+    if (!sec) return;
+    var cleaned = stripOrphanedPlacementBlurbs(stripLegacyPlacements(sec.content || ''), sec);
+    if (cleaned !== String(sec.content || '').trim()) {
+      sec.content = cleaned;
+      changed = true;
+    }
+  });
+  return changed;
+}
+
 function buildArticleBody() {
   let body = '';
   let tocInserted = false;
   const tocHtml = buildTocHtml();
   articleState.sections.forEach(sec => {
-    const chunks = formatSectionHtml(sec.content);
+    const chunks = formatSectionHtml(prepareSectionContent(sec));
     let htmlBlock = chunks.join('');
     const inlineImgs = buildInlineImagesHtml(sec);
     const productImgs = buildProductImageHtml(sec);
@@ -4787,6 +4959,11 @@ function assemblePreview() {
     showToast('请先生成 SEO 元信息', '');
     return;
   }
+  // Clean orphan blurbs left by the old "写入正文" button so section editor +
+  // next assemble stay consistent with the single-source inject path.
+  if (cleanPersistedPlacementResidue()) {
+    renderSectionStack();
+  }
   const html = fillBlogTemplate();
   articleState.previewHtml = html;
   articleState.validation = runClientValidation();
@@ -4796,6 +4973,7 @@ function assemblePreview() {
   renderChecklist();
   setGenPhase('preview');
   saveToRun();
+  persistArticleState();
   logStep(3, 'preview', '组装预览完成（blog-post-template 填槽 + FAQ JSON-LD）');
   var run = getActiveRun();
   if (run) run.genStatus = 'preview';
@@ -4814,7 +4992,7 @@ function ngramsSet(tokens, n) {
   return set;
 }
 function faqOverlapRatio() {
-  var body = (articleState.sections || []).map(function(s){ return s.content || ''; }).join('\n');
+  var body = (articleState.sections || []).map(function(s){ return prepareSectionContent(s); }).join('\n');
   var bodyNg = ngramsSet(wordsList(body), 3);
   var faqText = (articleState.faq || []).map(function(f){ return (f.q||'') + ' ' + (f.a||''); }).join(' ');
   var faqNg = ngramsSet(wordsList(faqText), 3);
@@ -4825,7 +5003,7 @@ function faqOverlapRatio() {
   return inter / keys.length;
 }
 function runClientValidation() {
-  var body = (articleState.sections || []).map(function(s){ return s.content || ''; }).join('\n');
+  var body = (articleState.sections || []).map(function(s){ return prepareSectionContent(s); }).join('\n');
   var wc = wordsList(body).length;
   var m = articleState.meta || {};
   var title = m.title || '';
@@ -4960,7 +5138,6 @@ function rejectArticle() {
   fillMetaFields();
   enableMetaFields(false);
   setStatus('sectionsStatus', 'idle', '待生成');
-  document.getElementById('btnApplyPlacements').disabled = true;
   document.getElementById('btnFaqNext').disabled = true;
   document.getElementById('btnMetaNext').disabled = true;
   document.getElementById('btnGenAllSections').disabled = false;
@@ -5070,7 +5247,7 @@ var RETIRED_DEFAULT_RULE_TEXTS = {
   '内链 URL 必须来自「生成推荐」Agent 调用的 blog API（scripts/povison-blog.py /api/povison-blog/*，sitemap 真实博客）；禁止编造 blog URL（会 404）': 1,
   '4–6 个问答；问题用 H3 展开；答案 40–60 词（榜单类 30–40 词）': 1,
   '榜单类结构（按顺序）：Title → Introduction(含H2标题,~100词) → 主题相关H2(选择标准/总览) → Quick Summary Table → Best Picks List(默认10个,H3展开) → 信息增量H2(1-2个,问句格式) → Conclusion(≤100词) → FAQ(4-6个,H3展开)': 1,
-  '正文配图必须从 Unsplash/Pexels API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search），禁止编造 URL、禁止浏览器随便抓图': 1,
+  '正文配图必须从 Pixabay/Openverse API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search），禁止编造 URL、禁止浏览器随便抓图': 1,
   '正文配图必须能看出家具、室内或房间布局；禁止搬家纸箱特写、握手、抽象纹理、无关户外、无家具人像；找不到合格图时 images=[]，同一 URL 不得跨 section 复用': 1,
 };
 
@@ -6470,12 +6647,16 @@ async function bridgeValidateAndPreview() {
 async function bridgeAskAgent(step, triggerBtn) {
   if (!(await bridgeHealth())) return;
   const btns = [];
-  // Disable all agent-trigger buttons in the current phase + the explicit trigger
+  // Disable all agent-trigger buttons across all phase panels (original behavior).
   document.querySelectorAll('[onclick*="bridgeAskAgent"], [onclick*="generateSerp"], [onclick*="generateOutline"], [onclick*="generateAllSections"]').forEach(b => btns.push(b));
   if (triggerBtn && !btns.includes(triggerBtn)) btns.push(triggerBtn);
   const jobKind = 'agent-' + step;
   JobProgress.start(jobKind, btns);
-  agentLiveReset('genLive', 'Agent · ' + step, '正在执行…');
+  // Use the per-panel mini live stream (not the global genLive at the top of
+  // the workbench) so the viewport doesn't shift when the stream appears.
+  const _LIVE_PANEL = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'placementsLive', faq:'faqLive', meta:'metaLive' };
+  const livePanelId = _LIVE_PANEL[step] || _LIVE_PANEL[currentGenPhase] || 'genLive';
+  agentLiveReset(livePanelId, 'Agent · ' + step, '正在执行…');
   try {
     const rid = await bridgeEnsureRun();
     const isTask = String(rid).startsWith('task-');
@@ -6507,7 +6688,7 @@ async function bridgeAskAgent(step, triggerBtn) {
         if (_activePollTaskId !== rid) return; // operator switched away / started new flow
         await new Promise(r => setTimeout(r, 2000));
         if (_activePollTaskId !== rid) return;
-        progressIdx = await agentPollProgress(rid, progressIdx, 'genLive');
+        progressIdx = await agentPollProgress(rid, progressIdx, livePanelId);
         try {
           const st = await bridgeFetch(statusPath);
           const gw = st.gateway || {};
@@ -6517,18 +6698,18 @@ async function bridgeAskAgent(step, triggerBtn) {
             // Only refresh the UI if this task is still the one the operator has
             // selected; otherwise leave the current view untouched.
             if (_activePollTaskId !== rid) return;
-            progressIdx = await agentPollProgress(rid, progressIdx, 'genLive');
+            progressIdx = await agentPollProgress(rid, progressIdx, livePanelId);
             // Agent writes via seo_save_step_data → DB, not the run-dir file.
             await reloadArticleState(rid);
             JobProgress.done(true, 'Agent 已完成：' + step);
             showToast('Agent 已完成：' + step, 'success');
-            agentLiveAppend('genLive', '完成：' + step, 'done');
-            setTimeout(function(){ agentLiveHide('genLive'); }, 1800);
+            agentLiveAppend(livePanelId, '完成：' + step, 'done');
+            setTimeout(function(){ agentLiveHide(livePanelId); }, 1800);
           } else if (status === 'failed' || status === 'error') {
             done = true;
             JobProgress.done(false, 'Agent 执行失败');
             showToast('Agent 执行失败', '');
-            agentLiveAppend('genLive', 'Agent 执行失败', 'error');
+            agentLiveAppend(livePanelId, 'Agent 执行失败', 'error');
           } else if (status === 'waiting_for_approval') {
             JobProgress.update('等待审批中…请在 Gateway 中批准该运行');
           } else if (status === 'running') {

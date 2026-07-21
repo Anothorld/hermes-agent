@@ -54,8 +54,8 @@ Other modes: `./start.sh bridge` (UI only) · `./start.sh gateway` (agent only) 
 | `GET /api/tasks/{id}/steps/{n}/agent/status` | Poll gateway run status |
 | `GET /api/tasks/{id}/steps/{n}/agent/progress` | Live progress rows (read-only) |
 | `GET /api/wordpress/health` | WP connection config + REST/auth status (no secrets) |
-| `GET /api/stock-images/health` | Unsplash/Pexels key presence (no secrets) |
-| `POST /api/stock-images/search` | Body `{query, source?, per_page?}` → candidate pool for section images |
+| `GET /api/stock-images/health` | Pixabay key + Openverse availability (no secrets) |
+| `POST /api/stock-images/search` | Body `{query, source?: auto\|pixabay\|openverse, per_page?}` → candidate pool for section images |
 | `GET /api/povison-products/health` | POVISON catalog Search API reachability (no secrets; storeId=3) |
 | `POST /api/povison-products/search` | Body `{keyword, limit?}` → candidates with image + tags |
 | `POST /api/povison-products/lookup` | Body `{url, sku?, variant?}` → name, url, image, specs, dimensions |
@@ -126,6 +126,14 @@ resets to「全部来源」, and the view switches to Step 1 so operators see re
 
 ## Env (set by `start.sh`)
 
+The Bridge also auto-loads `.env` at startup (``_load_dotenv`` in `server.py`), so it
+works even when started manually (e.g. `uvicorn server:app` without `start.sh`).
+Vars already in the real environment take precedence over `.env` values. Both
+`playground/seo-studio/.env` and the profile `~/.hermes/profiles/povison-seo/.env`
+are loaded (in that order). This is critical for ``SEO_LLM_API_KEY`` — without it,
+script-path LLM calls (``section-generate.py --mode meta/faq``) silently fail and
+fall back to demo content.
+
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `SEO_SKILL_DIR` | `~/.hermes/skills/productivity/povison-seo-blog` | Scripts + templates + data |
@@ -139,6 +147,14 @@ resets to「全部来源」, and the view switches to Step 1 so operators see re
 | `SEO_LLM_MODEL` | `glm-5.2` | Model id (`glm-2` is not available on this endpoint; use `glm-5.2`) |
 
 Copy `.env.example` → `.env` and set `SEO_LLM_API_KEY` before running brainstorm or section generation.
+
+**Meta / FAQ JSON mode:** `section-generate.py` requests ``response_format={"type":"json_object"}``
+for meta/faq/outline/placements (verified supported on ``glm-5.2``). If a quota failover
+lands on a model that rejects ``response_format`` (e.g. ``glm-5.2-b``), ``llm_client``
+retries once without it. Reasoning models also need enough ``max_tokens`` so ``content``
+is not empty after ``reasoning_content`` (meta uses 8000). If the primary meta call still
+cannot be parsed, stderr shows ``[meta] primary LLM response not JSON, using demo draft``
+and falls back to ``demo_meta``.
 
 **Feishu 应用登录**（参考 povison-cs-console）：复制 `.env.example` 中的 `SEO_STUDIO_*` 块，配置 H5 免登和/或 AnyCross OIDC。详见 [docs/seo-studio-feishu.md](../../../docs/seo-studio-feishu.md)。
 
@@ -186,13 +202,15 @@ Copy `.env.example` → `.env` and set `SEO_LLM_API_KEY` before running brainsto
 - **Image policy (Step 3):** the agent inserts two kinds of images, from strictly separate sources so they never conflict:
   - **Body images** — `articleState.sections[].images = [{url, alt, caption, credit}]` plus
     `section.image_queries = [2–3 concrete English phrases]` (P0). Source MUST be
-    Unsplash or Pexels via the **candidate pool** (P1):
+    **Pixabay or Openverse** via the **candidate pool** (P1):
     `python3 scripts/search-stock-images.py -q "..." -n 5` or
-    `POST /api/stock-images/search`. The agent may only pick from returned candidates —
-    never invent URLs / browser-scrape. Hard rules: photo must show furniture / room /
-    layout; forbid moving-box close-ups, handshakes, abstract textures, unrelated outdoors,
-    portraits with no furniture. Skip (`images=[]`) if no good match. Never duplicate URLs.
-  - **API keys:** `UNSPLASH_ACCESS_KEY` and/or `PEXELS_API_KEY` in `.env` (see `.env.example`).
+    `POST /api/stock-images/search` (`source`: `auto` | `pixabay` | `openverse`).
+    The agent may only pick from returned candidates — never invent URLs / browser-scrape.
+    Hard rules: photo must show furniture / room / layout; forbid moving-box close-ups,
+    handshakes, abstract textures, unrelated outdoors, portraits with no furniture.
+    Skip (`images=[]`) if no good match. Never duplicate URLs.
+  - **API keys:** Openverse works anonymously (no key). Optional `PIXABAY_API_KEY` in `.env`
+    (see `.env.example`); optional `OPENVERSE_ACCESS_TOKEN` for higher Openverse rate limits.
     Health: `GET /api/stock-images/health`.
   - **Product images** — `articleState.products[].image = <POVISON product image URL>` and
     `products[].url = <PDP URL>`. Source MUST be POVISON (povison.com). The preferred path is the
@@ -225,6 +243,23 @@ Copy `.env.example` → `.env` and set `SEO_LLM_API_KEY` before running brainsto
     PDP**; caption text is the product name (e.g. `Povison Ansel-…`), matching
     [published blog figures](https://www.povison.com/blog/buying-guide/low-profile-tv-stand.html).
     WordPress draft export also pre-enriches any product still missing an image before publishing.
+  - **Placement injection (assembly-time, single source of truth):** the old manual "写入已接受项到正文"
+    button has been removed. Accepted products and internal links are injected into the article body
+    by `fill_blog_template` → `_article_body` at assembly time (both the local preview and the
+    WordPress draft export). For each section, `_strip_legacy_placements` first strips any trailing
+    legacy `[Product: …]` / `[Internal link: …]` blocks from older runs, then `_prepare_section_content`
+    weaves accepted placements back in from `articleState.products` / `articleState.links` where
+    `status='accepted'` and `sectionId` matches:
+    - **Internal links** are inlined into the section's first plain-text occurrence of their anchor
+      (case-insensitive, word-bounded, preserves the body's original casing) so they read like
+      editor-placed inline links rather than trailing footnotes. Links whose anchor does not appear
+      in the body fall back to a trailing `Related: [anchor](url)` line so no accepted link is silently
+      dropped.
+    - **Products** are appended as blurbs at the end with the product name hyperlinked to the PDP.
+    Orphan blurbs left by the old buggy write-to-body button (stacked paragraphs with no `[Product:]`
+    marker) are also stripped before inject, so re-assembling historical polluted tasks self-heals.
+    Re-assembling never accumulates duplicates; `articleState.products`/`links` is the only source.
+    Local UI 「组装预览」uses the same `prepareSectionContent` path client-side (not only the Bridge).
   - The UI renders body images as centered `<figure>` after each section's text and product images
     immediately after that section's lifestyle images.
   - The blog template **no longer** includes the legacy footer gallery (`Visual Inspiration` / 10 stock
@@ -264,6 +299,13 @@ Copy `.env.example` → `.env` and set `SEO_LLM_API_KEY` before running brainsto
     `rank_math_schema` post meta best-effort.
   - **Category/tags:** defaults come from `WP_CATEGORY_ID` / `WP_TAG_IDS`; override per-export by passing
     `category_id` (int) and `tag_ids` (list[int]) in the request body.
+  - **External link `rel=nofollow`:** at assembly time `_add_external_link_rel` walks every `<a href>`
+    in the article body and, for **external** links (any `http(s)://` host that is not `povison.com`
+    or a subdomain of it), bakes in `target="_blank" rel="noreferrer noopener nofollow"`. Internal
+    povison.com links (product PDPs, `/collections/<slug>` pages, `/blog/*.html` articles injected by
+    placements) and in-page anchors (`#id`) are left untouched so internal SEO juice is not diluted.
+    WordPress preserves `rel` on `<a>` tags received via the REST API, so the draft ships with the
+    same link relationships an operator would otherwise set by hand in the block editor.
   - **Health:** `GET /api/wordpress/health` reports config presence + REST/auth status (no secrets) for
     pre-flight checks.
   - **Deps:** `beautifulsoup4`, `requests`, `pyyaml` added to `requirements.txt` (parser + client + config

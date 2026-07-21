@@ -42,6 +42,40 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from auth import feishu_h5_client, oidc_client, operator_session, operator_store
 from auth.oidc_routes import router as oidc_router
 
+
+def _load_dotenv() -> None:
+    """Load ``.env`` from the seo-studio dir so the Bridge works even when
+    started manually (not via ``start.sh``).
+
+    Only sets vars that are NOT already in the environment (real env wins).
+    This is critical for ``SEO_LLM_API_KEY`` — without it, script-path LLM
+    calls (section-generate.py --mode meta/faq) silently fail and fall back
+    to demo content. Also loads the profile ``.env`` if present.
+    """
+    here = Path(__file__).resolve().parent
+    candidates = [
+        here / ".env",
+        Path.home() / ".hermes" / "profiles" / os.environ.get("SEO_PROFILE", "povison-seo") / ".env",
+    ]
+    for env_path in candidates:
+        if not env_path.exists():
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip("'\"")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+        except Exception:
+            pass
+
+
+_load_dotenv()
+
 SKILL_DIR = Path(os.environ.get("SEO_SKILL_DIR", "")).resolve() or Path.home() / ".hermes/skills/productivity/povison-seo-blog"
 RUNS_DIR = Path(os.environ.get("SEO_RUNS_DIR", str(SKILL_DIR / "runs"))).resolve()
 STUDIO_HTML = Path(os.environ.get("SEO_STUDIO_HTML", "")).resolve() or (Path(__file__).parent / "ui" / "index.html")
@@ -182,8 +216,19 @@ def _spawn_job(kind: str, cmd: list[str], cwd: Path, rid: str = "", on_done=None
         rc: int | None = None
         err = ""
         try:
+            # Inherit Bridge env (incl. SEO_LLM_* loaded by _load_dotenv at import).
+            child_env = os.environ.copy()
+            if kind == "section-generate" and not child_env.get("SEO_LLM_API_KEY", "").strip():
+                import sys as _sys
+                print(
+                    "  [seo-studio] SEO_LLM_API_KEY not set — script LLM steps (meta/faq/…) "
+                    "will fall back to demo templates. Set it in playground/seo-studio/.env "
+                    "and restart Bridge.",
+                    file=_sys.stderr,
+                )
             proc = subprocess.run(
                 cmd, cwd=str(cwd), capture_output=True, text=True, timeout=SCRIPT_TIMEOUT,
+                env=child_env,
             )
             rc = proc.returncode
             with _JOBS_LOCK:
@@ -248,6 +293,8 @@ async def health(request: Request) -> dict:
         "profile": PROFILE,
         "scripts_ok": scripts_ok,
         "gateway_key_set": bool(GATEWAY_KEY),
+        "seo_llm_configured": bool(os.environ.get("SEO_LLM_API_KEY", "").strip()),
+        "seo_llm_model": os.environ.get("SEO_LLM_MODEL", ""),
         "skill_dir": str(SKILL_DIR),
         "runs_dir": str(RUNS_DIR),
         "db": _db.stats(),
@@ -281,6 +328,10 @@ def _step_num_for_agent(step: str) -> int:
 
 _PDP_RE = re.compile(r"^https?://(?:[\w-]+\.)*povison\.com/[^?#]*\.html(?:[?#]|$)", re.I)
 _BLOG_RE = re.compile(r"^https?://(?:[\w-]+\.)*povison\.com/blog/[^?#]*\.html(?:[?#]|$)", re.I)
+# Internal links may also point at povison.com category/collection landing pages
+# (SKILL.md §内链: "从 povison.com/blog/ 选相关文章（或合适类目页）"). These are
+# real internal pages, not fabricated — the liveness guard is the backstop.
+_COLLECTION_RE = re.compile(r"^https?://(?:[\w-]+\.)*povison\.com/collections/[^?#/]+(?:[?#]|/?$)", re.I)
 _POVISON_HOST_RE = re.compile(r"^(?:[\w-]+\.)*povison\.com$", re.I)
 
 
@@ -289,9 +340,12 @@ def _validate_placement_urls(data: dict) -> list[dict]:
 
     Returns a list of warnings: ``[{kind, idx, url, problem}]``. Empty = clean.
     Product URLs must be povison PDPs (``.html`` + povison host); link URLs must
-    be povison blog articles (``/blog/<...>.html``). Fabricated URLs are the
-    root cause of 404 placements — this validator blocks confirming placements
-    until they're fixed or sourced from the catalog/blog APIs.
+    be povison blog articles (``/blog/<...>.html``) or category landing pages
+    (``/collections/<slug>``). Fabricated URLs are the root cause of 404
+    placements — this validator blocks confirming placements until they're
+    fixed or sourced from the catalog/blog APIs. The HTTP liveness guard
+    (``placementUrlCheck``) is the final backstop for any URL that passes the
+    pattern check but still 404s.
     """
     warnings: list[dict] = []
     if not isinstance(data, dict):
@@ -316,8 +370,12 @@ def _validate_placement_urls(data: dict) -> list[dict]:
         if not url:
             warnings.append({"kind": "link", "idx": i, "url": "", "problem": "link.url is empty"})
             continue
-        if not _BLOG_RE.match(url):
-            warnings.append({"kind": "link", "idx": i, "url": url, "problem": "link.url is not a real povison.com/blog/ article (must start with https://www.povison.com/blog/ and end with .html) — likely fabricated, will 404"})
+        host = urlparse(url).hostname or ""
+        if not _POVISON_HOST_RE.match(host):
+            warnings.append({"kind": "link", "idx": i, "url": url, "problem": f"link.url host is not povison.com ({host})"})
+            continue
+        if not (_BLOG_RE.match(url) or _COLLECTION_RE.match(url)):
+            warnings.append({"kind": "link", "idx": i, "url": url, "problem": "link.url is not a real povison.com blog article (/blog/.../*.html) or category page (/collections/<slug>) — likely fabricated, will 404"})
     return warnings
 
 
@@ -711,6 +769,17 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "'Conclusion' (capitalized) for the conclusion; title is the section heading text "
             "(empty string for Intro); content is the markdown body; status='ready' when done. "
             "Set articleState.phaseDone.sections = true when all sections have content.\n"
+            "VOICE / HUMANIZE (REQUIRED before saving each section):\n"
+            "1) After drafting each section's content, call `skill_view('humanizer')` and apply its "
+            "anti-AI-pattern rules to rewrite the prose so it sounds like a real person wrote it — "
+            "strip 'stands as a testament', 'underscores the importance', 'in today's fast-paced world', "
+            "'it's not just X, it's Y', em-dash asides, and other tells the skill lists.\n"
+            "2) Keep POVISON buying-guide credibility: first-person experience and opinions are welcome, "
+            "but stay trustworthy and specific — no stand-up bits, no slang, no manufactured drama. "
+            "Vary sentence length, prefer concrete details over filler, and let one or two genuine "
+            "opinions through per section.\n"
+            "3) Preserve all SEO structure: keep H2/H3 headings, tables, data citations, product/internal-link "
+            "markers, image_queries, and section boundaries intact — humanize the prose, not the structure.\n"
             "IMAGES (P0+P1 — structured queries + stock API candidate pool):\n"
             "1) For each H2 that warrants a visual, FIRST write section.image_queries = "
             "[2-3 concrete ENGLISH search phrases]. Good: 'couple arranging living room sofa', "
@@ -725,7 +794,7 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "section.images = [{url, alt, caption, credit}] using the candidate's url/alt/credit. "
             "caption = short English figure caption matching the section.\n"
             "4) HARD RULES — skip the section (images=[]) if no good match:\n"
-            "   - Source MUST be Unsplash or Pexels from the API pool. NEVER POVISON product photos here.\n"
+            "   - Source MUST be Pixabay or Openverse from the API pool. NEVER POVISON product photos here.\n"
             "   - MUST depict furniture / room interior / layout. FORBIDDEN: moving boxes close-ups, "
             "     generic handshakes, abstract textures, outdoor scenes unrelated to the section, "
             "     pure portraits with no furniture.\n"
@@ -737,7 +806,18 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
         ),
         "meta": (
             "Generate SEO meta (title/description/slug). Update articleState.meta and "
-            "set articleState.phaseDone.meta = true."
+            "set articleState.phaseDone.meta = true.\n"
+            "HARD LENGTH LIMITS (write to fit, NEVER over-write then truncate):\n"
+            "- title: 50–60 characters (English). This is the META title for SERP, NOT the "
+            "article H1. When the H1 is longer than 60 chars, REWRITE a shorter click-worthy "
+            "meta title — do NOT copy the H1 verbatim and do NOT truncate with '...'.\n"
+            "- description: 150–160 characters. Same rule — rewrite to fit, do not truncate. "
+            "Vary the opening (avoid starting every article with Discover/Learn/Find out).\n"
+            "- slug: lowercase, hyphenated, ≤75 characters, aligned with the rewritten meta "
+            "title (not a verbatim slug of the full H1).\n"
+            "- focus: primary keyword phrase.\n"
+            "Before saving, count each field's characters and confirm title is in [50,60] and "
+            "description is in [150,160]. If out of range, revise the wording until it fits."
         ),
         "placements": (
             "Decide product placements and internal links. "
@@ -772,9 +852,17 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "in one seo_save_step_data call, then set articleState.phaseDone.placements = true.\n"
             "PRODUCT IMAGES: The catalog API already fills image (Detail API main image). Do NOT "
             "substitute stock photos for product images. If a product image is missing, leave image=''.\n"
-            "INTERNAL LINK anchors: anchor text MUST be a natural long-tail phrase that already appears "
-            "(or will appear) in the section's body — never 'click here' / 'see this guide' / 'Povison blog'. "
-            "The API returns a suggested anchor derived from the article slug; adjust it to read naturally in-sentence."
+            "INTERNAL LINK anchors: anchor text MUST be a VERBATIM long-tail phrase that already appears "
+            "word-for-word in the target section's `content` (the section is already written — read it). "
+            "The recommend-links API returns a suggested anchor derived from the article slug (e.g. "
+            "'why-choose-a-sintered-stone-dining-table'); that slug-derived anchor almost never appears "
+            "verbatim in the body, so you MUST scan the section's actual prose and pick a real phrase from it "
+            "(e.g. if the section contains 'a sintered stone dining table adds texture', use "
+            "'sintered stone dining table' as the anchor). Never use 'click here' / 'see this guide' / "
+            "'Povison blog'. If no suitable verbatim phrase exists in that section, either pick a different "
+            "section for the link or use a shorter phrase that does appear. The assembly step weaves the "
+            "link inline at the first occurrence of the anchor in the body; if the anchor is not verbatim in "
+            "the body it falls back to a trailing 'Related:' footnote, which reads worse — so pick carefully."
         ),
     }
     step_guidance = {
@@ -893,10 +981,10 @@ async def wordpress_health() -> dict:
         return {"configured": False, "rest_api": "error", "auth": "error", "error": str(e)}
 
 
-# ---- Stock images (Unsplash / Pexels) ----------------------------------------
+# ---- Stock images (Pixabay / Openverse) --------------------------------------
 @app.get("/api/stock-images/health")
 async def stock_images_health() -> dict:
-    """Report whether Unsplash/Pexels API keys are configured (no secrets)."""
+    """Report Pixabay key + Openverse availability (no secrets)."""
     try:
         import stock_images as _stock
 
@@ -907,9 +995,10 @@ async def stock_images_health() -> dict:
 
 @app.post("/api/stock-images/search")
 async def stock_images_search(body: dict | None = None) -> dict:
-    """Search Unsplash/Pexels for body-image candidates.
+    """Search Pixabay/Openverse for body-image candidates.
 
-    Body: ``{query, source?: auto|unsplash|pexels, per_page?: 1-10}``.
+    Body: ``{query, source?: auto|pixabay|openverse, per_page?: 1-10}``.
+    Legacy ``unsplash`` / ``pexels`` source values are treated as ``auto``.
     Returns a candidate pool the agent/operator must pick from — never invent URLs.
     """
     try:
@@ -1601,6 +1690,158 @@ def _strip_content_markers(content: str) -> str:
     return text
 
 
+def _strip_legacy_placements(content: str) -> str:
+    """Remove trailing auto-applied placement blocks (marker + blurb paragraph).
+
+    Older UI wrote `\n\n[Product: name]\n<blurb>` and `\n\n[Internal link: ...]`
+    directly into section content. These markers always sat at the end of a
+    section, so a greedy match from the first trailing placement marker to
+    end-of-string safely removes the whole appended block (any mix of product
+    and internal-link blocks). Keeps any operator-edited prose before the
+    first marker intact.
+    """
+    text = content or ""
+    text = re.sub(r"\n\n\[(Product|Internal link):[\s\S]*$", "", text)
+    return text
+
+
+def _strip_orphaned_placement_blurbs(content: str, state: dict, sec: dict) -> str:
+    """Remove bare product blurbs left by the old buggy "写入正文" button.
+
+    The old clear regex only deleted `[Product: name]` markers, so repeated
+    clicks stacked the blurb paragraph without markers. `_strip_legacy_placements`
+    cannot see those orphans. Remove every occurrence of each accepted product's
+    blurb (plain and markdown-linked name variants) for this section so
+    `_inject_products_md` can re-append exactly once.
+    """
+    text = content or ""
+    sid = sec.get("id")
+    if not sid:
+        return text
+    for p in state.get("products") or []:
+        if not isinstance(p, dict) or p.get("status") != "accepted":
+            continue
+        if (p.get("sectionId") or p.get("section")) != sid:
+            continue
+        blurb = (p.get("blurb") or "").strip()
+        name = (p.get("name") or "").strip()
+        url = (p.get("url") or "").strip()
+        if not blurb:
+            continue
+        variants = [blurb]
+        if name and url:
+            variants.append(blurb.replace(name, f"[{name}]({url})", 1))
+        for v in variants:
+            if not v:
+                continue
+            while v in text:
+                text = text.replace(v, "")
+    # Leftover standalone markers (not only trailing)
+    text = re.sub(r"\n\n\[Product:\s*[^\]]+\]", "", text)
+    text = re.sub(r"\n\n\[Internal link:[^\]]*\]", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def _prepare_section_content(state: dict, sec: dict) -> str:
+    """Clean legacy placement residue, inline-link accepted internal links into
+    body prose, then append accepted product blurbs once.
+
+    Internal links are woven into the section's first plain-text occurrence of
+    their anchor (case-insensitive, word-bounded, preserves the body's original
+    casing) so they read like editor-placed inline links rather than trailing
+    footnotes. Links whose anchor does not appear in the body fall back to a
+    trailing ``Related: [anchor](url)`` line so no accepted link is silently
+    dropped. Products are still appended as blurbs at the end (their blurb prose
+    is not part of the section body, so inline weaving does not apply).
+    """
+    sec_content = _strip_legacy_placements(sec.get("content") or "")
+    sec_content = _strip_orphaned_placement_blurbs(sec_content, state, sec)
+    # Inline-link accepted internal links into body prose (first occurrence).
+    fallback_links: list[str] = []
+    for l in state.get("links") or []:
+        if not isinstance(l, dict):
+            continue
+        if (l.get("sectionId") or l.get("section")) != sec.get("id"):
+            continue
+        if l.get("status") != "accepted":
+            continue
+        anchor = (l.get("anchor") or "").strip()
+        url = (l.get("url") or "").strip()
+        if not anchor or not url:
+            continue
+        sec_content, replaced = _inline_link_replace(sec_content, anchor, url)
+        if not replaced:
+            fallback_links.append(f"Related: [{anchor}]({url})")
+    # Append accepted product blurbs (single source of truth: articleState.products).
+    product_md = _inject_products_md(state, sec)
+    parts: list[str] = []
+    if sec_content.strip():
+        parts.append(sec_content.rstrip())
+    if product_md:
+        parts.append(product_md)
+    if fallback_links:
+        parts.append("\n\n".join(fallback_links))
+    return "\n\n".join(parts)
+
+
+def _inline_link_replace(content: str, anchor: str, url: str) -> tuple[str, bool]:
+    """Replace first plain-text occurrence of ``anchor`` with ``[anchor](url)``.
+
+    Case-insensitive match, word-bounded, preserves the body's original casing
+    of the matched text (so ``Sintered Stone Dining Table`` in body stays capitalized
+    when wrapped). Skips occurrences already inside a markdown link ``[...](...)``
+    to avoid nesting. Returns ``(new_content, replaced?)``.
+    """
+    if not content or not anchor or not url:
+        return content, False
+    try:
+        pattern = re.compile(r"(?<!\w)" + re.escape(anchor) + r"(?!\w)", re.I)
+    except re.error:
+        return content, False
+    # Spans of existing links (markdown [...](...) and HTML <a ...>...</a>) — skip
+    # matches inside them to avoid nesting a link inside another link.
+    link_spans = [m.span() for m in re.finditer(r"\[[^\]]*\]\([^)]*\)|<a\b[^>]*>.*?</a>", content, re.I | re.S)]
+    for m in pattern.finditer(content):
+        s, e = m.span()
+        if any(ls <= s < le or ls < e <= le for ls, le in link_spans):
+            continue
+        matched_text = content[s:e]
+        replacement = f"[{matched_text}]({url})"
+        return content[:s] + replacement + content[e:], True
+    return content, False
+
+
+def _inject_products_md(state: dict, sec: dict) -> str:
+    """Build markdown for accepted product blurbs attached to ``sec``.
+
+    Single source of truth is ``articleState.products`` (status='accepted',
+    sectionId matches). Each product contributes its blurb with the product
+    name hyperlinked to the PDP. Returns empty string when nothing applies.
+    """
+    sid = sec.get("id")
+    if not sid:
+        return ""
+    parts: list[str] = []
+    for p in state.get("products") or []:
+        if not isinstance(p, dict):
+            continue
+        if (p.get("sectionId") or p.get("section")) != sid:
+            continue
+        if p.get("status") != "accepted":
+            continue
+        blurb = (p.get("blurb") or "").strip()
+        name = (p.get("name") or "").strip()
+        url = (p.get("url") or "").strip()
+        if not blurb and not name:
+            continue
+        text = blurb or name
+        if name and url:
+            text = text.replace(name, f"[{name}]({url})", 1)
+        parts.append(text)
+    return "\n\n".join(parts)
+
+
 def _is_md_table_sep(line: str) -> bool:
     """True for GFM separator rows like ``| --- | :---: |``."""
     s = line.strip()
@@ -1994,6 +2235,50 @@ def _toc_html(state: dict) -> str:
     )
 
 
+_A_OPEN_TAG_RE = re.compile(r"<a\b[^>]*>", re.I)
+
+
+def _add_external_link_rel(html: str) -> str:
+    """Add ``target="_blank" rel="noreferrer noopener nofollow"`` to external links.
+
+    External = any ``http(s)://`` link whose host is not ``povison.com`` (or a
+    subdomain of it). In-page anchors (``#id``) and relative/internal povison.com
+    links (product PDPs, collection pages, blog articles injected by placements)
+    are left untouched so internal-link SEO juice is not diluted. This mirrors
+    the per-link "nofollow" toggle operators would otherwise set by hand in the
+    WordPress editor, applied at assembly time so the exported draft ships with
+    correct relationships baked in (WordPress preserves ``rel`` on ``<a>`` tags
+    received via the REST API).
+
+    Surgical: only rewrites the matched ``<a ...>`` opening tag, leaving the rest
+    of the HTML byte-identical so table/figure styles are not disturbed.
+    """
+    if not html or "<a " not in html.lower():
+        return html
+
+    def _process(match: re.Match) -> str:
+        tag = match.group(0)
+        href_m = re.search(r'\bhref=["\']([^"\']*)["\']', tag, re.I)
+        if not href_m:
+            return tag
+        href = href_m.group(1).strip()
+        if href.startswith("#") or not re.match(r"^https?://", href, re.I):
+            return tag  # in-page anchor or relative → internal
+        host = (urlparse(href).hostname or "").lower()
+        if not host or host == "povison.com" or host.endswith(".povison.com"):
+            return tag  # internal povison.com link → leave alone
+        # Drop any pre-existing target/rel to avoid duplicates, then append ours.
+        tag = re.sub(r'\s*target=["\'][^"\']*["\']', "", tag, flags=re.I)
+        tag = re.sub(r'\s*rel=["\'][^"\']*["\']', "", tag, flags=re.I)
+        if tag.endswith(">"):
+            tag = tag[:-1] + ' target="_blank" rel="noreferrer noopener nofollow">'
+        else:
+            tag = tag + ' target="_blank" rel="noreferrer noopener nofollow">'
+        return tag
+
+    return _A_OPEN_TAG_RE.sub(_process, html)
+
+
 def _article_body(state: dict) -> str:
     """Build article body for WP export / preview.
 
@@ -2004,7 +2289,12 @@ def _article_body(state: dict) -> str:
     toc = _toc_html(state)
     toc_inserted = False
     for sec in state.get("sections") or []:
-        chunks = _section_html(sec.get("content") or "")
+        # Strip legacy/orphan placement residue, weave accepted internal links
+        # inline into body prose (first occurrence), append accepted product
+        # blurbs. articleState.products/links is the single source of truth — no
+        # manual "写入正文" button.
+        sec_content = _prepare_section_content(state, sec)
+        chunks = _section_html(sec_content)
         inline_imgs = _inline_images_html(sec)
         product_imgs = _product_images_html(state, sec)
         if sec.get("type") == "Intro":
@@ -2044,6 +2334,9 @@ def _article_body(state: dict) -> str:
     faq = state.get("faq") or []
     if faq:
         body += f'<h2 id="q-a">{_esc("Q&A")}</h2>' + _faq_block_html(faq)
+    # Bake nofollow/target into external links so the WP draft ships with correct
+    # link relationships without manual per-link editing in the block editor.
+    body = _add_external_link_rel(body)
     return body
 
 
@@ -2196,6 +2489,12 @@ async def agent_run(rid: str, body: dict | None = None) -> dict:
             "Generate body sections for the confirmed outline. Write to article-state.json: "
             "update articleState.sections[].content and set status='ready' for each. "
             "Set articleState.phaseDone.sections = true when all sections have content. "
+            "VOICE/HUMANIZE: after drafting each section, call skill_view('humanizer') and apply its "
+            "anti-AI-pattern rules — strip 'stands as a testament', 'underscores the importance', "
+            "'in today's fast-paced world', em-dash asides, and other tells; vary sentence length; let "
+            "one or two genuine first-person opinions through. Keep POVISON buying-guide credibility "
+            "(no slang/drama). Preserve headings, tables, data, product/internal-link markers, and "
+            "image_queries — humanize the prose, not the structure. "
             "IMAGES: for each H2 that needs a visual, set image_queries (2-3 concrete English "
             "phrases), run `python3 scripts/search-stock-images.py -q \"...\" -n 5`, pick ONE "
             "candidate that shows furniture/room/layout into section.images=[{url,alt,caption,credit}]. "
@@ -2206,7 +2505,15 @@ async def agent_run(rid: str, body: dict | None = None) -> dict:
         ),
         "meta": (
             "Generate SEO meta (title/description/slug). Update article-state.json meta and "
-            "phaseDone.meta = true."
+            "phaseDone.meta = true. "
+            "HARD LENGTH LIMITS — write to fit, do NOT over-write then truncate: "
+            "title 50–60 chars (META title for SERP — rewrite shorter when H1 is long; "
+            "do NOT copy H1 verbatim), description 150–160 chars, slug lowercase hyphenated "
+            "≤75 chars aligned with the rewritten meta title (not full H1 slug). "
+            "Count each field's characters before saving; if out of range, rewrite the wording "
+            "(do not save a long string and rely on truncation). Title must contain the primary "
+            "keyword naturally near the front; vary description openings (not every article starts "
+            "with Discover/Learn/Find out)."
         ),
     }
     step_guidance = step_guidance_map.get(step, f"Step: {step}. Write outputs into the run directory.")

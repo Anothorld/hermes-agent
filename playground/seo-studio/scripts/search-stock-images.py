@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Search Unsplash/Pexels for SEO blog body-image candidates.
+"""Search Pixabay/Openverse for SEO blog body-image candidates.
 
 Used by the povison-seo agent during section generation (P0+P1 image flow).
 Prefer this over browser scraping — returns a constrained candidate pool.
 
 Examples:
   python3 scripts/search-stock-images.py -q "modern living room sofa" -n 5
-  python3 scripts/search-stock-images.py -q "dining table small apartment" --source pexels -o /tmp/stock.json
+  python3 scripts/search-stock-images.py -q "dining table small apartment" --source openverse -o /tmp/stock.json
 
 Env:
-  UNSPLASH_ACCESS_KEY / PEXELS_API_KEY — API keys
+  PIXABAY_API_KEY — optional Pixabay key (https://pixabay.com/api/docs/)
+  OPENVERSE_ACCESS_TOKEN — optional; anonymous Openverse works without it
   SEO_STUDIO_DIR — path to playground/seo-studio (imports stock_images.py)
   SEO_BRIDGE_BASE — optional fallback HTTP Bridge (default http://127.0.0.1:8766)
 """
@@ -65,14 +66,14 @@ def _via_bridge(query: str, source: str, per_page: int) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Search Unsplash/Pexels stock images for blog sections")
+    ap = argparse.ArgumentParser(description="Search Pixabay/Openverse stock images for blog sections")
     ap.add_argument("-q", "--query", required=True, help="Concrete English search phrase")
     ap.add_argument("-n", "--per-page", type=int, default=5, help="Candidates (1-10)")
     ap.add_argument(
         "--source",
         default="auto",
-        choices=["auto", "unsplash", "pexels"],
-        help="Stock source (default: auto)",
+        choices=["auto", "pixabay", "openverse"],
+        help="Stock source (default: auto = Pixabay+Openverse merge)",
     )
     ap.add_argument("-o", "--output", help="Write JSON result to this path")
     ap.add_argument(
