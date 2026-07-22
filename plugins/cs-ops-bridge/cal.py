@@ -461,8 +461,10 @@ def session_display_counts(*, env: str = "LIVE") -> dict[str, int]:
 
     Mirrors ``classify_intent``-side ``mapStatus``: ``draft_ready`` splits into
     ``autopilot`` (latest autopilot job scheduled) vs ``draft``; ``operator`` =
-    operator_sent/operator_replied/reviewed; ``skipped`` = skipped/failed;
-    everything else collapses to ``processing``. ``all`` is the grand total.
+    operator_sent/operator_replied/reviewed; ``skipped`` and ``failed`` are
+    reported as separate buckets so the workbench can show a distinct
+    「处理失败」chip; everything else collapses to ``processing``. ``all`` is
+    the grand total.
 
     This is the authoritative source for chip badges so they stay correct
     regardless of which filter is active or how many rows are loaded.
@@ -478,7 +480,8 @@ def session_display_counts(*, env: str = "LIVE") -> dict[str, int]:
             WHEN s.status='draft_ready' THEN 'draft'
             WHEN s.status='awaiting_expert' THEN 'escalating'
             WHEN s.status IN ('operator_sent','operator_replied','reviewed') THEN 'operator'
-            WHEN s.status IN ('skipped','failed') THEN 'skipped'
+            WHEN s.status='failed' THEN 'failed'
+            WHEN s.status='skipped' THEN 'skipped'
             ELSE 'processing'
           END AS display,
           COUNT(*) AS n
@@ -491,7 +494,7 @@ def session_display_counts(*, env: str = "LIVE") -> dict[str, int]:
     # Frontend chips expect every display-status key to be present. GROUP BY only
     # emits groups with rows, so a 0-count status (e.g. no autopilot sessions)
     # would be missing and the chip badge would keep its stale HTML placeholder.
-    counts = {k: 0 for k in ("draft", "autopilot", "operator", "escalating", "skipped", "processing")}
+    counts = {k: 0 for k in ("draft", "autopilot", "operator", "escalating", "skipped", "failed", "processing")}
     for r in rows:
         counts[r["display"]] = int(r["n"])
     counts["all"] = sum(v for k, v in counts.items() if k != "all")
@@ -1809,6 +1812,30 @@ def get_escalation(*, escalation_id: int) -> Optional[dict[str, Any]]:
         sess = conn.execute("SELECT * FROM cs_session WHERE id=?", (out["session_id"],)).fetchone()
         out["session"] = dict(sess) if sess else None
         return out
+
+
+def get_escalation_feishu_ids(*, escalation_id: int) -> Optional[dict[str, Optional[str]]]:
+    """Return only the persisted Feishu delivery ids for an escalation.
+
+    Used by `POST /escalations` to detect idempotent retries: when an escalation
+    was deduped and already has a delivered Feishu message, the route skips the
+    re-send (which would post a duplicate group message) and returns the existing
+    thread info so the agent can still apply-handoff. Lighter than
+    `get_escalation` (no session join) since this runs on every open-escalation.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT feishu_chat_id, feishu_thread_id, feishu_message_id "
+            "FROM cs_escalations WHERE id=?",
+            (escalation_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "feishu_chat_id": row["feishu_chat_id"],
+            "feishu_thread_id": row["feishu_thread_id"],
+            "feishu_message_id": row["feishu_message_id"],
+        }
 
 
 def list_escalations(*, state: Optional[str] = None, env: str = "LIVE") -> list[dict[str, Any]]:

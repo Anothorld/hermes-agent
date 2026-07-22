@@ -111,7 +111,7 @@ def feishu_setup_page(request: Request):
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>SEO Studio · 飞书免登配置</title>
+<title>SEO Studio（Beta） · 飞书免登配置</title>
 <style>
 body{{font-family:-apple-system,system-ui,sans-serif;background:#f5f5f7;margin:0;padding:32px 20px;color:#1d1d1f}}
 .card{{max-width:640px;margin:0 auto;background:#fff;border-radius:16px;padding:28px 24px;box-shadow:0 2px 12px rgba(0,0,0,.06)}}

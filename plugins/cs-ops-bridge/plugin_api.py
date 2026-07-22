@@ -1118,6 +1118,26 @@ def open_escalation(
     feishu_result: dict[str, Any] = {"skipped": True}
     should_send = body.auto_send_feishu and not (body.feishu_message_id and body.feishu_thread_id)
     if should_send:
+        # Idempotent retry guard: if this escalation was deduped by CAL and a
+        # Feishu message was already delivered for it, do NOT re-send — that
+        # would post a duplicate group message (the ESC:339/340 failure mode
+        # where the agent timed out on open-escalation, the bridge send
+        # succeeded, then the agent retried). Return the existing thread ids so
+        # the agent can still apply-handoff --feishu-thread-id. When the first
+        # send failed (no message_id persisted), this guard does NOT trigger and
+        # the send is retried as a recovery path.
+        existing_ids = cal.get_escalation_feishu_ids(escalation_id=eid)
+        if existing_ids and (existing_ids["feishu_message_id"] or existing_ids["feishu_thread_id"]):
+            feishu_result = {
+                "ok": True,
+                "message_id": existing_ids["feishu_message_id"],
+                "thread_id": existing_ids["feishu_thread_id"],
+                "chat_id": existing_ids["feishu_chat_id"],
+                "error": None,
+                "dedup_skipped": True,
+            }
+            return {"escalation_id": eid, "feishu": feishu_result}
+
         from . import feishu_notify
 
         try:
@@ -1256,12 +1276,12 @@ def relaunch_session_route(
     from .email_channel import session_is_email
     from .gateway_client import GatewayClient
 
-    if not session_is_email(quickcep_session_id):
-        raise HTTPException(status_code=409, detail="non_email_channel")
-
     sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=body.env)
     if not sess:
         raise HTTPException(status_code=404, detail="session not found")
+
+    if not session_is_email(quickcep_session_id, cal_session=sess):
+        raise HTTPException(status_code=409, detail="non_email_channel")
 
     # Resume retry routing — MUST come before the awaiting_expert 409 check:
     # ESC36/37 failures leave the session in `awaiting_expert`, and the 409

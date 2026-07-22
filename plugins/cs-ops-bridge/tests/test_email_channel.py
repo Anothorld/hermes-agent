@@ -58,3 +58,26 @@ def test_session_is_email_uses_api_row():
         assert not ec.session_is_email("s2")
     with patch.object(ec, "fetch_email_session_row", return_value=None):
         assert not ec.session_is_email("missing")
+
+
+def test_cal_session_is_email():
+    ec = _load()
+    assert ec.cal_session_is_email({"customer_email": "a@b.com", "status": "failed"})
+    assert not ec.cal_session_is_email({"customer_email": "a@b.com", "status": "skipped"})
+    assert not ec.cal_session_is_email({"customer_email": "", "status": "processing"})
+    assert not ec.cal_session_is_email(None)
+
+
+def test_session_is_email_cal_fallback_skips_list():
+    ec = _load()
+    cal = {"customer_email": "aged@example.com", "status": "failed"}
+    with patch.object(ec, "fetch_email_session_row") as mock_fetch:
+        assert ec.session_is_email("old-session", cal_session=cal)
+        mock_fetch.assert_not_called()
+
+
+def test_session_is_email_messages_fallback():
+    ec = _load()
+    with patch.object(ec, "fetch_email_session_row", return_value=None), \
+         patch.object(ec, "_session_has_email_messages", return_value=True):
+        assert ec.session_is_email("old-session")

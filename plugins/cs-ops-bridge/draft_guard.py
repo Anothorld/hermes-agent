@@ -32,6 +32,7 @@ try:
     )
     from .compensation_guard import guard_draft as _guard_compensation  # type: ignore
     from .link_guard import guard_draft as _guard_link  # type: ignore
+    from .photo_source_guard import guard_draft as _guard_photo_source  # type: ignore
     _PKG_CONTEXT = True
 except ImportError:  # loaded as a top-level module
     from internal_domain_guard import guard_draft as _guard_domain  # type: ignore
@@ -41,6 +42,7 @@ except ImportError:  # loaded as a top-level module
     )
     from compensation_guard import guard_draft as _guard_compensation  # type: ignore
     from link_guard import guard_draft as _guard_link  # type: ignore
+    from photo_source_guard import guard_draft as _guard_photo_source  # type: ignore
     _PKG_CONTEXT = False
 
 
@@ -110,7 +112,21 @@ def guard_draft_content(
                 "blocked_kind": "link",
             }
 
-    # 4. PDF attachment guard (vault-sourced PDFs only on escalation resume).
+    # 4. Photo-source guard — block drafts hotlinking static.povison.com catalog images.
+    if _guard_photo_source is not None:
+        res = _guard_photo_source(content)
+        if res.get("blocked"):
+            return {
+                "blocked": True,
+                "error": res.get("error", "catalog image blocked"),
+                "error_detail": res.get("error_detail", ""),
+                "source": res.get("source", "content"),
+                "matches": res.get("matches") or [],
+                "snippet": res.get("snippet", ""),
+                "blocked_kind": "photo_source",
+            }
+
+    # 5. PDF attachment guard (vault-sourced PDFs only on escalation resume).
     if _attachments_contain_pdf is not None and _guard_draft_attachments is not None:
         if _attachments_contain_pdf(attachments_json):
             res = _guard_draft_attachments(attachments_json, allowed_attachment_urls=allowed_attachment_urls)
