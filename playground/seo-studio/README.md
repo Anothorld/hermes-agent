@@ -156,6 +156,19 @@ is not empty after ``reasoning_content`` (meta uses 8000). If the primary meta c
 cannot be parsed, stderr shows ``[meta] primary LLM response not JSON, using demo draft``
 and falls back to ``demo_meta``.
 
+**Merged section + placement flow:** `section-generate.py --mode section` first calls the
+Bridge HTTP API (`/api/povison-products/recommend` + `/api/povison-blog/recommend-links`,
+resolved via `SEO_STUDIO_BASE_URL` then `SEO_BRIDGE_PORT` then 8766) to fetch a candidate
+pool of REAL povison URLs, injects a compact `candidate_pool` into the section prompt, and
+the LLM weaves inline markdown links into the prose as it writes (output stays `{id,content}` —
+no `placements_used` field, to avoid reasoning-token exhaustion). `_resolve_and_backfill` then
+parses the markdown links out of `content`, validates them against the pool, and backfills
+`state[products]/[links]` per-section. If the Bridge is unreachable, sections are written
+without inline links and the legacy assembly path applies; the static `placement-catalog.json`
+is never used as a URL source (known 404s). A server-side step-3 post-save hook
+(`_post_save_step3_inline_placements`) re-derives `products`/`links` from `sections[].content`
+on every save, covering both the Agent and script paths.
+
 **Feishu 应用登录**（参考 povison-cs-console）：复制 `.env.example` 中的 `SEO_STUDIO_*` 块，配置 H5 免登和/或 AnyCross OIDC。详见 [docs/seo-studio-feishu.md](../../../docs/seo-studio-feishu.md)。
 
 | Var | Default | Purpose |
@@ -218,12 +231,15 @@ and falls back to ``demo_meta``.
     fallback only when the Detail API fails. If a product image cannot be found, `image` is left
     empty (never substituted with a stock photo).
   - **UI buttons (Placements panel):**
-    - **生成推荐** — the single primary entry. Launches the Hermes Agent for the placements
-      substep; the agent prompt instructs it to call BOTH `povison-catalog.py recommend`
-      (products) AND `povison-blog.py recommend-links` (internal links) and write both into
-      `articleState` in one shot — real URLs only (PDP `/<slug>.html?variant=<id>`, blog
-      `/blog/<cat>/<slug>.html`), with images + fit scores + blurbs. Operator then reviews
-      each card (accept/reject/edit).
+    - **重新挑选植入候选** (merged flow) — the placements phase is now review/re-resolve
+      only. Body sections are written with inline markdown links to REAL povison URLs during
+      the section step (the script fetches a candidate pool via the Bridge recommend APIs and
+      injects it into the section prompt; the LLM weaves links inline as it drafts). The
+      structured `products`/`links` cards are backfilled from the prose. This button calls
+      `bridgeGenerateSection('placements')` → `section-generate.py --mode placements`, which
+      re-scans `sections[].content` for inline links and re-derives the cards (no new LLM call,
+      no wholesale replace) — use it after editing prose or deleting cards. Per-section merge
+      preserves other sections' accepted placements on single-block rewrites.
     - **补全缺图** — calls `POST /api/povison-products/enrich-batch` for products that have a
       `url` but no `image`; fills `image` from the Detail API (scrape fallback).
     - **校验链接有效性** — calls `POST /api/tasks/{id}/steps/3/verify-placements` which does a
@@ -232,24 +248,34 @@ and falls back to ``demo_meta``.
       `articleState.placementUrlCheck` and the **确认，写 FAQ** button stays disabled until
       they're fixed and re-verified. This is the second guard rail — it catches real-shaped but
       dead URLs (retired products, unpublished articles) that the pattern validator misses.
-  - **URL validation (root-cause fix for 404 placements):** two guard rails.
+  - **URL validation (root-cause fix for 404 placements):** three guard rails.
     1. **Pattern check** (on every save of step-3 data): `products[].url` must be a povison PDP
-       (`.html` + povison host); `links[].url` must be `https://www.povison.com/blog/<...>.html`.
-       Fabricated URLs → `articleState.placementWarnings` + confirm disabled.
-    2. **Liveness check** (operator-triggered via 「校验链接有效性」): parallel HTTP probe of
+       (`.html` + povison host); `links[].url` must be `https://www.povison.com/blog/<...>.html`
+       or a `/collections/<slug>` landing page. Fabricated URLs →
+       `articleState.placementWarnings` + confirm disabled.
+    2. **Inline-link scan** (merged flow, on every save of step-3 data): `_post_save_step3_inline_placements`
+       scans `sections[].content` for markdown `[text](povison url)` links, validates each URL
+       shape, backfills `products`/`links` from the prose when those arrays are empty, and flags
+       invented/malformed povison URLs embedded inline (the top-array pattern check cannot see
+       these). Covers both the Agent path and the script path.
+    3. **Liveness check** (operator-triggered via 「校验链接有效性」): parallel HTTP probe of
        every URL; dead URLs → `articleState.placementUrlCheck` + confirm disabled.
-    Both render in a red banner listing each offending URL with its HTTP status.
+    All render in a red banner listing each offending URL with its HTTP status.
   - Export renders each product as a centered `<figure>`: **image and caption both link to the
     PDP**; caption text is the product name (e.g. `Povison Ansel-…`), matching
     [published blog figures](https://www.povison.com/blog/buying-guide/low-profile-tv-stand.html).
     WordPress draft export also pre-enriches any product still missing an image before publishing.
-  - **Placement injection (assembly-time, single source of truth):** the old manual "写入已接受项到正文"
-    button has been removed. Accepted products and internal links are injected into the article body
-    by `fill_blog_template` → `_article_body` at assembly time (both the local preview and the
-    WordPress draft export). For each section, `_strip_legacy_placements` first strips any trailing
-    legacy `[Product: …]` / `[Internal link: …]` blocks from older runs, then `_prepare_section_content`
-    weaves accepted placements back in from `articleState.products` / `articleState.links` where
-    `status='accepted'` and `sectionId` matches:
+  - **Placement injection (assembly-time, single source of truth):** two paths.
+    - **Merged flow (new tasks):** body sections already contain inline markdown links to REAL
+      povison URLs (the section LLM wove them in from the candidate pool). `_prepare_section_content`
+      detects inline povison links in `sec.content` and only strips REJECTED placements
+      (`_strip_rejected_links_from_prose`: unwraps rejected internal links to plain text; drops
+      rejected product blurb paragraphs when blurb-sized ≤100 words). No `Related:` fallback, no
+      trailing blurb append — the prose already contains everything.
+    - **Legacy flow (old tasks):** section content has no inline povison links; placements live in
+      `articleState.products`/`links`. `_strip_legacy_placements` strips trailing
+      `[Product: …]` / `[Internal link: …]` blocks, then `_prepare_section_content` weaves accepted
+      placements back in:
     - **Internal links** are inlined into the section's first plain-text occurrence of their anchor
       (case-insensitive, word-bounded, preserves the body's original casing) so they read like
       editor-placed inline links rather than trailing footnotes. Links whose anchor does not appear

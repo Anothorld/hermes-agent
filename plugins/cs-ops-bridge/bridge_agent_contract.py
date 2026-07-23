@@ -72,8 +72,10 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
    Bridge auto-adds **📦 订单信息** to the Feishu post from QuickCEP orders + tracking (no extra flag). If QuickCEP has no linked orders, the section notes that — include order numbers in --email-summary when known from the email.
    --email-quote carries the customer's complete email body (not a partial excerpt). Multiline or $ in quote → --email-quote-file /tmp/quote.txt. Bridge auto-posts to Feishu AI客服后援; use returned feishu.thread_id in step 8.
 8. (escalate) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase awaiting_expert --feishu-thread-id "<thread from open-escalation response>"
-9. (failure) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase failed --error "<中文：面向客服的失败说明，勿写 CLI/系统日志>" --customer-need "<中文：客户诉求摘要>" --actions-taken "<中文：已尝试的业务动作，如「已查询订单但未能保存草稿」>"
-10. terminal: python3 {cli} update-session-status --env {env} --session-id {quickcep_session_id} --status draft_ready|awaiting_expert|failed
+9. (intentional skip — B2B spam, carrier COI misroute, SEO pitch, out-of-scope) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase skipped --customer-need "<中文：来信性质>" --actions-taken "<中文：为何跳过，如「承运商 COI 误入，无客户订单」>" --follow-up "无需回复客户；建议关闭工单或拉黑发件域名"
+   **NEVER** use --phase failed for intentional skips — failed is ONLY for real processing errors (API crash, draft-save failure, etc.). Bridge tags skipped as **AI-已结案**, not AI-处理失败.
+9b. (unrecoverable error) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase failed --error "<中文：面向客服的失败说明，勿写 CLI/系统日志>" --customer-need "<中文：客户诉求摘要>" --actions-taken "<中文：已尝试的业务动作，如「已查询订单但未能保存草稿」>"
+10. terminal: python3 {cli} update-session-status --env {env} --session-id {quickcep_session_id} --status draft_ready|awaiting_expert|failed|skipped
 """
 
 
@@ -259,8 +261,9 @@ def process_instructions() -> str:
         "(what the customer wants, what was tried, what the operator should do next). "
         "Never mention CLI flags, gateway/bridge, logs, run_id, message_id, or other engineering details. "
         "Internal QuickCEP notes are operator-facing Chinese only. "
-        "apply-handoff --phase must be one of: processing, draft_ready, awaiting_expert, failed, "
-        "reviewed, followup_while_busy, operator_sent — never invent phase names."
+        "apply-handoff --phase must be one of: processing, draft_ready, awaiting_expert, failed, skipped, "
+        "reviewed, followup_while_busy, operator_sent — never invent phase names. "
+        "Use skipped (not failed) for B2B/spam/carrier misroute intentional no-reply."
     )
 
 

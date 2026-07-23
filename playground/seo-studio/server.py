@@ -333,6 +333,30 @@ _BLOG_RE = re.compile(r"^https?://(?:[\w-]+\.)*povison\.com/blog/[^?#]*\.html(?:
 # real internal pages, not fabricated — the liveness guard is the backstop.
 _COLLECTION_RE = re.compile(r"^https?://(?:[\w-]+\.)*povison\.com/collections/[^?#/]+(?:[?#]|/?$)", re.I)
 _POVISON_HOST_RE = re.compile(r"^(?:[\w-]+\.)*povison\.com$", re.I)
+# Markdown link: [text](url). Used to detect inline placements baked into prose
+# (merged section+placement flow) and to strip rejected ones at assembly time.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", re.I)
+
+
+def _is_inline_placement_url(url: str) -> bool:
+    """True when url is a povison.com PDP, blog article, or collection page."""
+    if not url:
+        return False
+    host = (urlparse(url).hostname or "")
+    if not _POVISON_HOST_RE.match(host):
+        return False
+    return bool(_PDP_RE.match(url) or _BLOG_RE.match(url) or _COLLECTION_RE.match(url))
+
+
+def _has_inline_povison_links(content: str) -> bool:
+    """True when raw section content already contains inline markdown links to
+    povison.com — i.e. the merged section+placement flow wrote them. Used by
+    ``_prepare_section_content`` to pick the new assembly path vs the legacy
+    inline_replace + Related-fallback + orphan-blurb path.
+    """
+    if not content:
+        return False
+    return any(_is_inline_placement_url(u) for _, u in _MD_LINK_RE.findall(content))
 
 
 def _validate_placement_urls(data: dict) -> list[dict]:
@@ -429,6 +453,129 @@ def _backfill_empty_content_fields(data: dict, db_data: dict | None) -> int:
                 data[field] = existing
                 n += 1
     return n
+
+
+def _post_save_step3_inline_placements(data: dict) -> list[dict]:
+    """Server-side post-save hook for step 3 (C1): derive placements from inline
+    markdown links baked into ``sections[].content`` by the merged flow.
+
+    Runs on EVERY step-3 save, so it covers both the Agent path (which writes
+    articleState directly via seo_save_step_data and has no Python post-process)
+    and the script path. It:
+
+    1. Scans each section's content for markdown ``[text](povison url)`` links.
+    2. Validates each povison URL shape; invented/malformed povison URLs are
+       SANITIZED out of the prose (unwrapped to plain text — §4 backstop, matches
+       the script path's ``_resolve_and_backfill``) and flagged as warnings (C2).
+    3. Backfills ``data["products"]``/``data["links"]`` from the inline links, gated
+       by a ``_placementsBackfilled`` sentinel so an operator's "delete all" is
+       respected (C3): backfill happens only ONCE — the first time the arrays are
+       empty AND the sentinel is unset. Once placements are populated (by the
+       script, the Agent, or this hook), the sentinel is set and subsequent
+       clears are treated as intentional. Enriches entries from
+       ``data["_candidatePool"]`` when present (name, image, score).
+
+    Mutates ``data`` in place. Returns a list of warning dicts (empty = clean).
+    """
+    if not isinstance(data, dict):
+        return []
+    warnings: list[dict] = []
+    sections = data.get("sections") or []
+    pool = data.get("_candidatePool") or {}
+    pool_products = {p.get("url"): p for p in (pool.get("products") or []) if isinstance(p, dict) and p.get("url")}
+    pool_links = {l.get("url"): l for l in (pool.get("links") or []) if isinstance(l, dict) and l.get("url")}
+
+    derived_products: list[dict] = []
+    derived_links: list[dict] = []
+    bad_urls: list[str] = []
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        sid = sec.get("id") or ""
+        content = sec.get("content") or ""
+        seen_p: set[str] = set()
+        seen_l: set[str] = set()
+        for anchor, url in _MD_LINK_RE.findall(content):
+            url = url.strip()
+            host = (urlparse(url).hostname or "")
+            if not _POVISON_HOST_RE.match(host):
+                continue  # external citation — allowed
+            if not _is_inline_placement_url(url):
+                bad_urls.append(url)
+                continue
+            # Classify: blog articles + collection pages are internal LINKS;
+            # other povison .html pages are product PDPs. Check blog/collection
+            # FIRST because _PDP_RE also matches /blog/.../.html paths.
+            if (_BLOG_RE.match(url) or _COLLECTION_RE.match(url)) and url not in seen_l:
+                seen_l.add(url)
+                l = pool_links.get(url) or {}
+                derived_links.append({
+                    "id": l.get("id") or f"l{len(derived_links)+1}",
+                    "status": "pending",
+                    "anchor": anchor,
+                    "url": url,
+                    "sectionId": sid,
+                    "score": l.get("score"),
+                    "reasons": l.get("reasons") or "",
+                    "title_guess": l.get("title_guess") or "",
+                    "category": l.get("category") or "",
+                    "inline": True,
+                })
+            elif _PDP_RE.match(url) and url not in seen_p:
+                seen_p.add(url)
+                p = pool_products.get(url) or {}
+                derived_products.append({
+                    "id": p.get("id") or f"p{len(derived_products)+1}",
+                    "status": "pending",
+                    "name": p.get("name") or anchor,
+                    "url": url,
+                    "image": p.get("image") or "",
+                    "sectionId": sid,
+                    "blurb": "",
+                    "fit_score": p.get("fit_score"),
+                    "fit_reasons": p.get("fit_reasons") or "",
+                    "sku": p.get("sku") or "",
+                    "inline": True,
+                })
+
+    # #3 / #8: sanitize prose — unwrap invented/malformed povison URLs to plain
+    # text so they never ship to preview/WordPress. Matches the script path's
+    # _resolve_and_backfill §4 backstop. (Valid povison links and external
+    # citations are kept.)
+    if bad_urls:
+        bad_set = set(bad_urls)
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            sec["content"] = _MD_LINK_RE.sub(
+                lambda m: m.group(1) if m.group(2).strip() in bad_set else m.group(0),
+                sec.get("content") or "",
+            )
+
+    # #1: gate backfill on the _placementsBackfilled sentinel so an operator's
+    # deliberate "delete all" is not undone. Backfill runs only ONCE — when the
+    # arrays are empty AND the sentinel is unset. The script path populates the
+    # arrays itself (so the sentinel gets set below without backfilling); the
+    # Agent path leaves them empty on first save, so the hook backfills + sets
+    # the sentinel; any later operator clear is then respected.
+    already = bool(data.get("_placementsBackfilled"))
+    has_products = bool(data.get("products") or [])
+    has_links = bool(data.get("links") or [])
+    if not already and not has_products and derived_products:
+        data["products"] = derived_products
+    if not already and not has_links and derived_links:
+        data["links"] = derived_links
+    # Set the sentinel once placements exist (populated by script/Agent/hook).
+    if (data.get("products") or []) or (data.get("links") or []):
+        data["_placementsBackfilled"] = True
+
+    if bad_urls:
+        warnings.append({
+            "kind": "inline_link",
+            "problem": "invented_or_malformed_povison_url",
+            "urls": bad_urls[:10],
+        })
+    return warnings
 
 
 @app.post("/api/tasks")
@@ -553,6 +700,10 @@ async def put_step_data(task_id: str, step_num: int, request: Request) -> dict:
     placement_warnings: list[dict] = []
     if step_num == 3 and isinstance(data, dict):
         placement_warnings = _validate_placement_urls(data)
+        # Merged-flow post-save hook (C1): derive placements from inline links in
+        # prose, backfill empty products/links, flag invented povison URLs (C2).
+        inline_warnings = _post_save_step3_inline_placements(data)
+        placement_warnings.extend(inline_warnings)
         if placement_warnings:
             data["placementWarnings"] = placement_warnings
             # Force the gate closed so the operator must fix URLs before proceeding.
@@ -712,6 +863,17 @@ async def run_step(task_id: str, step_num: int, body: dict | None = None) -> dic
         def _on_sec():
             try:
                 st = json.loads(state_path.read_text(encoding="utf-8"))
+                # Route through the same step-3 post-save hook (C1) so this script
+                # path also gets inline-link sanitization + products/links backfill.
+                if isinstance(st, dict):
+                    inline_warnings = _post_save_step3_inline_placements(st)
+                    if inline_warnings:
+                        st["placementWarnings"] = st.get("placementWarnings", []) + inline_warnings
+                        if st.get("placementsConfirmed"):
+                            st["placementsConfirmed"] = False
+                            if isinstance(st.get("phaseDone"), dict):
+                                st["phaseDone"]["placements"] = False
+                    state_path.write_text(json.dumps(st, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 _db.save_step_data(task_id, 3, st, status="done")
             except Exception as e:
                 _db.set_step_status(task_id, 3, "error")
@@ -769,6 +931,22 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "'Conclusion' (capitalized) for the conclusion; title is the section heading text "
             "(empty string for Intro); content is the markdown body; status='ready' when done. "
             "Set articleState.phaseDone.sections = true when all sections have content.\n"
+            "MERGED PLACEMENTS (write inline links while drafting — do NOT defer to a later placements run):\n"
+            "1) FIRST fetch a candidate pool of REAL povison URLs by calling "
+            "`python3 scripts/povison-catalog.py recommend --topic '<JSON>' --sections <file> --limit 5` "
+            "AND `python3 scripts/povison-blog.py recommend-links --topic '<JSON>' --sections <file> --limit 5` "
+            "(or POST http://127.0.0.1:8766/api/povison-products/recommend and /api/povison-blog/recommend-links "
+            "with {topic, sections, limit}). Store the result in articleState._candidatePool for audit.\n"
+            "2) As you write each section's content, weave 1-2 product links and 1-2 internal links INLINE as "
+            "markdown `[anchor](url)` using ONLY URLs from the pool. For a product, write a short 40-60 word "
+            "advice paragraph that links the product name to its PDP. NEVER invent, shorten, or rehost a URL — "
+            "if no pool entry fits, write the section with zero placements rather than fabricate one.\n"
+            "3) Do NOT output a placements_used field. After you save, a server-side hook derives "
+            "articleState.products/links deterministically by parsing the markdown links out of each "
+            "section.content and matching them back to the pool. You do not need to populate products/links "
+            "yourself, but you MAY set them from the pool as a best-effort hint (the hook is the source of truth).\n"
+            "4) If the Bridge is unreachable (no pool), write sections WITHOUT inline links — the legacy "
+            "assembly path will handle placements for that task.\n"
             "VOICE / HUMANIZE (REQUIRED before saving each section):\n"
             "1) After drafting each section's content, call `skill_view('humanizer')` and apply its "
             "anti-AI-pattern rules to rewrite the prose so it sounds like a real person wrote it — "
@@ -778,8 +956,8 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "but stay trustworthy and specific — no stand-up bits, no slang, no manufactured drama. "
             "Vary sentence length, prefer concrete details over filler, and let one or two genuine "
             "opinions through per section.\n"
-            "3) Preserve all SEO structure: keep H2/H3 headings, tables, data citations, product/internal-link "
-            "markers, image_queries, and section boundaries intact — humanize the prose, not the structure.\n"
+            "3) Preserve all SEO structure: keep H2/H3 headings, tables, data citations, inline product/internal "
+            "links, image_queries, and section boundaries intact — humanize the prose, not the structure.\n"
             "IMAGES (P0+P1 — structured queries + stock API candidate pool):\n"
             "1) For each H2 that warrants a visual, FIRST write section.image_queries = "
             "[2-3 concrete ENGLISH search phrases]. Good: 'couple arranging living room sofa', "
@@ -820,49 +998,26 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "description is in [150,160]. If out of range, revise the wording until it fits."
         ),
         "placements": (
-            "Decide product placements and internal links. "
-            "Each articleState.products[] item MUST use this schema: "
-            "{id, name, url, sectionId, blurb, status, image} where sectionId is the "
-            "section id this product attaches to (matches sections[].id); blurb is the "
-            "40-70 word placement copy; status is 'pending'; image is the POVISON product "
-            "image URL (empty string if not found). Update articleState.products and "
-            "articleState.internalLinks (or links), then set articleState.phaseDone.placements = true.\n"
-            "HARD RULE — NEVER FABRICATE URLs (root-cause fix for 404 placements). You MUST produce BOTH products and internal links in this single placements run by calling the two tools below. Do NOT defer to the operator buttons — YOU call the tools and write the results.\n"
-            "STEP 1 — PRODUCTS: Call "
-            "`python3 scripts/povison-catalog.py recommend --topic '<JSON>' --sections <file> --limit 2` "
-            "(or POST http://127.0.0.1:8766/api/povison-products/recommend with "
-            "{topic:{primary_keyword,secondary_keywords,category_keywords}, sections, limit}). "
-            "Write the returned products[] straight into articleState.products (each item already has "
-            "name, url, image, sku, fit_score, sectionId, blurb — keep them; set status='pending'). "
-            "Real PDP URLs look like `https://www.povison.com/<slug>.html?variant=<id>` — they ALWAYS "
-            "contain `.html` and a `?variant=` param. If a URL you'd write does not match this shape, it "
-            "is fabricated and will 404 — DO NOT write it.\n"
-            "STEP 2 — INTERNAL LINKS: Call "
-            "`python3 scripts/povison-blog.py recommend-links --topic '<JSON>' --sections <file> --limit 3` "
-            "(or POST http://127.0.0.1:8766/api/povison-blog/recommend-links with "
-            "{topic, sections, existing_urls, limit}). Write the returned links[] straight into "
-            "articleState.links (each item has anchor, url, sectionId, score, reasons — keep them; "
-            "set status='pending'). Real blog URLs look like "
-            "`https://www.povison.com/blog/<category>/<slug>.html` — they ALWAYS start with "
-            "`https://www.povison.com/blog/` and end with `.html`. Never invent a blog URL; if the API "
-            "returns no good match, write fewer links (0-1) rather than a fabricated one.\n"
-            "STEP 3 — SAVE: REPLACE articleState.products and articleState.links entirely with the "
-            "API results (do not keep any previous products/links from the loaded articleState — "
-            "the operator may have deleted them before re-running). Write BOTH into articleState "
-            "in one seo_save_step_data call, then set articleState.phaseDone.placements = true.\n"
-            "PRODUCT IMAGES: The catalog API already fills image (Detail API main image). Do NOT "
-            "substitute stock photos for product images. If a product image is missing, leave image=''.\n"
-            "INTERNAL LINK anchors: anchor text MUST be a VERBATIM long-tail phrase that already appears "
-            "word-for-word in the target section's `content` (the section is already written — read it). "
-            "The recommend-links API returns a suggested anchor derived from the article slug (e.g. "
-            "'why-choose-a-sintered-stone-dining-table'); that slug-derived anchor almost never appears "
-            "verbatim in the body, so you MUST scan the section's actual prose and pick a real phrase from it "
-            "(e.g. if the section contains 'a sintered stone dining table adds texture', use "
-            "'sintered stone dining table' as the anchor). Never use 'click here' / 'see this guide' / "
-            "'Povison blog'. If no suitable verbatim phrase exists in that section, either pick a different "
-            "section for the link or use a shorter phrase that does appear. The assembly step weaves the "
-            "link inline at the first occurrence of the anchor in the body; if the anchor is not verbatim in "
-            "the body it falls back to a trailing 'Related:' footnote, which reads worse — so pick carefully."
+            "RE-RESOLVE placements from EXISTING section prose (merged flow). "
+            "The body sections were already written with inline markdown links to REAL povison URLs during "
+            "the section step. Your job here is NOT to generate new placements from scratch — it is to "
+            "review/confirm and, if needed, re-derive the structured placement cards from the prose.\n"
+            "1) Scan each articleState.sections[].content for markdown `[anchor](url)` links whose url is a "
+            "real povison.com PDP (contains `.html` and `?variant=`), blog article "
+            "(`https://www.povison.com/blog/.../.html`), or collection page. Build articleState.products and "
+            "articleState.links from these: each item gets {id, status:'pending', name/anchor, url, "
+            "sectionId, fit_score/reasons when known from articleState._candidatePool}.\n"
+            "2) If sections have NO inline links (legacy task written before the merge), fall back to the "
+            "old generate path: call `povison-catalog.py recommend` and `povison-blog.py recommend-links` "
+            "(limit 2 / 3) and write the results into products/links. Real PDP URLs contain `.html` + "
+            "`?variant=`; real blog URLs start with `https://www.povison.com/blog/` and end with `.html`. "
+            "NEVER fabricate a URL — if the API returns no good match, write fewer (0-1) rather than a 404.\n"
+            "3) REPLACE articleState.products and articleState.links entirely with the re-derived set "
+            "(the operator may have deleted entries before re-running). Set "
+            "articleState.phaseDone.placements = true once the cards reflect the prose.\n"
+            "NOTE: the merged section path is preferred — this standalone placements run is mainly for "
+            "re-resolving after the operator edits prose or deletes cards. A server-side hook also "
+            "re-derives products/links from prose on every step-3 save, so this run is a confirmation pass."
         ),
     }
     step_guidance = {
@@ -1617,6 +1772,18 @@ async def sections_generate(rid: str, body: dict | None = None) -> dict:
     def _on_sec_done():
         try:
             st = json.loads(state_path.read_text(encoding="utf-8"))
+            # Route through the same step-3 post-save hook (C1) so the script path
+            # also gets inline-link validation + products/links backfill from prose.
+            if isinstance(st, dict):
+                inline_warnings = _post_save_step3_inline_placements(st)
+                if inline_warnings:
+                    st["placementWarnings"] = st.get("placementWarnings", []) + inline_warnings
+                    if st.get("placementsConfirmed"):
+                        st["placementsConfirmed"] = False
+                        if isinstance(st.get("phaseDone"), dict):
+                            st["phaseDone"]["placements"] = False
+                # Persist the backfilled state back to the run file + DB.
+                state_path.write_text(json.dumps(st, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             _db.record_article_state(rid, st)
         except Exception:
             pass
@@ -1743,19 +1910,119 @@ def _strip_orphaned_placement_blurbs(content: str, state: dict, sec: dict) -> st
     return text
 
 
-def _prepare_section_content(state: dict, sec: dict) -> str:
-    """Clean legacy placement residue, inline-link accepted internal links into
-    body prose, then append accepted product blurbs once.
+def _strip_rejected_links_from_prose(content: str, state: dict, sec: dict) -> str:
+    """Remove/unwrap inline placements the operator REJECTED for this section.
 
-    Internal links are woven into the section's first plain-text occurrence of
-    their anchor (case-insensitive, word-bounded, preserves the body's original
-    casing) so they read like editor-placed inline links rather than trailing
-    footnotes. Links whose anchor does not appear in the body fall back to a
-    trailing ``Related: [anchor](url)`` line so no accepted link is silently
-    dropped. Products are still appended as blurbs at the end (their blurb prose
-    is not part of the section body, so inline weaving does not apply).
+    Merged-flow sections bake accepted placements inline as markdown links. When
+    an operator rejects a card, the corresponding inline link must not ship to
+    WordPress:
+
+    - Rejected *internal links*: unwrap ``[anchor](url)`` → ``anchor`` (keep the
+      words, drop the link).
+    - Rejected *products*: the LLM wrote a short standalone blurb paragraph
+      containing ``[Product Name](url)``. Remove that whole paragraph. If the
+      product link also appears elsewhere (woven into a content paragraph), just
+      unwrap it there rather than dropping real content. Guard: only drop a
+      paragraph when it is blurb-sized (≤ ~100 words) AND contains the rejected
+      product URL — protects against nuking a long content paragraph.
     """
-    sec_content = _strip_legacy_placements(sec.get("content") or "")
+    text = content or ""
+    sid = sec.get("id")
+    if not sid:
+        return text
+    rejected_p_urls: set[str] = set()
+    rejected_l_urls: set[str] = set()
+    for p in state.get("products") or []:
+        if isinstance(p, dict) and p.get("status") == "rejected" and (p.get("sectionId") or p.get("section")) == sid:
+            if p.get("url"):
+                rejected_p_urls.add(p["url"])
+    for l in state.get("links") or []:
+        if isinstance(l, dict) and l.get("status") == "rejected" and (l.get("sectionId") or l.get("section")) == sid:
+            if l.get("url"):
+                rejected_l_urls.add(l["url"])
+    if not rejected_p_urls and not rejected_l_urls:
+        return text
+
+    # Products: drop blurb-sized paragraphs containing the rejected product link.
+    if rejected_p_urls:
+        paras = re.split(r"(\n\n+)", text)
+        kept: list[str] = []
+        for para in paras:
+            if re.fullmatch(r"\n\n+", para):
+                kept.append(para)
+                continue
+            urls_in = {u for _, u in _MD_LINK_RE.findall(para)}
+            if urls_in & rejected_p_urls:
+                word_count = len(para.split())
+                if word_count <= 100:
+                    # standalone blurb paragraph — drop it
+                    continue
+                # long content paragraph — keep, but unwrap the link below
+            kept.append(para)
+        text = "".join(kept)
+
+    # Unwrap any remaining rejected product links + all rejected internal links.
+    def _unwrap(m: re.Match) -> str:
+        anchor, url = m.group(1), m.group(2)
+        if url in rejected_l_urls or url in rejected_p_urls:
+            return anchor
+        return m.group(0)
+
+    text = _MD_LINK_RE.sub(_unwrap, text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+def _prepare_section_content(state: dict, sec: dict) -> str:
+    """Prepare a section's content for final article assembly.
+
+    Two paths:
+
+    - **Merged flow** (new tasks): the section LLM already wove accepted
+      placements inline as markdown links with real povison URLs. We only strip
+      the placements the operator REJECTED (unwrap links, drop rejected product
+      blurb paragraphs). No ``Related:`` fallback, no trailing blurb append —
+      the prose already contains everything.
+
+    - **Legacy flow** (old tasks): section content has no inline povison links;
+      placements live separately in ``state[products]/[links]``. We inline-link
+      accepted internal links into the first plain-text anchor occurrence
+      (falling back to a trailing ``Related:`` line when the anchor is absent),
+      strip legacy ``[Product: ...]`` markers + orphan blurbs, then append
+      accepted product blurbs once at the end.
+    """
+    raw = sec.get("content") or ""
+    if _has_inline_povison_links(raw):
+        # Merged flow: links are already inline. Strip rejected ones, then append
+        # blurbs for accepted products that are NOT inline in the prose (e.g.
+        # manually-added product cards) so their blurb copy still ships (#4).
+        cleaned = _strip_rejected_links_from_prose(raw, state, sec)
+        inline_urls = {u for _, u in _MD_LINK_RE.findall(cleaned)}
+        extra_blurbs: list[str] = []
+        for p in state.get("products") or []:
+            if not isinstance(p, dict):
+                continue
+            if (p.get("sectionId") or p.get("section")) != sec.get("id"):
+                continue
+            if p.get("status") != "accepted":
+                continue
+            url = (p.get("url") or "").strip()
+            if url and url in inline_urls:
+                continue  # already inline in prose — no trailing blurb needed
+            blurb = (p.get("blurb") or "").strip()
+            name = (p.get("name") or "").strip()
+            if not blurb and not name:
+                continue
+            text = blurb or name
+            if name and url:
+                text = text.replace(name, f"[{name}]({url})", 1)
+            extra_blurbs.append(text)
+        if extra_blurbs:
+            return cleaned.rstrip() + "\n\n" + "\n\n".join(extra_blurbs)
+        return cleaned
+
+    # Legacy flow
+    sec_content = _strip_legacy_placements(raw)
     sec_content = _strip_orphaned_placement_blurbs(sec_content, state, sec)
     # Inline-link accepted internal links into body prose (first occurrence).
     fallback_links: list[str] = []

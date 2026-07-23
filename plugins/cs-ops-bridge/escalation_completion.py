@@ -10,7 +10,7 @@ from . import feishu_notify
 
 log = logging.getLogger(__name__)
 
-_COMPLETION_PHASES = frozenset({"draft_ready", "failed"})
+_COMPLETION_PHASES = frozenset({"draft_ready", "failed", "skipped"})
 
 
 def complete_resuming_escalation_by_id(

@@ -374,6 +374,40 @@ def test_failed_default_operator_hint_is_business_facing():
     assert "人工" in plan.note_body
 
 
+def test_skipped_phase_uses_closed_tag_not_failed():
+    sh = _load_pkg_module("session_handoff")
+    with patch.object(sh, "load_tag_map", return_value={
+        "ai_lifecycle": {"failed": "ai-fail", "closed": "ai-closed"},
+        "business": {"invalid_ticket": "biz-invalid"},
+        "inquiry_by_category": {},
+    }):
+        plan = sh.compose_handoff("skipped", {
+            "actions_taken": "识别为 B2B 垃圾销售邮件，不处理",
+        })
+    assert "ai-closed" in plan.tags_add
+    assert "ai-fail" not in plan.tags_add
+    assert plan.target_status == "skipped"
+    assert "处理失败" not in plan.note_body
+    assert "无需处理" in plan.note_body
+
+
+def test_failed_remapped_to_skipped_for_b2b_spam():
+    sh = _load_pkg_module("session_handoff")
+    phase, ctx = sh.maybe_remap_failed_to_skipped("failed", {
+        "actions_taken": "处理失败：识别为B2B垃圾销售邮件，不处理",
+    })
+    assert phase == "skipped"
+
+
+def test_failed_not_remapped_for_real_error():
+    sh = _load_pkg_module("session_handoff")
+    phase, _ctx = sh.maybe_remap_failed_to_skipped("failed", {
+        "error": "gateway launch failed",
+        "actions_taken": "已查询订单但未能保存草稿",
+    })
+    assert phase == "failed"
+
+
 # ── §4.13 B bridge guard: draft_ready requires a CAL draft ──────────────
 
 def test_draft_ready_blocked_without_cal_draft(monkeypatch, tmp_path):

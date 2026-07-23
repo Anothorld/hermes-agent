@@ -30,6 +30,7 @@ HANDOFF_PHASES = frozenset(
         "draft_ready",
         "awaiting_expert",
         "failed",
+        "skipped",
         "reviewed",
         "followup_while_busy",
         "operator_sent",
@@ -42,6 +43,9 @@ PHASE_ALIASES: dict[str, str] = {
     "processed_by_human": "reviewed",
     "human_processed": "reviewed",
     "done": "reviewed",
+    "intentionally_skipped": "skipped",
+    "ignore": "skipped",
+    "no_action": "skipped",
 }
 
 
@@ -55,6 +59,7 @@ PHASE_LABELS: dict[str, str] = {
     "draft_ready": "草稿待审",
     "awaiting_expert": "待专家",
     "failed": "处理失败",
+    "skipped": "无需处理",
     "reviewed": "已结案",
     "followup_while_busy": "客户追加消息",
     "operator_sent": "操作员已发送回复",
@@ -65,6 +70,7 @@ STATUS_BY_PHASE: dict[str, str] = {
     "draft_ready": "draft_ready",
     "awaiting_expert": "awaiting_expert",
     "failed": "failed",
+    "skipped": "skipped",
     "reviewed": "reviewed",
     "operator_sent": "operator_replied",
 }
@@ -82,7 +88,7 @@ _STATUS_ORDER: dict[str, int] = {
 }
 
 # Agent-driven phases that must not run after operator already sent / reviewed.
-_STALE_AGENT_PHASES = frozenset({"processing", "draft_ready", "awaiting_expert", "failed"})
+_STALE_AGENT_PHASES = frozenset({"processing", "draft_ready", "awaiting_expert", "failed", "skipped"})
 
 # Escalation may follow a saved draft in the same agent run — still sync QuickCEP tags.
 _ESCALATION_OVERRIDE_STATUSES = frozenset({"draft_ready", "processing", "pending"})
@@ -326,6 +332,71 @@ def _sanitize_operator_note(text: str) -> str:
     return out.strip()
 
 
+# Agent sometimes uses --phase failed for intentional out-of-scope skips (B2B spam, carrier
+# COI misroute, SEO pitches). Remap to skipped so QuickCEP gets AI-已结案, not AI-处理失败.
+_INTENTIONAL_SKIP_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"b2b", re.I),
+    re.compile(r"垃圾|spam|seo|推广|推销|guest\s*post", re.I),
+    re.compile(r"承运商|carrier|coi\b|gomwd", re.I),
+    re.compile(r"误入|无关|不在处理范围|无需处理|不处理|不生成.*草稿", re.I),
+    re.compile(r"拉黑名单|拉黑域名|关闭工单", re.I),
+    re.compile(r"销售邮件|pitch|vendor\s*outreach", re.I),
+)
+
+
+def _intentional_skip_text(context: Optional[Mapping[str, Any]]) -> str:
+    ctx = context or {}
+    parts = [
+        str(ctx.get("actions_taken") or ""),
+        str(ctx.get("error") or ""),
+        str(ctx.get("customer_need") or ""),
+        str(ctx.get("follow_up") or ""),
+        str(ctx.get("operator_hint") or ""),
+    ]
+    classify = ctx.get("classify") or {}
+    if isinstance(classify, dict):
+        parts.append(str(classify.get("category") or ""))
+        parts.append(str(classify.get("route") or ""))
+    return " ".join(parts)
+
+
+def is_intentional_skip_context(context: Optional[Mapping[str, Any]]) -> bool:
+    """True when handoff text indicates a deliberate no-reply skip (not a real failure)."""
+    blob = _intentional_skip_text(context)
+    if not blob.strip():
+        return False
+    return any(p.search(blob) for p in _INTENTIONAL_SKIP_PATTERNS)
+
+
+def _strip_failure_prefix(text: str) -> str:
+    return re.sub(r"^处理失败[：:]\s*", "", (text or "").strip())
+
+
+def _skipped_actions_summary(context: Mapping[str, Any]) -> str:
+    actions = _strip_failure_prefix(str(context.get("actions_taken") or ""))
+    if actions:
+        return _sanitize_operator_note(actions)
+    err = _strip_failure_prefix(str(context.get("error") or ""))
+    if err:
+        return _sanitize_operator_note(err)
+    return "已识别为无需 AI 处理的来信（B2B/垃圾/承运商误入等）"
+
+
+def maybe_remap_failed_to_skipped(
+    phase: str,
+    context: Optional[Mapping[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Remap agent ``failed`` handoffs that describe intentional skips."""
+    if phase != "failed" or not is_intentional_skip_context(context):
+        return phase, dict(context or {})
+    ctx = dict(context or {})
+    log.info(
+        "remap failed handoff -> skipped (intentional skip) actions=%s",
+        (ctx.get("actions_taken") or "")[:80],
+    )
+    return "skipped", ctx
+
+
 def _business_failure_summary(*, error: str = "", actions_taken: str = "") -> str:
     """Map technical failures to operator-facing business summaries."""
     sanitized_actions = _sanitize_operator_note(actions_taken)
@@ -524,6 +595,22 @@ def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> 
             operator_hint=operator_hint or "自动处理未完成，请根据客户诉求人工跟进",
         )
 
+    elif phase == "skipped":
+        tid = _ai_id(tag_map, "closed")
+        if tid:
+            tags_add.append(tid)
+        inv = _business_id(tag_map, "invalid_ticket")
+        if inv:
+            tags_add.append(inv)
+        actions = _skipped_actions_summary(ctx)
+        note_body = _compose_standard_note(
+            phase_label=PHASE_LABELS[phase],
+            customer_need=customer_need or "无关或误入邮件，不在 AI 处理范围",
+            actions_taken=actions,
+            follow_up=follow_up or "无需回复客户；可在 QuickCEP 关闭工单或拉黑发件域名",
+            operator_hint=operator_hint or "本单 AI 已跳过，无需接手",
+        )
+
     elif phase == "reviewed":
         tid = _ai_id(tag_map, "closed")
         if tid:
@@ -695,13 +782,16 @@ def apply_handoff(
         )
         phase = canonical
 
+    ctx = dict(context or {})
+    phase, ctx = maybe_remap_failed_to_skipped(phase, ctx)
+
     sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
         return {"ok": False, "error": "session not found"}
 
     if _handoff_stale_for_session(phase=phase, session_status=str(sess["status"])):
         completion_result = None
-        if phase in ("draft_ready", "failed"):
+        if phase in ("draft_ready", "failed", "skipped"):
             try:
                 from .escalation_completion import complete_resuming_escalation_after_handoff
 
@@ -709,7 +799,7 @@ def apply_handoff(
                     quickcep_session_id=quickcep_session_id,
                     phase=phase,
                     env=env,
-                    operator_hint=str((context or {}).get("operator_hint") or ""),
+                    operator_hint=str(ctx.get("operator_hint") or ""),
                 )
             except Exception as exc:
                 log.warning(
@@ -752,13 +842,12 @@ def apply_handoff(
                 "session_id": quickcep_session_id,
             }
 
-    plan = compose_handoff(phase, context)
+    plan = compose_handoff(phase, ctx)
 
     # PR1.2: persist the classify dict {category, route, confidence, urgency} to
     # cs_facts so the workbench L1 aggregate can surface it without a QuickCEP call.
     try:
-        _ctx = context or {}
-        classify = _ctx.get("classify")
+        classify = ctx.get("classify")
         if isinstance(classify, str):
             classify = json.loads(classify)
         if isinstance(classify, dict) and classify:
@@ -878,7 +967,7 @@ def apply_handoff(
 
     via_resume = False
     escalation_id = None
-    if phase in ("draft_ready", "failed"):
+    if phase in ("draft_ready", "failed", "skipped"):
         try:
             esc = cal.get_resuming_escalation_for_session(
                 quickcep_session_id=quickcep_session_id, env=env,

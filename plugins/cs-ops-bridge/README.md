@@ -184,7 +184,9 @@ python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py apply-handoff \
 
 **Dollar amounts:** In shell, `$200` inside double-quoted `--content "..."` becomes `00` (bash expands `$2`). Use `--content-file` or single-quoted `--content '...$200...'`.
 
-Phases: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `reviewed`, `followup_while_busy`, `operator_sent`.
+Phases: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `skipped`, `reviewed`, `followup_while_busy`, `operator_sent`.
+
+**Intentional skip (`skipped`):** B2B spam, carrier COI misroute, SEO pitches, and other out-of-scope mail must use `--phase skipped` (QuickCEP tag **AI-已结案**, CAL `status=skipped`). Do **not** use `--phase failed` for these — operators misread AI-处理失败 as a system crash. If an agent still sends `--phase failed` with skip-like wording (B2B/垃圾/承运商/误入), bridge auto-remaps to `skipped`.
 
 **Draft save:** `cs_bridge_tool draft-save` supports optional `--attachments` (JSON array, forwarded to QuickCEP). **PDF guard** blocks non-vault PDFs when `--attachments` contains `.pdf` (see `config/attachment_guard.yaml`). `upload-file` subcommand wraps QuickCEP CDN upload. Agents must use `cs_bridge_tool` only — not raw `quickcep_cli`. The **default** draft-save path writes to CAL (no QuickCEP `joinChat`); the **legacy** path (`--legacy-quickcep-draft` or `CS_OPS_DRAFT_SAVE_LEGACY_QUICKCEP=1`) writes to QuickCEP and calls `joinChat` first:
 
@@ -293,7 +295,7 @@ python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py classify-intent --env LIV
 python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py apply-handoff --env LIVE --session-id <id> --phase draft_ready --operator-hint "..."
 ```
 
-`apply-handoff --phase` must be one of: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `reviewed`, `followup_while_busy`, `operator_sent`. Unknown phases return HTTP 422/400 (not 500). Common aliases `completed` / `processed_by_human` normalize to `reviewed`.
+`apply-handoff --phase` must be one of: `processing`, `draft_ready`, `awaiting_expert`, `failed`, `skipped`, `reviewed`, `followup_while_busy`, `operator_sent`. Unknown phases return HTTP 422/400 (not 500). Common aliases `completed` / `processed_by_human` normalize to `reviewed`. Use `skipped` for intentional no-reply (B2B/spam/carrier misroute); bridge auto-remaps mistaken `failed` handoffs when skip wording is detected.
 
 ```bash
 python plugins/cs-ops-bridge/scripts/sync_session_tags.py   # after QuickCEP AI tags created

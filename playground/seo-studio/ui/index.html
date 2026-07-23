@@ -1293,14 +1293,14 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
             <div class="wb-card" style="margin-bottom:14px;">
               <div class="wb-card-header">
                 <h3>产品植入与内链</h3>
-                <span class="wb-status idle" id="placementsStatus">待生成</span>
+                <span class="wb-status idle" id="placementsStatus">待解析</span>
               </div>
               <div class="wb-card-body">
-                <p class="wb-hint">Agent 推荐 1–2 个产品段落与 2–3 条内链；你审核合理性后可改文案、换挂载板块、接受或驳回。确认后进 FAQ；最终「组装预览」时会按已接受项自动注入对应正文板块（产品文案 + 内链锚点超链）。</p>
+                <p class="wb-hint">正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」可从当前正文重新解析。确认后进 FAQ。</p>
                 <div class="gen-live-mini" id="placementsLive"></div>
                 <div id="placementWarningsBanner" style="display:none;background:#fef3f2;border:1px solid #fda4af;color:#9f1239;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;"></div>
                 <div class="wb-actions">
-                  <button class="btn btn-primary" id="btnGenPlacements" onclick="generatePlacements()" disabled>生成推荐</button>
+                  <button class="btn btn-primary" id="btnGenPlacements" onclick="generatePlacements()" disabled>重新挑选植入候选</button>
                   <button class="btn btn-secondary" id="btnEnrichProductImgs" onclick="enrichMissingProductImages()" disabled>补全缺图</button>
                   <button class="btn btn-secondary" id="btnVerifyPlacementUrls" onclick="verifyPlacementUrls()" disabled>校验链接有效性</button>
                   <button class="btn btn-secondary" id="btnAcceptAllPlacements" onclick="acceptAllPlacements()" disabled>一键全部接受</button>
@@ -4108,14 +4108,19 @@ function generatePlacements() {
   }
   clearStale('placements');
   invalidateDownstream('placements');
-  // Launch the Hermes Agent for the placements substep. The agent prompt instructs
-  // it to call povison-catalog.py recommend (products) AND povison-blog.py
-  // recommend-links (internal links) and write both into articleState in one shot
-  // — real URLs only, never fabricated. (Replaces the old script path that used
-  // the static placement-catalog.json seed and produced 404 URLs.)
-  // Flush any pending deletes first so Agent reads the cleared lists from DB.
+  // Merged flow (C4): placements are now woven inline into section prose during
+  // the section step. This button no longer launches a from-scratch Agent run
+  // (which REPLACED products/links wholesale and could diverge from prose).
+  // Instead it re-resolves the structured cards FROM the existing prose: the
+  // script (--mode placements) scans sections[].content for inline markdown
+  // links and backfills articleState.products/links. Use this after editing
+  // prose or deleting cards. Real URLs only — invented ones are flagged.
   flushArticlePersist().then(function() {
-    bridgeAskAgent('placements', document.getElementById('btnGenPlacements'));
+    const btn = document.getElementById('btnGenPlacements');
+    if (btn) { btn.disabled = true; btn.textContent = '解析中…'; }
+    bridgeGenerateSection('placements', null).finally(function() {
+      if (btn) { btn.textContent = '重新挑选植入候选'; }
+    });
   });
 }
 
@@ -4344,6 +4349,15 @@ function acceptAllPlacements() {
 }
 
 function removePlacement(kind, idx) {
+  var card = (articleState[kind] || [])[idx];
+  // Merged-flow "删除": also strip the inline link from the section prose so it
+  // does not ship to WordPress untracked (the card is being removed entirely).
+  if (card && card.url) {
+    var sec = (articleState.sections || []).find(function(s) { return s && s.id === (card.sectionId || card.section); });
+    if (sec && hasInlinePovisonLinks(sec.content || '')) {
+      stripInlineLinkFromSection(sec, card.url, kind === 'products');
+    }
+  }
   articleState[kind].splice(idx, 1);
   articleState.placementsConfirmed = false;
   articleState.phaseDone.placements = false;
@@ -4423,7 +4437,7 @@ function refreshPlacementsGate() {
     if (parts.length) {
       banner.style.display = '';
       banner.innerHTML = parts.join('<hr style="margin:6px 0;border:none;border-top:1px solid #fda4af;">') +
-        '<div style="margin-top:6px;">请点「生成推荐」让 Agent 重新选品，或手动修正 URL 后点「校验链接有效性」复检。</div>';
+        '<div style="margin-top:6px;">请点「重新挑选植入候选」从正文重新解析植入，或手动修正 URL 后点「校验链接有效性」复检。</div>';
     } else if (urlCheck && urlCheck.results && urlCheck.results.length) {
       banner.style.display = '';
       banner.innerHTML = '<b style="color:#15803d;">链接有效性校验通过：' + urlCheck.total + ' 个 URL 全部有效 ✓</b>';
@@ -4433,7 +4447,7 @@ function refreshPlacementsGate() {
     }
   }
 
-  if (!hasAny) setStatus('placementsStatus', 'idle', '待生成');
+  if (!hasAny) setStatus('placementsStatus', 'idle', '待解析');
   else if (hasWarnings || hasDeadUrls) setStatus('placementsStatus', 'edited', hasDeadUrls ? '存在死链' : 'URL 校验失败');
   else if (articleState.placementsConfirmed) setStatus('placementsStatus', 'ready', '已确认');
   else if (pending) setStatus('placementsStatus', 'edited', '待审核');
@@ -4744,6 +4758,104 @@ function buildTocHtml() {
   return html;
 }
 
+var POVISON_HOST_RE = /^(?:[\w-]+\.)*povison\.com$/i;
+var POVISON_PDP_RE = /^https?:\/\/(?:[\w-]+\.)*povison\.com\/[^?#]*\.html(?:[?#]|$)/i;
+var POVISON_BLOG_RE = /^https?:\/\/(?:[\w-]+\.)*povison\.com\/blog\/[^?#]*\.html(?:[?#]|$)/i;
+var POVISON_COLLECTION_RE = /^https?:\/\/(?:[\w-]+\.)*povison\.com\/collections\/[^?#/]+(?:[?#]|\/?$)/i;
+var MD_LINK_RE = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi;
+
+function isInlinePlacementUrl(url) {
+  if (!url) return false;
+  var host = '';
+  try { host = new URL(url).hostname || ''; } catch (e) { host = ''; }
+  if (!POVISON_HOST_RE.test(host)) return false;
+  return POVISON_PDP_RE.test(url) || POVISON_BLOG_RE.test(url) || POVISON_COLLECTION_RE.test(url);
+}
+
+function hasInlinePovisonLinks(content) {
+  if (!content) return false;
+  MD_LINK_RE.lastIndex = 0;
+  var m;
+  while ((m = MD_LINK_RE.exec(content)) !== null) {
+    if (isInlinePlacementUrl(m[2])) return true;
+  }
+  return false;
+}
+
+function stripRejectedLinksFromProse(content, sec) {
+  // Merged-flow sections bake accepted placements inline. On reject, unwrap
+  // rejected internal links to plain text and drop rejected product blurb
+  // paragraphs (only when blurb-sized: <= ~100 words AND contains the URL).
+  var text = String(content || '');
+  var sid = sec && sec.id;
+  if (!sid) return text;
+  var rejP = {}, rejL = {};
+  (articleState.products || []).forEach(function(p) {
+    if (p && p.status === 'rejected' && (p.sectionId || p.section) === sid && p.url) rejP[p.url] = true;
+  });
+  (articleState.links || []).forEach(function(l) {
+    if (l && l.status === 'rejected' && (l.sectionId || l.section) === sid && l.url) rejL[l.url] = true;
+  });
+  if (!Object.keys(rejP).length && !Object.keys(rejL).length) return text;
+
+  if (Object.keys(rejP).length) {
+    var paras = text.split(/(\n\n+)/);
+    var kept = [];
+    paras.forEach(function(para) {
+      if (/^\n\n+$/.test(para)) { kept.push(para); return; }
+      var urlsIn = [];
+      MD_LINK_RE.lastIndex = 0;
+      var mm;
+      while ((mm = MD_LINK_RE.exec(para)) !== null) {
+        if (rejP[mm[2]]) urlsIn.push(mm[2]);
+      }
+      if (urlsIn.length && para.split(/\s+/).length <= 100) {
+        // standalone blurb paragraph — drop it
+        return;
+      }
+      kept.push(para);
+    });
+    text = kept.join('');
+  }
+
+  // Unwrap any remaining rejected product links + all rejected internal links.
+  MD_LINK_RE.lastIndex = 0;
+  text = text.replace(MD_LINK_RE, function(m, anchor, url) {
+    if (rejL[url] || rejP[url]) return anchor;
+    return m;
+  });
+  return text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function stripInlineLinkFromSection(sec, url, isProduct) {
+  // Merged-flow "删除" (delete): remove the inline markdown link for this URL
+  // from the section's prose so it does not ship to WordPress untracked. For a
+  // product, drop the blurb-sized paragraph (<= ~100 words) containing the link
+  // and unwrap any other occurrence; for an internal link, unwrap to plain text.
+  // (Reject does the same at assembly time; delete does it immediately + drops
+  // the card, since the card is what the operator wanted gone.)
+  if (!sec || !url) return;
+  var text = String(sec.content || '');
+  if (!text) return;
+  if (isProduct) {
+    var paras = text.split(/(\n\n+)/);
+    var kept = [];
+    paras.forEach(function(para) {
+      if (/^\n\n+$/.test(para)) { kept.push(para); return; }
+      var hit = false;
+      MD_LINK_RE.lastIndex = 0;
+      var mm;
+      while ((mm = MD_LINK_RE.exec(para)) !== null) { if (mm[2] === url) { hit = true; break; } }
+      if (hit && para.split(/\s+/).length <= 100) return; // drop blurb paragraph
+      kept.push(para);
+    });
+    text = kept.join('');
+  }
+  MD_LINK_RE.lastIndex = 0;
+  text = text.replace(MD_LINK_RE, function(m, anchor, u) { return u === url ? anchor : m; });
+  sec.content = text.replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function stripLegacyPlacements(content) {
   return String(content || '').replace(/\n\n\[(Product|Internal link):[\s\S]*$/, '');
 }
@@ -4818,7 +4930,33 @@ function inlineLinkReplace(content, anchor, url) {
 }
 
 function prepareSectionContent(sec) {
-  var raw = stripLegacyPlacements(sec && sec.content);
+  var raw = String((sec && sec.content) || '');
+  if (hasInlinePovisonLinks(raw)) {
+    // Merged flow: placements already inline as markdown links. Strip rejected,
+    // then append blurbs for accepted products NOT inline in prose (manually-
+    // added cards) so their blurb copy still ships (#4).
+    var cleaned = stripRejectedLinksFromProse(raw, sec);
+    var inlineUrls = {};
+    MD_LINK_RE.lastIndex = 0;
+    var mm;
+    while ((mm = MD_LINK_RE.exec(cleaned)) !== null) { inlineUrls[mm[2]] = true; }
+    var extra = [];
+    (articleState.products || []).forEach(function(p) {
+      if (!p || p.status !== 'accepted') return;
+      if ((p.sectionId || p.section) !== (sec && sec.id)) return;
+      var url = String(p.url || '').trim();
+      if (url && inlineUrls[url]) return; // already inline — no trailing blurb
+      var blurb = String(p.blurb || '').trim();
+      var name = String(p.name || '').trim();
+      if (!blurb && !name) return;
+      var text = blurb || name;
+      if (name && url) text = text.replace(name, '[' + name + '](' + url + ')');
+      extra.push(text);
+    });
+    if (extra.length) return cleaned.replace(/\s+$/, '') + '\n\n' + extra.join('\n\n');
+    return cleaned;
+  }
+  raw = stripLegacyPlacements(raw);
   raw = stripOrphanedPlacementBlurbs(raw, sec);
   // Inline-link accepted internal links into body prose (first occurrence).
   var fallbackLinks = [];
@@ -5244,8 +5382,8 @@ var RETIRED_DEFAULT_RULE_TEXTS = {
   '核心关键词全文 3–5 次；本段不硬塞密度，注意 H2 之间内容不重复': 1,
   '家具术语保持一致准确，不随意切换（如 media console / TV stand / cabinet 除非有明确区分）': 1,
   '榜单类：总结如何通过正确家具选择让家更 cozy/comfortable，并用一句话强调 Povison 优势（deeper seating / comfort / ready-to-live-in fully assembled / value for money），结尾 CTA': 1,
-  '产品 URL 必须来自「生成推荐」Agent 调用的 catalog API（scripts/povison-catalog.py /api/povison-products/*）；禁止编造 PDP URL（会 404）': 1,
-  '内链 URL 必须来自「生成推荐」Agent 调用的 blog API（scripts/povison-blog.py /api/povison-blog/*，sitemap 真实博客）；禁止编造 blog URL（会 404）': 1,
+  '产品 URL 必须来自候选池（Bridge /api/povison-products/recommend，真实 PDP 形如 /<slug>.html?variant=<id>）；正文写作时由候选池注入，LLM 行内织入，禁止编造 PDP URL（会 404）': 1,
+  '内链 URL 必须来自候选池（Bridge /api/povison-blog/recommend-links，sitemap 真实博客形如 /blog/<cat>/<slug>.html）；正文写作时由候选池注入，LLM 行内织入，禁止编造 blog URL（会 404）': 1,
   '4–6 个问答；问题用 H3 展开；答案 40–60 词（榜单类 30–40 词）': 1,
   '榜单类结构（按顺序）：Title → Introduction(含H2标题,~100词) → 主题相关H2(选择标准/总览) → Quick Summary Table → Best Picks List(默认10个,H3展开) → 信息增量H2(1-2个,问句格式) → Conclusion(≤100词) → FAQ(4-6个,H3展开)': 1,
   '正文配图必须从 Pixabay/Openverse API 候选池选取（scripts/search-stock-images.py 或 Bridge /api/stock-images/search），禁止编造 URL、禁止浏览器随便抓图': 1,

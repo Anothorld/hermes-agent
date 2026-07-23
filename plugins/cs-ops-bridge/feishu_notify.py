@@ -232,6 +232,8 @@ def notify_escalation_completed(
     chat_id = (feishu_chat_id or escalation_chat_id() or DEFAULT_ESCALATION_CHAT).strip()
     if outcome == "failed":
         status_line = "❌ 处理失败，请人工接手 QuickCEP 会话"
+    elif outcome == "skipped":
+        status_line = "⏭️ 已跳过（无需 AI 处理），升级关闭"
     elif outcome == "operator_manual_reply":
         status_line = "✅ 客服已在 QuickCEP 直接回复客户，升级关闭"
     else:

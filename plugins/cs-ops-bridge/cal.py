@@ -768,11 +768,13 @@ def metrics_trend(
         gen_sids = set(gen.keys())
         # gap: 进入生成当日 但 当日未出草稿,按去向分类
         gap = gen_sids - drafted
-        gap_breakdown = {"failed": 0, "takeover": 0, "escalated": 0, "in_flight": 0, "other": 0}
+        gap_breakdown = {"failed": 0, "takeover": 0, "escalated": 0, "in_flight": 0, "skipped": 0, "other": 0}
         for sid in gap:
             st = gen.get(sid, "")
             if st == "failed":
                 gap_breakdown["failed"] += 1
+            elif st == "skipped":
+                gap_breakdown["skipped"] += 1
             elif st in ("operator_replied", "operator_sent"):
                 gap_breakdown["takeover"] += 1
             elif st == "awaiting_expert" or sid in esc:

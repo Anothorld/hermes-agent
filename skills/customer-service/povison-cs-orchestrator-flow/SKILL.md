@@ -68,7 +68,8 @@ When using `--content` in shell, **single-quote** drafts that contain `$` (e.g. 
    - Read `feishu.thread_id` from the JSON response
    - **`apply-handoff --phase awaiting_expert --feishu-thread-id <thread_id>`**
    - `update-session-status --status awaiting_expert`
-8. **On unrecoverable error:** `apply-handoff --phase failed` then `update-session-status --status failed`
+8. **Intentional skip (B2B spam, carrier COI misroute, SEO pitch, out-of-scope):** `apply-handoff --phase skipped` then `update-session-status --status skipped`. Tags **AI-已结案** (not AI-处理失败). Example `--actions-taken "承运商 COI 误入，无客户订单，按 SOP 不回复"`.
+9. **On unrecoverable error:** `apply-handoff --phase failed` then `update-session-status --status failed`. Use **only** for real processing failures — never for intentional skips.
 
 ## apply-handoff fields
 
@@ -83,7 +84,7 @@ When using `--content` in shell, **single-quote** drafts that contain `$` (e.g. 
 
 **内部备注原则：** 写给**客服同事**看，只写与会话相关的业务信息。禁止写 CLI 参数（如 `--content-file`）、系统组件（gateway/bridge/日志）、`run_id`/`message_id` 等工程细节。Bridge 会自动过滤常见技术用语。
 
-**Valid `--phase` values only:** `processing`, `draft_ready`, `awaiting_expert`, `failed`, `reviewed`, `followup_while_busy`, `operator_sent`. Never invent names like `completed` or `processed_by_human` — use `reviewed` for human-closed cases.
+**Valid `--phase` values only:** `processing`, `draft_ready`, `awaiting_expert`, `failed`, `skipped`, `reviewed`, `followup_while_busy`, `operator_sent`. Never invent names like `completed` or `processed_by_human` — use `reviewed` for human-closed cases. Use `skipped` (not `failed`) when the email is B2B spam, carrier misroute, or otherwise out of scope.
 
 **语言：** 以上写入 QuickCEP **内部备注**的字段必须全部使用**简体中文**，不要英文。客户邮件草稿（`draft-save --content`）仍用英文。
 
