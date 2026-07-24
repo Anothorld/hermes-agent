@@ -286,8 +286,10 @@ on every save, covering both the Agent and script paths.
     marker) are also stripped before inject, so re-assembling historical polluted tasks self-heals.
     Re-assembling never accumulates duplicates; `articleState.products`/`links` is the only source.
     Local UI 「组装预览」uses the same `prepareSectionContent` path client-side (not only the Bridge).
-  - The UI renders body images as centered `<figure>` after each section's text and product images
-    immediately after that section's lifestyle images.
+  - The UI renders body images as centered `<figure>` after each section's text. **Image placement rule
+    (one image per spot):** when a section has an accepted product figure, the general stock illustration
+    is omitted so the two don't stack and separate the product blurb from its image — the product image
+    wins. Sections without a product image still render their stock illustration as before.
   - The blog template **no longer** includes the legacy footer gallery (`Visual Inspiration` / 10 stock
     Pexels tiles). Preview and WordPress export end after the article body (+ hero in the full preview shell).
 
@@ -301,6 +303,19 @@ on every save, covering both the Agent and script paths.
     as post content and extracts title / slug / meta-description / FAQ-schema from the head, writes
     Rank Math SEO meta, and creates the post (`status=draft`). Returns `post_id` + `edit_url` +
     `preview_url`; the UI opens the WP edit screen in a new tab.
+  - **Rank Math SEO meta injection (required on this site):** the povison.com WP REST API does
+    **not** register `rank_math_*` meta with `show_in_rest=true`, so the standard REST `meta` field
+    (used by `create_draft_from_html`) and XML-RPC `custom_fields` both **silently drop** SEO
+    title/description/focus-keyword/schema — the Rank Math sidebar would stay empty and plugin
+    detection would find nothing. `wp_publish.py` therefore re-injects them after draft creation
+    via Rank Math's own REST endpoint `POST /wp-json/rankmath/v1/updateMeta` (the same route the
+    block editor calls on save), using Application-Password Basic Auth:
+    `_inject_rank_math_seo_meta` writes `rank_math_title` / `rank_math_description` /
+    `rank_math_focus_keyword` (focus keyword sourced from `articleState.meta.focus`, falling back
+    to the title-derived value); `_inject_rank_math_faq_schema` writes
+    `rank_math_schema_FAQPage` (clean FAQPage object). Both are best-effort and report back via
+    `result["seo_meta_injected"]` / `result["faq_schema_injected"]`. Only the `rankmath` plugin
+    path is handled; `yoast` falls through to the standard (possibly empty) REST meta write.
   - **Credentials:** read from the profile `config.yaml` `mcp_servers.wordpress.env` block
     (`WP_BASE` / `WP_USER` / `WP_APP_PASS` / `WP_CATEGORY_ID` / `WP_TAG_IDS` / `SEO_PLUGIN`) — the single
     source of truth. Environment variables override config.yaml when set. The Application Password is
@@ -321,8 +336,9 @@ on every save, covering both the Agent and script paths.
     [low-profile TV stand guide](https://www.povison.com/blog/buying-guide/low-profile-tv-stand.html).
   - **FAQ / Q&A:** heading is **`Q&A`** (`id="q-a"`). Questions are `h3` (~1.25em) and answers
     are body-sized paragraphs — not the older small gray accordion look. Plain HTML only
-    (no forged Rank Math Gutenberg FAQ block). Schema still via template JSON-LD /
-    `rank_math_schema` post meta best-effort.
+    (no forged Rank Math Gutenberg FAQ block). Schema via `rank_math_schema_FAQPage` post meta,
+    written through Rank Math's `/wp-json/rankmath/v1/updateMeta` endpoint (see "Rank Math SEO
+    meta injection" above) — the old `rank_math_schema` REST-meta write was silently dropped.
   - **Category/tags:** defaults come from `WP_CATEGORY_ID` / `WP_TAG_IDS`; override per-export by passing
     `category_id` (int) and `tag_ids` (list[int]) in the request body.
   - **External link `rel=nofollow`:** at assembly time `_add_external_link_rel` walks every `<a href>`

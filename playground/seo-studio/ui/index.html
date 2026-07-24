@@ -5022,7 +5022,11 @@ function buildArticleBody() {
       }
       const headingId = slugifyHeading(sec.title);
       body += '<h2 id="' + escapeAttr(headingId) + '">' + escapeHtml(sec.title) + '</h2>' + htmlBlock;
-      body += inlineImgs + productImgs;
+      // Image placement rule (operator feedback 2026-07-24): one image per spot —
+      // when a section has an accepted product figure, omit the general stock
+      // illustration so the two don't stack and separate the product blurb from
+      // its image. Product image wins.
+      body += productImgs ? productImgs : inlineImgs;
     }
   });
   if (articleState.faq && articleState.faq.length) {

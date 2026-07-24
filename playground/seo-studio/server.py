@@ -1515,6 +1515,7 @@ async def wordpress_draft(task_id: str, body: dict | None = None) -> dict:
             html_content=html,
             category_id=b.get("category_id"),
             tag_ids=b.get("tag_ids"),
+            focus_keyword=(state.get("meta") or {}).get("focus"),
             skip_image_upload=bool(b.get("skip_image_upload", False)),
             status=b.get("status", "draft"),
         )
@@ -2597,7 +2598,11 @@ def _article_body(state: dict) -> str:
             heading_id = _slugify_heading(sec.get("title") or "")
             body += f'<h2 id="{_esc(heading_id)}">{_esc(sec.get("title") or "")}</h2>'
             body += _chunks_to_html(chunks)
-            body += inline_imgs + product_imgs
+            # Image placement rule (operator feedback 2026-07-24): one image per
+            # spot — when a section has an accepted product figure, omit the
+            # general stock illustration so the two don't stack and separate the
+            # product blurb from its image. Product image wins.
+            body += product_imgs if product_imgs else inline_imgs
     faq = state.get("faq") or []
     if faq:
         body += f'<h2 id="q-a">{_esc("Q&A")}</h2>' + _faq_block_html(faq)

@@ -182,12 +182,75 @@ def _split_ids(value: str) -> list[int]:
     return [int(x.strip()) for x in value.split(",") if x.strip()]
 
 
+def _rank_math_rest_update_meta(config: Any, post_id: int, meta: dict[str, Any]) -> bool:
+    """Write Rank Math post meta via Rank Math's own REST endpoint.
+
+    The standard WP REST ``meta`` field silently drops ``rank_math_*`` keys
+    because Rank Math does not register them with ``show_in_rest=true``, and
+    XML-RPC ``custom_fields`` excludes registered meta — so neither the
+    publisher's ``create_post(meta=...)`` nor ``update_post(meta=...)`` path
+    persists SEO title/description/focus-keyword/schema. Rank Math exposes
+    ``/wp-json/rankmath/v1/updateMeta`` (the same route the block editor calls
+    on save) which accepts Basic Auth (application password) and persists the
+    meta. Best-effort: returns False on failure so export never aborts.
+    """
+    if not post_id or not meta:
+        return False
+    try:
+        import requests  # type: ignore
+    except ImportError:
+        return False
+    url = config.base_url.rstrip("/") + "/wp-json/rankmath/v1/updateMeta"
+    payload = {"postID": post_id, "objectID": post_id, "objectType": "post", "meta": meta}
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            auth=(config.username, config.app_password),
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _inject_rank_math_seo_meta(
+    config: Any, result: dict[str, Any], focus_keyword: str | None = None
+) -> bool:
+    """Persist SEO title/description/focus-keyword via Rank Math REST.
+
+    Reads the parsed SEO values the publisher already put on ``result["seo"]``
+    and writes them through ``_rank_math_rest_update_meta`` (the standard
+    REST ``meta`` write is silently dropped on this site). ``focus_keyword``
+    (from ``articleState.meta.focus``) takes precedence over the parser's
+    title-derived fallback.
+    """
+    if config.seo_plugin != "rankmath":
+        return False
+    if not result or not result.get("post_id"):
+        return False
+    seo = result.get("seo") or {}
+    meta: dict[str, Any] = {}
+    if seo.get("meta_title"):
+        meta["rank_math_title"] = seo["meta_title"]
+    if seo.get("meta_desc"):
+        meta["rank_math_description"] = seo["meta_desc"]
+    focus = (focus_keyword or seo.get("focus_kw") or "").strip()
+    if focus:
+        meta["rank_math_focus_keyword"] = focus
+    if not meta:
+        return False
+    return _rank_math_rest_update_meta(config, result["post_id"], meta)
+
+
 def publish_draft(
     *,
     html_content: str | None = None,
     html_path: str | None = None,
     category_id: int | None = None,
     tag_ids: list[int] | None = None,
+    focus_keyword: str | None = None,
     skip_image_upload: bool = False,
     status: str = "draft",
 ) -> dict[str, Any]:
@@ -197,10 +260,12 @@ def publish_draft(
     article body, SEO meta (Rank Math), FAQ schema, slug and featured image are
     extracted exactly as the agent's MCP tool does it.
 
-    After the draft is created, a post-processing step injects the FAQ schema
-    into Rank Math's ``rank_math_schema`` meta field (the publisher only puts
-    it under a non-standard ``faq_schema_json`` key which Rank Math ignores),
-    so the FAQ block shows up in Rank Math's Schema Generator.
+    After the draft is created, two post-processing steps re-inject Rank Math
+    meta through Rank Math's own REST endpoint (``/wp-json/rankmath/v1/
+    updateMeta``): one for SEO title/description/focus-keyword and one for the
+    FAQ schema. This is required because the standard WP REST ``meta`` field
+    silently drops ``rank_math_*`` keys on this site (not registered with
+    show_in_rest), so the publisher's own meta write never persists them.
 
     Args:
         html_content: Full blog template HTML (preferred). Parser extracts
@@ -210,6 +275,8 @@ def publish_draft(
         html_path: Path to an HTML file (alternative to html_content).
         category_id: Override default WP category. None → config default.
         tag_ids: Override default tags. None → config default.
+        focus_keyword: SEO focus keyword (from ``articleState.meta.focus``).
+            Takes precedence over the parser's title-derived fallback.
         skip_image_upload: False (default) downloads + uploads each image to
             the WP Media Library so the first image becomes the featured image.
             True keeps original URLs (no featured image will be set).
@@ -243,9 +310,20 @@ def publish_draft(
         status=status,
         category_id=category_id,
         tag_ids=tag_ids,
+        focus_keyword=focus_keyword,
         skip_image_upload=skip_image_upload,
     )
 
+    # Re-inject Rank Math SEO meta + FAQ schema via Rank Math's REST endpoint.
+    # The publisher's standard REST `meta` write is silently dropped on this
+    # site; these best-effort calls are what actually make the meta show up in
+    # the Rank Math sidebar and on the rendered post.
+    try:
+        result["seo_meta_injected"] = _inject_rank_math_seo_meta(
+            cfg, result, focus_keyword=focus_keyword
+        )
+    except Exception:
+        result["seo_meta_injected"] = False
     _inject_rank_math_faq_schema(client, cfg, result, html_content, html_path)
     return result
 
@@ -257,13 +335,15 @@ def _inject_rank_math_faq_schema(
     html_content: str | None,
     html_path: str | None,
 ) -> None:
-    """Write FAQ schema into Rank Math's ``rank_math_schema`` post meta.
+    """Write FAQ schema into Rank Math's ``rank_math_schema_FAQPage`` post meta.
 
-    The publisher stores FAQ JSON-LD under ``faq_schema_json`` which Rank Math
-    does not read. Rank Math stores schema data in the ``rank_math_schema``
-    meta field as a JSON object keyed by schema type. This helper re-parses
-    the source HTML for the FAQ JSON-LD, wraps it in Rank Math's expected
-    format, and updates the post meta via the REST API.
+    The publisher stores FAQ JSON-LD under ``faq_schema_json`` / a standard
+    REST ``meta`` write, both of which Rank Math ignores (the REST ``meta``
+    field silently drops ``rank_math_*`` keys on this site). Rank Math stores
+    schema data keyed by type, e.g. ``rank_math_schema_FAQPage``. This helper
+    re-parses the source HTML for the FAQ JSON-LD, builds a clean FAQPage
+    object, and writes it through Rank Math's own REST endpoint
+    (``/wp-json/rankmath/v1/updateMeta``).
 
     Best-effort: silently skips if there is no FAQ data or the update fails.
     """
@@ -287,15 +367,15 @@ def _inject_rank_math_faq_schema(
     faq_data = parsed.get("faq_data")
     if not faq_data or not faq_data.get("mainEntity"):
         return
-    # Rank Math stores schemas in rank_math_schema as { "FAQPage-<hash>": { "@type": "FAQPage", ... } }
-    import hashlib
-    schema_key = "FAQPage-" + hashlib.md5(
-        json.dumps(faq_data, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()[:8]
-    rank_math_schema = {schema_key: faq_data}
+    # Rank Math stores the schema object directly (no @context; it adds that
+    # on output). Strip @context/extra keys to match Rank Math's native shape.
+    faq_schema = {"@type": "FAQPage", "mainEntity": faq_data.get("mainEntity") or []}
     try:
-        client.update_post(result["post_id"], {
-            "meta": {"rank_math_schema": json.dumps(rank_math_schema, ensure_ascii=False)},
-        })
+        ok = _rank_math_rest_update_meta(
+            config,
+            result["post_id"],
+            {"rank_math_schema_FAQPage": json.dumps(faq_schema, ensure_ascii=False)},
+        )
+        result["faq_schema_injected"] = ok
     except Exception:
-        pass
+        result["faq_schema_injected"] = False
