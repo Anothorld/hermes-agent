@@ -46,7 +46,7 @@ def test_compose_draft_ready_removes_escalation_tag():
     }):
         plan = sh.compose_handoff("draft_ready", {"customer_need": "客户咨询物流进度"})
     assert "ai-draft" in plan.tags_add
-    assert "biz-wait" in plan.tags_add
+    assert "biz-wait" not in plan.tags_add  # draft_ready must NOT add awaiting_customer
     assert "biz-esc" in plan.tags_remove
     assert "ai-proc" in plan.tags_remove
     assert "[智能客服]" in plan.note_body

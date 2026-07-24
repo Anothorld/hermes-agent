@@ -541,9 +541,8 @@ def compose_handoff(phase: str, context: Optional[Mapping[str, Any]] = None) -> 
         tid = _ai_id(tag_map, "draft_ready")
         if tid:
             tags_add.append(tid)
-        ac = _business_id(tag_map, "awaiting_customer")
-        if ac:
-            tags_add.append(ac)
+        # Do NOT add "awaiting_customer" here — the draft has not been sent yet.
+        # The operator_sent phase adds it after the reply is actually sent.
         esc = _business_id(tag_map, "escalation")
         if esc:
             tags_remove.append(esc)
