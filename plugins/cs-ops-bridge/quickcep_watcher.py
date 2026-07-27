@@ -70,6 +70,47 @@ def _truthy_env(key: str, *, default: bool) -> bool:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
 
+
+# Cached QuickCEP userId of the AI/bridge system account (from .quickcep_token.json).
+# Used by the "skip assigned sessions" guard so the watcher does NOT skip sessions
+# assigned to the AI account itself — only those assigned to other human operators.
+# ``None``  = not loaded yet; once loaded it is always a non-empty string (we never
+# cache an empty result so the lookup retries until the AI token is available).
+_system_operator_id_cache: Optional[str] = None
+
+
+def _system_operator_id() -> str:
+    """Return the bridge's own QuickCEP userId (cached), or ``""`` if unavailable.
+
+    Reads the cached ``.quickcep_token.json`` produced by ``quickcep_login``.
+    Falls back to ``CS_OPS_SYSTEM_OPERATOR_ID`` env override for deployments that
+    cannot rely on the token cache. Never raises.
+    """
+    global _system_operator_id_cache
+    if _system_operator_id_cache:
+        return _system_operator_id_cache
+    env_override = (os.environ.get("CS_OPS_SYSTEM_OPERATOR_ID") or "").strip()
+    if env_override:
+        _system_operator_id_cache = env_override
+        return _system_operator_id_cache
+    try:
+        scripts = _quickcep_scripts_dir() / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        import quickcep_login  # type: ignore
+
+        cached = quickcep_login.load_token() or {}
+        uid = str(cached.get("userId") or "").strip()
+        # Only cache a non-empty result: if the token isn't cached yet at first
+        # call (e.g. watcher started before AI login), we want to re-read on the
+        # next inbound instead of pinning "" for the whole process lifetime.
+        if uid:
+            _system_operator_id_cache = uid
+        return uid
+    except Exception as exc:  # noqa: BLE001 — best-effort lookup
+        log.debug("system operator id lookup failed: %s", exc)
+        return ""
+
 # REST reconcile bootstraps missed first launches or retries failed rows.
 # Busy statuses (processing, awaiting_expert, …) must not be re-polled: lastMsgTime
 # moves when we add internal notes, which previously caused false follow-up loops.
@@ -320,6 +361,111 @@ def _tag_ad_and_skip(
         log.warning("ad event write failed session=%s: %s", session_id, exc)
 
 
+def _leave_quickcep_if_previously_joined(*, session_id: str) -> None:
+    """Leave the QuickCEP session (unassign the AI) when the AI previously joined it.
+
+    Used on permanent intent-gate skips (``intention_not_allowed`` / out_of_scope).
+    A reopened session often passed the gate on its first message — the AI joined
+    via ``join_chat_session`` — but the new follow-up reclassifies to an
+    out-of-scope intent (e.g. ``order_management``). Without leaving, the session
+    stays assigned to the AI account while CAL marks it ``skipped``: the AI won't
+    process it, human operators can't take it, and no escalation is created —
+    the case gets stuck. Leaving hands it back to the unassigned queue.
+
+    No-op when the AI never joined this session (first-message skip), when the
+    CAL row is missing, when the session is still busy (the skip did not take
+    effect — ``_enqueue_permanent_skip``'s busy guard kept an in-flight status
+    like ``processing``/``awaiting_expert``), when a prior skip already left
+    the session (idempotent), or when the leave-chat call fails (fail-soft — the
+    skip itself still stands). Never raises.
+    """
+    try:
+        sess = cal.get_session(quickcep_session_id=session_id, env=_ENV)
+    except Exception as exc:
+        log.debug("leave-on-skip session lookup failed session=%s: %s", session_id, exc)
+        return
+    if not sess:
+        return
+    # Busy guard: only leave when the skip actually took effect (status=skipped).
+    # _enqueue_permanent_skip's force_status busy guard keeps in-flight statuses
+    # (processing/awaiting_expert/draft_ready/operator_replied/reviewed) unchanged —
+    # calling leave-chat on those would kick the AI out of a session it is actively
+    # working on (or one a human expert is engaged with), orphaning the gateway run.
+    if str(sess.get("status") or "") != "skipped":
+        log.debug(
+            "leave-on-skip skipped session=%s status=%s (busy, not disrupted)",
+            session_id, sess.get("status"),
+        )
+        return
+    try:
+        joined = cal.session_has_event(
+            session_row_id=sess["id"], event_type="quickcep_join_chat",
+        )
+    except Exception as exc:
+        log.debug("leave-on-skip join-event lookup failed session=%s: %s", session_id, exc)
+        return
+    if not joined:
+        return
+    # Idempotency: if a prior intent_gate_skip already left this session, don't
+    # call leave-chat again on repeated out_of_scope follow-ups — the AI is
+    # already out and the session is already in the human queue.
+    try:
+        already_left = cal.session_has_event(
+            session_row_id=sess["id"], event_type="quickcep_leave_chat",
+        )
+    except Exception as exc:
+        log.debug("leave-on-skip leave-event lookup failed session=%s: %s", session_id, exc)
+        already_left = False
+    if already_left:
+        log.debug("leave-on-skip already left session=%s (idempotent no-op)", session_id)
+        return
+    try:
+        from .session_handoff import _run_quickcep_cli
+        from .quickcep_leave_confirm import reconcile_leave_chat_payload
+        cli = _quickcep_scripts_dir() / "scripts" / "quickcep_cli.py"
+        code, out, _err = _run_quickcep_cli(["leave-chat", session_id])
+        # Parse the CLI payload and reconcile email-leaveChat vs live-chat_end so
+        # the recorded `ok` reflects actual unassignment — exit code alone is
+        # unreliable (email sessions exit 0 with `chat_end_not_confirmed` even
+        # though leaveChat unassigned the session). Mirrors close_session.
+        try:
+            payload = json.loads(out) if out else {}
+        except json.JSONDecodeError:
+            payload = {"raw_stdout": (out or "")[:500]}
+        payload = reconcile_leave_chat_payload(payload, cli=cli, session_id=session_id)
+        ok = bool(payload.get("ok"))
+        cal.write_event(
+            quickcep_session_id=session_id,
+            env=_ENV,
+            event_type="quickcep_leave_chat",
+            payload={
+                "source": "intent_gate_skip",
+                "ok": ok,
+                "exit_code": code,
+                "result_code": payload.get("result_code"),
+                "error": payload.get("error"),
+            },
+        )
+        if ok:
+            log.info("intent_gate skip → leave-chat ok session=%s", session_id)
+        else:
+            log.warning(
+                "intent_gate skip → leave-chat failed session=%s exit=%s err=%s",
+                session_id, code, payload.get("error") or "<unknown>",
+            )
+    except Exception as exc:  # noqa: BLE001 — fail-soft
+        log.warning("intent_gate skip → leave-chat crashed session=%s: %s", session_id, exc)
+        try:
+            cal.write_event(
+                quickcep_session_id=session_id,
+                env=_ENV,
+                event_type="quickcep_leave_chat",
+                payload={"source": "intent_gate_skip", "ok": False, "error": str(exc)},
+            )
+        except Exception:
+            pass
+
+
 def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     session_id = str(info.get("chatSubSessionId") or "")
     message_id = str(info.get("id") or info.get("lastMsgTime") or time.time())
@@ -425,21 +571,45 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
                 gate="intent_gate",
                 extra_payload={"reason": gate.reason, "tags": list(gate.tags) or []},
             )
+            # If the AI previously joined this QuickCEP session (e.g. a reopen
+            # where the first message passed the gate), leave now so the session
+            # returns to the unassigned queue instead of staying stuck on the AI
+            # account in a skipped state. No-op when the AI never joined.
+            _leave_quickcep_if_previously_joined(session_id=session_id)
         return None
 
-    # Skip sessions already assigned to human operators (unless AI is actively processing)
+    # Skip sessions already assigned to human operators (unless AI is actively
+    # processing, or the session is assigned to the AI/system operator itself).
+    #
+    # The system (bridge) has its own QuickCEP operator account (userId in
+    # .quickcep_token.json). Sessions assigned to that account MUST still be
+    # processed by the AI — only sessions assigned to OTHER human operators are
+    # skipped (a human is already handling them). This prevents cases from
+    # landing in the operator queue "joined but never tagged" when QuickCEP
+    # routes them to the AI account.
     if _truthy_env("CS_OPS_SKIP_ASSIGNED_SESSIONS", default=True):
         existing_sess = cal.get_session(quickcep_session_id=session_id, env=_ENV)
         ai_busy = existing_sess and str(existing_sess.get("status") or "") not in ("pending", "failed", "")
         if not ai_busy:
             op_ids = info.get("operatorIds")
             if op_ids:
-                log.info(
-                    "skip launch session %s assigned_to_operators=%s",
-                    session_id,
-                    op_ids,
-                )
-                return None
+                sys_op_id = _system_operator_id()
+                op_id_list = [str(x) for x in (op_ids if isinstance(op_ids, list) else [op_ids])]
+                # Only skip when none of the assignees is the system operator.
+                if not (sys_op_id and sys_op_id in op_id_list):
+                    log.info(
+                        "skip launch session %s assigned_to_operators=%s (system_op=%s)",
+                        session_id,
+                        op_ids,
+                        sys_op_id or "<none>",
+                    )
+                    return None
+                else:
+                    log.info(
+                        "launch session %s assigned_to_system_operator=%s (will process)",
+                        session_id,
+                        op_ids,
+                    )
 
     result = cal.enqueue_session(
         quickcep_session_id=session_id,
@@ -556,6 +726,10 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             },
             chat_session_id=str(info.get("chatSessionId") or "") or None,
             skip_quickcep=os.environ.get("CS_OPS_HANDOFF_SKIP_QUICKCEP", "").lower() in ("1", "true"),
+            # status was just set to "failed" above; force the AI-处理失败 tag
+            # to be written to QuickCEP (otherwise the "session already failed"
+            # skip guard would drop it — see quickcep-tags-dropped-on-closed-sessions).
+            force_quickcep_tags=True,
         )
     except Exception as exc:
         log.warning("failed handoff after launch error session=%s: %s", session_id, exc)

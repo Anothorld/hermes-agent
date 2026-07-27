@@ -184,6 +184,215 @@ def test_intent_not_allowed_enqueues_skip(monkeypatch, tmp_path):
     assert payload["gate"] == "intent_gate"
 
 
+# ── intent_gate skip leaves QuickCEP session when AI previously joined ──
+
+def test_intent_not_allowed_leaves_when_previously_joined(monkeypatch, tmp_path):
+    """Reopen reclassifies to out_of_scope; AI had joined earlier → must leave-chat."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    watcher = _load("quickcep_watcher")
+    # First message: session created + AI joined earlier.
+    r1 = cal.enqueue_session(quickcep_session_id="qs-intent-rejoin", message_id="m1", env="LIVE")
+    cal.write_event(
+        quickcep_session_id="qs-intent-rejoin", env="LIVE",
+        event_type="quickcep_join_chat", payload={"ok": True},
+    )
+    # Second message: reclassifies to out_of_scope.
+    leave_calls: list[list[str]] = []
+    def _fake_cli(args):
+        leave_calls.append(list(args))
+        # Realistic leave-chat success payload (ok=True short-circuits reconcile).
+        return (0, json.dumps({"ok": True, "result_code": 200}), "")
+    with patch.object(watcher, "check_intent_gate") as gate_fn, \
+         patch("cs_ops_bridge_pr3_skip_test.session_handoff._run_quickcep_cli", side_effect=_fake_cli):
+        gate_fn.return_value = types.SimpleNamespace(
+            allowed=False,
+            reason="intention_not_allowed (classifier:order_management:out_of_scope)",
+            tags=("订单管理",),
+        )
+        watcher._launch_for_message({
+            "chatSubSessionId": "qs-intent-rejoin",
+            "id": "m2",
+            "channel": "email",
+            "email": "cust@example.com",
+            "intentionTags": ["订单管理"],
+        })
+    sess = cal.get_session(quickcep_session_id="qs-intent-rejoin", env="LIVE")
+    assert sess["status"] == "skipped"
+    # leave-chat was called for this session.
+    assert any(c[:2] == ["leave-chat", "qs-intent-rejoin"] for c in leave_calls), leave_calls
+    # A quickcep_leave_chat audit event was written with source=intent_gate_skip.
+    ev = _latest_event(cal, session_row_id=r1["session"]["id"], event_type="quickcep_leave_chat")
+    assert ev is not None
+    payload = json.loads(ev["payload_json"])
+    assert payload["source"] == "intent_gate_skip"
+    assert payload["ok"] is True
+
+
+def test_intent_not_allowed_no_leave_when_never_joined(monkeypatch, tmp_path):
+    """First-message skip (AI never joined) must NOT call leave-chat."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    watcher = _load("quickcep_watcher")
+    leave_calls: list[list[str]] = []
+    def _fake_cli(args):
+        leave_calls.append(list(args))
+        return (0, "", "")
+    with patch.object(watcher, "check_intent_gate") as gate_fn, \
+         patch("cs_ops_bridge_pr3_skip_test.session_handoff._run_quickcep_cli", side_effect=_fake_cli):
+        gate_fn.return_value = types.SimpleNamespace(
+            allowed=False,
+            reason="intention_not_allowed (classifier:order_management:out_of_scope)",
+            tags=("订单管理",),
+        )
+        watcher._launch_for_message({
+            "chatSubSessionId": "qs-intent-fresh",
+            "id": "m1",
+            "channel": "email",
+            "email": "cust@example.com",
+            "intentionTags": ["订单管理"],
+        })
+    sess = cal.get_session(quickcep_session_id="qs-intent-fresh", env="LIVE")
+    assert sess["status"] == "skipped"
+    assert leave_calls == [], leave_calls
+    # No quickcep_leave_chat event when AI never joined.
+    ev = _latest_event(cal, session_row_id=sess["id"], event_type="quickcep_leave_chat")
+    assert ev is None
+
+
+# ── busy guard: do NOT leave an in-flight (processing) session ───────
+
+def test_intent_not_allowed_no_leave_when_processing(monkeypatch, tmp_path):
+    """A new out_of_scope follow-up on a `processing` session must NOT leave-chat.
+
+    _enqueue_permanent_skip's busy guard keeps status=processing (in-flight run
+    not disrupted). leave-chat here would orphan the active gateway run.
+    """
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    watcher = _load("quickcep_watcher")
+    # First message: session created, AI joined, now actively processing.
+    r1 = cal.enqueue_session(quickcep_session_id="qs-intent-busy", message_id="m1", env="LIVE")
+    cal.write_event(
+        quickcep_session_id="qs-intent-busy", env="LIVE",
+        event_type="quickcep_join_chat", payload={"ok": True},
+    )
+    cal.update_session_status(session_row_id=r1["session"]["id"], status="processing")
+    leave_calls: list[list[str]] = []
+    def _fake_cli(args):
+        leave_calls.append(list(args))
+        return (0, "", "")
+    with patch.object(watcher, "check_intent_gate") as gate_fn, \
+         patch("cs_ops_bridge_pr3_skip_test.session_handoff._run_quickcep_cli", side_effect=_fake_cli):
+        gate_fn.return_value = types.SimpleNamespace(
+            allowed=False,
+            reason="intention_not_allowed (classifier:order_management:out_of_scope)",
+            tags=("订单管理",),
+        )
+        watcher._launch_for_message({
+            "chatSubSessionId": "qs-intent-busy",
+            "id": "m2",
+            "channel": "email",
+            "email": "cust@example.com",
+            "intentionTags": ["订单管理"],
+        })
+    sess = cal.get_session(quickcep_session_id="qs-intent-busy", env="LIVE")
+    # Busy guard kept processing — NOT overridden to skipped.
+    assert sess["status"] == "processing"
+    # leave-chat must NOT have been called on an in-flight session.
+    assert leave_calls == [], leave_calls
+    # No quickcep_leave_chat event.
+    ev = _latest_event(cal, session_row_id=r1["session"]["id"], event_type="quickcep_leave_chat")
+    assert ev is None
+
+
+# ── idempotency: repeated out_of_scope follow-up does not leave twice ──
+
+def test_intent_not_allowed_no_leave_when_already_left(monkeypatch, tmp_path):
+    """A second out_of_scope follow-up after a prior leave must NOT leave again."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    watcher = _load("quickcep_watcher")
+    # Session: AI joined earlier, already skipped + already left (prior cycle).
+    r1 = cal.enqueue_session(quickcep_session_id="qs-intent-idem", message_id="m1", env="LIVE")
+    cal.write_event(
+        quickcep_session_id="qs-intent-idem", env="LIVE",
+        event_type="quickcep_join_chat", payload={"ok": True},
+    )
+    cal.update_session_status(session_row_id=r1["session"]["id"], status="skipped")
+    cal.write_event(
+        quickcep_session_id="qs-intent-idem", env="LIVE",
+        event_type="quickcep_leave_chat", payload={"source": "intent_gate_skip", "ok": True},
+    )
+    leave_calls: list[list[str]] = []
+    def _fake_cli(args):
+        leave_calls.append(list(args))
+        return (0, "", "")
+    with patch.object(watcher, "check_intent_gate") as gate_fn, \
+         patch("cs_ops_bridge_pr3_skip_test.session_handoff._run_quickcep_cli", side_effect=_fake_cli):
+        gate_fn.return_value = types.SimpleNamespace(
+            allowed=False,
+            reason="intention_not_allowed (classifier:order_management:out_of_scope)",
+            tags=("订单管理",),
+        )
+        watcher._launch_for_message({
+            "chatSubSessionId": "qs-intent-idem",
+            "id": "m2",
+            "channel": "email",
+            "email": "cust@example.com",
+            "intentionTags": ["订单管理"],
+        })
+    sess = cal.get_session(quickcep_session_id="qs-intent-idem", env="LIVE")
+    assert sess["status"] == "skipped"
+    # leave-chat must NOT be called again — already left in a prior cycle.
+    assert leave_calls == [], leave_calls
+
+
+# ── failure path: leave-chat failure is recorded accurately ─────────
+
+def test_intent_not_allowed_leave_failure_recorded(monkeypatch, tmp_path):
+    """A real leave-chat failure (ok=False) is recorded as ok=False in the event."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    watcher = _load("quickcep_watcher")
+    r1 = cal.enqueue_session(quickcep_session_id="qs-intent-leavefail", message_id="m1", env="LIVE")
+    cal.write_event(
+        quickcep_session_id="qs-intent-leavefail", env="LIVE",
+        event_type="quickcep_join_chat", payload={"ok": True},
+    )
+    cal.update_session_status(session_row_id=r1["session"]["id"], status="failed")
+    def _fake_cli(args):
+        # Real failure: SIO error, result_code != 200 → reconcile keeps ok=False.
+        return (0, json.dumps({"ok": False, "result_code": 500, "error": "sio_disconnect"}), "")
+    with patch.object(watcher, "check_intent_gate") as gate_fn, \
+         patch("cs_ops_bridge_pr3_skip_test.session_handoff._run_quickcep_cli", side_effect=_fake_cli):
+        gate_fn.return_value = types.SimpleNamespace(
+            allowed=False,
+            reason="intention_not_allowed (classifier:order_management:out_of_scope)",
+            tags=("订单管理",),
+        )
+        watcher._launch_for_message({
+            "chatSubSessionId": "qs-intent-leavefail",
+            "id": "m2",
+            "channel": "email",
+            "email": "cust@example.com",
+            "intentionTags": ["订单管理"],
+        })
+    sess = cal.get_session(quickcep_session_id="qs-intent-leavefail", env="LIVE")
+    assert sess["status"] == "skipped"
+    ev = _latest_event(cal, session_row_id=r1["session"]["id"], event_type="quickcep_leave_chat")
+    assert ev is not None
+    payload = json.loads(ev["payload_json"])
+    assert payload["source"] == "intent_gate_skip"
+    assert payload["ok"] is False
+    assert payload["error"] == "sio_disconnect"
+
+
 # ── _launch_for_message: no_intention_tags stays log-only (no CAL row) ──
 
 def test_no_intention_tags_stays_log_only(monkeypatch, tmp_path):

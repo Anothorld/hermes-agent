@@ -86,11 +86,12 @@ Tier 1 不再使用 `web_search` / `web_extract`。模型应：
 686 现象：浏览器**只开了一个空 `about:blank` 标签页，从未导航到任何网页**，run 随后挂住。根因不是页面加载超时（浏览器 CLI 本身有 60s 硬超时会 kill），而是：被强停的 run 不会执行 `cleanup_browser`，其 pool 标签页**泄漏**为孤儿 `about:blank`，在共享 debug Chrome 里越积越多、拖慢后续 CDP attach；叠加并行 email-discover 批量把 gateway 槽位/LLM 打满。
 
 修复：
-- **tab-pool 插件**（`plugins/local-chrome-tab-pool/internal/tab_pool.py`）：`acquire()` 前调用 `reap_orphan_blank_tabs()`，只关闭**未被 pool 跟踪且 url 为 `about:blank`** 的 page target——真实页面与在用标签页不受影响。
+- **tab-pool 插件**（`plugins/local-chrome-tab-pool/internal/tab_pool.py`）：`acquire()` 前调用 `reap_orphan_blank_tabs()`，只关闭**未被 pool 跟踪且 url 为 `about:blank`** 的 page target——真实页面与在用标签页不受影响。**2026-07-27 复发修复**：reaper 现在也回收**真实 URL 孤儿 tab**（被 no-progress watchdog 强杀时已导航完的 run 遗留），但 age-gated（默认 `LOCAL_CHROME_ORPHAN_REAL_URL_AGE_S=300`s）——首次观察到只记录，连续观测超过阈值才关闭，避免误杀并发 run 刚打开正在导航的 tab。`recover_degraded_chrome` 重启 Chrome 时清空 age-gate map。
 - **技能 + brief 纪律**：Tier 2 一页一次、单次尝试，导航/快照报错或超时即记入 `tried` 继续，绝不重试同一 URL；用尽 8 页预算即返回 miss；Chrome 无法启动则 miss `browser_unavailable`。**绝不让 run 挂死**。
 - **并发**：一次只跑一个 browser enrichment run（`kol-email-discover:*` 与 `kol-creator-brief-refresh:*` 共享全局槽位），不要并行多个身份的 browser 发现/简介刷新。Console `run_launch_queue` 对 browser serial kinds 强制 **全局 max_inflight=1**。
 - **CLI 错误**：bridge CLI 失败路径在 **stdout** 输出 JSON；空 terminal + exit 2 应读 stdout 的 `error`/`hint`，禁止转 `execute_code`。
 - **工具误选（701 / SEB8010）**：模型曾用 `delegate_task` 派子代理、子代理空参调用 `veedcrawl_*`（`bad_request`，未到 API）。`kol-bridge-agent-guard` 现对 `kol-email-discover:*` 拦截 `veedcrawl_*` 与 `delegate_task`；对 **`kol-campaign:*` 发现 run** 拦截 `delegate_task`（outreach/draft 除外）。Launch/rediscover brief 与 `instagram-kol-discovery` 技能同步写明：发现用 `browser_*`，批量靠 `/rediscover`。
+- **`browser_cdp` 绕过漏洞（2026-07-27 事故）**：agent 用 `browser_cdp` 的 `Page.navigate`/`Page.goto` 直接导航 IG profile，绕过 `KOL_RPA_STRICT_BROWSER_BLOCK`（只拦 `browser_navigate`），45 次 CDP 调用烧光 150 次迭代预算，一个候选都没入库。修复：`kol-bridge-agent-guard` 现对 `browser_cdp Page.navigate`/`Page.goto` 到 `instagram.com/*`、`google.com/search`、`ipinfo.io` 与 `browser_navigate` 同拦，共用 one-shot fallback token。`Runtime.evaluate` 不受 URL 拦截（所有权 guard 另管），但技能明确禁止用 `Runtime.evaluate` 内 `fetch()` 到 blocked 域名代替 RPA。
 
 ## 列表性能（看板 / 审批 / 详情）
 

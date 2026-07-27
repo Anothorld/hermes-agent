@@ -77,7 +77,7 @@ def test_reconcile_skips_when_visitor_is_latest(monkeypatch, tmp_path):
     rec = _load("operator_send_reconcile")
     detect = _load("operator_outbound_detect")
 
-    r = cal.enqueue_session(quickcep_session_id="s2", message_id="m1", env="LIVE")
+    r = cal.enqueue_session(quickcep_session_id="2547506973813489667", message_id="m1", env="LIVE")
     cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
 
     messages = [
@@ -101,11 +101,11 @@ def test_reconcile_skips_when_operator_sent_event_exists(monkeypatch, tmp_path):
     cal = _load("cal")
     rec = _load("operator_send_reconcile")
 
-    r = cal.enqueue_session(quickcep_session_id="s1", message_id="m1", env="LIVE")
+    r = cal.enqueue_session(quickcep_session_id="2547506973813489668", message_id="m1", env="LIVE")
     cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
     # enqueue_session already wrote inbound_received; this send is same-cycle.
     cal.write_event(
-        quickcep_session_id="s1",
+        quickcep_session_id="2547506973813489668",
         event_type="operator_sent",
         payload={"message_id": "op-1"},
         env="LIVE",
@@ -128,15 +128,15 @@ def test_reconcile_checks_again_after_reopen_despite_prior_operator_sent(monkeyp
     cal = _load("cal")
     rec = _load("operator_send_reconcile")
 
-    r = cal.enqueue_session(quickcep_session_id="s-reopen", message_id="m1", env="LIVE")
+    r = cal.enqueue_session(quickcep_session_id="2547506973813489669", message_id="m1", env="LIVE")
     cal.write_event(
-        quickcep_session_id="s-reopen",
+        quickcep_session_id="2547506973813489669",
         event_type="operator_sent",
         payload={"message_id": "op-old"},
         env="LIVE",
     )
     # Customer reopen → new inbound cycle while still draft_ready for reconcile scan.
-    cal.enqueue_session(quickcep_session_id="s-reopen", message_id="m2", env="LIVE")
+    cal.enqueue_session(quickcep_session_id="2547506973813489669", message_id="m2", env="LIVE")
     cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
 
     op_msg = {"id": "op-new", "createTime": "2026-07-09 12:00:00"}
@@ -151,3 +151,25 @@ def test_reconcile_checks_again_after_reopen_despite_prior_operator_sent(monkeyp
     assert stats["synced"] == 1
     fetch.assert_called_once()
     handoff.assert_called_once()
+
+
+def test_reconcile_skips_invalid_session_id_without_calling_quickcep(monkeypatch, tmp_path):
+    """Non-numeric quickcep_session_id (test fixture leak) must not hit QuickCEP API."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    rec = _load("operator_send_reconcile")
+
+    r = cal.enqueue_session(quickcep_session_id="sess-1", message_id="m1", env="LIVE")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+
+    with patch.object(rec, "_fetch_last_operator_message") as fetch:
+        with patch.object(rec, "handle_operator_send") as handoff:
+            with patch.object(
+                rec, "repair_orphaned_escalations_once", return_value={"checked": 0, "repaired": 0}
+            ):
+                stats = rec.reconcile_operator_sent_once(env="LIVE")
+
+    assert stats["synced"] == 0
+    fetch.assert_not_called()  # guard must short-circuit before the QuickCEP call
+    handoff.assert_not_called()

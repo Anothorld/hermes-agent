@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shutil
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -71,8 +73,6 @@ def _debug_session_log(*, hypothesis_id: str, location: str, message: str, data:
 
 
 def _is_effectively_empty_draft(html: str) -> bool:
-    import re
-
     text = re.sub(r"<[^>]+>", " ", html or "")
     text = text.replace("\xa0", " ").strip()
     return not text
@@ -82,12 +82,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_schema_initialized = False
+
+
 def _connect() -> sqlite3.Connection:
+    global _schema_initialized
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(_DB_PATH))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    recreate_all(conn)
+    # busy_timeout: wait up to 5s for a lock instead of raising SQLITE_BUSY
+    # immediately. WAL mode allows concurrent readers, but DDL/PRAGMA still
+    # need a brief write lock; without this, requests fail under contention.
+    conn.execute("PRAGMA busy_timeout=5000")
+    # journal_mode=WAL is persistent — only set it once per process to avoid
+    # competing for the write lock on every connection open.
+    if not _schema_initialized:
+        conn.execute("PRAGMA journal_mode=WAL")
+        recreate_all(conn)
+        _schema_initialized = True
     return conn
 
 
@@ -2335,3 +2347,182 @@ def set_global_pause(*, paused: bool, by: str = "") -> None:
         "by": by,
         "at": datetime.now(timezone.utc).isoformat(),
     })
+
+
+# ─── Test/invalid session purge ──────────────────────────────────────
+# QuickCEP chatSubSessionId is a 19-digit numeric Long. Rows whose
+# quickcep_session_id is non-numeric (e.g. "sess-1", "qs", "x") are test
+# fixtures that leaked into the LIVE CAL DB and pollute the reconcile loop
+# (operator_send_reconcile) — every tick they trigger a failing QuickCEP API
+# call (JSON parse error: Cannot deserialize Long from "sess-1"). These
+# helpers find and remove them deterministically, with a pre-backup.
+
+# Valid QuickCEP sub-session id: 15-20 digits (snowflake-ish). Conservative.
+_VALID_QSID = re.compile(r"^\d{15,20}$")
+
+
+def is_valid_quickcep_session_id(qsid: str | None) -> bool:
+    """True when ``qsid`` looks like a real QuickCEP sub-session id."""
+    if not qsid:
+        return False
+    return bool(_VALID_QSID.match(str(qsid).strip()))
+
+
+def list_test_sessions(*, env: str | None = None) -> list[dict[str, Any]]:
+    """Return cs_session rows whose quickcep_session_id is NOT a valid numeric id.
+
+    These are test/placeholder rows (e.g. ``sess-1``, ``qs``, ``x``) that leak
+    into the CAL DB and break the operator_send_reconcile loop. ``env`` None
+    scans all envs; pass ``"LIVE"`` to scope.
+    """
+    with _connect() as conn:
+        if env:
+            rows = conn.execute(
+                "SELECT * FROM cs_session WHERE env=? ORDER BY id",
+                (env,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM cs_session ORDER BY id").fetchall()
+        return [dict(r) for r in rows if not is_valid_quickcep_session_id(r["quickcep_session_id"])]
+
+
+# Child tables that reference cs_session(id). FK enforcement is OFF in the
+# running bridge (_connect only sets journal_mode), so purge must delete each
+# child explicitly. Order matters for vault_blob ref_count accounting.
+_SESSION_CHILD_TABLES = (
+    "cs_conversation_events",
+    "cs_facts",
+    "cs_autopilot_jobs",
+)
+
+
+def purge_sessions_by_ids(
+    *,
+    row_ids: list[int],
+    env: str = "LIVE",
+    dry_run: bool = True,
+    backup: bool = True,
+) -> dict[str, Any]:
+    """Delete cs_session rows (and their children) by primary key.
+
+    Deterministic, idempotent cleanup used to evict test/invalid sessions that
+    leak into the CAL DB. Always prefers a pre-backup; set ``backup=False`` only
+    when the caller has already snapshotted the DB.
+
+    Args:
+        row_ids: cs_session.id values to delete.
+        env: env filter — only rows matching both id AND env are removed.
+        dry_run: when True, no writes happen; the return describes what would
+            be deleted (counts + sampled ids).
+        backup: when True (and not dry_run), copy the DB file to
+            ``<db>.bak-<utc-iso>`` before any DELETE.
+
+    Returns:
+        dict with ``mode`` ("dry_run"|"applied"), ``backup_path``,
+        ``deleted`` per-table counts, and ``row_ids`` actually targeted.
+    """
+    row_ids = [int(i) for i in row_ids]
+    if not row_ids:
+        return {"mode": "dry_run" if dry_run else "applied", "deleted": {}, "row_ids": []}
+
+    placeholders = ",".join("?" for _ in row_ids)
+    result: dict[str, Any] = {"row_ids": row_ids, "deleted": {}}
+
+    with _connect() as conn:
+        # Snapshot the target rows + their escalation ids (for vault link cleanup).
+        targets = conn.execute(
+            f"SELECT id, quickcep_session_id FROM cs_session WHERE id IN ({placeholders}) AND env=?",
+            (*row_ids, env),
+        ).fetchall()
+        target_ids = [r["id"] for r in targets]
+        target_qsids = [r["quickcep_session_id"] for r in targets]
+        result["matched"] = [
+            {"id": i, "quickcep_session_id": q} for i, q in zip(target_ids, target_qsids)
+        ]
+        if not target_ids:
+            result["mode"] = "dry_run" if dry_run else "applied"
+            result["deleted"] = {}
+            return result
+
+        esc_rows = conn.execute(
+            f"SELECT id FROM cs_escalations WHERE session_id IN ({','.join('?' for _ in target_ids)})",
+            tuple(target_ids),
+        ).fetchall()
+        esc_ids = [r["id"] for r in esc_rows]
+
+        # Pre-count what would be removed (also reported on apply for verification).
+        counts: dict[str, int] = {
+            "cs_session": len(target_ids),
+            "cs_conversation_events": conn.execute(
+                f"SELECT COUNT(*) AS n FROM cs_conversation_events WHERE session_id IN ({','.join('?' for _ in target_ids)})",
+                tuple(target_ids),
+            ).fetchone()["n"],
+            "cs_facts": conn.execute(
+                f"SELECT COUNT(*) AS n FROM cs_facts WHERE session_id IN ({','.join('?' for _ in target_ids)})",
+                tuple(target_ids),
+            ).fetchone()["n"],
+            "cs_autopilot_jobs": conn.execute(
+                f"SELECT COUNT(*) AS n FROM cs_autopilot_jobs WHERE session_id IN ({','.join('?' for _ in target_ids)})",
+                tuple(target_ids),
+            ).fetchone()["n"],
+            "cs_escalations": len(esc_ids),
+        }
+        if esc_ids:
+            counts["escalation_vault_link"] = conn.execute(
+                f"SELECT COUNT(*) AS n FROM escalation_vault_link WHERE escalation_id IN ({','.join('?' for _ in esc_ids)})",
+                tuple(esc_ids),
+            ).fetchone()["n"]
+        # cs_message_dedup is keyed by quickcep_session_id (not session_id).
+        if target_qsids:
+            counts["cs_message_dedup"] = conn.execute(
+                f"SELECT COUNT(*) AS n FROM cs_message_dedup WHERE quickcep_session_id IN ({','.join('?' for _ in target_qsids)})",
+                tuple(target_qsids),
+            ).fetchone()["n"]
+        result["deleted"] = counts
+
+        if dry_run:
+            result["mode"] = "dry_run"
+            return result
+
+        # Apply: backup first.
+        if backup:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            bak = _DB_PATH.with_suffix(f".db.bak-{ts}")
+            shutil.copy2(_DB_PATH, bak)
+            result["backup_path"] = str(bak)
+
+        # Vault links + blob ref_count decrement (mirror delete_vault_link).
+        if esc_ids:
+            link_rows = conn.execute(
+                f"SELECT id, blob_md5 FROM escalation_vault_link WHERE escalation_id IN ({','.join('?' for _ in esc_ids)})",
+                tuple(esc_ids),
+            ).fetchall()
+            for lr in link_rows:
+                conn.execute("DELETE FROM escalation_vault_link WHERE id=?", (lr["id"],))
+                conn.execute(
+                    "UPDATE vault_blob SET ref_count = CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END WHERE md5=?",
+                    (lr["blob_md5"],),
+                )
+
+        for tbl in _SESSION_CHILD_TABLES:
+            conn.execute(
+                f"DELETE FROM {tbl} WHERE session_id IN ({','.join('?' for _ in target_ids)})",
+                tuple(target_ids),
+            )
+        if esc_ids:
+            conn.execute(
+                f"DELETE FROM cs_escalations WHERE id IN ({','.join('?' for _ in esc_ids)})",
+                tuple(esc_ids),
+            )
+        if target_qsids:
+            conn.execute(
+                f"DELETE FROM cs_message_dedup WHERE quickcep_session_id IN ({','.join('?' for _ in target_qsids)})",
+                tuple(target_qsids),
+            )
+        conn.execute(
+            f"DELETE FROM cs_session WHERE id IN ({','.join('?' for _ in target_ids)}) AND env=?",
+            (*target_ids, env),
+        )
+        conn.commit()
+        result["mode"] = "applied"
+        return result

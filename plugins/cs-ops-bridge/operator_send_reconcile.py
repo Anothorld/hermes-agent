@@ -147,6 +147,18 @@ def reconcile_operator_sent_once(*, env: str | None = None) -> dict[str, Any]:
             sid = str(sess.get("quickcep_session_id") or "")
             if not sid:
                 continue
+            # Guard: skip non-numeric / placeholder session ids (e.g. "sess-1",
+            # "qs", "x") — QuickCEP's chatSubSessionId is a Long; sending a
+            # non-numeric id triggers a JSON parse error every tick. Such rows
+            # are test fixtures that leaked into the CAL DB; purge them via
+            # cal.purge_sessions_by_ids instead of hammering the QuickCEP API.
+            if not cal.is_valid_quickcep_session_id(sid):
+                log.warning(
+                    "operator reconcile: skip invalid quickcep_session_id=%r row=%s status=%s "
+                    "(not a numeric QuickCEP id; purge via cal.purge_sessions_by_ids)",
+                    sid, row_id, status,
+                )
+                continue
             op_msg = _fetch_last_operator_message(sid)
             if not op_msg:
                 continue

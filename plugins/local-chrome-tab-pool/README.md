@@ -78,6 +78,45 @@ Autostart uses `DEBUG_CHROME_SKIP_ENV=1` (same as the pool launcher) so
 No skill changes required. Agents call `browser_navigate` as usual; the plugin
 runs before the tool and wires the isolated tab transparently.
 
+## Orphan tab reaping
+
+A force-stopped or crashed agent run never reaches `cleanup_browser`, so its
+tab leaks. The pool reaps orphans before each `acquire` and on proactive CDP
+health probes. Two flavours:
+
+| Orphan flavour | Behaviour |
+|----------------|-----------|
+| `about:blank` / empty URL | Closed **immediately** — these are never navigated, so they cannot belong to a live run mid-acquire (`acquire` reaps *before* calling `_create_tab`). |
+| Real-URL orphan (e.g. `https://www.instagram.com/…`) | Closed only after being observed as untracked for **≥ `LOCAL_CHROME_ORPHAN_REAL_URL_AGE_S`** (default `300`s). |
+
+The age-gate is what closes the POVISON 686 recurrence (2026-07-27): a run
+force-killed by the no-progress watchdog *after* navigating leaks a real-URL
+tab. The original reaper only handled `about:blank` orphans, so real-URL
+orphans accumulated in the shared debug Chrome, degraded CDP WebSocket upgrades
+to `HTTP 500`, and the next run hung on `browser_navigate`. The age-gate
+prevents racing a concurrent run that just opened a tab and is mid-navigate.
+
+`recover_degraded_chrome` clears the age-gate map on Chrome restart, so
+recycled target ids are not reaped instantly post-recovery.
+
+## Stale cached-tab eviction in `acquire`
+
+`acquire` returns a cached tab when one exists for the `task_id`. After a
+Chrome restart (manual kill, crash, or `recover_degraded_chrome`), the cached
+`target_id` is gone from the new Chrome, but `cdp_ws_healthy` only probes the
+**browser-level** WebSocket — it cannot see that a cached **page-level**
+`cdp_url` is dead. `acquire` would hand back a stale entry whose WS upgrade
+returns `HTTP 500` on the new Chrome (POVISON 686 recurrence, 2026-07-27: RPA
+navigate kept failing after Chrome was restarted because the gateway still
+held the old `target_id`).
+
+`acquire` now calls `get_target_url(target_id)` to verify the cached tab still
+exists in `/json/list` before reusing it. A stale entry is evicted and a fresh
+tab is created. This complements `recover_degraded_chrome` (which clears the
+whole pool on a *detected* degradation) for the case where Chrome was
+restarted out-of-band (operator kill, OOM, host reboot) without the pool
+noticing.
+
 ## `_get_session_info` wrapper
 
 When `BROWSER_CDP_URL` is present, `browser_tool._get_session_info` would

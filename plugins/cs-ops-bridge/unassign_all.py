@@ -22,6 +22,7 @@ import logging
 import subprocess
 import sys
 import time
+import importlib
 from typing import Any
 
 from .profile_refs import quickcep_skill_dir
@@ -128,11 +129,160 @@ def _leave_one_session(session_id: str, jwt: str) -> dict[str, Any]:
     # CLI reports ok=False when chat_end doesn't fire, but batchLeaveChat
     # still succeeded (code 200). Treat chat_end_not_confirmed as success.
     if out.get("ok"):
+        log.info("unassign leave-chat ok session=%s chat_end=True", session_id)
         return {"ok": True, "chat_end": True}
     err = out.get("error") or ""
     if err == "chat_end_not_confirmed":
+        log.info("unassign leave-chat ok session=%s chat_end_not_confirmed (unassigned)", session_id)
         return {"ok": True, "chat_end": False, "unassigned": True}
-    return {"ok": False, "chat_end": False, "error": err or "leave_failed", "result_code": out.get("result_code")}
+    detail = err or "leave_failed"
+    stderr = (proc.stderr or "").strip()
+    log.warning(
+        "unassign leave-chat failed session=%s error=%s result_code=%s exit=%s stderr=%s",
+        session_id, detail, out.get("result_code"), proc.returncode, stderr[:300],
+    )
+    return {"ok": False, "chat_end": False, "error": detail, "result_code": out.get("result_code"), "stderr": stderr[:500]}
+
+
+def _import_quickcep_cli():
+    """Import the deployed ``quickcep_cli`` module (lives in the skill scripts dir).
+
+    Reuses the same sys.path trick as ``_login`` (which imports ``quickcep_login``).
+    Returns the module object so callers can use ``api_request`` /
+    ``_connect_operator_socket`` / ``_message_has_chat_end`` directly — this lets
+    ``unassign_all`` open ONE Socket.io connection for all sessions instead of
+    spawning a subprocess per session.
+    """
+    scripts_dir = quickcep_skill_dir() / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    return importlib.import_module("quickcep_cli")
+
+
+def _leave_sessions_via_shared_socket(
+    cli_module,
+    *,
+    jwt: str,
+    assigned: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Leave every assigned session reusing a single Socket.io connection.
+
+    Opens one SIO polling connection + one ``checkSocket``, then for each session
+    runs ``joinChat`` → ``batchLeaveChat`` → poll ``chat_end``. The SIO connection
+    is best-effort for ``chat_end`` emission; the REST ``joinChat``/``batchLeaveChat``
+    do the actual unassign, so even if the connection goes stale mid-loop the
+    operator is still removed from ``operatorIds`` (``chat_end_not_confirmed`` is
+    treated as success, matching the legacy subprocess path).
+
+    Raises ``QuickCEPRequestError`` if the initial SIO handshake fails so the
+    caller can fall back to the per-session subprocess path.
+    """
+    api_request = cli_module.api_request
+    connect_socket = cli_module._connect_operator_socket
+    has_chat_end = cli_module._message_has_chat_end
+    QuickCEPRequestError = cli_module.QuickCEPRequestError
+    JOIN_TIMEOUT = getattr(cli_module, "JOIN_CHAT_TIMEOUT", 60)
+    LEAVE_TIMEOUT = getattr(cli_module, "LEAVE_CHAT_TIMEOUT", 90)
+
+    # One shared SIO connection for the whole batch.
+    sock = connect_socket(jwt)
+    socket_id = sock["socket_id"]
+    store_id = sock["store_id"]
+    operator_id = sock["operator_id"]
+    staff_id = sock["staff_id"]
+    api_request(
+        "POST",
+        "/im/operator/action/checkSocket",
+        jwt,
+        {"socketId": socket_id},
+        timeout=20,
+        api_step="checkSocket",
+    )
+
+    results: list[dict[str, Any]] = []
+    for r in assigned:
+        sid = r.get("id") or r.get("chatSubSessionId") or ""
+        if not sid:
+            continue
+        vi = r.get("visitorInfo") or {}
+        label = vi.get("email") or vi.get("firstName") or sid
+        res: dict[str, Any] = {
+            "session_id": sid,
+            "email": label,
+            "ok": False,
+            "chat_end": False,
+        }
+        try:
+            join = api_request(
+                "POST",
+                "/im/operator/action/joinChat",
+                jwt,
+                {"chatSubSessionId": sid},
+                timeout=JOIN_TIMEOUT,
+                api_step="joinChat",
+            )
+            if join.get("code") != 200:
+                res["error"] = "join_failed"
+                res["join_code"] = join.get("code")
+                log.warning("unassign shared-socket join_failed session=%s code=%s", sid, join.get("code"))
+                results.append(res)
+                time.sleep(0.3)
+                continue
+
+            leave = api_request(
+                "POST",
+                "/im/operator/action/batchLeaveChat",
+                jwt,
+                {
+                    "chatSubSessionIds": [sid],
+                    "storeId": store_id,
+                    "operatorId": operator_id,
+                    "staffId": staff_id,
+                },
+                timeout=LEAVE_TIMEOUT,
+                api_step="batchLeaveChat",
+            )
+            closed = False
+            try:
+                for _ in range(5):
+                    time.sleep(0.35)
+                    closed = has_chat_end(jwt, sid)
+                    if closed:
+                        break
+            except Exception as exc:  # noqa: BLE001 — chat_end poll is best-effort
+                log.debug("unassign chat_end poll failed session=%s: %s", sid, exc)
+
+            leave_ok = leave.get("code") == 200
+            if leave_ok and closed:
+                res["ok"] = True
+                res["chat_end"] = True
+                log.info("unassign shared-socket ok session=%s chat_end=True", sid)
+            elif leave_ok and not closed:
+                # batchLeaveChat returned 200 but chat_end didn't fire — operator
+                # still removed from operatorIds. Treat as unassign success.
+                res["ok"] = True
+                res["chat_end"] = False
+                res["unassigned"] = True
+                log.info("unassign shared-socket ok session=%s chat_end_not_confirmed (unassigned)", sid)
+            else:
+                res["ok"] = False
+                res["error"] = "leave_failed"
+                res["result_code"] = leave.get("code")
+                log.warning(
+                    "unassign shared-socket leave_failed session=%s result_code=%s",
+                    sid, leave.get("code"),
+                )
+        except QuickCEPRequestError as exc:
+            res["ok"] = False
+            res["error"] = str(exc) or "quickcep_request_error"
+            log.warning("unassign shared-socket error session=%s: %s", sid, exc)
+        except Exception as exc:  # noqa: BLE001 — per-session isolation
+            res["ok"] = False
+            res["error"] = str(exc) or "unexpected_error"
+            log.warning("unassign shared-socket unexpected error session=%s: %s", sid, exc)
+        results.append(res)
+        time.sleep(0.3)  # gentle rate limit
+    return results
 
 
 def unassign_all_sessions(
@@ -165,7 +315,25 @@ def unassign_all_sessions(
     jwt = auth["jwt"]
     op_user_id = auth["userId"]
     if not op_user_id:
-        return {"ok": False, "error": "no_user_id_in_jwt"}
+        return {"ok": False, "error": "no_user_id_in_jwt",
+                "detail": "QuickCEP JWT 中缺少 userId，无法识别操作员账号。请检查「设置」里的 QuickCEP 账号是否正确。"}
+    # Fix 4: validate staffId early — _connect_operator_socket requires it and
+    # would otherwise 100%-fail every leave-chat with an opaque "JWT missing
+    # userId/staffId" error. Surface a clear, actionable error instead.
+    op_staff_id = auth.get("staffId") or ""
+    if not op_staff_id:
+        log.error(
+            "unassign_all: staffId missing in JWT for %s — cannot open SIO connection",
+            quickcep_email,
+        )
+        return {
+            "ok": False,
+            "error": "no_staff_id_in_jwt",
+            "detail": (
+                "QuickCEP 账号缺少 staffId，无法下班退出会话。请改用具备客服坐席权限的 QuickCEP 账号，"
+                "或联系管理员为该账号分配坐席后再试。"
+            ),
+        }
 
     # Step 2: List sessions
     try:
@@ -199,33 +367,56 @@ def unassign_all_sessions(
             "elapsed_ms": int((time.time() - t0) * 1000),
         }
 
-    # Step 4: Leave each session
-    results = []
-    unassigned = 0
-    failed = 0
-    for r in assigned:
-        sid = r.get("id") or r.get("chatSubSessionId") or ""
-        if not sid:
-            continue
-        vi = r.get("visitorInfo") or {}
-        label = vi.get("email") or vi.get("firstName") or sid
-        res = _leave_one_session(sid, jwt)
-        results.append({
-            "session_id": sid,
-            "email": label,
-            "ok": res["ok"],
-            "chat_end": res.get("chat_end", False),
-            "error": res.get("error"),
-        })
-        if res["ok"]:
-            unassigned += 1
-        else:
-            failed += 1
-        time.sleep(0.3)  # gentle rate limit
+    # Step 4: Leave each session. Prefer a single shared Socket.io connection
+    # (one handshake + one checkSocket, then joinChat/batchLeaveChat per session)
+    # — far faster and more robust than spawning a subprocess per session. Fall
+    # back to the per-session subprocess path only if the shared SIO connection
+    # cannot be opened (pre-loop). Per-session errors are caught inside the
+    # shared path and recorded as individual failures, so a mid-loop raise there
+    # would only happen on a code bug — in that case keep whatever partial
+    # results we have rather than re-processing already-unassigned sessions.
+    results: list[dict[str, Any]] = []
+    used_shared_socket = False
+    try:
+        cli_module = _import_quickcep_cli()
+        results = _leave_sessions_via_shared_socket(cli_module, jwt=jwt, assigned=assigned)
+        used_shared_socket = True
+    except Exception as exc:
+        log.warning(
+            "unassign_all: shared SIO connection failed (%s); falling back to per-session subprocess",
+            exc,
+        )
 
+    if not used_shared_socket and not results:
+        for r in assigned:
+            sid = r.get("id") or r.get("chatSubSessionId") or ""
+            if not sid:
+                continue
+            vi = r.get("visitorInfo") or {}
+            label = vi.get("email") or vi.get("firstName") or sid
+            res = _leave_one_session(sid, jwt)
+            results.append({
+                "session_id": sid,
+                "email": label,
+                "ok": res["ok"],
+                "chat_end": res.get("chat_end", False),
+                "error": res.get("error"),
+            })
+            time.sleep(0.3)  # gentle rate limit
+
+    unassigned = sum(1 for r in results if r.get("ok"))
+    failed = sum(1 for r in results if not r.get("ok"))
+
+    if used_shared_socket:
+        mode = "shared_socket"
+    elif results:
+        mode = "shared_socket_partial"  # shared path raised mid-loop; kept partial results
+    else:
+        mode = "subprocess"
     log.info(
-        "unassign_all: done env=%s operator=%s(%s) unassigned=%d failed=%d elapsed=%.1fs",
-        env, operator_name, operator_id, unassigned, failed, time.time() - t0,
+        "unassign_all: done env=%s operator=%s(%s) mode=%s unassigned=%d failed=%d elapsed=%.1fs",
+        env, operator_name, operator_id,
+        mode, unassigned, failed, time.time() - t0,
     )
 
     return {

@@ -113,7 +113,7 @@ Profile 设置 `browser.cloud_provider: local`。Chrome 长跑后：
 ./start-debug-chrome.sh restart
 ```
 
-爆发前可执行 tab-pool 运维：`reap_orphan_blank_tabs`（见 `local-chrome-tab-pool` README）。
+爆发前可执行 tab-pool 运维：`reap_orphan_tabs`（别名 `reap_orphan_blank_tabs`；见 `local-chrome-tab-pool` README）。真实 URL 孤儿 tab 默认 age-gate 300s（`LOCAL_CHROME_ORPHAN_REAL_URL_AGE_S`）。
 
 ### 3. Bridge 崩溃 / EMFILE
 

@@ -34,6 +34,18 @@ Before browsing, extract a compact **Campaign Context** from user input, product
   Google SERP, IP check) instead of step-by-step `browser_*`. `browser_*`
   is reserved for fallback, curated lists, and non-Google public web. See
   **Step 0.5 — RPA 采集优先** below for the full workflow.
+
+  **禁止 `browser_cdp` 绕过 (HARD):** `browser_cdp` 的 `Page.navigate` /
+  `Page.goto` 到 `instagram.com/*`、`google.com/search*`、`ipinfo.io` 与
+  `browser_navigate` 受同一 guard 约束（`KOL_RPA_STRICT_BROWSER_BLOCK=1`），
+  会被 `kol-bridge-agent-guard` 拦截。**不得**用 `browser_cdp` 手动爬 IG
+  profile / reels 代替 `rpa_fetch_ig_profile` / `rpa_fetch_ig_reels` ——
+  这是绕过 RPA 优先规则的 HARD 违规（2026-07-27 事故：agent 用 45 次
+  `browser_cdp Page.navigate` + `Runtime.evaluate` 手动爬 IG，烧光 150 次
+  迭代预算，一个候选都没入库）。`Runtime.evaluate` 内的 `fetch()` 到
+  blocked 域名同样禁止。RPA 工具返回 `ok=false` + `fallback_hint` 时会
+  颁发 one-shot token，允许一次 `browser_navigate` 或 `browser_cdp
+  Page.navigate` 到该 URL。
 - **Product**: category, key features, materials/mechanisms/tech, price tier.
 - **Buyer**: likely age/life stage, household, home status, pain points, competitive alternatives.
 - **Purchase driver**: one Primary Driver and 1-2 Secondary Drivers from the routing table.
@@ -108,10 +120,11 @@ deferred 意味着 Agent **必须**在内容筛选阶段从 `rpa_fetch_reel_comm
 - Using `browser_*` to IG/Google URLs after RPA succeeds on the same handle (double quota)
 - Using `browser_console` to read comments instead of `rpa_fetch_reel_comments`
 - Reading snapshots to guess follower counts instead of `qualification.gates`
+- Using `browser_cdp` (`Page.navigate` / `Page.goto` / `Runtime.evaluate` with `fetch()`) to scrape IG profiles/reels instead of `rpa_fetch_ig_profile` / `rpa_fetch_ig_reels` — `browser_cdp` navigation to IG/Google/ipinfo is blocked by the same guard as `browser_navigate` (2026-07-27 事故修复)
 
 **Registration gate:** `rpa_fetch_ig_profile(handle)` success = this run has visited the handle (equivalent to `browser_navigate("https://www.instagram.com/<handle>/")`). The `kol-discovery-precompress-guard` recognizes both `browser_navigate` and `rpa_fetch_ig_profile`/`rpa_fetch_ig_reels` as visited.
 
-**Guard enforcement:** When `KOL_RPA_STRICT_BROWSER_BLOCK=1` (default), the `kol-bridge-agent-guard` hook blocks `browser_navigate` to `instagram.com/*`, `google.com/search`, and `ipinfo.io` URLs in campaign discovery sessions (post-bootstrap). RPA tools that return `ok=false` with a fallback hint grant a one-shot token for that specific URL.
+**Guard enforcement:** When `KOL_RPA_STRICT_BROWSER_BLOCK=1` (default), the `kol-bridge-agent-guard` hook blocks `browser_navigate` **and** `browser_cdp Page.navigate`/`Page.goto` to `instagram.com/*`, `google.com/search`, and `ipinfo.io` URLs in campaign discovery sessions (post-bootstrap). RPA tools that return `ok=false` with a fallback hint grant a one-shot token for that specific URL (honored by both `browser_navigate` and `browser_cdp Page.navigate`).
 
 ## Driver And Historical Calibration
 Pick **one Primary Purchase Driver**. If two drivers tie, choose the one closest to buyer intent, not product appearance. The same sofa may route to A for cozy aesthetics, B for family hosting, or D for home-theater/gaming setup.

@@ -161,6 +161,27 @@ def _load_rpa_url_policy():
     return module
 
 
+def _browser_cdp_navigate_url(args: Dict[str, Any]) -> str:
+    """Extract the target URL from a ``browser_cdp`` navigation call.
+
+    The agent bypassed ``browser_navigate``'s URL block by calling
+    ``browser_cdp`` with ``Page.navigate`` / ``Page.goto`` directly (POVISON
+    686 recurrence, 2026-07-27: 45 ``browser_cdp`` calls scraped IG profiles,
+    burned the 150-iteration budget, and never reached ingest). We treat
+    those CDP navigation methods as equivalent to ``browser_navigate`` for URL
+    blocking. ``Runtime.evaluate`` with in-page ``fetch()`` is NOT covered
+    here — it would require brittle JS parsing — but closing the navigation
+    path forces the agent back to ``rpa_fetch_ig_profile``.
+    """
+    method = str(args.get("method") or "").strip()
+    if method not in ("Page.navigate", "Page.goto"):
+        return ""
+    params = args.get("params")
+    if not isinstance(params, dict):
+        return ""
+    return str(params.get("url") or params.get("targetUrl") or "").strip()
+
+
 def _check_rpa_browser_url_block(
     tool_name: str,
     args: Dict[str, Any],
@@ -173,7 +194,8 @@ def _check_rpa_browser_url_block(
     - KOL_RPA_STRICT_BROWSER_BLOCK=1 (default)
     - session is kol-campaign:* discovery (not outreach/draft)
     - bootstrap is complete (don't double-block during bootstrap)
-    - tool is browser_navigate (other browser_* don't have URL args)
+    - tool is browser_navigate, OR browser_cdp with Page.navigate/Page.goto
+      (closes the CDP-navigation loophole — see ``_browser_cdp_navigate_url``)
 
     Falls back to allow if a valid RPA fallback token exists for the URL.
     """
@@ -181,10 +203,14 @@ def _check_rpa_browser_url_block(
         return None
     if not _campaign_discovery_session(session_id, task_id):
         return None
-    if tool_name != "browser_navigate":
+
+    if tool_name == "browser_navigate":
+        url = str(args.get("url", "") or "")
+    elif tool_name == "browser_cdp":
+        url = _browser_cdp_navigate_url(args)
+    else:
         return None
 
-    url = str(args.get("url", "") or "")
     if not url:
         return None
 
@@ -200,15 +226,18 @@ def _check_rpa_browser_url_block(
     # Check for RPA fallback token (one-shot allow)
     ds = _load_discovery_session()
     if ds.consume_rpa_fallback(sid, url):
-        return None  # Token consumed — allow this one browser_navigate
+        return None  # Token consumed — allow this one navigation
 
+    via = "browser_navigate" if tool_name == "browser_navigate" else "browser_cdp Page.navigate"
     return {
         "action": "block",
         "message": (
-            f"browser_navigate to {url} is blocked when KOL_RPA_STRICT_BROWSER_BLOCK=1. "
+            f"{via} to {url} is blocked when KOL_RPA_STRICT_BROWSER_BLOCK=1. "
             "Use RPA tools instead: rpa_fetch_ig_profile / rpa_fetch_ig_reels / "
             "rpa_fetch_reel_comments for instagram.com, rpa_fetch_google_serp for "
             "google.com/search, rpa_check_ip for ipinfo.io. "
+            "browser_cdp Page.navigate/Page.goto to these URLs is treated the "
+            "same as browser_navigate — do not use raw CDP to bypass the guard. "
             "If an RPA tool returned ok=false with fallback_hint, it has already "
             "granted a one-time fallback token for that URL."
         ),

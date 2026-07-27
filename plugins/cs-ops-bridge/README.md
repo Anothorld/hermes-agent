@@ -110,6 +110,8 @@ Facts and event payloads are sanitized on write (`pii_sanitize.py`): emails, pho
 | `CS_OPS_INTENT_FILTER` | `true` | Only auto-process sessions whose QuickCEP `intentionTags` include allowed business intents |
 | `CS_OPS_ALLOWED_INTENTION_TAGS` | `产品咨询,物流咨询` | Comma-separated QuickCEP AI intent labels (overrides `config/intent_filter.yaml`) |
 | `CS_OPS_INTENT_FETCH_MAX_PAGES` | `5` | Session-list pages to scan when resolving `intentionTags` for one session |
+| `CS_OPS_SYSTEM_OPERATOR_ID` | — | QuickCEP `userId` of the AI/bridge system account. Sessions assigned to this operator are **still processed** by the watcher (not skipped). Auto-detected from `.quickcep_token.json` when unset; set this to override when the token cache is unavailable. |
+| `CS_OPS_SKIP_ASSIGNED_SESSIONS` | `true` | Skip launching AI for sessions already assigned to **non-system** human operators. Sessions assigned to the system operator (`CS_OPS_SYSTEM_OPERATOR_ID` / token cache) are always processed. |
 
 ## Inbound intent filter
 
@@ -140,6 +142,8 @@ Automation listens to and processes **QuickCEP email sessions only**. Web chat, 
 Shared module: `email_channel.py` (`is_email_channel`, `inbound_payload_is_email`, `cal_session_is_email`, `session_is_email`).
 
 Permanent inbound skips (PR3): `non_email` / `internal_email_blocklist` / `intent_gate: intention_not_allowed` / `ad` enqueue into CAL with `status=skipped` + an `inbound_skipped` event (payload `gate` field). Transient skips (`intent_gate: no_intention_tags` / `assigned_to_operators`) stay log-only to preserve REST reconcile retry — enqueuing would write `cs_message_dedup` and block later re-evaluation.
+
+- **Leave-on-skip for `intent_gate: intention_not_allowed`**: when a reopened session is reclassified as out-of-scope (e.g. `order_management`) and the AI had previously `join-chat`'d into the QuickCEP session (CAL has a `quickcep_join_chat` event), the watcher calls `quickcep_cli leave-chat` to unassign the AI so the session returns to the human queue — otherwise it stays stuck on the AI account in a `skipped` state (AI won't process, humans can't take it, no escalation). A `quickcep_leave_chat` CAL event (`source=intent_gate_skip`) records the outcome (with reconciled `ok` — email `leaveChat` vs live `chat_end` handled via `reconcile_leave_chat_payload`, same as `close_session`). No-op when: the AI never joined (first-message skip), the session is still busy (`_enqueue_permanent_skip`'s busy guard kept an in-flight status like `processing`/`awaiting_expert` — leave-chat would orphan the active gateway run), or a prior skip already left the session (idempotent — repeated out_of_scope follow-ups don't re-call leave-chat). Fail-soft if QuickCEP SIO is unreachable (the skip itself still stands).
 
 - SIO `visitorSendMsg` and REST reconcile both pass through `intent_gate.check_intent_gate` before enqueue/launch.
 - Sessions with no `intentionTags` are skipped unless CAL already has another session for the same customer email (follow-up threads that QuickCEP opens as a new sub-session often lack AI intent tags).
@@ -300,6 +304,21 @@ python plugins/cs-ops-bridge/scripts/cs_bridge_tool.py apply-handoff --env LIVE 
 ```bash
 python plugins/cs-ops-bridge/scripts/sync_session_tags.py   # after QuickCEP AI tags created
 ```
+
+### Purging test/invalid sessions
+
+Test fixtures with non-numeric `quickcep_session_id` (e.g. `sess-1`, `qs`, `x`) can leak into the LIVE CAL DB and break the `operator_send_reconcile` loop (QuickCEP rejects non-Long `chatSubSessionId` with a JSON parse error every tick). `operator_send_reconcile` now skips such ids, but to evict rows already in the DB use the deterministic purge helper:
+
+```bash
+# Dry-run (lists what would be deleted, no writes):
+python3 playground/purge_cal_test_sessions.py
+# Apply (pre-backup of cal.db, then delete):
+python3 playground/purge_cal_test_sessions.py --apply
+# Scope to a different env:
+python3 playground/purge_cal_test_sessions.py --env TEST --apply
+```
+
+The underlying API is `cal.list_test_sessions(env=...)` + `cal.purge_sessions_by_ids(row_ids=..., env=..., dry_run=..., backup=...)`, which handles child-table cleanup (`cs_conversation_events`, `cs_facts`, `cs_autopilot_jobs`, `cs_escalations`, `escalation_vault_link` + `vault_blob` ref-count, `cs_message_dedup`) and writes a `cal.db.bak-<utc>` snapshot before any DELETE.
 
 ## Architecture
 

@@ -820,3 +820,136 @@ def test_pre_tool_call_accepts_observer_kwargs():
         middleware_trace=[{"kind": "test"}],
     )
     assert out is None
+
+
+def _bootstrap_discovery_session(h, sid: str) -> None:
+    """Run the three bootstrap terminal commands so bootstrap_complete() returns True."""
+    ds = h._load_discovery_session()
+    ds.reset_bootstrap(sid)
+    ds.reset_fallback_tokens(sid)
+    cli = "/Users/me/hermes-agent/plugins/kol-ops-bridge/scripts/kol-bridge-cli"
+    campaign = sid.split(":")[-1] if ":" in sid else sid
+    for cmd in (
+        f"{cli} list-candidates --env LIVE --campaign-id {campaign}",
+        f"{cli} list-discovery-skip-handles --env LIVE",
+        f"{cli} list-outreach-cooldown-handles --env LIVE --plain",
+    ):
+        assert h.pre_tool_call("terminal", {"command": cmd}, task_id=sid) is None
+
+
+def test_blocks_browser_cdp_page_navigate_to_ig_post_bootstrap():
+    """browser_cdp Page.navigate to IG is blocked same as browser_navigate (CDP loophole)."""
+    h = _hooks()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    _bootstrap_discovery_session(h, sid)
+
+    out = h.pre_tool_call(
+        "browser_cdp",
+        {
+            "method": "Page.navigate",
+            "params": {"url": "https://www.instagram.com/jakearnold/"},
+            "target_id": "ABC123",
+            "timeout": 30,
+        },
+        task_id=sid,
+    )
+    assert out is not None
+    assert out["action"] == "block"
+    assert "browser_cdp Page.navigate" in out["message"]
+    assert "rpa_fetch_ig_profile" in out["message"]
+
+
+def test_blocks_browser_cdp_page_goto_to_google_search():
+    """browser_cdp Page.goto to google.com/search is also blocked."""
+    h = _hooks()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    _bootstrap_discovery_session(h, sid)
+
+    out = h.pre_tool_call(
+        "browser_cdp",
+        {
+            "method": "Page.goto",
+            "params": {"url": "https://www.google.com/search?q=home+decor"},
+        },
+        task_id=sid,
+    )
+    assert out is not None
+    assert out["action"] == "block"
+
+
+def test_allows_browser_cdp_runtime_evaluate():
+    """browser_cdp Runtime.evaluate is NOT blocked (only navigation methods are)."""
+    h = _hooks()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    _bootstrap_discovery_session(h, sid)
+
+    out = h.pre_tool_call(
+        "browser_cdp",
+        {
+            "method": "Runtime.evaluate",
+            "params": {"expression": "document.body.innerText"},
+            "target_id": "ABC123",
+        },
+        task_id=sid,
+    )
+    # Runtime.evaluate without a blocked URL is allowed (ownership guard is separate).
+    assert out is None
+
+
+def test_allows_browser_cdp_page_navigate_to_allowed_url():
+    """browser_cdp Page.navigate to a curated-list URL (feedspot) is allowed."""
+    h = _hooks()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    _bootstrap_discovery_session(h, sid)
+
+    out = h.pre_tool_call(
+        "browser_cdp",
+        {
+            "method": "Page.navigate",
+            "params": {"url": "https://www.feedspot.com/infiniterss.php?q=home+decor"},
+        },
+        task_id=sid,
+    )
+    assert out is None
+
+
+def test_browser_cdp_fallback_token_allows_one_navigation():
+    """RPA fallback token allows ONE browser_cdp Page.navigate to the same URL."""
+    h = _hooks()
+    sid = "kol-campaign:LIVE:POVISON-TS-8319"
+    _bootstrap_discovery_session(h, sid)
+
+    url = "https://www.instagram.com/foo/"
+    ds = h._load_discovery_session()
+    ds.grant_rpa_fallback(sid, url)
+
+    # First browser_cdp Page.navigate — consumed token, allowed
+    out1 = h.pre_tool_call(
+        "browser_cdp",
+        {"method": "Page.navigate", "params": {"url": url}},
+        task_id=sid,
+    )
+    assert out1 is None
+
+    # Second browser_cdp Page.navigate to same URL — token consumed, blocked
+    out2 = h.pre_tool_call(
+        "browser_cdp",
+        {"method": "Page.navigate", "params": {"url": url}},
+        task_id=sid,
+    )
+    assert out2 is not None
+    assert out2["action"] == "block"
+
+
+def test_browser_cdp_block_not_applied_to_email_discover():
+    """CDP URL block only applies to campaign discovery, NOT kol-email-discover."""
+    h = _hooks()
+    out = h.pre_tool_call(
+        "browser_cdp",
+        {
+            "method": "Page.navigate",
+            "params": {"url": "https://www.instagram.com/foo/"},
+        },
+        task_id="kol-email-discover:LIVE:SEB8008",
+    )
+    assert out is None, "email-discover should allow browser_cdp Page.navigate to IG"

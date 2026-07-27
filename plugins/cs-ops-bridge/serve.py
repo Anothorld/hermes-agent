@@ -71,6 +71,33 @@ def _build_app() -> FastAPI:
         ps = pkg.processing_stale
         gw_base = os.environ.get("CS_OPS_GATEWAY_BASE", "http://127.0.0.1:8643").rstrip("/")
 
+        # Pre-warm: initialize DB schema and QuickCEP token BEFORE starting
+        # background watchers or accepting requests. This prevents the first
+        # messages request from blocking 20+ seconds on schema DDL (competing
+        # with watcher write locks) and QuickCEP token re-login.
+        log = logging.getLogger("cs-ops-bridge")
+        try:
+            pkg.cal.health()  # opens a connection → triggers recreate_all once
+            log.info("DB schema pre-warmed")
+        except Exception as exc:
+            log.warning("DB schema pre-warm failed: %s", exc)
+        try:
+            import subprocess, sys
+            skill_dir = Path(os.environ.get(
+                "CS_OPS_QUICKCEP_SKILL_DIR",
+                str(Path(os.environ.get("HERMES_HOME", "/opt/data")) / "skills" / "social-media" / "quickcep"),
+            ))
+            cli = skill_dir / "scripts" / "quickcep_cli.py"
+            if cli.exists():
+                proc = subprocess.run(
+                    [sys.executable, str(cli), "tags-get", "0"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(skill_dir),
+                )
+                log.info("QuickCEP token pre-warmed (rc=%d)", proc.returncode)
+        except Exception as exc:
+            log.warning("QuickCEP token pre-warm failed: %s", exc)
+
         async def _probe_gateway() -> None:
             import urllib.error
             import urllib.request

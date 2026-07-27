@@ -28,12 +28,19 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PORT = 9222
 _AUTOLAUNCH_TIMEOUT_S = 25.0
 _CDP_PROBE_INTERVAL_S = float(os.environ.get("LOCAL_CHROME_CDP_PROBE_INTERVAL_S", "120"))
+# Untracked page targets on a real URL (not about:blank) are reaped only after
+# being observed as orphans for this long, so a tab a concurrent run just
+# opened and is actively navigating cannot be killed out from under it.
+_ORPHAN_REAL_URL_AGE_S = float(os.environ.get("LOCAL_CHROME_ORPHAN_REAL_URL_AGE_S", "300"))
 
 _lock = threading.Lock()
 _autolaunch_lock = threading.Lock()
 _cdp_probe_lock = threading.Lock()
 _last_cdp_probe_at: float = 0.0
 _task_tabs: Dict[str, Dict[str, str]] = {}
+# target_id -> first-seen-as-orphan timestamp (monotonic). Only real-URL
+# orphans are age-gated; about:blank orphans close immediately.
+_orphan_first_seen: Dict[str, float] = {}
 
 
 def _truthy_env(name: str, default: bool = True) -> bool:
@@ -360,6 +367,10 @@ def recover_degraded_chrome(task_id: Optional[str] = None) -> None:
         else:
             stale = dict(_task_tabs)
             _task_tabs.clear()
+        # Chrome is being restarted — every target_id we tracked is gone, so
+        # drop the orphan age-gate map too (otherwise freshly-reopened tabs
+        # with recycled ids could be reaped instantly after recovery).
+        _orphan_first_seen.clear()
 
     for info in stale.values():
         _close_target_id(str(info.get("target_id") or ""))
@@ -384,19 +395,28 @@ def _create_tab() -> Dict[str, str]:
     return {"cdp_url": cdp_url, "target_id": target_id}
 
 
-def reap_orphan_blank_tabs() -> int:
-    """Close untracked ``about:blank`` page targets left behind by dead runs.
+def reap_orphan_tabs() -> int:
+    """Close untracked page targets left behind by dead runs.
 
     A force-stopped or crashed agent run never reaches ``cleanup_browser``, so
-    its pooled ``about:blank`` tab leaks. These accumulate in the shared debug
-    Chrome and slow every subsequent CDP attach (POVISON 686: an empty tab was
-    opened but navigation never started). Reaping is deliberately conservative —
-    only page targets that are **both** untracked by this pool **and** still on
-    ``about:blank`` are closed, so real navigated pages and live pooled tabs are
-    never touched.
+    its pooled tab leaks. These accumulate in the shared debug Chrome and slow
+    every subsequent CDP attach (POVISON 686: an empty tab was opened but
+    navigation never started). Two flavours of orphan are reaped:
+
+    * ``about:blank`` / empty URL — closed **immediately**. These are never
+      navigated, so they cannot belong to a live run mid-acquire (``acquire``
+      reaps *before* calling ``_create_tab``, so the just-opened blank is never
+      observed by a concurrent reap pass).
+    * Real-URL orphans — closed only after being observed as untracked for at
+      least ``LOCAL_CHROME_ORPHAN_REAL_URL_AGE_S`` (default 300s). A run that
+      was force-killed *after* navigating (POVISON 686 recurrence, 2026-07-27)
+      leaks a real-URL tab; without age-gating, a tab a concurrent run just
+      opened and is actively navigating could be reaped out from under it.
+
+    Tracked tabs (live pooled tabs in ``_task_tabs``) are never touched.
 
     Returns:
-        Count of orphan blank tabs closed (0 when Chrome is down/unreachable).
+        Count of orphan tabs closed (0 when Chrome is down/unreachable).
     """
     if not probe_chrome():
         return 0
@@ -411,7 +431,12 @@ def reap_orphan_blank_tabs() -> int:
     with _lock:
         tracked = {info.get("target_id") for info in _task_tabs.values()}
 
-    closed = 0
+    now = time.monotonic()
+    seen_ids: set[str] = set()
+    blank_closed = 0
+    real_closed = 0
+    real_pending: list[str] = []
+
     for target in targets:
         if not isinstance(target, dict) or target.get("type") != "page":
             continue
@@ -419,13 +444,62 @@ def reap_orphan_blank_tabs() -> int:
         url = str(target.get("url") or "").strip()
         if not target_id or target_id in tracked:
             continue
-        if url not in ("", "about:blank"):
+        seen_ids.add(target_id)
+        if url in ("", "about:blank"):
+            _close_target_id(target_id)
+            blank_closed += 1
+            continue
+        # Real-URL orphan: age-gate via first-seen map.
+        first_seen = _orphan_first_seen.get(target_id)
+        if first_seen is None:
+            _orphan_first_seen[target_id] = now
+            real_pending.append(target_id)
+            continue
+        if (now - first_seen) < _ORPHAN_REAL_URL_AGE_S:
+            real_pending.append(target_id)
             continue
         _close_target_id(target_id)
-        closed += 1
+        _orphan_first_seen.pop(target_id, None)
+        real_closed += 1
+
+    # Drop first-seen entries for targets that no longer exist (closed by us,
+    # closed by the agent, or Chrome evicted them). Keeps the map bounded.
+    stale_keys = set(_orphan_first_seen) - seen_ids
+    for key in stale_keys:
+        _orphan_first_seen.pop(key, None)
+
+    closed = blank_closed + real_closed
     if closed:
-        logger.info("Tab pool reaped %d orphan about:blank tab(s)", closed)
+        parts = []
+        if blank_closed:
+            parts.append(f"{blank_closed} about:blank")
+        if real_closed:
+            parts.append(f"{real_closed} stale real-URL (age>={_ORPHAN_REAL_URL_AGE_S:.0f}s)")
+        logger.info("Tab pool reaped %d orphan tab(s): %s", closed, ", ".join(parts))
+    if real_pending:
+        logger.debug(
+            "Tab pool %d real-URL orphan(s) pending age-gate (threshold %.0fs)",
+            len(real_pending), _ORPHAN_REAL_URL_AGE_S,
+        )
     return closed
+
+
+# Backward-compatible alias — original name only described the blank-tab case.
+reap_orphan_blank_tabs = reap_orphan_tabs
+
+
+def _cached_tab_is_live(target_id: str) -> bool:
+    """Return True when the cached tab's target_id still exists in Chrome.
+
+    After a Chrome restart (manual kill, crash, or ``recover_degraded_chrome``),
+    every previously-opened target_id is gone. ``cdp_ws_healthy`` only probes
+    the **browser-level** WebSocket, so it cannot see that a cached page-level
+    ``cdp_url`` is now dead — ``acquire`` would hand back a stale entry whose
+    WS upgrade returns HTTP 500 on the new Chrome (POVISON 686 recurrence,
+    2026-07-27: RPA navigate kept failing after Chrome was restarted because
+    the gateway still held the old target_id). We verify via ``/json/list``.
+    """
+    return bool(get_target_url(target_id))
 
 
 def acquire(task_id: str) -> Dict[str, str]:
@@ -441,8 +515,17 @@ def acquire(task_id: str) -> Dict[str, str]:
 
     with _lock:
         cached = _task_tabs.get(key)
-        if cached:
+        if cached and _cached_tab_is_live(str(cached.get("target_id") or "")):
             return dict(cached)
+        if cached:
+            # Cached entry points at a dead target (Chrome restarted). Evict
+            # so we create a fresh tab instead of returning a dead cdp_url.
+            logger.warning(
+                "Tab pool evicting stale cached tab %s for task=%s "
+                "(target no longer exists in Chrome — likely restarted)",
+                cached.get("target_id"), key,
+            )
+            _task_tabs.pop(key, None)
 
     # Best-effort hygiene: clear leaked blank tabs from prior killed runs
     # before opening a new one, so the shared Chrome does not accumulate dead

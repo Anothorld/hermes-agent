@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -27,6 +28,7 @@ def tab_pool(monkeypatch):
     monkeypatch.delenv("LOCAL_CHROME_TAB_POOL", raising=False)
     module = _load_tab_pool_module()
     module._task_tabs.clear()
+    module._orphan_first_seen.clear()
     return module
 
 
@@ -111,6 +113,9 @@ def test_acquire_creates_tab(tab_pool, monkeypatch):
         calls.append((url, method))
         if url.endswith("/json/version"):
             return {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/ABC"}
+        if url.endswith("/json/list"):
+            # Cached tab liveness check — report TAB1 as live.
+            return [{"type": "page", "id": "TAB1", "url": "https://example.com/cur"}]
         if "/json/new" in url:
             return {
                 "id": "TAB1",
@@ -232,7 +237,161 @@ def test_reap_orphan_blank_tabs_noop_when_chrome_down(tab_pool, monkeypatch):
     assert tab_pool.reap_orphan_blank_tabs() == 0
 
 
-def test_acquire_reaps_orphans_before_creating(tab_pool, monkeypatch):
+def test_reap_orphan_tabs_real_url_age_gated(tab_pool, monkeypatch):
+    # Real-URL orphans must NOT be closed on first sight — a concurrent run
+    # might have just opened the tab and be mid-navigate. They are recorded
+    # and only reaped once observed as orphan for >= the age threshold.
+    tab_pool._orphan_first_seen.clear()
+    listing = [
+        {"type": "page", "id": "REAL1", "url": "https://www.google.com/search?q=x"},
+        {"type": "page", "id": "REAL2", "url": "https://www.instagram.com/foo/"},
+    ]
+    closed = []
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: closed.append(tid))
+    monkeypatch.setattr(
+        tab_pool, "_http_json",
+        lambda url, *, method="GET", timeout=10.0: listing,
+    )
+
+    # First pass: record only, close nothing.
+    assert tab_pool.reap_orphan_tabs() == 0
+    assert closed == []
+    assert set(tab_pool._orphan_first_seen.keys()) == {"REAL1", "REAL2"}
+
+    # Second pass immediately after: still below threshold → still kept.
+    assert tab_pool.reap_orphan_tabs() == 0
+    assert closed == []
+
+
+def test_reap_orphan_tabs_real_url_closed_after_age_threshold(tab_pool, monkeypatch):
+    tab_pool._orphan_first_seen.clear()
+    listing = [{"type": "page", "id": "STALE", "url": "https://www.instagram.com/foo/"}]
+    closed = []
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: closed.append(tid))
+    monkeypatch.setattr(
+        tab_pool, "_http_json",
+        lambda url, *, method="GET", timeout=10.0: listing,
+    )
+
+    # First pass records the orphan.
+    assert tab_pool.reap_orphan_tabs() == 0
+    # Backdate the first-seen timestamp so the next pass exceeds the threshold.
+    tab_pool._orphan_first_seen["STALE"] -= tab_pool._ORPHAN_REAL_URL_AGE_S + 1.0
+
+    # Second pass now reaps it.
+    assert tab_pool.reap_orphan_tabs() == 1
+    assert closed == ["STALE"]
+    # Map entry dropped after close.
+    assert "STALE" not in tab_pool._orphan_first_seen
+
+
+def test_reap_orphan_tabs_drops_first_seen_for_evicted_targets(tab_pool, monkeypatch):
+    # If Chrome evicted a tab (or we closed it), its id vanishes from /json/list.
+    # The first-seen map must not grow unbounded.
+    tab_pool._orphan_first_seen.clear()
+    tab_pool._orphan_first_seen["GONE"] = 1.0
+    # STILL_HERE is in the listing and freshly seen → must be preserved.
+    tab_pool._orphan_first_seen["STILL_HERE"] = time.monotonic()
+    listing = [{"type": "page", "id": "STILL_HERE", "url": "https://example.com/a"}]
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: None)
+    monkeypatch.setattr(
+        tab_pool, "_http_json",
+        lambda url, *, method="GET", timeout=10.0: listing,
+    )
+
+    tab_pool.reap_orphan_tabs()
+    assert "GONE" not in tab_pool._orphan_first_seen
+    assert "STILL_HERE" in tab_pool._orphan_first_seen
+
+
+def test_reap_orphan_tabs_tracked_real_url_preserved(tab_pool, monkeypatch):
+    # A live pooled tab on a real URL must never be reaped even after age.
+    tab_pool._task_tabs["live"] = {
+        "target_id": "TRACKED_REAL",
+        "cdp_url": "ws://127.0.0.1:9222/devtools/page/TRACKED_REAL",
+    }
+    tab_pool._orphan_first_seen.clear()
+    listing = [{"type": "page", "id": "TRACKED_REAL", "url": "https://www.instagram.com/live/"}]
+    closed = []
+    monkeypatch.setattr(tab_pool, "probe_chrome", lambda: True)
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: closed.append(tid))
+    monkeypatch.setattr(
+        tab_pool, "_http_json",
+        lambda url, *, method="GET", timeout=10.0: listing,
+    )
+
+    # Backdate well past threshold — tracked tab still preserved.
+    tab_pool.reap_orphan_tabs()
+    tab_pool.reap_orphan_tabs()
+    assert closed == []
+
+
+def test_acquire_evicts_stale_cached_tab_after_chrome_restart(tab_pool, monkeypatch):
+    # After Chrome restart, the cached target_id is gone from /json/list.
+    # acquire must evict the stale entry and create a fresh tab instead of
+    # returning a dead cdp_url (which would make RPA navigate hit HTTP 500).
+    tab_pool._task_tabs.clear()
+    tab_pool._task_tabs["stale-task"] = {
+        "target_id": "DEAD_TARGET",
+        "cdp_url": "ws://127.0.0.1:9222/devtools/page/DEAD_TARGET",
+    }
+    # get_target_url returns "" for the dead target (not in listing).
+    monkeypatch.setattr(tab_pool, "get_target_url", lambda tid: "")
+    create_calls = []
+
+    def fake_create():
+        create_calls.append(1)
+        return {
+            "target_id": "FRESH_TARGET",
+            "cdp_url": "ws://127.0.0.1:9222/devtools/page/FRESH_TARGET",
+        }
+
+    monkeypatch.setattr(tab_pool, "_create_tab", fake_create)
+    monkeypatch.setattr(tab_pool, "maybe_probe_cdp_health", lambda **kw: None)
+    monkeypatch.setattr(tab_pool, "reap_orphan_blank_tabs", lambda: 0)
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: None)
+
+    info = tab_pool.acquire("stale-task")
+    assert info["target_id"] == "FRESH_TARGET"
+    assert create_calls == [1]
+    # Stale entry replaced with the fresh one.
+    assert tab_pool._task_tabs["stale-task"]["target_id"] == "FRESH_TARGET"
+
+
+def test_acquire_reuses_cached_tab_when_target_still_live(tab_pool, monkeypatch):
+    # When the cached target_id still exists in Chrome, acquire must reuse it
+    # (no unnecessary tab churn).
+    tab_pool._task_tabs.clear()
+    tab_pool._task_tabs["live-task"] = {
+        "target_id": "ALIVE",
+        "cdp_url": "ws://127.0.0.1:9222/devtools/page/ALIVE",
+    }
+    monkeypatch.setattr(tab_pool, "get_target_url", lambda tid: "https://example.com/current")
+    monkeypatch.setattr(tab_pool, "_create_tab", lambda: pytest.fail("must not create"))
+    monkeypatch.setattr(tab_pool, "maybe_probe_cdp_health", lambda **kw: None)
+    monkeypatch.setattr(tab_pool, "reap_orphan_blank_tabs", lambda: 0)
+
+    info = tab_pool.acquire("live-task")
+    assert info["target_id"] == "ALIVE"
+
+
+
+    # After a Chrome restart all target_ids are gone; the age-gate map must
+    # reset so recycled ids aren't reaped instantly post-recovery.
+    tab_pool._orphan_first_seen.clear()
+    tab_pool._orphan_first_seen["OLD"] = 1.0
+    tab_pool._task_tabs.clear()
+    monkeypatch.setattr(tab_pool, "_close_target_id", lambda tid: None)
+    monkeypatch.setattr(tab_pool, "ensure_chrome_running", lambda: None)
+
+    tab_pool.recover_degraded_chrome()
+    assert tab_pool._orphan_first_seen == {}
+
+
+
     reaped = {"n": 0}
 
     def fake_reap():

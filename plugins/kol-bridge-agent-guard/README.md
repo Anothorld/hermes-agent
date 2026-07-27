@@ -15,7 +15,7 @@ bypassing the deterministic KOL bridge CLI.
 | `terminal` / `execute_code` HTTP scrape | `kol-email-discover:*` and `kol-campaign:*` when command matches curl/requests/Serper/google.com/search/etc. |
 | `browser_*` | Post-approval only: `kol-campaign-outreach:`, `kol-campaign-draft:`, `kol-nox-contacts-batch:`, `kol-reply:` — use Nox + bridge CLI, not browser crawl |
 | `browser_*` / `veedcrawl_*` / `rpa_*` | **`kol-campaign:` discovery** — blocked until bootstrap completes: `list-candidates`, `list-discovery-skip-handles`, `list-outreach-cooldown-handles` for the session's campaign |
-| `browser_navigate` (URL block) | **`kol-campaign:` discovery** (post-bootstrap, when `KOL_RPA_STRICT_BROWSER_BLOCK=1`) — blocked for `instagram.com/*`, `google.com/search`, `ipinfo.io` URLs. Use `rpa_*` tools instead. One-shot fallback token granted by RPA tools on `ok=false`. Does NOT affect `kol-email-discover:*` or `kol-creator-brief-refresh:*`. |
+| `browser_navigate` / `browser_cdp Page.navigate` (URL block) | **`kol-campaign:` discovery** (post-bootstrap, when `KOL_RPA_STRICT_BROWSER_BLOCK=1`) — blocked for `instagram.com/*`, `google.com/search`, `ipinfo.io` URLs. Use `rpa_*` tools instead. One-shot fallback token granted by RPA tools on `ok=false` (honored by both `browser_navigate` and `browser_cdp Page.navigate`/`Page.goto`). `browser_cdp Runtime.evaluate` is NOT URL-blocked (ownership guard only). Does NOT affect `kol-email-discover:*` or `kol-creator-brief-refresh:*`. |
 | `terminal` (bridge CLI) | **`kol-campaign:` discovery** — `--campaign-id` / `--env` must match session; mismatches are blocked |
 
 Block messages include the canonical Nox path:

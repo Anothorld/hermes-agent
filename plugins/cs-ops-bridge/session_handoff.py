@@ -769,8 +769,17 @@ def apply_handoff(
     context: Optional[Mapping[str, Any]] = None,
     chat_session_id: Optional[str] = None,
     skip_quickcep: bool = False,
+    force_quickcep_tags: bool = False,
 ) -> dict[str, Any]:
-    """Compose and apply lifecycle handoff (tags + note + CAL events)."""
+    """Compose and apply lifecycle handoff (tags + note + CAL events).
+
+    ``force_quickcep_tags`` bypasses the "session already at target status"
+    QuickCEP-tag skip. Use it when the caller advanced the CAL status to the
+    target value directly (via ``cal.update_session_status``) *before* invoking
+    the handoff — in that case no prior handoff applied the QuickCEP tags, so
+    the skip guard would otherwise drop them silently (e.g. the watcher's
+    launch-failed path sets ``status=failed`` then calls ``apply_handoff``).
+    """
     canonical = normalize_handoff_phase(phase)
     if canonical != phase:
         log.info(
@@ -882,6 +891,17 @@ def apply_handoff(
         phase=phase,
         session_status=str(sess["status"]),
     )
+    # When the caller pre-advanced the CAL status to the target value directly
+    # (not via a prior apply_handoff), the "session already at target" skip
+    # would wrongly drop tags that were never actually written. Override it.
+    if force_quickcep_tags and qc_skip_reason and qc_skip_reason.startswith("session already"):
+        log.info(
+            "force quickcep tags session=%s phase=%s (override skip: %s)",
+            quickcep_session_id,
+            phase,
+            qc_skip_reason,
+        )
+        qc_skip_reason = None
     _agent_debug_log(
         hypothesis_id="B",
         location="session_handoff.py:apply_handoff",
