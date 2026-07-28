@@ -104,8 +104,9 @@ def test_refine_skips_one_off_compensation():
 
 def test_refine_retains_product_fact_with_pii_context():
     r = m.refine_to_ko(raw_question="Does M2-SF8248 have OEKO-TEX? (order #260712345)", raw_answer="Yes, OEKO-TEX certified; 10% linen + 90% polyester.", sku="M2-SF8248", product_name="Modern Deep Seat Sofa", escalation_id="17", session_id="2547506973813489665", env="LIVE", source="human_confirmed")
-    assert "ko" in r, r
-    ko = r["ko"]
+    assert "kos" in r, r
+    assert len(r["kos"]) == 1  # domain=product, not split
+    ko = r["kos"][0]
     assert ko.domain == "product"
     assert "order_id" in ko.redacted_fields
     assert "260712345" not in ko.question and "260712345" not in ko.answer
@@ -115,8 +116,8 @@ def test_refine_retains_product_fact_with_pii_context():
 
 def test_refine_policy_no_sku():
     r = m.refine_to_ko(raw_question="Can you mail a physical leather swatch?", raw_answer="We do not ship physical swatches; offer digital color alternatives and showroom viewing.", sku=None, env="LIVE", source="official_policy")
-    assert "ko" in r, r
-    ko = r["ko"]
+    assert "kos" in r, r
+    ko = r["kos"][0]
     assert ko.domain == "policy"
 
 
@@ -219,3 +220,90 @@ def test_rerank_policy_dedup_keeps_latest_effective_from():
     out = m.rerank_results(results)
     assert len(out) == 1
     assert out[0]["metadata"]["effective_from"] == "2026-07-01"
+
+
+def test_refine_splits_domain_both_into_two_kos():
+    """Plan O13.1 rule 3: SKU + policy_type → split into product KO + policy KO."""
+    # rule-fallback path (LLM unavailable): question has SKU + return keyword
+    r = m.refine_to_ko(raw_question="Can I return sofa M2-SF8248?", raw_answer="Yes, 30-day return window.",
+                       sku="M2-SF8248", product_name="Sofa", env="LIVE", source="human_confirmed")
+    assert "kos" in r, r
+    assert len(r["kos"]) == 2, f"expected split into 2 KOs, got {len(r['kos'])}"
+    domains = {ko.domain for ko in r["kos"]}
+    assert domains == {"product", "policy"}
+    # product KO keeps the SKU, policy KO keeps the policy_type
+    prod = next(ko for ko in r["kos"] if ko.domain == "product")
+    pol = next(ko for ko in r["kos"] if ko.domain == "policy")
+    assert prod.product_id == "M2-SF8248"
+    assert prod.policy_type is None
+    assert pol.policy_type == "return"
+    assert pol.product_id is None
+
+
+def test_force_retain_does_not_bypass_pii_scan(monkeypatch):
+    """B1 fix: force_retain bypasses ONLY reusability, NOT the PII residual scan (O9).
+
+    Simulates the LLM path emitting a refined question that reintroduces an email
+    the LLM failed to de-identify. heuristic_redact runs first (would catch it), so
+    we mock _llm_json to return a KO dict whose question still contains the raw email
+    AND redact is bypassed by asserting the residual-scan branch is reachable. We do
+    this by monkeypatching heuristic_redact to a no-op for this test (proving the
+    residual scan is the backstop, not redact alone)."""
+    import hindsight_ko as mod
+
+    # Mock LLM to return a refined KO that still contains an email (simulating LLM miss)
+    def fake_llm(prompt):
+        return {
+            "reusable": True, "domain": "product", "product_id": "M2-SF8248",
+            "attribute": "weight", "category": "spec", "source": "human_confirmed",
+            "confirmed": "true", "aliases": [], "question": "What is the weight? customer rose@x.com asked",
+            "answer": "M2-SF8248 weighs 80kg.", "key_fact": "M2-SF8248 weighs 80kg.",
+            "confidence": 0.9, "redacted_fields": [],
+        }
+    monkeypatch.setattr(mod, "_llm_json", fake_llm)
+    # Disable heuristic_redact so the email survives into the refined KO — the residual
+    # scan must then catch it (proving force_retain does NOT bypass the residual gate).
+    monkeypatch.setattr(mod, "heuristic_redact", lambda t: (t, []))
+
+    r = mod.refine_to_ko(raw_question="x", raw_answer="y", sku="M2-SF8248",
+                         env="LIVE", source="human_confirmed", force_retain=True)
+    assert r.get("status") == "skipped", r
+    assert r["reason"] == "residual_pii"
+    assert "customer_email" in r["detail"]
+
+
+def test_recall_degradation_retries_with_empty_metadata_filter(monkeypatch):
+    """R7 retry must pass an explicit ``metadata_filter={}`` (not omit it), so the
+    backend's query_analyzer does NOT auto-derive the same filter back from the SKU
+    in the query (which would make the retry equivalent to the failed request).
+
+    ``{}`` is a SQL no-op (``metadata @> '{}'::jsonb`` is always true) and signals
+    "no filter" distinctly from "param absent" (the auto-derive trigger)."""
+    import hindsight_ko as mod
+
+    calls: list[dict] = []
+
+    def fake_http_recall(body, *, bank=mod.KNOWLEDGE_BANK):
+        calls.append(body)
+        # First call (with metadata_filter set) fails → triggers R7 retry
+        if "metadata_filter" in body and body["metadata_filter"] != {}:
+            return {"error": "HTTP 500", "detail": "internal error", "bank": bank}
+        # Retry (metadata_filter={}) succeeds
+        return {"results": [{"text": "fact", "metadata": {"domain": "product"}}]}
+
+    monkeypatch.setattr(mod, "http_recall", fake_http_recall)
+    # Parser must route to single-domain path (not both) so the single-domain R7 branch runs
+    monkeypatch.setattr(mod, "parse_query", lambda **kw: {
+        "domain": "product", "product_id": "M2-SF8248", "attribute": "",
+        "attribute_known": True, "policy_type": "", "applies_to": "all",
+    })
+
+    r = mod.recall_ko(question="M2-SF8248 weight?", sku="M2-SF8248", use_metadata_filter=True)
+    assert r["status"] == "ok", r
+    assert len(calls) == 2, f"expected 2 calls (orig + retry), got {len(calls)}"
+    # Original call carries the real filter
+    assert calls[0]["metadata_filter"] == {"domain": "product", "product_id": "M2-SF8248"}
+    # Retry MUST pass an explicit empty dict (not omit the key) — this is the fix.
+    assert calls[1].get("metadata_filter") == {}, (
+        f"retry must set metadata_filter={{}} to bypass auto-derive; got {calls[1].get('metadata_filter')!r}"
+    )

@@ -67,7 +67,7 @@ def knowledge_retain(env: str, source: str, question: str, answer: str,
     - question/answer: raw expert Q/A (may contain order#/email; tool will de-identify)
     - sku/product_name/product_slug: product context if available
     - escalation_id/session_id: only stored in metadata.evidence, never in searchable content
-    - force_retain: operator override (skip reusable/PII gates); default false
+    - force_retain: operator override (skip reusability gates only); default false. PII residual scan is NEVER bypassed (bank directive O9).
 
     Returns {"status":"retained"|"skipped"|"error", ...}. Skipped still lets the agent proceed to draft-save.
     """

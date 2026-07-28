@@ -321,7 +321,6 @@ def _rule_fallback_refine(raw_q: str, raw_a: str, sku: str | None, product_name:
     a, a_red = heuristic_redact(raw_a)
     redacted = sorted(set(q_red + a_red))
     has_sku = bool(sku)
-    domain = DOMAIN_PRODUCT if has_sku else DOMAIN_POLICY
     key_fact = a.strip() or q.strip()
     # category heuristics
     ql = raw_q.lower()
@@ -359,6 +358,15 @@ def _rule_fallback_refine(raw_q: str, raw_a: str, sku: str | None, product_name:
         ptype = "installation"
     if not ptype and ("payment" in ql or "支付" in ql):
         ptype = "payment"
+    # Plan O13.1 rule 3: SKU + policy_type → domain=both (refine_to_ko splits into 2 KOs).
+    # SKU alone → product; policy_type alone → policy; neither → policy (safer default,
+    # avoids polluting product recall with non-product text).
+    if has_sku and ptype:
+        domain = DOMAIN_BOTH
+    elif has_sku:
+        domain = DOMAIN_PRODUCT
+    else:
+        domain = DOMAIN_POLICY
     aliases = []
     # crude alias extraction: split question on punctuation, drop PII-bearing fragments
     for part in re.split(r"[?,\n]", raw_q):
@@ -414,13 +422,45 @@ def _is_empty_or_narrative_only(ko: KnowledgeObject) -> bool:
     return bool(re.fullmatch(r"[\s.,;]*(已回复|已发送|草稿已保存|waiting|pending|draft saved|replied|sent)[\s.,;]*", text, re.I))
 
 
+def _split_both_domain(ko: KnowledgeObject) -> list[KnowledgeObject]:
+    """If ko.domain == both, split into two KOs (one product, one policy) per plan O13.1 rule 3
+    (禁止揉成一条). Otherwise return [ko]. Each split KO reuses the refined text."""
+    if ko.domain != DOMAIN_BOTH:
+        return [ko]
+    product_fields = {f: getattr(ko, f) for f in ("product_id", "product_name", "attribute", "page")}
+    policy_fields = {f: getattr(ko, f) for f in ("policy_type", "applies_to", "version", "effective_from", "effective_to")}
+    shared = {f: getattr(ko, f) for f in (
+        "category", "source", "confirmed", "evidence_doc", "aliases", "question", "answer", "key_fact",
+        "evidence", "confidence", "reusable", "skip_reason", "redacted_fields", "env", "created_at")}
+    ko_product = KnowledgeObject(domain=DOMAIN_PRODUCT, **product_fields, **{k: v for k, v in policy_fields.items() if k in ("applies_to",)},
+                                **shared)
+    # product KO: applies_to defaults to "all"; clear policy fields
+    ko_product.policy_type = None
+    ko_product.version = ""
+    ko_product.effective_from = ""
+    ko_product.effective_to = ""
+    ko_policy = KnowledgeObject(domain=DOMAIN_POLICY, **{k: v for k, v in product_fields.items() if k == "page"},
+                                applies_to=ko.applies_to or "all", policy_type=ko.policy_type,
+                                version=ko.version, effective_from=ko.effective_from, effective_to=ko.effective_to,
+                                **shared)
+    ko_policy.product_id = None
+    ko_policy.product_name = None
+    ko_policy.attribute = None
+    return [ko_product, ko_policy]
+
+
 def refine_to_ko(*, raw_question: str, raw_answer: str, sku: str | None = None,
                  product_name: str | None = None, product_slug: str | None = None,
                  escalation_id: str | None = None, session_id: str | None = None,
                  env: str = "TEST", source: str = "human_confirmed",
                  force_retain: bool = False) -> dict[str, Any]:
-    """Run refine pipeline. Returns a dict with either {'ko': KnowledgeObject} or
-    {'status':'skipped','reason':..., 'detail':...}."""
+    """Run refine pipeline. Returns one of:
+    - {'kos': [KnowledgeObject, ...]} on success (list has 2 entries when domain=both, else 1)
+    - {'status':'skipped','reason':..., 'detail':...} when the refined content is not reusable
+      or contains residual PII.
+
+    Per plan O13.1 rule 3, a domain=both fact (SKU + policy_type) is split into TWO KOs
+    (product + policy) so each domain retains independently — never mashed into one item."""
     prompt = _REFINE_PROMPT.format(q=raw_question, a=raw_answer, sku=sku or "", pname=product_name or "",
                                    pslug=product_slug or "", esc=escalation_id or "", sid=session_id or "",
                                    src=source, env=env)
@@ -469,7 +509,11 @@ def refine_to_ko(*, raw_question: str, raw_answer: str, sku: str | None = None,
         ko = _rule_fallback_refine(raw_question, raw_answer, sku, product_name, product_slug,
                                    escalation_id, session_id, env, source)
 
-    # Reusable judgment (rule fallback acts on refined text)
+    # Reusable judgment (rule fallback acts on refined text).
+    # force_retain bypasses ONLY the reusability gates (one_off_compensation /
+    # session_narrative / reusable=false) — it is an ops override to rescue a
+    # mis-skipped fact. PII is a HARD constraint (bank directive O9: never store
+    # customer PII), so the residual PII scan below runs unconditionally.
     if not force_retain and not ko.reusable:
         return {"status": "skipped", "reason": "not_reusable", "detail": ko.skip_reason or "unspecified"}
     if not force_retain and _looks_like_one_off_compensation(ko.answer + " " + ko.key_fact):
@@ -477,23 +521,25 @@ def refine_to_ko(*, raw_question: str, raw_answer: str, sku: str | None = None,
     if not force_retain and _is_empty_or_narrative_only(ko):
         return {"status": "skipped", "reason": "not_reusable", "detail": "session_narrative"}
 
-    # PII residual scan on refined text
+    # PII residual scan on refined text — HARD gate, never bypassed by force_retain.
     residual = scan_pii(ko.question + " " + ko.answer + " " + ko.key_fact)
-    if residual and not force_retain:
+    if residual:
         return {"status": "skipped", "reason": "residual_pii", "detail": ",".join(sorted(set(residual)))}
 
-    return {"ko": ko}
+    # Plan O13.1 rule 3: domain=both must split into TWO KOs (product + policy).
+    kos = _split_both_domain(ko)
+    return {"kos": kos}
 
 
 # --- Intent+Attribute Parser (recall side) ---
 _PARSER_PROMPT = """Parse a customer question into structured recall filters.
-Output JSON with EXACTLY these keys (all strings): domain ("product"|"policy"|"both"), product_id, attribute, policy_type (one of return|warranty|shipping|installation|payment, or ""), applies_to.
+Output JSON with EXACTLY these keys (all strings): domain ("product"|"policy"|"both"), product_id, attribute, policy_type (one of return|warranty|shipping|installation|payment|swatch, or ""), applies_to.
 - domain="product" if the question is about a specific product's spec/material/cert/dimension/compatibility.
 - domain="policy" if about returns/warranty/shipping/installation/payment/swatch/showroom/COI without a specific product.
 - domain="both" if it asks about a product AND a policy (e.g. "can I return sofa X?").
 - product_id = SKU if given.
 - attribute = the non-standard attribute asked about (e.g. material_certification, leg_count, weight_capacity).
-- policy_type = policy category if policy/both.
+- policy_type = policy category if policy/both; use "swatch" for physical sample/color chip mailing questions.
 - applies_to = "all" or "category:sofa" or "product:<SKU>".
 
 question: {q}
@@ -696,20 +742,35 @@ def retain_ko(*, raw_question: str, raw_answer: str, sku: str | None = None,
               escalation_id: str | None = None, session_id: str | None = None,
               env: str = "TEST", source: str = "human_confirmed",
               force_retain: bool = False, async_: bool = True) -> dict[str, Any]:
-    """Full retain pipeline: refine -> PII -> retain to Knowledge bank."""
+    """Full retain pipeline: refine -> PII -> retain to Knowledge bank.
+
+    Per plan O13.1 rule 3, a domain=both fact (SKU + policy_type) is split into TWO
+    KOs and each is retained independently — so product facts and policy facts land
+    as separate memory items with their own domain-prefixed tags/entities/metadata.
+    Returns {'status':'retained','bank':..., 'kos':[...], 'http':...} (or skipped/error)."""
     refined = refine_to_ko(raw_question=raw_question, raw_answer=raw_answer, sku=sku,
                           product_name=product_name, product_slug=product_slug,
                           escalation_id=escalation_id, session_id=session_id,
                           env=env, source=source, force_retain=force_retain)
-    if "ko" not in refined:
+    if "kos" not in refined:
         return refined  # skipped
-    ko: KnowledgeObject = refined["ko"]
-    payload = build_retain_payload(ko, async_=async_)
-    resp = http_retain(payload)
-    if "error" in resp:
-        return {"status": "error", "bank": KNOWLEDGE_BANK, "ko": ko.model_dump(), "http": resp}
-    return {"status": "retained", "bank": KNOWLEDGE_BANK, "redacted_fields": ko.redacted_fields,
-            "ko": ko.model_dump(), "http": resp}
+    kos: list[KnowledgeObject] = refined["kos"]
+    retained: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    all_redacted: list[str] = []
+    for ko in kos:
+        payload = build_retain_payload(ko, async_=async_)
+        resp = http_retain(payload)
+        all_redacted.extend(ko.redacted_fields)
+        if "error" in resp:
+            errors.append({"ko": ko.model_dump(), "http": resp})
+        else:
+            retained.append({"ko": ko.model_dump(), "http": resp})
+    if not retained and errors:
+        return {"status": "error", "bank": KNOWLEDGE_BANK, "kos": [e["ko"] for e in errors], "http": errors[0]["http"]}
+    return {"status": "retained", "bank": KNOWLEDGE_BANK,
+            "redacted_fields": sorted(set(all_redacted)),
+            "kos": [r["ko"] for r in retained], "http": [r["http"] for r in retained]}
 
 
 def recall_ko(*, question: str, sku: str | None = None, product_name: str | None = None,
@@ -731,7 +792,13 @@ def recall_ko(*, question: str, sku: str | None = None, product_name: str | None
         if "error" in r and use_metadata_filter and "metadata_filter" in b:
             log.warning("recall(%s) with metadata_filter failed (%s); retrying without filter",
                         forced_domain, r.get("detail"))
+            # Pass an explicit empty dict, not omit, so the engine's auto-derive
+            # (query_analyzer SKU extraction → metadata_filter) does NOT re-inject
+            # the same filter the retry is trying to drop. ``{}`` is a SQL no-op and
+            # skips auto-derivation (the engine only auto-derives when the param is
+            # None / omitted).
             b2 = {k: v for k, v in b.items() if k != "metadata_filter"}
+            b2["metadata_filter"] = {}
             r = http_recall(b2)
         return b, r
 
@@ -750,7 +817,13 @@ def recall_ko(*, question: str, sku: str | None = None, product_name: str | None
         resp = http_recall(body)
         if "error" in resp and use_metadata_filter and "metadata_filter" in body:
             log.warning("recall with metadata_filter failed (%s); retrying without filter", resp.get("detail"))
+            # Pass an explicit empty dict, not omit, so the engine's auto-derive
+            # (query_analyzer SKU extraction → metadata_filter) does NOT re-inject
+            # the same filter the retry is trying to drop. ``{}`` is a SQL no-op and
+            # skips auto-derivation (the engine only auto-derives when the param is
+            # None / omitted).
             body2 = {k: v for k, v in body.items() if k != "metadata_filter"}
+            body2["metadata_filter"] = {}
             resp = http_recall(body2)
         if "error" in resp:
             return {"status": "error", "bank": KNOWLEDGE_BANK, "parsed": parsed, "request": body, "http": resp}
