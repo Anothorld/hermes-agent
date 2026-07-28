@@ -1,0 +1,65 @@
+{
+  "_comment": "Reference attribute vocabulary for the povison-cs Intent+Attribute Parser. NON-MANDATORY: the parser maps known synonyms to canonical attribute names; unknown attributes pass through unchanged (with an `attribute_unknown` flag in parsed output). Review periodically and promote stable unknowns here.",
+  "_canonical_keys": ["attribute", "synonyms", "category"],
+  "version": "0.1",
+  "attributes": [
+    {
+      "attribute": "fabric_composition",
+      "category": "material",
+      "synonyms": ["fabric content", "material composition", "composition", "fabric makeup", "linen polyester ratio", "fabric blend", "material ratio"]
+    },
+    {
+      "attribute": "certification",
+      "category": "certification",
+      "synonyms": ["oecko-tex", "oeko-tex", "pfas-free", "pfas free", "certified", "certification", "safety certification"]
+    },
+    {
+      "attribute": "weight_capacity",
+      "category": "spec",
+      "synonyms": ["weight limit", "load capacity", "load bearing", "weight bearing", "max weight", "承重", "承重能力"]
+    },
+    {
+      "attribute": "dimensions",
+      "category": "spec",
+      "synonyms": ["size", "measurements", "length", "width", "height", "depth", "尺寸", "规格"]
+    },
+    {
+      "attribute": "color",
+      "category": "appearance",
+      "synonyms": ["colour", "color options", "colorway", "finish color", "颜色"]
+    },
+    {
+      "attribute": "material",
+      "category": "material",
+      "synonyms": ["frame material", "upholstery material", "leather type", "fabric type", "wood type", "metal type", "材质", "材料"]
+    },
+    {
+      "attribute": "assembly",
+      "category": "assembly",
+      "synonyms": ["assembly required", "pre-assembled", "ready to assemble", "tools needed", "安装方式"]
+    },
+    {
+      "attribute": "warranty",
+      "category": "warranty",
+      "synonyms": ["warranty period", "guarantee", "warranty length", "质保", "保修"]
+    },
+    {
+      "attribute": "washability",
+      "category": "care",
+      "synonyms": ["washable", "machine washable", "removable cover", "cleanable", "可洗"]
+    },
+    {
+      "attribute": "stability_without_legs",
+      "category": "spec",
+      "synonyms": ["stable without legs", "can remove legs", "leg removal", "usable without legs"]
+    }
+  ],
+  "policy_types": [
+    {"key": "return", "synonyms": ["refund", "退换", "退货", "return window", "return policy"]},
+    {"key": "warranty", "synonyms": ["guarantee", "质保", "保修", "warranty claim"]},
+    {"key": "shipping", "synonyms": ["delivery", "物流", "配送", "shipping cost", "lead time"]},
+    {"key": "installation", "synonyms": ["install", "安装", "white glove", "assembly service"]},
+    {"key": "payment", "synonyms": ["支付", "financing", "installment", "payment method"]},
+    {"key": "swatch", "synonyms": ["sample", "color chip", "色卡", "fabric sample", "leather sample", "swatch mailing"]}
+  ]
+}

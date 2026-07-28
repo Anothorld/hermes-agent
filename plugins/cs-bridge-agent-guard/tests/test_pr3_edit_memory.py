@@ -25,10 +25,19 @@ def _load_guard():
 # ── Guard whitelist ────────────────────────────────────────────────────
 
 
-def test_edit_memory_allows_hindsight_tools():
+def test_edit_memory_allows_knowledge_tools():
+    sg = _load_guard()
+    for tool in ("knowledge_retain", "knowledge_recall"):
+        assert sg.pre_tool_block(tool_name=tool, args={}, run_kind="edit_memory") is None
+
+
+def test_edit_memory_blocks_legacy_hindsight_tools():
+    """Legacy hindsight_* tools are blocked for edit_memory (replaced by the dedicated knowledge toolset)."""
     sg = _load_guard()
     for tool in ("hindsight_retain", "hindsight_recall", "hindsight_reflect"):
-        assert sg.pre_tool_block(tool_name=tool, args={}, run_kind="edit_memory") is None
+        out = sg.pre_tool_block(tool_name=tool, args={}, run_kind="edit_memory")
+        assert out is not None
+        assert out["action"] == "block"
 
 
 def test_edit_memory_blocks_non_hindsight_tools():
@@ -37,7 +46,7 @@ def test_edit_memory_blocks_non_hindsight_tools():
         out = sg.pre_tool_block(tool_name=tool, args={}, run_kind="edit_memory")
         assert out is not None
         assert out["action"] == "block"
-        assert "hindsight" in out["message"]
+        assert "knowledge" in out["message"]
 
 
 def test_edit_memory_whitelist_ignores_session_scope():

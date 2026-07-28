@@ -69,6 +69,19 @@ def test_resume_checklist_forbids_execute_code() -> None:
     assert "skill_view(name='povison-cs-escalation-resumer')" in text
     assert "terminal:" in text
     assert "quickcep_session_id" in text
-    assert "povison-cs-hermes-user" in text
-    assert "povison-cs-hermes-knowledge" not in text
-    assert "hindsight_bridge.py" in text
+    # Step 5 now uses the knowledge_retain MCP tool + knowledge bank (bank isolation)
+    assert "knowledge_retain" in text
+    assert "furniture-knowledge" in text
+    assert "povison-cs-hermes-user" not in text
+    assert "povison-cs-hermes-knowledge" not in text  # legacy name from plan; deployed bank is furniture-knowledge
+    assert "192.168.10.123:8888" in text
+    assert "items" in text  # curl payload wraps items (OpenAPI)
+
+
+def test_process_checklist_step65_uses_knowledge_recall_mcp() -> None:
+    text = contract.process_cli_checklist(env="LIVE", quickcep_session_id="sess-1")
+    assert "knowledge_recall" in text
+    assert "hindsight_recall(" not in text  # legacy tool call form replaced (tracker script name is allowed)
+    assert "knowledge_retain" not in text.split("# bridge_cli_checklist", 1)[1].split("6.5.", 1)[0]  # not in process pre-6.5
+    # policy questions with no SKU must not be skipped
+    assert "never skip just because there is no SKU" in text

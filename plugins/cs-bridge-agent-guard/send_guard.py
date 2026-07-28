@@ -41,17 +41,20 @@ _EXECUTE_CODE_BRIDGE_BLOCK_MESSAGE = (
 _CS_BRIDGE_TOOL_COMMAND_RE = re.compile(r"(?is)cs_bridge_tool(?:\.py)?\b")
 
 # PR3: edit_memory runs inherit the reply-generation context but are restricted
-# to hindsight memory tools only — every other tool is blocked so the agent can
-# only analyze the operator's edit and retain facts, never act on the customer.
+# to the dedicated Hindsight knowledge tools only — every other tool is blocked
+# so the agent can only analyze the operator's edit and retain reusable facts to
+# the Knowledge bank (furniture-knowledge), never act on the customer. Auto-
+# consolidation (observations_mission) replaces the legacy hindsight_reflect.
 EDIT_MEMORY_ALLOWED_TOOLS: frozenset[str] = frozenset({
-    "hindsight_retain",
-    "hindsight_recall",
-    "hindsight_reflect",
+    "knowledge_retain",
+    "knowledge_recall",
 })
 EDIT_MEMORY_BLOCK_MESSAGE = (
-    "edit_memory run is restricted to hindsight memory tools "
-    "(hindsight_retain, hindsight_recall, hindsight_reflect); "
-    "all other tools are blocked for this run kind."
+    "edit_memory run is restricted to the Hindsight knowledge tools "
+    "(knowledge_retain, knowledge_recall); "
+    "all other tools are blocked for this run kind. "
+    "Operator factual corrections are retained to the Knowledge bank (furniture-knowledge) "
+    "via knowledge_retain; knowledge_recall checks what is already known."
 )
 
 

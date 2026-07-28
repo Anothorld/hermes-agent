@@ -73,6 +73,25 @@ def hindsight_bank_id() -> str:
     return (os.environ.get("CS_OPS_HINDSIGHT_BANK") or "povison-cs-hermes-user").strip() or "povison-cs-hermes-user"
 
 
+def hindsight_knowledge_bank_id() -> str:
+    """Dedicated Knowledge bank for the cs-ops-bridge hindsight toolset.
+
+    Bank isolation hard constraint: knowledge_retain / knowledge_recall always
+    target this bank and never fall back to the Experience (user) bank. The
+    deployed povison-cs Hindsight server exposes this bank as ``furniture-knowledge``.
+    """
+    return (os.environ.get("CS_OPS_HINDSIGHT_KNOWLEDGE_BANK") or "furniture-knowledge").strip() or "furniture-knowledge"
+
+
+def hindsight_knowledge_base_url() -> str:
+    """Hindsight endpoint hosting the Knowledge bank (dedicated toolset target).
+
+    The Knowledge bank lives on the new optimized Hindsight server (192.168.10.123),
+    which is distinct from the legacy Experience bank server (192.168.10.63).
+    """
+    return (os.environ.get("CS_OPS_HINDSIGHT_KNOWLEDGE_URL") or "http://192.168.10.123:8888").strip() or "http://192.168.10.123:8888"
+
+
 def hindsight_recall_tracker_script() -> Path:
     """Hindsight recall success tracker script (profile-local)."""
     override = os.environ.get("CS_OPS_HINDSIGHT_RECALL_TRACKER", "").strip()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .profile_refs import quickcep_skill_dir, hindsight_bridge_script, hindsight_bank_id, hindsight_recall_tracker_script
+from .profile_refs import quickcep_skill_dir, hindsight_recall_tracker_script, hindsight_knowledge_bank_id, hindsight_knowledge_base_url
 
 
 def cs_bridge_cli_path() -> Path:
@@ -27,15 +27,16 @@ def agent_tool_paths() -> dict[str, str]:
 def _tool_rules_block(*, resume: bool = False) -> str:
     """Shared gateway tool rules for process/resume briefs."""
     hindsight = (
-        "- **Hindsight step (step 5) MUST use the terminal tool**, NOT execute_code. "
-        "If the bridge script times out, retry via terminal with the direct API curl command — never via execute_code.\n"
+        "- **Hindsight knowledge step (step 5) calls the `knowledge_retain` MCP tool** (cs-hindsight-knowledge server), NOT execute_code and NOT the legacy hindsight_bridge.py retain. "
+        "If the MCP server is unavailable, retry via terminal with the direct API curl command in the checklist (items + 300s) — never via execute_code.\n"
         if resume
         else ""
     )
     esc17 = " execute_code scripts lose error context, cannot handle timeouts properly, and have caused Hindsight retain failures (ESC:17)." if resume else ""
     return f"""# tool_rules (CRITICAL — violation causes silent data loss)
 - **The `terminal` tool IS in your available tool list** — call it directly for every bridge CLI step. Do NOT claim terminal is missing.
-- **EVERY step below MUST be executed via the terminal tool.** One command per terminal call.
+- **EVERY cs_bridge_tool step MUST be executed via the terminal tool.** One command per terminal call.
+- **Hindsight knowledge tools (`knowledge_retain`, `knowledge_recall`) are MCP tools** — call them directly as tools (not via terminal/execute_code).
 - **delegate_task is PROHIBITED** for cs_bridge_tool or shell commands — it drops output and breaks the checklist.
 - **execute_code is STRICTLY PROHIBITED.** Do NOT use execute_code, subprocess.run, os.system, or any Python sandbox to run bridge CLI commands.{esc17}
 {hindsight}- Do **NOT** call quickcep_cli directly.
@@ -65,9 +66,10 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
    draft-save default writes to CAL (no joinChat). Legacy QuickCEP path (--legacy-quickcep-draft) auto-calls join-chat before save. joinChat is also called by the watcher at launch time (fail-soft) so the AI account is already visible in QuickCEP. If using --content inline in shell, wrap in **single quotes** when text contains $ (e.g. --content 'refund $200 after delivery'). Double quotes mangle $200 → 00.
    **Internal domain guard**: draft-save automatically blocks drafts containing internal/backend URLs (OSS buckets, localhost, feishu.cn, internal IPs/ports). If blocked, strip internal links and retry. Never put internal system URLs in customer-facing drafts.
 6. (auto_handle) terminal: python3 {cli} apply-handoff --env {env} --session-id {quickcep_session_id} --phase draft_ready --actions-taken "已查询并生成回复草稿" --operator-hint "<中文：操作员接手要点>"
-6.5. (escalate candidate) **Check Hindsight** before escalating — call hindsight_recall(query="<product slug> <problem keywords>"), then IMMEDIATELY record to tracker:
-   terminal: python3 {tracker_script} record --session-id {quickcep_session_id} --query "<recall query>" --result hit|miss|error --outcome auto_handled|escalated --reason "<if escalated, why>" --product-slug "<slug>" --category "<category>" --num-results <N>
-   See §Hindsight Knowledge Recall in povison-cs-orchestrator-flow skill for full procedure. If Hindsight hit → auto_handle (skip to step 5/6). If miss/error → proceed to step 7.
+6.5. (escalate candidate) **Check Hindsight knowledge** before escalating — call the `knowledge_recall` MCP tool: knowledge_recall(question="<customer question or product slug + problem keywords>", sku="<SKU if known>", product_name="<optional>"). Do NOT use the legacy hindsight_recall tool. For policy questions with no SKU, still call knowledge_recall (the Parser routes domain=policy) — never skip just because there is no SKU.
+   The tool returns `parsed` (domain/product_id/attribute/policy_type/applies_to), `request` (the actual query + metadata_filter + tags), and `results`. Then IMMEDIATELY record to tracker:
+   terminal: python3 {tracker_script} record --session-id {quickcep_session_id} --query "<request.query from tool result>" --result hit|miss|error --outcome auto_handled|escalated --reason "<if escalated, why>" --product-slug "<slug>" --category "<category>" --num-results <N> --metadata-filter "<JSON of request.metadata_filter>" --domain "<parsed.domain>"
+   See §Hindsight Knowledge Recall in povison-cs-orchestrator-flow skill for full procedure. If knowledge_recall hit → auto_handle (skip to step 5/6). If miss/error → proceed to step 7.
 7. (escalate) terminal: python3 {cli} open-escalation --env {env} --session-id {quickcep_session_id} --customer-email "<from get-messages>" --email-summary "<简体中文：客户诉求摘要>" --email-quote "<customer's full original email text>" --reason "<why>" --urgency medium|high|low --question "<expert question>"
    Bridge auto-adds **📦 订单信息** to the Feishu post from QuickCEP orders + tracking (no extra flag). If QuickCEP has no linked orders, the section notes that — include order numbers in --email-summary when known from the email.
    --email-quote carries the customer's complete email body (not a partial excerpt). Multiline or $ in quote → --email-quote-file /tmp/quote.txt. Bridge auto-posts to Feishu AI客服后援; use returned feishu.thread_id in step 8.
@@ -176,7 +178,7 @@ is_conversation_closing: true — 这是一封话题结束邮件（客户纯感�
 ## Pre-extracted entities
 - orders: {ge.get('orders') or []} → 已在 dispatch-context 提供，直接用
 - products: {[p.get('slug') or p.get('name') for p in (ge.get('products') or [])]} → 商品查询用此 slug
-- hindsight_keywords: {ge.get('hindsight_keywords') or []} → step 6.5 hindsight_recall 直接用此 query
+- hindsight_keywords: {ge.get('hindsight_keywords') or []} → step 6.5 knowledge_recall 可把这些关键词拼进 question 辅助 Parser
 
 ## Summary (中文，客户诉求概括)
 {ge.get('summary_zh') or '(none)'}
@@ -205,8 +207,8 @@ is_conversation_closing: true — 这是一封话题结束邮件（客户纯感�
 def resume_cli_checklist(*, env: str, escalation_id: int) -> str:
     cli = cs_bridge_cli_path()
     paths = agent_tool_paths()
-    hindsight_cli = hindsight_bridge_script()
-    hindsight_bank = hindsight_bank_id()
+    knowledge_bank = hindsight_knowledge_bank_id()
+    knowledge_url = hindsight_knowledge_base_url().rstrip("/")
     return f"""# agent_tool_paths
 cs_bridge_tool: {paths['cs_bridge_tool']}
 
@@ -218,9 +220,11 @@ cs_bridge_tool: {paths['cs_bridge_tool']}
 2. terminal: python3 {cli} get-dispatch-context --env {env} --session-id <quickcep_session_id from escalation.session>
 3. terminal: python3 {cli} get-messages --env {env} --session-id <quickcep_session_id>
 4. terminal: write_file(path='/tmp/draft-<quickcep_session_id>.html', content='<English reply merging operator_answer, Povison tone>')
-5. **[REQUIRED] Record Q&A to Hindsight** BEFORE draft-save. This step is NOT optional — skipping it means future identical questions will be re-escalated:
-   terminal: python3 {hindsight_cli} retain --bank {hindsight_bank} --content '<structured Q&A per povison-cs-escalation-resumer skill template>' --tags "povison,escalation-qa,<product_slug>,<category>" --context "povison escalation Q&A"
-   If bridge script times out (60s), retry via terminal with: curl -s -X POST http://192.168.10.63:8888/v1/default/banks/{hindsight_bank}/memories -H 'Content-Type: application/json' -d '{{"content":"<Q&A>","context":"povison escalation Q&A","tags":["povison","escalation-qa"]}}' --max-time 120
+5. **[REQUIRED] Record Q&A to Hindsight Knowledge bank** BEFORE draft-save, via the `knowledge_retain` MCP tool. This step is NOT optional — skipping it means future identical questions will be re-escalated:
+   call knowledge_retain(env="{env}", source="human_confirmed", question="<customer question, may include order/email context — tool will de-identify>", answer="<operator/expert answer>", sku="<SKU if known>", product_name="<optional>", escalation_id="{escalation_id}", session_id="<quickcep_session_id>")
+   The tool refines (de-PII + dual-domain structured metadata + reusable check) and retains to the {knowledge_bank} bank. If it returns status="skipped" (e.g. one-off compensation, session narrative), that is correct — continue to draft-save anyway.
+   If the MCP server is unavailable, retry via terminal with the direct API curl (items + 300s timeout):
+   terminal: curl -s -m 300 -X POST {knowledge_url}/v1/default/banks/{knowledge_bank}/memories -H 'Content-Type: application/json' -d '{{"async":true,"items":[{{"content":"<de-identified Q&A>","context":"povison escalation Q&A","tags":["povison","escalation-qa"],"timestamp":"unset","observation_scopes":"shared"}}]}}'
    Only skip if Hindsight server is confirmed down.
 6. terminal: python3 {cli} draft-save --env {env} --session-id <quickcep_session_id> --content-file /tmp/draft-<quickcep_session_id>.html --subject "Re: ..." --receiver "<email>" (never send-email; join-chat is automatic)
    If get-escalation resume_context includes operator_attachments, pass them via --attachments with the JSON array (fileName, fileSize, url). PDF attachments must be vault-sourced — draft-save attachment guard blocks assembly/static.povison PDFs.
@@ -284,9 +288,11 @@ def resume_instructions() -> str:
         "Load escalation context via cs_bridge_tool, incorporate operator_answer into the "
         "customer reply, and write a QuickCEP draft for human review. "
         "MANDATORY: After merging operator_answer and BEFORE draft-save, record the Q&A pair to "
-        "Hindsight memory via hindsight_bridge.py retain (see step 5 in the checklist) — "
-        "executed via the **terminal** tool, NOT execute_code. "
-        "If hindsight_bridge.py times out, retry via terminal with a curl command (see checklist). "
+        "the Hindsight Knowledge bank via the `knowledge_retain` MCP tool (cs-hindsight-knowledge server, see step 5 in the checklist) — "
+        "called as a tool, NOT via execute_code. The tool de-identifies PII, judges dual-domain metadata, "
+        "and retains only reusable product/policy facts. If it returns status=\"skipped\" (one-off "
+        "compensation / session narrative), that is correct — continue to draft-save. If the MCP server "
+        "is unavailable, retry via terminal with the direct API curl command (items + 300s, see checklist). "
         "This enables future auto-handling of identical questions without re-escalation. "
         "When resume_context includes operator_attachments, include them in draft-save --attachments. "
         "Only vault-uploaded PDFs may be attached — product assembly PDFs must be text in the body."
@@ -303,11 +309,12 @@ def edit_memory_instructions() -> str:
         "the operator-edited draft provided in the input. Focus ONLY on factual corrections about "
         "products, policies, specs, pricing, shipping, returns, or warranty — ignore tone/style edits, "
         "greetings, typos, and formatting changes.\n\n"
-        "STRICT TOOL CONSTRAINT: this run is guard-locked to hindsight memory tools only. You may call "
-        "hindsight_recall to check what's already known, hindsight_retain to persist each factual "
-        "correction as a distinct memory, and hindsight_reflect to consolidate. You MUST NOT call any "
-        "other tool — no terminal, no execute_code, no cs_bridge_tool, no send_message. If no factual "
-        "product/policy change exists, retain nothing and finish.\n\n"
+        "STRICT TOOL CONSTRAINT: this run is guard-locked to the Hindsight knowledge tools only. You may call "
+        "knowledge_recall to check what's already known in the Knowledge bank (furniture-knowledge), and "
+        "knowledge_retain to persist each factual correction as a distinct reusable fact. The tool de-identifies "
+        "PII and judges dual-domain (product/policy) metadata for you — pass the raw correction text. You MUST NOT call any "
+        "other tool — no terminal, no execute_code, no cs_bridge_tool, no send_message, no hindsight_retain/recall/reflect. "
+        "If no factual product/policy change exists, retain nothing and finish.\n\n"
         "When retaining, write concise, self-contained facts (e.g. \"产品X的承重为150kg，非200kg\"), "
-        "tagged with the product/SKU context when available. Never retain PII or customer-specific details."
+        "passing the product/SKU context via the sku/product_name parameters when available. Never retain PII or customer-specific details."
     )
