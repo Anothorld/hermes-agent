@@ -108,7 +108,8 @@ def test_launch_failed_event_written_on_gateway_failure(monkeypatch, tmp_path):
     cal = _load("cal")
     watcher = _load("quickcep_watcher")
     # Force gateway launch to return no run_id and not dedup_skipped.
-    fake_outcome = types.SimpleNamespace(run_id=None, dedup_skipped=False)
+    # transient=False simulates a PERMANENT failure (non-429/5xx) → failed path.
+    fake_outcome = types.SimpleNamespace(run_id=None, dedup_skipped=False, transient=False)
     with patch.object(watcher, "GatewayClient") as gw_cls, \
          patch.object(watcher, "apply_handoff", return_value={"ok": True}) as handoff:
         gw_cls.from_env.return_value.start_process_run.return_value = fake_outcome

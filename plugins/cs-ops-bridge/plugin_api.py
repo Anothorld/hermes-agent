@@ -1343,6 +1343,30 @@ def relaunch_session_route(
         brief_extra="source: console_relaunch",
     )
     if not outcome.run_id:
+        if outcome.dedup_skipped:
+            raise HTTPException(status_code=409, detail="launch deduped (already in flight)")
+        if outcome.transient:
+            # Gateway transiently full (429/5xx/unreachable) — re-queue to
+            # pending instead of failing, mirroring the inbound watcher path.
+            # The next watcher tick retries when a slot frees.
+            cal.update_session_status(session_row_id=sess["id"], status="pending")
+            try:
+                cal.write_event(
+                    quickcep_session_id=quickcep_session_id,
+                    env=body.env,
+                    event_type="launch_requeued",
+                    payload={
+                        "message_id": str(msg_id),
+                        "error": "gateway transient (429/5xx/unreachable) on manual relaunch",
+                        "run_id": None,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("relaunch launch_requeued event write failed session=%s: %s", quickcep_session_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail="gateway 暂时满载，已重新排队（pending），稍后自动重试",
+            )
         cal.update_session_status(session_row_id=sess["id"], status="failed")
         raise HTTPException(status_code=502, detail="gateway launch failed")
     return {"ok": True, "run_id": outcome.run_id}

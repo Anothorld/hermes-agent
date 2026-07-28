@@ -202,3 +202,42 @@ def test_relaunch_join_disabled_by_env(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["run_id"] == "run-rel-3"
     mock_join.assert_not_called()
+
+
+def test_relaunch_transient_requeues_to_pending(monkeypatch, tmp_path):
+    """Manual relaunch on a transient (429/5xx) gateway failure re-queues to pending, not failed."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_BRIDGE_KEY", "test-key")
+    cal = _load("cal")
+    _load("email_channel")
+    _load("escalation_resume")
+    gw_mod = _load("gateway_client")
+    qj = _load("quickcep_join")
+    api = _load("plugin_api")
+
+    r = cal.enqueue_session(quickcep_session_id="s-rel-429", message_id="m1", env="LIVE")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="failed")
+
+    class _TransientGw:
+        def start_process_run(self, **kw):
+            return gw_mod.LaunchOutcome(run_id=None, transient=True)
+
+    ec = sys.modules[f"{_PKG}.email_channel"]
+    er = sys.modules[f"{_PKG}.escalation_resume"]
+
+    with patch.object(api, "_require_bridge_key"), \
+         patch.object(ec, "session_is_email", return_value=True), \
+         patch.object(er, "retry_resume_for_session", return_value={"kind": "none"}), \
+         patch.object(qj, "join_chat_session", return_value=_ok_join_result("s-rel-429")), \
+         patch.object(gw_mod, "GatewayClient") as mock_gw_cls:
+        mock_gw_cls.from_env.return_value = _TransientGw()
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.relaunch_session_route(
+                "s-rel-429",
+                MagicMock(env="LIVE", message_id="m-rel"),
+            )
+
+    assert exc_info.value.status_code == 503
+    sess = cal.get_session(quickcep_session_id="s-rel-429", env="LIVE")
+    assert sess["status"] == "pending"
