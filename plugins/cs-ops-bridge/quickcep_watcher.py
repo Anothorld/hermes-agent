@@ -698,6 +698,30 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     if outcome.dedup_skipped:
         log.info("launch dedup skip session %s message %s", session_id, message_id)
         return None
+    # Transient gateway failure (429/5xx/unreachable) — re-queue to ``pending``
+    # instead of failing the session. The next watcher tick retries when a
+    # gateway slot frees up. This is the pending-queue behavior: a full gateway
+    # must never permanently fail a session that has not been processed.
+    if outcome.transient:
+        cal.update_session_status(session_row_id=result["session"]["id"], status="pending")
+        log.warning(
+            "launch requeued (transient) session=%s message=%s — back to pending",
+            session_id, message_id,
+        )
+        try:
+            cal.write_event(
+                quickcep_session_id=session_id,
+                env=_ENV,
+                event_type="launch_requeued",
+                payload={
+                    "message_id": message_id,
+                    "error": "gateway transient (429/5xx/unreachable)",
+                    "run_id": None,
+                },
+            )
+        except Exception as exc:
+            log.warning("launch_requeued event write failed session=%s: %s", session_id, exc)
+        return None
     cal.update_session_status(session_row_id=result["session"]["id"], status="failed")
     log.error("launch failed for session %s message %s", session_id, message_id)
     try:

@@ -9,12 +9,27 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _inflight: set[str] = set()
+
+
+@dataclass(frozen=True)
+class PostRunResult:
+    """Result of POST /v1/runs.
+
+    ``ok`` is True on success (``data`` holds the gateway response). On failure,
+    ``transient`` distinguishes retryable gateway states (429/5xx/unreachable)
+    from permanent errors — callers re-queue transient failures to ``pending``
+    instead of marking the session ``failed``.
+    """
+    ok: bool
+    data: Optional[dict[str, Any]] = None
+    transient: bool = False
 
 
 def launch_dedup_key(session_id: str, message_id: str) -> str:
@@ -40,36 +55,51 @@ def post_run_with_retry(
     api_key: Optional[str],
     body: dict[str, Any],
     max_attempts: int = 4,
-) -> Optional[dict[str, Any]]:
+) -> PostRunResult:
+    """POST /v1/runs with exponential backoff.
+
+    Returns ``PostRunResult(ok=True, data=...)`` on success. On failure returns
+    ``PostRunResult(ok=False, transient=True)`` when the gateway was busy
+    (429/502/503/504) or unreachable — these are retried up to ``max_attempts``
+    and the caller should re-queue the session to ``pending`` rather than fail
+    it. Other HTTP errors are non-transient (``transient=False``).
+    """
     headers: dict[str, str] = {"Accept": "application/json", "Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     payload = json.dumps(body).encode("utf-8")
     url = f"{base.rstrip('/')}/v1/runs"
     delay = 1.0
+    last_transient = False
     for attempt in range(1, max_attempts + 1):
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 raw = resp.read()
-            return json.loads(raw.decode("utf-8")) if raw else {}
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+            return PostRunResult(ok=True, data=data)
         except urllib.error.HTTPError as exc:
             if exc.code in (429, 502, 503, 504) and attempt < max_attempts:
                 log.warning("gateway POST /v1/runs HTTP %s — retry %s/%s", exc.code, attempt, max_attempts)
+                last_transient = True
                 time.sleep(delay)
                 delay = min(delay * 2, 16)
                 continue
-            log.error("gateway POST /v1/runs failed HTTP %s", exc.code)
-            return None
+            # Exhausted retries on a transient code, OR a non-transient code (4xx other).
+            transient = exc.code in (429, 502, 503, 504)
+            log.error("gateway POST /v1/runs failed HTTP %s (transient=%s)", exc.code, transient)
+            return PostRunResult(ok=False, transient=transient)
         except urllib.error.URLError as exc:
             if attempt < max_attempts:
                 log.warning("gateway unreachable — retry %s/%s: %s", attempt, max_attempts, exc)
+                last_transient = True
                 time.sleep(delay)
                 delay = min(delay * 2, 16)
                 continue
             log.error("gateway POST /v1/runs failed: %s", exc)
-            return None
-    return None
+            # Unreachable gateway is transient (it may come back).
+            return PostRunResult(ok=False, transient=True)
+    return PostRunResult(ok=False, transient=last_transient)
 
 
 def stop_run(*, base: str, api_key: Optional[str], run_id: str) -> bool:

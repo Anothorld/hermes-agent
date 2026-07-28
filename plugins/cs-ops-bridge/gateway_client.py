@@ -9,6 +9,7 @@ from typing import Optional
 
 from .bridge_agent_contract import process_instructions, resume_instructions, edit_memory_instructions
 from .gateway_launch import (
+    PostRunResult,
     drain_run_events,
     launch_dedup_key,
     post_run_with_retry,
@@ -30,6 +31,11 @@ def _gateway_yolo_enabled() -> bool:
 class LaunchOutcome:
     run_id: str | None
     dedup_skipped: bool = False
+    # True when the gateway was transiently unavailable (429/5xx/unreachable).
+    # Callers should re-queue the session to ``pending`` rather than mark it
+    # ``failed`` — this is the pending-queue behavior for gateway-capacity
+    # contention.
+    transient: bool = False
 
 
 @dataclass
@@ -170,9 +176,10 @@ class GatewayClient:
             if run_kind:
                 body["run_kind"] = run_kind
             out = post_run_with_retry(base=self.base, api_key=self.api_key, body=body)
-            if not out:
-                return LaunchOutcome(run_id=None)
-            run_id = out.get("run_id") if isinstance(out, dict) else None
+            if not out.ok:
+                # Transient (429/5xx/unreachable) → caller re-queues to pending.
+                return LaunchOutcome(run_id=None, transient=out.transient)
+            run_id = out.data.get("run_id") if isinstance(out.data, dict) else None
             if run_id:
                 drain_run_events(base=self.base, api_key=self.api_key, run_id=str(run_id))
             return LaunchOutcome(run_id=str(run_id) if run_id else None)

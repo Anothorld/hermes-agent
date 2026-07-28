@@ -43,7 +43,7 @@ def test_process_run_builds_expected_gateway_body():
 
     def _fake_post(*, base, api_key, body, max_attempts=4):
         captured["body"] = body
-        return {"run_id": "mock-run-1"}
+        return gw_mod.PostRunResult(ok=True, data={"run_id": "mock-run-1"})
 
     client = gw_mod.GatewayClient(base="http://127.0.0.1:8643", api_key="test-key")
     with patch.object(gw_mod, "post_run_with_retry", side_effect=_fake_post):
@@ -69,7 +69,7 @@ def test_process_run_respects_yolo_disable(monkeypatch):
 
     def _fake_post(*, base, api_key, body, max_attempts=4):
         captured["body"] = body
-        return {"run_id": "mock-run-2"}
+        return gw_mod.PostRunResult(ok=True, data={"run_id": "mock-run-2"})
 
     client = gw_mod.GatewayClient(base="http://127.0.0.1:8643", api_key="test-key")
     with patch.object(gw_mod, "post_run_with_retry", side_effect=_fake_post):
@@ -143,6 +143,43 @@ def test_launch_failure_applies_failed_handoff(monkeypatch, tmp_path):
     assert sess["status"] == "failed"
     assert len(handoffs) == 1
     assert handoffs[0]["phase"] == "failed"
+
+
+def test_launch_transient_requeues_to_pending(monkeypatch, tmp_path):
+    """A transient gateway failure (429/5xx) must re-queue to pending, not fail."""
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
+    cal = _load_module("cal")
+    qw = _load_module("quickcep_watcher")
+    gw_mod = _load_module("gateway_client")
+
+    class _TransientGw:
+        def start_process_run(self, **kwargs):
+            return gw_mod.LaunchOutcome(run_id=None, transient=True)
+
+    handoffs: list = []
+
+    def _no_handoff(**kwargs):
+        handoffs.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(qw, "GatewayClient", type("G", (), {"from_env": staticmethod(lambda: _TransientGw())}))
+    monkeypatch.setattr(qw, "apply_handoff", _no_handoff)
+
+    run_id = qw._launch_for_message(
+        {
+            "chatSubSessionId": "sess-429",
+            "chatSessionId": "chat-1",
+            "id": "mid-1",
+            "email": "visitor@example.com",
+            "channel": "email",
+        }
+    )
+    assert run_id is None
+    sess = cal.get_session(quickcep_session_id="sess-429", env="LIVE")
+    assert sess["status"] == "pending"
+    # No failed handoff must be applied for transient requeue.
+    assert handoffs == []
 
 
 def test_launch_skipped_when_intent_not_allowed(monkeypatch, tmp_path):
