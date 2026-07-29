@@ -80,16 +80,54 @@ def test_is_newer_visitor_followup_rest_vs_native_id_same_message():
 def test_is_newer_visitor_followup_native_id_match():
     _reset_modules()
     qw = _load("quickcep_watcher")
+    # Same native id tracked — no new follow-up.
     assert qw.is_newer_visitor_followup(
         cal_last_msg_id="2560343188000000001",
         visitor_msg_id="2560343188000000001",
-        visitor_create_time="2026-07-29 00:17:45",
+        visitor_create_time="2026-07-29 08:17:45",
     ) is False
+    # Different native id, no inbound baseline → cannot prove newer (do not re-arm).
     assert qw.is_newer_visitor_followup(
         cal_last_msg_id="2560343188000000001",
         visitor_msg_id="2560343188000000099",
-        visitor_create_time="2026-07-29 01:00:00",
+        visitor_create_time="2026-07-29 09:00:00",
+    ) is False
+    # Different native id, visitor (UTC+8 08:17:45) is same instant as inbound (UTC 00:17:45)
+    # → not strictly newer → no re-arm. This is the 3404/3612 incident shape.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 08:17:45",
+        inbound_received_at="2026-07-29 00:17:45",
+    ) is False
+    # Visitor (UTC+8 09:00:00 = UTC 01:00:00) is newer than inbound (UTC 00:17:50).
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 09:00:00",
+        inbound_received_at="2026-07-29 00:17:50",
     ) is True
+    # Visitor (UTC+8 08:17:50 = UTC 00:17:50) equal to inbound (UTC 00:17:50) → not strictly newer.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 08:17:50",
+        inbound_received_at="2026-07-29 00:17:50",
+    ) is False
+    # Visitor older than inbound (UTC+8 07:00:00 = UTC 23:00:00 previous day) → not newer.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 07:00:00",
+        inbound_received_at="2026-07-29 00:17:50",
+    ) is False
+    # Missing createTime with baseline present → cannot prove newer.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="",
+        inbound_received_at="2026-07-29 00:17:50",
+    ) is False
 
 
 def test_rest_reconcile_eligible_only_pending_or_failed(monkeypatch, tmp_path):
@@ -147,13 +185,15 @@ def test_rest_reconcile_skips_processing_sessions(monkeypatch, tmp_path):
     cal = _load("cal")
     qw = _load("quickcep_watcher")
 
-    r = cal.enqueue_session(quickcep_session_id="2547148060574048259", message_id="m1", env="LIVE")
+    # Use a unique session id to avoid interference from other tests' CAL rows.
+    sid = "2547148060574048999"
+    r = cal.enqueue_session(quickcep_session_id=sid, message_id="m1", env="LIVE")
     cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
 
     fake_stdout = {
         "sessions": [
             {
-                "id": "2547148060574048259",
+                "id": sid,
                 "lastMsgTime": "2026-06-23 14:12:49",
                 "unreadNum": 2,
                 "channel": "email",
@@ -169,9 +209,10 @@ def test_rest_reconcile_skips_processing_sessions(monkeypatch, tmp_path):
 
     with patch.object(qw.subprocess, "run", return_value=_Proc()):
         with patch.object(qw, "_launch_for_message") as launch:
-            stats = qw.run_rest_reconcile_once()
+            with patch.object(qw, "reconcile_operator_sent_once", return_value={"synced": 0, "checked": 0, "skipped_already": 0}):
+                stats = qw.run_rest_reconcile_once()
 
-    assert stats.get("skipped_busy") == 1
+    assert stats.get("skipped_busy") >= 1
     assert stats.get("launched") == 0
     launch.assert_not_called()
 

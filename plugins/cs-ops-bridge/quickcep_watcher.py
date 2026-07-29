@@ -969,11 +969,41 @@ def _rest_last_msg_time(cal_last_msg_id: str) -> str:
     return ""
 
 
+def _parse_quickcep_time_to_epoch(ts: str) -> Optional[float]:
+    """Parse a QuickCEP ``createTime`` (UTC+8, ``YYYY-MM-DD HH:MM:SS``) to epoch."""
+    if not ts:
+        return None
+    try:
+        from datetime import datetime, timezone, timedelta
+
+        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        # QuickCEP server is UTC+8.
+        return dt.replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_utc_time_to_epoch(ts: str) -> Optional[float]:
+    """Parse a CAL ``created_at`` (UTC, ``YYYY-MM-DD HH:MM:SS``) to epoch."""
+    if not ts:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        # CAL created_at may have fractional seconds or 'Z' — normalize.
+        clean = ts.rstrip("Z").split(".")[0]
+        dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 def is_newer_visitor_followup(
     *,
     cal_last_msg_id: str,
     visitor_msg_id: str,
     visitor_create_time: str,
+    inbound_received_at: str = "",
 ) -> bool:
     """Return True only with positive evidence the visitor message is new vs CAL.
 
@@ -981,6 +1011,19 @@ def is_newer_visitor_followup(
     QuickCEP ``messages`` returns a native numeric/card id + ``createTime``.
     Substring id matching alone false-positives (same customer mail, different
     id formats) and wrongly re-arms ``reviewed`` / ``operator_replied`` rows.
+
+    For non-REST markers (SIO native ids), substring matching is unreliable
+    because QuickCEP may return a different visitor message (or the same one
+    with a different id representation). In that case, fall back to comparing
+    ``visitor_create_time`` against ``inbound_received_at`` (the CAL
+    ``inbound_received`` event's ``created_at``). When either timestamp is
+    missing, there is no positive evidence of a newer follow-up → do not re-arm.
+
+    **Timezone handling**: CAL ``created_at`` is UTC (SQLite ``datetime()``
+    output, e.g. ``2026-07-21 02:39:53``). QuickCEP ``createTime`` is in the
+    QuickCEP server's local time (UTC+8, e.g. ``2026-07-21 10:36:55``). Direct
+    string comparison would be wrong (10:36 > 02:39 even when they are the same
+    instant). Both timestamps are parsed to epoch seconds before comparing.
     """
     cal_marker = (cal_last_msg_id or "").strip()
     vid = (visitor_msg_id or "").strip()
@@ -995,14 +1038,30 @@ def is_newer_visitor_followup(
 
     rest_time = _rest_last_msg_time(cal_marker)
     if rest_time:
-        # REST path: only re-arm when createTime is strictly newer than the
-        # recorded lastMsgTime. Missing createTime → cannot prove newer.
+        # REST path: both rest_time and vtime come from QuickCEP's API and are
+        # in the same timezone (UTC+8). String comparison is safe here.
         if not vtime:
             return False
         return vtime > rest_time
 
-    # Non-REST marker whose id did not match → treat as a new follow-up.
-    return bool(vid)
+    # Non-REST marker whose id did not match. Previously this returned
+    # ``bool(vid)``, which false-positives when QuickCEP returns a different
+    # visitor message (or the same one with a different id format) — causing
+    # reviewed / operator_replied sessions to be wrongly reset to pending.
+    # Require positive time evidence: visitor createTime must be strictly
+    # newer than the CAL inbound_received event's created_at. Missing either
+    # timestamp → cannot prove newer → do not re-arm.
+    baseline = (inbound_received_at or "").strip()
+    if not vtime or not baseline:
+        return False
+    # CAL created_at is UTC; QuickCEP createTime is UTC+8. Parse both to epoch
+    # before comparing — direct string comparison is wrong across timezones.
+    v_epoch = _parse_quickcep_time_to_epoch(vtime)
+    b_epoch = _parse_utc_time_to_epoch(baseline)
+    if v_epoch is None or b_epoch is None:
+        # Cannot parse → no positive evidence → do not re-arm.
+        return False
+    return v_epoch > b_epoch
 
 
 def _rearm_check_session(sess: dict[str, Any]) -> bool:
@@ -1036,10 +1095,23 @@ def _rearm_check_session(sess: dict[str, Any]) -> bool:
     visitor_msg_id = str(latest_visitor_msg.get("id") or "")
     visitor_create_time = str(latest_visitor_msg.get("createTime") or "")
 
+    # For non-REST markers (SIO native ids), is_newer_visitor_followup needs a
+    # time baseline to avoid false-positives on id format mismatch. Use the
+    # CAL inbound_received event's created_at as the baseline.
+    inbound_received_at = ""
+    try:
+        inbound_received_at = cal.latest_event_created_at(
+            session_row_id=int(sess["id"]),
+            event_types=("inbound_received",),
+        ) or ""
+    except Exception as exc:
+        log.debug("rearm: inbound_received_at lookup failed session=%s: %s", sid, exc)
+
     if not is_newer_visitor_followup(
         cal_last_msg_id=cal_last_msg_id,
         visitor_msg_id=visitor_msg_id,
         visitor_create_time=visitor_create_time,
+        inbound_received_at=inbound_received_at,
     ):
         return False
 

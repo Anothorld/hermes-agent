@@ -761,6 +761,92 @@ def apply_quickcep_note(
     return {"ok": ok, "stdout": out, "stderr": err}
 
 
+def leave_quickcep_after_failed_handoff(
+    *,
+    quickcep_session_id: str,
+    env: str,
+    session_row_id: int,
+) -> dict[str, Any]:
+    """Leave the QuickCEP session after a failed handoff (fail-soft).
+
+    When AI previously joined via ``join-chat`` and the session is now CAL
+    ``failed``, call ``leave-chat`` so the AI account exits — restoring
+    ``unreadNum`` growth so REST reconcile (``--unread-only``) can re-capture
+    follow-ups. Mirrors intent-gate's ``_leave_quickcep_if_previously_joined``
+    and Console's ``close_session`` leave path.
+
+    No-op when:
+    - the AI never joined (no ``quickcep_join_chat`` event), or
+    - a prior ``quickcep_leave_chat`` is at or after the latest join (idempotent
+      — also covers relaunch re-join followed by a second failure), or
+    - the leave-chat call fails (fail-soft — the failed handoff still stands).
+
+    Never raises.
+    """
+    try:
+        joined_at = cal.latest_event_created_at(
+            session_row_id=session_row_id,
+            event_types=("quickcep_join_chat",),
+        )
+        if not joined_at:
+            return {"ok": True, "skipped": True, "reason": "never joined"}
+        left_at = cal.latest_event_created_at(
+            session_row_id=session_row_id,
+            event_types=("quickcep_leave_chat",),
+        )
+        if left_at and left_at >= joined_at:
+            return {"ok": True, "skipped": True, "reason": "already left after latest join"}
+    except Exception as exc:
+        log.debug("leave-on-failed event lookup failed session=%s: %s", quickcep_session_id, exc)
+        return {"ok": False, "skipped": True, "reason": f"event lookup failed: {exc}"}
+
+    try:
+        from .quickcep_leave_confirm import reconcile_leave_chat_payload
+
+        cli = _quickcep_skill_dir() / "scripts" / "quickcep_cli.py"
+        code, out, _err = _run_quickcep_cli(["leave-chat", quickcep_session_id])
+        try:
+            payload = json.loads(out) if out else {}
+        except json.JSONDecodeError:
+            payload = {"raw_stdout": (out or "")[:500]}
+        payload = reconcile_leave_chat_payload(
+            payload, cli=cli, session_id=quickcep_session_id,
+        )
+        ok = bool(payload.get("ok"))
+        cal.write_event(
+            quickcep_session_id=quickcep_session_id,
+            env=env,
+            event_type="quickcep_leave_chat",
+            payload={
+                "source": "failed_handoff",
+                "ok": ok,
+                "exit_code": code,
+                "result_code": payload.get("result_code"),
+                "error": payload.get("error"),
+            },
+        )
+        if ok:
+            log.info("failed handoff → leave-chat ok session=%s", quickcep_session_id)
+        else:
+            log.warning(
+                "failed handoff → leave-chat failed session=%s exit=%s err=%s",
+                quickcep_session_id, code, payload.get("error") or "<unknown>",
+            )
+        return {"ok": ok, "payload": payload}
+    except Exception as exc:  # noqa: BLE001 — fail-soft
+        log.warning("failed handoff → leave-chat crashed session=%s: %s", quickcep_session_id, exc)
+        try:
+            cal.write_event(
+                quickcep_session_id=quickcep_session_id,
+                env=env,
+                event_type="quickcep_leave_chat",
+                payload={"source": "failed_handoff", "ok": False, "error": str(exc)},
+            )
+        except Exception:
+            pass
+        return {"ok": False, "error": str(exc)}
+
+
 def apply_handoff(
     *,
     quickcep_session_id: str,
@@ -789,6 +875,14 @@ def apply_handoff(
             quickcep_session_id,
         )
         phase = canonical
+
+    # Capture the caller's original skip_quickcep flag before the qc_skip_reason
+    # logic below may overwrite the local ``skip_quickcep`` variable (L1035).
+    # leave-on-failed must respect only the caller's intent, not the internal
+    # tag-skip guard — otherwise the launch-failed path (which pre-sets status
+    # to failed, triggering "session already failed" qc_skip_reason) would
+    # suppress leave even though the session is genuinely failed and joined.
+    caller_skip_quickcep = skip_quickcep
 
     ctx = dict(context or {})
     phase, ctx = maybe_remap_failed_to_skipped(phase, ctx)
@@ -828,6 +922,21 @@ def apply_handoff(
         }
         if completion_result:
             out["escalation_completion"] = completion_result
+        # Heal-leave: if phase=failed and the session is already CAL `failed`
+        # but never got a leave-chat (e.g. prior handoff ran before this fix),
+        # attempt leave now. Idempotent join-after-leave guard prevents spam.
+        # Never leave on operator_replied/reviewed (would close human sessions).
+        if phase == "failed" and str(sess.get("status") or "") == "failed" and not caller_skip_quickcep:
+            try:
+                leave_result = leave_quickcep_after_failed_handoff(
+                    quickcep_session_id=quickcep_session_id,
+                    env=env,
+                    session_row_id=sess["id"],
+                )
+                if leave_result:
+                    out["leave_chat"] = leave_result
+            except Exception as exc:
+                log.debug("heal leave-on-failed stale session=%s: %s", quickcep_session_id, exc)
         return out
 
     # Bridge guard (§4.13 B): draft_ready requires a CAL draft — the agent must
@@ -1067,6 +1176,25 @@ def apply_handoff(
     }
     if completion_result:
         result["escalation_completion"] = completion_result
+
+    # Leave-chat on failed handoff: only when the session is now CAL `failed`.
+    # Tags/notes must run before leave (QuickCEP drops tags after chat_end).
+    # Use caller_skip_quickcep (the original param), not the local skip_quickcep
+    # variable which may have been flipped to True by the qc_skip_reason guard.
+    if phase == "failed" and not caller_skip_quickcep:
+        try:
+            post_sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
+            if post_sess and str(post_sess.get("status") or "") == "failed":
+                leave_result = leave_quickcep_after_failed_handoff(
+                    quickcep_session_id=quickcep_session_id,
+                    env=env,
+                    session_row_id=sess["id"],
+                )
+                if leave_result:
+                    result["leave_chat"] = leave_result
+        except Exception as exc:
+            log.debug("leave-on-failed after handoff failed session=%s: %s", quickcep_session_id, exc)
+
     return result
 
 
@@ -1126,7 +1254,14 @@ def handle_operator_send(
             "reason": "untracked send: no CAL row (create session via inbound enqueue first)",
         }
 
-    allowed_statuses = {"draft_ready", "awaiting_expert", "processing", "operator_replied"}
+    allowed_statuses = {
+        "draft_ready",
+        "awaiting_expert",
+        "processing",
+        "operator_replied",
+        "pending",
+        "failed",
+    }
     if sess["status"] not in allowed_statuses:
         return {"ok": False, "skipped": True, "reason": f"status={sess['status']}"}
 
@@ -1154,6 +1289,10 @@ def handle_operator_send(
         context["send_note"] = "升级待专家期间人工直接回复客户"
     elif sess["status"] == "processing":
         context["send_note"] = "处理过程中人工直接回复客户"
+    elif sess["status"] == "pending":
+        context["send_note"] = "会话尚未自动处理时人工直接回复客户"
+    elif sess["status"] == "failed":
+        context["send_note"] = "自动处理失败后人工直接回复客户"
 
     if info.get("chatSessionId") and not sess.get("chat_session_id"):
         cal.update_session_chat_id(

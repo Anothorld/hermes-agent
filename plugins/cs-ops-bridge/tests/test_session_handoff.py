@@ -474,3 +474,194 @@ def test_draft_ready_guard_bypassed_in_legacy_mode(monkeypatch, tmp_path):
         )
     assert out["ok"] is True
     assert cal.get_session(quickcep_session_id="sess-legacy", env="LIVE")["status"] == "draft_ready"
+
+
+# ── P1: leave-chat on failed handoff ──────────────────────────────────────
+
+
+def _setup_failed_session(monkeypatch, tmp_path, qsid="sess-fail-leave"):
+    """Enqueue a session, mark it failed, and write a prior join event."""
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    cal._schema_initialized = False  # force recreate_all on new db
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id=qsid, message_id="m1", env="LIVE", chat_session_id="c1")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
+    # Simulate AI join-chat on launch.
+    cal.write_event(
+        quickcep_session_id=qsid, env="LIVE",
+        event_type="quickcep_join_chat",
+        payload={"ok": True, "source": "launch"},
+    )
+    cal.update_session_status(session_row_id=r["session"]["id"], status="failed")
+    return cal, sh, r["session"]["id"]
+
+
+def test_failed_handoff_leaves_when_previously_joined(monkeypatch, tmp_path):
+    """apply_handoff(failed) must call leave-chat when AI previously joined."""
+    cal, sh, row_id = _setup_failed_session(monkeypatch, tmp_path)
+
+    cli_calls = []
+    def _fake_run(args):
+        cli_calls.append(args)
+        return 0, json.dumps({"ok": True, "result_code": 200}), ""
+
+    with patch.object(sh, "_run_quickcep_cli", side_effect=_fake_run), \
+         patch.object(sh, "apply_quickcep_tags", return_value=[]), \
+         patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+        result = sh.apply_handoff(
+            quickcep_session_id="sess-fail-leave",
+            phase="failed",
+            env="LIVE",
+            force_quickcep_tags=True,
+        )
+
+    assert result["ok"] is True
+    assert "leave_chat" in result
+    assert result["leave_chat"]["ok"] is True
+    # leave-chat was called
+    assert any(c[0] == "leave-chat" for c in cli_calls), cli_calls
+    # CAL has the leave event with source=failed_handoff
+    events = cal.get_dispatch_context(quickcep_session_id="sess-fail-leave", env="LIVE") or {}
+    leave_evs = [e for e in events.get("recent_events", []) if e["event_type"] == "quickcep_leave_chat"]
+    assert len(leave_evs) == 1
+    assert leave_evs[0]["payload"]["source"] == "failed_handoff"
+    assert leave_evs[0]["payload"]["ok"] is True
+
+
+def test_failed_handoff_no_leave_when_never_joined(monkeypatch, tmp_path):
+    """apply_handoff(failed) must NOT call leave-chat when AI never joined."""
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    cal._schema_initialized = False
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id="sess-fail-nojoin", message_id="m1", env="LIVE", chat_session_id="c1")
+    # No join event — AI never joined.
+    cal.update_session_status(session_row_id=r["session"]["id"], status="failed")
+    with patch.object(sh, "_run_quickcep_cli", return_value=(1, "", "not found")) as cli:
+        with patch.object(sh, "apply_quickcep_tags", return_value=[]):
+            with patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+                result = sh.apply_handoff(
+                    quickcep_session_id="sess-fail-nojoin",
+                    phase="failed",
+                    env="LIVE",
+                    force_quickcep_tags=True,
+                )
+
+    assert result["ok"] is True
+    # leave-chat was NOT called
+    cli.assert_not_called()
+    # Result indicates skipped leave
+    assert result.get("leave_chat", {}).get("skipped") is True
+
+
+def test_failed_handoff_no_leave_on_draft_ready(monkeypatch, tmp_path):
+    """apply_handoff(failed) on a draft_ready session must NOT leave (status guard)."""
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    cal._schema_initialized = False
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id="sess-dr-noleave", message_id="m1", env="LIVE", chat_session_id="c1")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
+    cal.save_draft(quickcep_session_id="sess-dr-noleave", draft_html="<p>d</p>", source="agent", env="LIVE")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+    # Agent mistakenly sends failed on a draft_ready session.
+    # _handoff_stale_for_session will skip (rank 30 >= 15 via stale? No: stale only when current_rank>=40).
+    # Actually draft_ready(30) is not >= 40, so not stale. But _status_update_allowed
+    # will reject draft_ready->failed (rank regression). So status stays draft_ready.
+
+    with patch.object(sh, "_run_quickcep_cli", return_value=(1, "", "nope")) as cli:
+        with patch.object(sh, "apply_quickcep_tags", return_value=[]):
+            with patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+                result = sh.apply_handoff(
+                    quickcep_session_id="sess-dr-noleave",
+                    phase="failed",
+                    env="LIVE",
+                    context={"error": "oops"},
+                )
+
+    # Status must stay draft_ready (rank regression rejected).
+    sess = cal.get_session(quickcep_session_id="sess-dr-noleave", env="LIVE")
+    assert sess["status"] == "draft_ready"
+    # leave-chat must NOT have been called (status != failed).
+    cli.assert_not_called()
+
+
+def test_failed_handoff_idempotent_after_prior_leave(monkeypatch, tmp_path):
+    """A second failed handoff must NOT leave again if leave already happened after join."""
+    cal, sh, row_id = _setup_failed_session(monkeypatch, tmp_path, "sess-fail-idem")
+
+    # Write a prior leave event after the join.
+    cal.write_event(
+        quickcep_session_id="sess-fail-idem", env="LIVE",
+        event_type="quickcep_leave_chat",
+        payload={"source": "intent_gate_skip", "ok": True},
+    )
+
+    with patch.object(sh, "_run_quickcep_cli", return_value=(1, "", "nope")) as cli:
+        with patch.object(sh, "apply_quickcep_tags", return_value=[]):
+            with patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+                result = sh.apply_handoff(
+                    quickcep_session_id="sess-fail-idem",
+                    phase="failed",
+                    env="LIVE",
+                    force_quickcep_tags=True,
+                )
+
+    # leave-chat was NOT called again (idempotent).
+    cli.assert_not_called()
+    assert result.get("leave_chat", {}).get("skipped") is True
+
+
+def test_failed_handoff_leave_failure_is_fail_soft(monkeypatch, tmp_path):
+    """leave-chat failure must not affect the handoff ok result."""
+    cal, sh, row_id = _setup_failed_session(monkeypatch, tmp_path, "sess-fail-soft")
+
+    with patch.object(sh, "_run_quickcep_cli", return_value=(1, "", "SIO error")):
+        with patch.object(sh, "apply_quickcep_tags", return_value=[]):
+            with patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+                result = sh.apply_handoff(
+                    quickcep_session_id="sess-fail-soft",
+                    phase="failed",
+                    env="LIVE",
+                    force_quickcep_tags=True,
+                )
+
+    # Handoff ok is driven by tags/notes, not leave.
+    assert result["ok"] is True
+    # Leave result shows failure but is recorded.
+    assert result["leave_chat"]["ok"] is False
+
+
+def test_failed_handoff_tags_before_leave(monkeypatch, tmp_path):
+    """Tags must be applied BEFORE leave-chat (QuickCEP drops tags after chat_end)."""
+    cal, sh, row_id = _setup_failed_session(monkeypatch, tmp_path, "sess-fail-order")
+
+    call_order = []
+    def _fake_tags(**kw):
+        call_order.append("tags")
+        return []
+    def _fake_note(**kw):
+        call_order.append("note")
+        return {"ok": True}
+    def _fake_run(args):
+        call_order.append("leave-chat")
+        return 0, json.dumps({"ok": True}), ""
+
+    with patch.object(sh, "apply_quickcep_tags", side_effect=_fake_tags), \
+         patch.object(sh, "apply_quickcep_note", side_effect=_fake_note), \
+         patch.object(sh, "_run_quickcep_cli", side_effect=_fake_run):
+        sh.apply_handoff(
+            quickcep_session_id="sess-fail-order",
+            phase="failed",
+            env="LIVE",
+            force_quickcep_tags=True,
+        )
+
+    # Tags must come before leave-chat.
+    assert "tags" in call_order
+    assert "leave-chat" in call_order
+    assert call_order.index("tags") < call_order.index("leave-chat")

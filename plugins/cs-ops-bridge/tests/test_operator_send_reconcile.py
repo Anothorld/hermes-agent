@@ -173,3 +173,123 @@ def test_reconcile_skips_invalid_session_id_without_calling_quickcep(monkeypatch
     assert stats["synced"] == 0
     fetch.assert_not_called()  # guard must short-circuit before the QuickCEP call
     handoff.assert_not_called()
+
+
+def test_reconcile_syncs_pending_session(monkeypatch, tmp_path):
+    """pending sessions (AI never launched) must be synced when operator replies in QuickCEP."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    rec = _load("operator_send_reconcile")
+
+    r = cal.enqueue_session(
+        quickcep_session_id="2547506973813489770", message_id="m1", env="LIVE",
+        customer_email="pending@example.com",
+    )
+    # status stays pending (AI never launched)
+
+    op_msg = {"id": "2547621894254018888", "createTime": "2026-07-15 10:00:00"}
+    with patch.object(rec, "_fetch_last_operator_message", return_value=op_msg):
+        with patch.object(rec, "handle_operator_send", return_value={"ok": True}) as handoff:
+            with patch.object(
+                rec, "repair_orphaned_escalations_once", return_value={"checked": 0, "repaired": 0}
+            ):
+                stats = rec.reconcile_operator_sent_once(env="LIVE")
+
+    assert stats["synced"] == 1
+    handoff.assert_called_once()
+
+
+def test_reconcile_syncs_failed_session(monkeypatch, tmp_path):
+    """failed sessions (AI launched but failed) must be synced when operator replies in QuickCEP."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    rec = _load("operator_send_reconcile")
+
+    r = cal.enqueue_session(
+        quickcep_session_id="2547506973813489771", message_id="m1", env="LIVE",
+        customer_email="failed@example.com",
+    )
+    cal.update_session_status(session_row_id=r["session"]["id"], status="failed")
+
+    op_msg = {"id": "2547621894254018999", "createTime": "2026-07-15 11:00:00"}
+    with patch.object(rec, "_fetch_last_operator_message", return_value=op_msg):
+        with patch.object(rec, "handle_operator_send", return_value={"ok": True}) as handoff:
+            with patch.object(
+                rec, "repair_orphaned_escalations_once", return_value={"checked": 0, "repaired": 0}
+            ):
+                stats = rec.reconcile_operator_sent_once(env="LIVE")
+
+    assert stats["synced"] == 1
+    handoff.assert_called_once()
+
+
+def test_handle_operator_send_allows_pending(monkeypatch, tmp_path):
+    """handle_operator_send must accept status=pending (not reject with status= skip)."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    sh = _load("session_handoff")
+
+    r = cal.enqueue_session(
+        quickcep_session_id="2547506973813489780", message_id="m1", env="LIVE",
+        customer_email="pending-send@example.com", chat_session_id="chat-1",
+    )
+    # status stays pending
+
+    called = {}
+    def _fake_apply(**kw):
+        called.update(kw)
+        return {"ok": True}
+
+    with patch.object(sh, "apply_handoff", side_effect=_fake_apply):
+        with patch.object(sh, "_maybe_close_escalations_after_operator_send", return_value={"ok": True}):
+            result = sh.handle_operator_send(
+                {
+                    "chatSubSessionId": "2547506973813489780",
+                    "chatSessionId": "chat-1",
+                    "id": "msg-pending-1",
+                    "channel": "email",
+                },
+                env="LIVE",
+            )
+
+    assert result.get("ok") is True
+    assert called.get("phase") == "operator_sent"
+    assert "尚未自动处理" in called.get("context", {}).get("send_note", "")
+
+
+def test_handle_operator_send_allows_failed(monkeypatch, tmp_path):
+    """handle_operator_send must accept status=failed (not reject with status= skip)."""
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load("cal")
+    sh = _load("session_handoff")
+
+    r = cal.enqueue_session(
+        quickcep_session_id="2547506973813489781", message_id="m1", env="LIVE",
+        customer_email="failed-send@example.com", chat_session_id="chat-1",
+    )
+    cal.update_session_status(session_row_id=r["session"]["id"], status="failed")
+
+    called = {}
+    def _fake_apply(**kw):
+        called.update(kw)
+        return {"ok": True}
+
+    with patch.object(sh, "apply_handoff", side_effect=_fake_apply):
+        with patch.object(sh, "_maybe_close_escalations_after_operator_send", return_value={"ok": True}):
+            result = sh.handle_operator_send(
+                {
+                    "chatSubSessionId": "2547506973813489781",
+                    "chatSessionId": "chat-1",
+                    "id": "msg-failed-1",
+                    "channel": "email",
+                },
+                env="LIVE",
+            )
+
+    assert result.get("ok") is True
+    assert "处理失败后" in called.get("context", {}).get("send_note", "")
+

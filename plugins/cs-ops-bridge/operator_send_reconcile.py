@@ -18,7 +18,18 @@ from .session_handoff import handle_operator_send
 
 log = logging.getLogger(__name__)
 
-_SYNC_STATUSES = frozenset({"draft_ready", "awaiting_expert", "processing"})
+# Sessions whose CAL status may be synced to operator_replied when QuickCEP shows
+# an operator outbound email as the latest conversational message. ``pending`` and
+# ``failed`` are included so sessions that never launched / failed to launch are
+# also synced when a human replies directly in QuickCEP — otherwise CAL stays
+# stuck and REST reconcile keeps re-attempting AI launch on already-replied sessions.
+_SYNC_STATUSES = frozenset({
+    "draft_ready",
+    "awaiting_expert",
+    "processing",
+    "pending",
+    "failed",
+})
 
 
 def _quickcep_scripts_dir() -> Path:
