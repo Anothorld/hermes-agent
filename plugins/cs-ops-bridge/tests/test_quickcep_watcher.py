@@ -47,6 +47,51 @@ def test_rest_session_message_id_ignores_unread_suffix():
     assert qw.rest_session_message_id(row) == "rest:2026-06-23 14:10:29"
 
 
+def test_is_newer_visitor_followup_rest_vs_native_id_same_message():
+    """rest:{lastMsgTime} must not false-positive against QuickCEP native msg id."""
+    _reset_modules()
+    qw = _load("quickcep_watcher")
+    # Incident shape: CAL tracked REST lastMsgTime; messages API returns native id.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="rest:2026-07-29 00:17:45",
+        visitor_msg_id="2560343188000000001",
+        visitor_create_time="2026-07-29 00:17:45",
+    ) is False
+    # Older or equal createTime is not a follow-up.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="rest:2026-07-29 00:17:45",
+        visitor_msg_id="2560343188000000001",
+        visitor_create_time="2026-07-28 23:00:00",
+    ) is False
+    # Strictly newer createTime is a real follow-up.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="rest:2026-07-29 00:17:45",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 01:00:00",
+    ) is True
+    # Missing createTime on REST marker → cannot prove newer (do not re-arm).
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="rest:2026-07-29 00:17:45",
+        visitor_msg_id="2560343188000000001",
+        visitor_create_time="",
+    ) is False
+
+
+def test_is_newer_visitor_followup_native_id_match():
+    _reset_modules()
+    qw = _load("quickcep_watcher")
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000001",
+        visitor_create_time="2026-07-29 00:17:45",
+    ) is False
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 01:00:00",
+    ) is True
+
+
 def test_rest_reconcile_eligible_only_pending_or_failed(monkeypatch, tmp_path):
     _reset_modules()
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))

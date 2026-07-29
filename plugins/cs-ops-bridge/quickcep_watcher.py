@@ -956,6 +956,55 @@ def _run_quickcep_cli_json(*args: str) -> Optional[dict[str, Any]]:
         return None
 
 
+def _rest_last_msg_time(cal_last_msg_id: str) -> str:
+    """Extract ``lastMsgTime`` from a REST dedup marker ``rest:{lastMsgTime}``.
+
+    Returns empty string for non-REST markers or ``rest:session:{id}`` placeholders.
+    """
+    marker = (cal_last_msg_id or "").strip()
+    if marker.startswith("rest:session:"):
+        return ""
+    if marker.startswith("rest:"):
+        return marker[len("rest:") :].strip()
+    return ""
+
+
+def is_newer_visitor_followup(
+    *,
+    cal_last_msg_id: str,
+    visitor_msg_id: str,
+    visitor_create_time: str,
+) -> bool:
+    """Return True only with positive evidence the visitor message is new vs CAL.
+
+    REST reconcile stores ``last_message_id`` as ``rest:{lastMsgTime}``, while
+    QuickCEP ``messages`` returns a native numeric/card id + ``createTime``.
+    Substring id matching alone false-positives (same customer mail, different
+    id formats) and wrongly re-arms ``reviewed`` / ``operator_replied`` rows.
+    """
+    cal_marker = (cal_last_msg_id or "").strip()
+    vid = (visitor_msg_id or "").strip()
+    vtime = (visitor_create_time or "").strip()
+
+    if not cal_marker:
+        return bool(vid or vtime)
+
+    # Native / SIO id already tracked (either direction for hybrid markers).
+    if vid and (vid in cal_marker or cal_marker in vid):
+        return False
+
+    rest_time = _rest_last_msg_time(cal_marker)
+    if rest_time:
+        # REST path: only re-arm when createTime is strictly newer than the
+        # recorded lastMsgTime. Missing createTime → cannot prove newer.
+        if not vtime:
+            return False
+        return vtime > rest_time
+
+    # Non-REST marker whose id did not match → treat as a new follow-up.
+    return bool(vid)
+
+
 def _rearm_check_session(sess: dict[str, Any]) -> bool:
     """Check if a CAL session has a newer visitor message in QuickCEP. Reset to pending if so.
 
@@ -987,23 +1036,14 @@ def _rearm_check_session(sess: dict[str, Any]) -> bool:
     visitor_msg_id = str(latest_visitor_msg.get("id") or "")
     visitor_create_time = str(latest_visitor_msg.get("createTime") or "")
 
-    # If this visitor message ID is already tracked in CAL, no new follow-up.
-    # Compare by createTime since CAL's last_message_id format may differ between SIO/REST paths.
-    cal_msg_marker = cal_last_msg_id
-    if cal_msg_marker and (visitor_msg_id in cal_msg_marker or cal_msg_marker in visitor_msg_id):
+    if not is_newer_visitor_followup(
+        cal_last_msg_id=cal_last_msg_id,
+        visitor_msg_id=visitor_msg_id,
+        visitor_create_time=visitor_create_time,
+    ):
         return False
 
-    # Also check the dedup table — if we already processed this visitor message, skip.
-    dedup_key = f"{_ENV}:{sid}:{visitor_msg_id}"
-    # We can't query dedup table directly (cal.py doesn't expose it), so we use
-    # the createTime comparison: if the visitor message is newer than the CAL
-    # last_message_id's implied time, it's a genuine follow-up.
-    # A simpler heuristic: check if last_message_id in CAL starts with "rest:" (REST-origin)
-    # or is a numeric ID (SIO-origin). If the visitor message createTime is newer than
-    # what CAL recorded, re-arm.
-
-    # Use the QuickCEP message ID as the new message_id for dedup.
-    # enqueue_session will handle the dedup check properly.
+    # enqueue_session will handle the dedup check properly on the next reconcile.
     log.info(
         "rearm: session %s has new visitor msg %s (createTime=%s), resetting to pending",
         sid, visitor_msg_id, visitor_create_time,
