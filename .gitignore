@@ -142,3 +142,11 @@ apps/desktop/demo/
 Resume_Lingzhi_Zhu_EN.*
 简历_*.docx
 简历_*.md
+
+# Local playground runtime logs / SQLite (never commit)
+**/output.log
+*.db
+*.db-shm
+*.db-wal
+*.db.bak*
+*.bak.*
