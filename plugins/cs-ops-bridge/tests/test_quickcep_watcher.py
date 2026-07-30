@@ -130,6 +130,53 @@ def test_is_newer_visitor_followup_native_id_match():
     ) is False
 
 
+def test_is_newer_visitor_followup_cal_iso8601_inbound_received_at():
+    """CAL ``created_at`` is ISO8601 from ``cal._now()``; parser must handle it.
+
+    Regression for the bug where ``_parse_utc_time_to_epoch`` returned ``None``
+    on real CAL timestamps (``2026-07-29T00:17:50.123456+00:00``), silently
+    disabling non-REST time-based re-arm in production. Existing tests used
+    space-separated SQLite ``datetime()`` shapes that masked the bug.
+    """
+    _reset_modules()
+    qw = _load("quickcep_watcher")
+    # Same instant as visitor UTC+8 08:17:45 → not strictly newer → no re-arm.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 08:17:45",
+        inbound_received_at="2026-07-29T00:17:45+00:00",
+    ) is False
+    # Visitor (UTC+8 09:00:00 = UTC 01:00:00) newer than inbound (UTC 00:17:50).
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 09:00:00",
+        inbound_received_at="2026-07-29T00:17:50.481234+00:00",
+    ) is True
+    # Trailing 'Z' suffix form.
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 09:00:00",
+        inbound_received_at="2026-07-29T00:17:50Z",
+    ) is True
+    # Unparseable baseline → fail closed (do not re-arm).
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 09:00:00",
+        inbound_received_at="not-a-date",
+    ) is False
+    # Legacy SQLite datetime() shape still parses (backward compat).
+    assert qw.is_newer_visitor_followup(
+        cal_last_msg_id="2560343188000000001",
+        visitor_msg_id="2560343188000000099",
+        visitor_create_time="2026-07-29 09:00:00",
+        inbound_received_at="2026-07-29 00:17:50",
+    ) is True
+
+
 def test_rest_reconcile_eligible_only_pending_or_failed(monkeypatch, tmp_path):
     _reset_modules()
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))

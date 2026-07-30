@@ -984,16 +984,29 @@ def _parse_quickcep_time_to_epoch(ts: str) -> Optional[float]:
 
 
 def _parse_utc_time_to_epoch(ts: str) -> Optional[float]:
-    """Parse a CAL ``created_at`` (UTC, ``YYYY-MM-DD HH:MM:SS``) to epoch."""
+    """Parse a CAL ``created_at`` (UTC) to epoch.
+
+    ``cal._now()`` writes ``datetime.now(timezone.utc).isoformat()``, e.g.
+    ``2026-07-30T01:26:07.705307+00:00``. Legacy rows may use SQLite
+    ``datetime()`` output (``YYYY-MM-DD HH:MM:SS``, no timezone). Both are
+    parsed to epoch seconds. Anything unparseable returns ``None`` so callers
+    fail closed (treat as "cannot prove newer").
+    """
     if not ts:
         return None
     try:
         from datetime import datetime, timezone
 
-        # CAL created_at may have fractional seconds or 'Z' — normalize.
-        clean = ts.rstrip("Z").split(".")[0]
-        dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S")
-        return dt.replace(tzinfo=timezone.utc).timestamp()
+        # fromisoformat accepts "T"/space separators, fractional seconds,
+        # and explicit offsets (Python 3.11+ also accepts trailing 'Z';
+        # normalize 'Z' for older interpreters).
+        iso = ts.strip()
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
     except (ValueError, TypeError):
         return None
 
@@ -1019,11 +1032,12 @@ def is_newer_visitor_followup(
     ``inbound_received`` event's ``created_at``). When either timestamp is
     missing, there is no positive evidence of a newer follow-up → do not re-arm.
 
-    **Timezone handling**: CAL ``created_at`` is UTC (SQLite ``datetime()``
-    output, e.g. ``2026-07-21 02:39:53``). QuickCEP ``createTime`` is in the
-    QuickCEP server's local time (UTC+8, e.g. ``2026-07-21 10:36:55``). Direct
-    string comparison would be wrong (10:36 > 02:39 even when they are the same
-    instant). Both timestamps are parsed to epoch seconds before comparing.
+    **Timezone handling**: CAL ``created_at`` is UTC via ``cal._now()``
+    (ISO 8601, e.g. ``2026-07-21T02:39:53.182044+00:00``). QuickCEP
+    ``createTime`` is in the QuickCEP server's local time (UTC+8, e.g.
+    ``2026-07-21 10:36:55``). Direct string comparison would be wrong
+    (10:36 > 02:39 even when they are the same instant). Both timestamps
+    are parsed to epoch seconds before comparing.
     """
     cal_marker = (cal_last_msg_id or "").strip()
     vid = (visitor_msg_id or "").strip()
