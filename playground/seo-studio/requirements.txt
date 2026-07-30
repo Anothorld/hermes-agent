@@ -11,3 +11,6 @@ itsdangerous>=2.1,<3
 # Markdown → HTML for WP export (GFM tables, lists, links). Without this,
 # pipe tables land in WordPress as raw "| col | col |" paragraphs.
 markdown>=3.5,<4
+# POVISON reviews (Editorial Picks) — read-only access to the magento2
+# review tables for real customer review quotes. Pinned per Hermes policy.
+pymysql>=1.1,<2

@@ -479,6 +479,13 @@ def _post_save_step3_inline_placements(data: dict) -> list[dict]:
     """
     if not isinstance(data, dict):
         return []
+    # Editorial Picks mode: products render as standalone H3 cards, not inline
+    # links in section prose. The Agent populates articleState.products directly
+    # (from povison-catalog recommend), so skip the prose-scanning / backfill
+    # logic that would otherwise strip or duplicate them. URL validation still
+    # runs via _validate_placement_urls (the other gate in the save chain).
+    if (data.get("placementStyle") or "inline") == "editorial":
+        return []
     warnings: list[dict] = []
     sections = data.get("sections") or []
     pool = data.get("_candidatePool") or {}
@@ -1020,6 +1027,46 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "re-derives products/links from prose on every step-3 save, so this run is a confirmation pass."
         ),
     }
+
+    # Detect Editorial Picks mode so the placements sub-step uses a different
+    # play (3 candidate products + real review quotes, not inline-link re-derive).
+    _current_state = _db.get_step_data(task_id, 3) or {}
+    _is_editorial = (_current_state.get("placementStyle") or "inline") == "editorial"
+    if step == "placements" and _is_editorial:
+        substep_guidance["placements"] = (
+            "EDITORIAL PICKS mode (articleState.placementStyle == 'editorial'). "
+            "Generate a standalone 'POVISON Picks' H2 with 3 H3 editorial review cards — "
+            "do NOT re-derive inline links from section prose (editorial cards carry their "
+            "own PDP-linked images).\n"
+            "1) Call `python3 scripts/povison-catalog.py recommend --topic '<JSON>' "
+            "--sections <file> --limit 3` (or POST http://127.0.0.1:8766/api/povison-products/recommend "
+            "with {topic, sections, limit:3}). Pick EXACTLY 3 candidate products. Real PDP URLs "
+            "contain `.html` and `?variant=`. NEVER fabricate a URL.\n"
+            "2) For each product, resolve its SPU id by calling "
+            "`python3 scripts/povison-reviews.py resolve --variant <variant_id>` "
+            "(or POST http://127.0.0.1:8766/api/povison-reviews/resolve-spu with {variant}). "
+            "Then fetch 1 real APPROVED review by calling "
+            "`python3 scripts/povison-reviews.py fetch --spu <spu_id> --limit 3 --min-rating 4` "
+            "(or GET http://127.0.0.1:8766/api/povison-reviews/by-spu?spu=<spu_id>&limit=3&min_rating=4). "
+            "Pick the most informative review and write it to product.reviewQuote = "
+            "{reviewer, date, quote, rating}. If no reviews exist, set reviewQuote = null "
+            "(do NOT fabricate a quote).\n"
+            "3) For each product write product.blurb (90-150 words, 1-3 paragraphs): "
+            "paragraph 1 MUST cover dimensions/specs + core mechanism (recline/wall-hug/dual-motor) "
+            "+ material/certification (OEKO-TEX/FibreGuard) + available colors. Paragraph 2 (optional) "
+            "a concrete usage scene with 1-2 first-person touches. Paragraph 3 (optional) the review "
+            "quote woven in naturally (e.g. 'Megan (October 17, 2025) highlights how stylish it looks').\n"
+            "4) Populate product.specs = {dimensions, mechanism, material, colors, tagline?} from "
+            "the Detail API (`povison-catalog.py lookup --url <pdp>`). product.warranty = a short "
+            "policy string when the PDP states one (30-day returns / 2-year warranty / certified "
+            "materials), else ''. product.image from the Detail API. product.sectionId = 'editorial-picks'.\n"
+            "5) Set articleState.editorialTitle (default 'POVISON Picks — {topic.title}') — the H2 "
+            "heading for the editorial section, operator-editable. Set articleState.editorialIntro = "
+            "a 1-sentence overview of why these 3 were picked.\n"
+            "6) Set articleState.links = [] (editorial mode does not place internal links in this "
+            "section). Set articleState.phaseDone.placements = true once all 3 cards are populated."
+        )
+
     step_guidance = {
         1: "Discover / enrich keywords. When done call seo_save_step_data(task_id, step_num=1, data=<keyword array>).",
         2: (
@@ -1386,6 +1433,66 @@ async def povison_blog_verify(body: dict | None = None) -> dict:
     if not url:
         return {"ok": False, "verified": False, "error": "url is required"}
     return _blog.verify_url(url)
+
+
+# ---- POVISON reviews (magento2 DB; read-only, for Editorial Picks) --------
+
+@app.get("/api/povison-reviews/health")
+async def povison_reviews_health() -> dict:
+    """Report reviews DB (magento2) reachability. Never raises."""
+    try:
+        import povison_reviews as _rev
+        return _rev.health()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/povison-reviews/by-spu")
+async def povison_reviews_by_spu(spu: str, limit: int = 5, min_rating: int = 0) -> dict:
+    """Fetch APPROVED reviews for an SPU (for Editorial Picks review quotes).
+
+    Query params: ``spu`` (required), ``limit`` (1-20, default 5),
+    ``min_rating`` (0-5, default 0). Returns ``{ok, spu, reviews: [...], count}``.
+    Reviews come from the magento2 DB — real customer content only, never AI.
+    """
+    try:
+        import povison_reviews as _rev
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_reviews module missing: {e}") from e
+    if not spu:
+        raise HTTPException(status_code=400, detail="spu is required")
+    return _rev.fetch_reviews(spu, limit=limit, min_rating=min_rating)
+
+
+@app.get("/api/povison-reviews/summary")
+async def povison_reviews_summary(spu: str) -> dict:
+    """Fetch the pre-aggregated review summary for an SPU.
+
+    Returns ``{ok, spu, reviewsCount, ratingSummary, rating(星)}``.
+    """
+    try:
+        import povison_reviews as _rev
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_reviews module missing: {e}") from e
+    if not spu:
+        raise HTTPException(status_code=400, detail="spu is required")
+    return _rev.summary(spu)
+
+
+@app.post("/api/povison-reviews/resolve-spu")
+async def povison_reviews_resolve_spu(body: dict | None = None) -> dict:
+    """Resolve an SPU id from a variant id or PDP URL.
+
+    Body: ``{variant?: "...", url?: "https://www.povison.com/..."}``.
+    Returns ``{ok, spu}`` — spu is null when not found.
+    """
+    try:
+        import povison_reviews as _rev
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_reviews module missing: {e}") from e
+    b = body or {}
+    spu = _rev.resolve_spu(variant=b.get("variant"), product_url=b.get("url"))
+    return {"ok": bool(spu), "spu": spu}
 
 
 # ---- Placement URL liveness guard (HTTP reachability) ----
@@ -2429,6 +2536,110 @@ def _product_images_html(state: dict, sec: dict) -> str:
     return "".join(out)
 
 
+def _editorial_card_html(p: dict, idx: int) -> str:
+    """Render one Editorial Picks product card (H3 title → linked image → prose).
+
+    Structure per the POVISON blog reference:
+    - H3 heading: product name + " — " + best-for tagline (plain text, NO link)
+    - Large product image wrapped in <a href=PDP> (the only link to the PDP)
+    - Prose (90-150 words, 1-3 paragraphs): specs/mechanism paragraph required,
+      optional scene/review/value paragraphs. Markdown is converted to HTML.
+    """
+    name = (p.get("name") or "").strip()
+    url = (p.get("url") or "").strip()
+    image = (p.get("image") or "").strip()
+    blurb = (p.get("blurb") or "").strip()
+    heading_id = f"editorial-pick-{idx}"
+
+    # H3 title: plain text, no link. Best-for tagline comes from specs.tagline if present.
+    specs = p.get("specs") if isinstance(p.get("specs"), dict) else None
+    tagline = (specs or {}).get("tagline") or ""
+    title_text = name if not tagline else f"{name} — {tagline}"
+    card = f'<h3 id="{_esc(heading_id)}" style="font-size:1.4em;font-weight:700;margin:1.8em 0 0.6em;line-height:1.3;color:#1a1a1a;">{_esc(title_text)}</h3>'
+
+    # Large product image wrapped in <a href=PDP>. Image is the sole PDP link.
+    if image:
+        card += _centered_image_html(
+            url=image,
+            alt=name,
+            caption="",
+            credit="",
+            max_width=800,
+            link_url=url,
+        )
+
+    # Prose: convert markdown blurb to HTML (handles paragraphs, lists, links).
+    if blurb:
+        chunks = _section_html(blurb)
+        card += _chunks_to_html(chunks)
+
+    # Optional review quote callout (rendered as a blockquote for visual weight).
+    rq = p.get("reviewQuote")
+    if isinstance(rq, dict) and (rq.get("quote") or "").strip():
+        reviewer = (rq.get("reviewer") or "").strip()
+        rdate = (rq.get("date") or "").strip()
+        rating = rq.get("rating")
+        quote = (rq.get("quote") or "").strip()
+        cite_parts = []
+        if reviewer:
+            cite_parts.append(_esc(reviewer))
+        if rdate:
+            cite_parts.append(_esc(rdate))
+        cite = ", ".join(cite_parts)
+        rating_stars = ""
+        if rating:
+            try:
+                stars = int(rating)
+                rating_stars = " " + "★" * max(1, min(5, stars))
+            except (TypeError, ValueError):
+                pass
+        card += (
+            '<blockquote style="border-left:3px solid #8b6f47;margin:20px 0;padding:8px 0 8px 18px;'
+            "color:#555;font-style:italic;font-size:1.02em;line-height:1.65;\">"
+            f'<p style="margin:0;">{_esc(quote)}{rating_stars}</p>'
+            + (f'<cite style="display:block;margin-top:6px;font-size:0.9em;color:#888;">— {cite}</cite>' if cite else "")
+            + "</blockquote>"
+        )
+
+    # Optional warranty / policy line.
+    warranty = (p.get("warranty") or "").strip()
+    if warranty:
+        card += (
+            '<p style="font-size:0.92em;color:#777;margin-top:12px;">'
+            f"{_esc(warranty)}</p>"
+        )
+
+    return f'<div class="editorial-pick" style="margin:0 0 36px;">{card}</div>'
+
+
+def _editorial_picks_html(state: dict) -> str:
+    """Render the standalone "POVISON Picks" H2 section with 3 H3 editorial cards.
+
+    Only renders when ``placementStyle == "editorial"`` AND there are exactly 3
+    accepted products. Otherwise returns "" and the caller falls back to the
+    inline-blurb path. The H2 title is operator-editable via
+    ``articleState.editorialTitle``.
+    """
+    if (state.get("placementStyle") or "inline") != "editorial":
+        return ""
+    products = [
+        p
+        for p in (state.get("products") or [])
+        if isinstance(p, dict) and p.get("status") == "accepted"
+    ]
+    if len(products) != 3:
+        return ""  # degrade to inline path; caller handles it
+
+    title = (state.get("editorialTitle") or "").strip() or "POVISON Picks"
+    intro = (state.get("editorialIntro") or "").strip()
+    html = f'<h2 id="povison-picks">{_esc(title)}</h2>'
+    if intro:
+        html += f'<p class="editorial-intro" style="font-size:1.05em;line-height:1.75;color:#444;margin:0 0 24px;">{_esc(intro)}</p>'
+    for i, p in enumerate(products, 1):
+        html += _editorial_card_html(p, i)
+    return html
+
+
 def _toc_html(state: dict) -> str:
     """Build a TOC block styled like Rank Math / published POVISON posts.
 
@@ -2552,10 +2763,18 @@ def _article_body(state: dict) -> str:
 
     Includes TOC (after intro), WP-native centered figures, section images,
     linked product figures, and FAQ (Q&A) microdata so Rank Math can detect FAQ schema.
+
+    When ``placementStyle == "editorial"`` and there are exactly 3 accepted
+    products, a standalone "POVISON Picks" H2 with 3 H3 editorial cards is
+    inserted before the Conclusion; per-section product images are skipped
+    because the editorial cards carry their own images.
     """
     body = ""
     toc = _toc_html(state)
     toc_inserted = False
+    is_editorial = (state.get("placementStyle") or "inline") == "editorial"
+    editorial_html = _editorial_picks_html(state) if is_editorial else ""
+    editorial_inserted = not bool(editorial_html)  # skip if nothing to insert
     for sec in state.get("sections") or []:
         # Strip legacy/orphan placement residue, weave accepted internal links
         # inline into body prose (first occurrence), append accepted product
@@ -2564,7 +2783,9 @@ def _article_body(state: dict) -> str:
         sec_content = _prepare_section_content(state, sec)
         chunks = _section_html(sec_content)
         inline_imgs = _inline_images_html(sec)
-        product_imgs = _product_images_html(state, sec)
+        # Editorial mode: editorial cards own the product images, so suppress
+        # per-section product figures to avoid duplicates.
+        product_imgs = "" if is_editorial else _product_images_html(state, sec)
         if sec.get("type") == "Intro":
             intro_html = _chunks_to_html(chunks)
             if not re.search(r"<h2[^>]*>\s*Introduction\s*</h2>", intro_html, re.I):
@@ -2588,6 +2809,11 @@ def _article_body(state: dict) -> str:
                     )
             body += intro_html + inline_imgs
         elif sec.get("type") == "Conclusion":
+            # Insert editorial picks before Conclusion so the section reads as
+            # the culmination of the body, right before the wrap-up.
+            if not editorial_inserted and editorial_html:
+                body += editorial_html
+                editorial_inserted = True
             body += '<div class="conclusion"><h2 id="conclusion">Conclusion</h2>'
             body += _chunks_to_html(chunks)
             body += "</div>"
@@ -2603,6 +2829,10 @@ def _article_body(state: dict) -> str:
             # general stock illustration so the two don't stack and separate the
             # product blurb from its image. Product image wins.
             body += product_imgs if product_imgs else inline_imgs
+    # Fallback: no Conclusion section exists — append editorial picks at the end.
+    if not editorial_inserted and editorial_html:
+        body += editorial_html
+        editorial_inserted = True
     faq = state.get("faq") or []
     if faq:
         body += f'<h2 id="q-a">{_esc("Q&A")}</h2>' + _faq_block_html(faq)
