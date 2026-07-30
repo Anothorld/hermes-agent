@@ -428,3 +428,50 @@ def test_join_disabled_by_env(monkeypatch, tmp_path):
 
     assert run_id == "run-3"
     mock_join.assert_not_called()
+
+
+def test_dedup_skipped_writes_event_and_keeps_processing(monkeypatch, tmp_path):
+    """When gateway launch is dedup-skipped, write a launch_dedup_skipped CAL event.
+
+    Status stays `processing` — processing_stale (2h) is the proven backstop if
+    the in-flight launch also crashes without handoff. Rolling back to `pending`
+    would be unsafe: cs_message_dedup blocks re-enqueue of the same message_id,
+    so the session would be stuck in `pending` with no recovery path.
+    """
+    _reset_modules()
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
+    cal = _load("cal")
+    qw = _load("quickcep_watcher")
+    _load("quickcep_join")
+
+    class FakeGW:
+        def start_process_run(self, **kw):
+            return MagicMock(run_id=None, dedup_skipped=True, transient=False)
+
+    with patch.object(qw, "join_chat_session", side_effect=lambda *a, **kw: _ok_join_result(a[0] if a else kw.get("session_id", ""))), \
+         patch.object(qw, "GatewayClient") as mock_gw_cls:
+        mock_gw_cls.from_env.return_value = FakeGW()
+        run_id = qw._launch_for_message(
+            {
+                "chatSubSessionId": "s-dedup",
+                "chatSessionId": "chat-1",
+                "id": "m1",
+                "email": "visitor@example.com",
+                "channel": "email",
+            }
+        )
+
+    assert run_id is None
+
+    # Status must stay processing (not rolled back to pending) — processing_stale
+    # is the backstop if the in-flight launch crashes.
+    sess = cal.get_session(quickcep_session_id="s-dedup", env="LIVE")
+    assert sess["status"] == "processing", f"expected processing, got {sess['status']}"
+
+    # launch_dedup_skipped event must be in CAL for auditability.
+    ctx = cal.get_dispatch_context(quickcep_session_id="s-dedup", env="LIVE") or {}
+    types = [e["event_type"] for e in ctx.get("recent_events", [])]
+    assert "launch_dedup_skipped" in types, f"launch_dedup_skipped event missing; got {types}"
+    # join still happened (fail-soft, before gateway).
+    assert "quickcep_join_chat" in types
