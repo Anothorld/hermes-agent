@@ -46,18 +46,25 @@ def _draft_owned_by_mailbox(
     env: str,
     mailbox_user_id: Optional[int],
 ) -> bool:
-    """True when this draft should be reconciled against the given mailbox."""
+    """True when this draft should be reconciled against the given mailbox.
+
+    Unbound campaigns (no mailbox binding yet) are eligible for **first-claim**:
+    any operator mailbox that already sees the draft thread in SENT may mark
+    sent and bind. Previously unbound drafts only matched ``user_id==0``, which
+    Console multi-mailbox setups never use — cards stayed 「Draft 待发送」forever.
+    """
     if mailbox_user_id is None:
         return True
     if not campaign_id:
-        return mailbox_user_id == 0
+        # No campaign-scoped binding; SENT membership already filtered the row.
+        return True
     binding = mailbox_resolver.read_binding(
         identity_id=identity_id,
         campaign_id=str(campaign_id),
         env=env,
     )
     if binding is None:
-        return mailbox_user_id == 0
+        return True
     return binding.user_id == mailbox_user_id
 
 
@@ -214,6 +221,19 @@ def _process_sent_reply_row(
     )
     sent_message_id = str((edit_payload or {}).get("sent_message_id") or "").strip()
     sent_body = str((edit_payload or {}).get("sent_body") or "").strip()
+    # When edit-learning is skipped (bounce in thread / missing agent body), still
+    # try to capture a non-bounce sent body for outbound delivery facts.
+    if write_outbound_sent and not sent_body:
+        try:
+            raw_body, raw_mid = gmail.resolve_sent_body(
+                thread_id=str(thread_id),
+                preferred_message_id=str(gmail_draft.get("message_id") or "") or None,
+            )
+            if raw_body and not is_bounce_body(raw_body):
+                sent_body = str(raw_body).strip()
+                sent_message_id = str(raw_mid or "").strip()
+        except GmailUnavailable as exc:
+            log.warning("resolve_sent_body (delivery) failed for thread %s: %s", thread_id, exc)
 
     with cal._connect() as conn:  # type: ignore[attr-defined]
         edit_already_captured = bool(
@@ -225,21 +245,24 @@ def _process_sent_reply_row(
 
     event_id: Optional[int] = None
     edit_event_written = False
-    if write_outbound_sent and edit_payload is None:
-        return {
-            "skipped": True,
-            "reason": "no_valid_sent_body",
-            "thread_id": thread_id,
-        }
+    learning_skip = None if edit_payload else "no_agent_or_sent_body_or_bounce"
+    # Delivery marking and edit-learning are intentionally decoupled: once the
+    # thread is in SENT (and mailbox ownership passed), always write
+    # offer.outreach_sent* so the Console leaves 「Draft 待发送」. Edit-learning
+    # remains best-effort when a valid non-bounce payload can be built.
     if write_outbound_sent:
         outbound_payload: dict[str, Any] = {
             "thread_id": thread_id,
             "gmail_draft": gmail_draft,
             "edit_learning": edit_payload,
         }
-        if sent_body:
-            outbound_payload["sent_body"] = sent_body
-        if sent_message_id:
+        if learning_skip:
+            outbound_payload["edit_learning_skipped"] = learning_skip
+        # Never persist bounce DSN text as the operator's outbound terms.
+        safe_sent_body = sent_body if sent_body and not is_bounce_body(sent_body) else ""
+        if safe_sent_body:
+            outbound_payload["sent_body"] = safe_sent_body
+        if sent_message_id and safe_sent_body:
             outbound_payload["sent_message_id"] = sent_message_id
         event_id = cal.write_event(
             identity_id=identity_id,
@@ -256,8 +279,8 @@ def _process_sent_reply_row(
             "offer.outreach_sent_at": now,
             "offer.gmail_sent_thread_id": thread_id,
         }
-        if sent_body:
-            offer_facts["offer.last_outbound_terms_proposed"] = sent_body
+        if safe_sent_body:
+            offer_facts["offer.last_outbound_terms_proposed"] = safe_sent_body
         cal.write_facts(
             identity_id=identity_id,
             campaign_id=campaign_id,
@@ -335,7 +358,7 @@ def _process_sent_reply_row(
         "edit_learning_written": edit_event_written,
         "was_edited": bool(edit_payload and edit_payload.get("was_edited")),
         "edit_distance": (edit_payload or {}).get("edit_distance"),
-        "skip_reason": None if edit_payload else "no_agent_or_sent_body",
+        "skip_reason": learning_skip,
     }
 
 
@@ -402,12 +425,25 @@ def _run_reconcile_sent_unlocked(
             continue
         if outcome.get("edit_learning_written"):
             edit_learning_count += 1
+        learning_skip = outcome.get("skip_reason")
+        if learning_skip:
+            key = f"learning_skip:{learning_skip}"
+            skip_reasons[key] = skip_reasons.get(key, 0) + 1
         reconciled.append(outcome)
+    if skip_reasons:
+        log.info(
+            "sent-reconcile env=%s sent_threads=%s reconciled=%s skip_reasons=%s",
+            env,
+            len(sent_thread_ids),
+            len(reconciled),
+            skip_reasons,
+        )
     return {
         "env": env,
         "sent_threads_seen": len(sent_thread_ids),
         "reconciled_count": len(reconciled),
         "edit_learning_count": edit_learning_count,
+        "skip_reasons": skip_reasons,
         "reconciled": reconciled,
     }
 
@@ -439,6 +475,7 @@ def _run_reconcile_all_mailboxes_unlocked(
     per_mailbox: list[dict[str, Any]] = []
     total_reconciled = 0
     total_edit_learning = 0
+    merged_skips: dict[str, int] = {}
     for mb in mailboxes:
         # Already under _gmail_reconcile_lock(); do not re-enter via run_reconcile_sent().
         summary = _run_reconcile_sent_unlocked(
@@ -453,11 +490,14 @@ def _run_reconcile_all_mailboxes_unlocked(
         per_mailbox.append(summary)
         total_reconciled += int(summary.get("reconciled_count") or 0)
         total_edit_learning += int(summary.get("edit_learning_count") or 0)
+        for reason, count in (summary.get("skip_reasons") or {}).items():
+            merged_skips[str(reason)] = merged_skips.get(str(reason), 0) + int(count)
     return {
         "env": env,
         "mailbox_count": len(per_mailbox),
         "reconciled_count": total_reconciled,
         "edit_learning_count": total_edit_learning,
+        "skip_reasons": merged_skips,
         "mailboxes": per_mailbox,
     }
 

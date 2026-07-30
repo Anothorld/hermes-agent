@@ -207,7 +207,11 @@ def test_sent_reconcile_dedupes_edit_learning_by_message_id(
 
 
 def test_sent_reconcile_skips_bounce_body(cal_db, bridge_pkg, monkeypatch):
-    """DSN / mailer-daemon bodies must not mark outreach_sent or write edit-learning."""
+    """DSN body must not write edit-learning or last_outbound terms; still mark sent.
+
+    Thread is already in SENT (operator clicked Send). Delivery bounce text must
+    not block ``offer.outreach_sent`` or the kanban stays on 「Draft 待发送」.
+    """
     cal_mod = cal_db
     gr = bridge_pkg.gmail_reconcile
     env = "LIVE"
@@ -243,6 +247,7 @@ def test_sent_reconcile_skips_bounce_body(cal_db, bridge_pkg, monkeypatch):
         sent_body="** Address not found **\n\nYour message wasn't delivered to kol@x.com",
         sent_message_id="msg-bounce-dsn-1",
     )
+    mock_client.list_sent_thread_ids.return_value = ["thread-bounce-1"]
     monkeypatch.setattr(
         bridge_pkg.gmail_console,
         "list_operator_gmail_clients",
@@ -252,17 +257,18 @@ def test_sent_reconcile_skips_bounce_body(cal_db, bridge_pkg, monkeypatch):
 
     out = gr.run_reconcile_sent(env=env, client=mock_client)
     assert out["edit_learning_count"] == 0
-    assert out["reconciled_count"] == 0
+    assert out["reconciled_count"] == 1
 
     facts = cal_mod.latest_facts_for(identity_id=iid, campaign_id="C-BNC1", env=env)
-    assert not facts.get("offer.outreach_sent")
-    assert not facts.get("offer.outreach_sent_at")
+    assert facts.get("offer.outreach_sent") is True
+    assert facts.get("offer.outreach_sent_at")
+    assert not facts.get("offer.last_outbound_terms_proposed")
 
 
 def test_sent_reconcile_skips_learning_when_thread_has_bounce(
     cal_db, bridge_pkg, monkeypatch,
 ):
-    """Delivery failure in thread must not write edit-learning even if sent body is valid."""
+    """Delivery failure in thread skips edit-learning but still marks outreach_sent."""
     cal_mod = cal_db
     gr = bridge_pkg.gmail_reconcile
     env = "LIVE"
@@ -298,6 +304,7 @@ def test_sent_reconcile_skips_learning_when_thread_has_bounce(
         sent_body="Hi KOL, operator final body after light edits.",
         sent_message_id="msg-real-sent-tbnc-1",
     )
+    mock_client.list_sent_thread_ids.return_value = ["thread-thread-bnc-1"]
     mock_client.get_thread = lambda _tid: [
         {
             "id": "msg-real-sent-tbnc-1",
@@ -321,7 +328,120 @@ def test_sent_reconcile_skips_learning_when_thread_has_bounce(
 
     out = gr.run_reconcile_sent(env=env, client=mock_client)
     assert out["edit_learning_count"] == 0
-    assert out["reconciled_count"] == 0
+    assert out["reconciled_count"] == 1
+    facts = cal_mod.latest_facts_for(identity_id=iid, campaign_id="C-TBNC1", env=env)
+    assert facts.get("offer.outreach_sent") is True
+    assert facts.get("offer.outreach_sent_at")
+    assert "operator final body" in str(facts.get("offer.last_outbound_terms_proposed") or "")
+
+
+def test_sent_reconcile_marks_sent_when_body_unavailable(
+    cal_db, bridge_pkg, monkeypatch,
+):
+    """SENT membership alone must flip outreach_sent even if body extract fails."""
+    cal_mod = cal_db
+    gr = bridge_pkg.gmail_reconcile
+    env = "LIVE"
+    iid = cal_mod.upsert_identity(primary_handle="reconcile-nobody@test", env=env)
+    cal_mod.write_facts(
+        identity_id=iid,
+        campaign_id="C-NB1",
+        namespace="approval",
+        facts={
+            "approval.reply_draft": {
+                "decision": "approved",
+                "draft": {
+                    "subject": "Test",
+                    "to": "kol@example.com",
+                    "body": "Agent draft paragraph for learning.",
+                    "thread_id": "thread-nobody-1",
+                },
+                "primary_goal": "outreach",
+                "primary_lane": "commerce",
+                "child_skill": "kol-reply-synthesizer",
+                "gmail_draft": {
+                    "thread_id": "thread-nobody-1",
+                    "message_id": "msg-draft-nb-1",
+                    "draft_id": "d1",
+                },
+            },
+        },
+        source="test",
+        env=env,
+    )
+
+    mock_client = _mock_reconcile_gmail(sent_body="", sent_message_id="")
+    mock_client.list_sent_thread_ids.return_value = ["thread-nobody-1"]
+    monkeypatch.setattr(
+        bridge_pkg.gmail_console,
+        "list_operator_gmail_clients",
+        lambda: [],
+    )
+    _patch_gmail_lock(monkeypatch, bridge_pkg)
+
+    out = gr.run_reconcile_sent(env=env, client=mock_client)
+    assert out["reconciled_count"] == 1
+    assert out["edit_learning_count"] == 0
+    assert out.get("skip_reasons", {}).get(
+        "learning_skip:no_agent_or_sent_body_or_bounce", 0,
+    ) == 1
+    facts = cal_mod.latest_facts_for(identity_id=iid, campaign_id="C-NB1", env=env)
+    assert facts.get("offer.outreach_sent") is True
+    assert facts.get("offer.outreach_sent_at")
+
+
+def test_sent_reconcile_first_claim_unbound_mailbox(
+    cal_db, bridge_pkg, monkeypatch,
+):
+    """Unbound campaign + Console operator uid>0 may claim on SENT hit."""
+    cal_mod = cal_db
+    gr = bridge_pkg.gmail_reconcile
+    mr = bridge_pkg.mailbox_resolver
+    env = "LIVE"
+    iid = cal_mod.upsert_identity(primary_handle="reconcile-claim@test", env=env)
+    cal_mod.write_facts(
+        identity_id=iid,
+        campaign_id="C-CL1",
+        namespace="approval",
+        facts={
+            "approval.reply_draft": {
+                "decision": "approved",
+                "draft": {
+                    "subject": "Test",
+                    "to": "kol@example.com",
+                    "body": "Agent draft paragraph for learning.",
+                    "thread_id": "thread-claim-1",
+                },
+                "primary_goal": "outreach",
+                "primary_lane": "commerce",
+                "child_skill": "kol-reply-synthesizer",
+                "gmail_draft": {
+                    "thread_id": "thread-claim-1",
+                    "message_id": "msg-draft-cl-1",
+                    "draft_id": "d1",
+                },
+            },
+        },
+        source="test",
+        env=env,
+    )
+
+    mock_client = _mock_reconcile_gmail(
+        sent_body="Operator final body with meaningful edits.",
+        sent_message_id="msg-sent-claim-1",
+    )
+    mock_client.list_sent_thread_ids.return_value = ["thread-claim-1"]
+    _patch_gmail_lock(monkeypatch, bridge_pkg)
+
+    out = gr.run_reconcile_sent(
+        env=env, client=mock_client, mailbox_user_id=42,
+    )
+    assert out["reconciled_count"] == 1
+    facts = cal_mod.latest_facts_for(identity_id=iid, campaign_id="C-CL1", env=env)
+    assert facts.get("offer.outreach_sent") is True
+    binding = mr.read_binding(identity_id=iid, campaign_id="C-CL1", env=env)
+    assert binding is not None
+    assert binding.user_id == 42
 
 
 def test_outreach_sent_false_blocked_after_confirmed_send(cal_db):

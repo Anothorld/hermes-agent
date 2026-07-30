@@ -15,7 +15,7 @@ Browser (Studio UI)  ──HTTP──►  Bridge (FastAPI :8766)  ──subproce
 | `start.sh` | Starts bridge + gateway, manages ports/keys, opens browser |
 | `server.py` | Single-file FastAPI bridge: serves UI, wraps scripts, delegates to gateway |
 | `ui/index.html` | Studio UI (also mirrored at `~/povison-seo-studio.html`) |
-| `requirements.txt` | `fastapi`, `uvicorn`, `httpx`, `pymysql` (reviews DB) |
+| `requirements.txt` | `fastapi`, `uvicorn`, `httpx` |
 | `.venv/` | Local venv (created by `./start.sh install`) |
 
 ## Quick start
@@ -67,10 +67,6 @@ Other modes: `./start.sh bridge` (UI only) · `./start.sh gateway` (agent only) 
 | `POST /api/povison-blog/search` | Body `{keyword, limit?}` → ranked blog articles `{url, slug, title_guess, category, score, reasons}` |
 | `POST /api/povison-blog/recommend-links` | Body `{topic: {primary_keyword, secondary_keywords, category_keywords}, sections, existing_urls?, limit?}` → `links[]` ready for `articleState.links` (all URLs real povison.com/blog/ articles from the sitemap) |
 | `POST /api/povison-blog/verify` | Body `{url}` → `{ok, verified, url, article?}` — is this a real povison.com/blog/ article? |
-| `GET /api/povison-reviews/health` | Reviews DB (magento2) reachability (no secrets; pymysql must be installed) |
-| `GET /api/povison-reviews/by-spu` | Query `spu` (required), `limit?` (1-20, default 5), `min_rating?` (0-5) → `{ok, spu, reviews: [{reviewId, nickname, date, title, detail, rating, helpfulCount, sourceType}], count}`. Real APPROVED reviews only (`status_id=1`). For Editorial Picks review quotes. |
-| `GET /api/povison-reviews/summary` | Query `spu` → `{ok, spu, reviewsCount, ratingSummary, rating}` (pre-aggregated from `review_entity_summary`). |
-| `POST /api/povison-reviews/resolve-spu` | Body `{variant?, url?}` → `{ok, spu}` — resolve an SPU id from a variant id or PDP URL. |
 | `GET /api/povison-placements/health` | Placement-guard reachability (probes one povison URL) |
 | `POST /api/povison-placements/verify-urls` | Body `{urls: ["..."], workers?}` → parallel HTTP liveness check (HEAD→GET, 10s timeout, povison host whitelist). Returns `{ok, checked_at, total, dead_count, results: [{url, live, status_code, final_url, error}]}` |
 | `POST /api/tasks/{task_id}/steps/3/verify-placements` | Verify all product + link URLs in the task's step-3 articleState are live; writes `articleState.placementUrlCheck` and forces `placementsConfirmed=false` if any dead |
@@ -444,55 +440,6 @@ python3 scripts/povison-blog.py recommend-links \
 ```
 
 The sitemap is cached on disk (`.cache/blog_sitemap.xml`, TTL ~6h); pass `--refresh` to `search` to force-refresh. Same operations over HTTP via `/api/povison-blog/*`.
-
-### POVISON reviews CLI (Editorial Picks · agent tool)
-
-`scripts/povison-reviews.py` fetches real APPROVED customer reviews from the
-magento2 database for the Editorial Picks placement style. Reviews come from
-the 7-table Magento Magenest PhotoReview schema (`status_id=1` = APPROVED;
-`ratingSum` is 0-100, /20 = 1-5 stars). Only SELECT queries — no writes.
-Credentials (`SEO_STUDIO_REVIEWS_MYSQL_*`) live in the profile `.env`.
-
-```bash
-# by SPU → top APPROVED reviews (nickname/date/rating/detail)
-python3 scripts/povison-reviews.py fetch --spu 1234 --limit 5 --min-rating 4
-
-# by SPU → pre-aggregated reviewsCount + ratingSummary
-python3 scripts/povison-reviews.py summary --spu 1234
-
-# variant id or PDP URL → SPU id
-python3 scripts/povison-reviews.py resolve --variant 5678
-python3 scripts/povison-reviews.py resolve --url "https://www.povison.com/sofa.html?variant=5678"
-```
-
-Set `SEO_STUDIO_DIR` if running from elsewhere. Same operations over HTTP via
-`/api/povison-reviews/*`. **Never** fabricate review quotes — if no reviews
-exist for an SPU, omit the review-quote paragraph in the editorial card.
-
-### Editorial Picks placement style (placementStyle=editorial)
-
-When `articleState.placementStyle == 'editorial'`, products render as a
-standalone "POVISON Picks" H2 with 3 H3 editorial review cards (instead of
-the default inline-blurb style). Key differences:
-
-- **3 products** (fixed, not 1-2) form a dedicated H2 section inserted before
-  the Conclusion.
-- **H3 titles are plain text** (no link); the PDP link lives on the **image**
-  only (the whole image is wrapped in `<a href=PDP>`).
-- **90-150 word blurb per card** (1-3 paragraphs): specs/mechanism paragraph
-  is required; scene/review/value paragraphs are optional.
-- **Real review quote** from the magento2 DB (`povison-reviews.py fetch`),
-  rendered as a blockquote. Omit when no reviews exist — never fabricate.
-- **No internal links** in this section (editorial cards own the visual).
-- The H2 title (`articleState.editorialTitle`) is operator-editable.
-- When fewer than 3 products are accepted, `_editorial_picks_html` returns
-  empty and the assembly falls back to the inline-blurb path (no forced
-  padding).
-
-The UI has a **植入样式** segmented control (inline blurb ↔ editorial) at the
-top of the placements sub-zone. Switching it invalidates placements so the
-prose is reassembled. Editorial fields (reviewer/date/quote, warranty) appear
-on each product card only in editorial mode.
 
 ## Sync with standalone UI
 

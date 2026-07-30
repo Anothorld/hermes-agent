@@ -1204,10 +1204,11 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
           <div class="gen-phase-pills" id="genPhasePills">
             <button class="gen-phase-pill active" data-phase="serp" onclick="setGenPhase('serp')"><span class="pill-num">1</span>SERP 洞察（可选）</button>
             <button class="gen-phase-pill" data-phase="outline" onclick="setGenPhase('outline')"><span class="pill-num">2</span>大纲</button>
-            <button class="gen-phase-pill" data-phase="sections" onclick="setGenPhase('sections')"><span class="pill-num">3</span>正文与植入</button>
-            <button class="gen-phase-pill" data-phase="faq" onclick="setGenPhase('faq')"><span class="pill-num">4</span>FAQ</button>
-            <button class="gen-phase-pill" data-phase="meta" onclick="setGenPhase('meta')"><span class="pill-num">5</span>SEO 元信息</button>
-            <button class="gen-phase-pill" data-phase="preview" onclick="setGenPhase('preview')"><span class="pill-num">6</span>预览发布</button>
+            <button class="gen-phase-pill" data-phase="sections" onclick="setGenPhase('sections')"><span class="pill-num">3</span>正文板块</button>
+            <button class="gen-phase-pill" data-phase="placements" onclick="setGenPhase('placements')"><span class="pill-num">4</span>产品与内链</button>
+            <button class="gen-phase-pill" data-phase="faq" onclick="setGenPhase('faq')"><span class="pill-num">5</span>FAQ</button>
+            <button class="gen-phase-pill" data-phase="meta" onclick="setGenPhase('meta')"><span class="pill-num">6</span>SEO 元信息</button>
+            <button class="gen-phase-pill" data-phase="preview" onclick="setGenPhase('preview')"><span class="pill-num">7</span>预览发布</button>
           </div>
 
           <!-- Phase: SERP -->
@@ -1257,7 +1258,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
             </div>
           </div>
 
-          <!-- Phase: Sections + Placements (merged) -->
+          <!-- Phase: Sections -->
           <div class="wb-panel" id="phase-sections">
             <div class="wb-card" style="margin-bottom:14px;">
               <div class="wb-card-header">
@@ -1265,12 +1266,13 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <span class="wb-status idle" id="sectionsStatus">待生成</span>
               </div>
               <div class="wb-card-body">
-                <p class="wb-hint">按 Intro → 各 H2 → Conclusion 逐块生成。每块可编辑、可单独重写；全部就绪后进入下方产品植入与内链审核。</p>
+                <p class="wb-hint">按 Intro → 各 H2 → Conclusion 逐块生成。每块可编辑、可单独重写；全部就绪后进入产品植入与内链审核。</p>
                 <div class="gen-live-mini" id="sectionsLive"></div>
                 <div class="wb-actions">
                   <button class="btn btn-primary" id="btnGenAllSections" onclick="generateAllSections()" disabled>请 Agent 写全部正文</button>
                   <div class="spacer"></div>
                   <button class="btn btn-ghost" onclick="setGenPhase('outline')">回改大纲</button>
+                  <button class="btn btn-primary" id="btnSectionsNext" onclick="setGenPhase('placements')" disabled>下一步：产品与内链</button>
                 </div>
               </div>
             </div>
@@ -1284,63 +1286,40 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <div class="section-preview-body" id="sectionPreviewBody"></div>
               </div>
             </div>
-
-            <!-- Placements sub-zone (merged from former phase-placements panel) -->
-            <div id="placementZone" style="border-top:1px solid var(--border, #e8e8e8);margin-top:24px;padding-top:20px;">
-              <div class="wb-card" style="margin-bottom:14px;">
-                <div class="wb-card-header">
-                  <h3>产品植入与内链</h3>
-                  <span class="wb-status idle" id="placementsStatus">待解析</span>
-                </div>
-                <div class="wb-card-body">
-                  <!-- Style toggle: inline blurb (default) vs editorial review cards (3 products) -->
-                  <div class="placement-style-toggle" id="placementStyleToggle" style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-                    <span style="font-size:13px;font-weight:600;color:var(--text-secondary,#666);">植入样式：</span>
-                    <div class="seg-control" role="group" aria-label="植入样式" style="display:inline-flex;border:1px solid var(--border,#d0d0d0);border-radius:8px;overflow:hidden;">
-                      <button type="button" class="seg-btn active" data-style="inline" onclick="setPlacementStyle('inline')" style="padding:6px 12px;font-size:12px;border:none;background:transparent;cursor:pointer;color:var(--text-primary,#1a1a1a);">行内 blurb（默认）</button>
-                      <button type="button" class="seg-btn" data-style="editorial" onclick="setPlacementStyle('editorial')" style="padding:6px 12px;font-size:12px;border:none;border-left:1px solid var(--border,#d0d0d0);background:transparent;cursor:pointer;color:var(--text-primary,#1a1a1a);">编辑式评测卡（3款）</button>
-                    </div>
-                  </div>
-                  <p class="wb-hint" id="placementsHintInline">正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」可从当前正文重新解析。确认后进 FAQ。</p>
-                  <p class="wb-hint" id="placementsHintEditorial" style="display:none;">编辑式评测卡样式：选 3 个 POVISON 在售产品，组成独立「POVISON Picks」H2 段落（3 个 H3 商品卡）。每卡含商品图（跳转商详页）+ 90-150 词结构化文案（规格机制段必含，场景/评论/价值总结可选）+ 真实买家评论引用（从 magento2 DB 拉取）。H3 标题为纯文本不带链接，跳转入口只在图片。点「重新挑选植入候选」启动 Agent 取 3 个候选 + 真实评论。</p>
-                  <div class="gen-live-mini" id="placementsLive"></div>
-                  <div id="placementWarningsBanner" style="display:none;background:#fef3f2;border:1px solid #fda4af;color:#9f1239;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;"></div>
-                  <!-- Editorial title/intro inputs (only shown in editorial mode) -->
-                  <div id="editorialFields" style="display:none;margin:12px 0 16px;padding:12px;background:var(--bg-tertiary,#f8f6f3);border-radius:8px;">
-                    <div style="margin-bottom:8px;">
-                      <label style="font-size:12px;font-weight:600;color:var(--text-secondary,#666);display:block;margin-bottom:4px;">Editorial H2 标题（可编辑）</label>
-                      <input type="text" id="editorialTitleInput" style="width:100%;padding:6px 8px;font-size:13px;border:1px solid var(--border,#d0d0d0);border-radius:6px;" oninput="onEditorialTitleInput(this.value)" placeholder="POVISON Picks — …">
-                    </div>
-                    <div>
-                      <label style="font-size:12px;font-weight:600;color:var(--text-secondary,#666);display:block;margin-bottom:4px;">Editorial 段首总览（1 句）</label>
-                      <textarea id="editorialIntroInput" rows="2" style="width:100%;padding:6px 8px;font-size:13px;border:1px solid var(--border,#d0d0d0);border-radius:6px;resize:vertical;" oninput="onEditorialIntroInput(this.value)" placeholder="用三个标准筛出 3 款…"></textarea>
-                    </div>
-                  </div>
-                  <div class="wb-actions">
-                    <button class="btn btn-primary" id="btnGenPlacements" onclick="generatePlacements()" disabled>重新挑选植入候选</button>
-                    <button class="btn btn-secondary" id="btnEnrichProductImgs" onclick="enrichMissingProductImages()" disabled>补全缺图</button>
-                    <button class="btn btn-secondary" id="btnVerifyPlacementUrls" onclick="verifyPlacementUrls()" disabled>校验链接有效性</button>
-                    <button class="btn btn-secondary" id="btnAcceptAllPlacements" onclick="acceptAllPlacements()" disabled>一键全部接受</button>
-                    <div class="spacer"></div>
-                    <button class="btn btn-primary" id="btnPlacementsNext" onclick="confirmPlacements()" disabled>确认，写 FAQ</button>
-                  </div>
-                </div>
-              </div>
-              <div id="productPlaceLabel" style="font-size:13px;font-weight:600;margin:4px 0 8px;">产品植入（1–2 个，约 40–70 词）</div>
-              <div class="placement-grid" id="productPlaceList"></div>
-              <div class="wb-actions" style="margin-bottom:16px;">
-                <button class="btn btn-secondary btn-sm" id="btnAddProduct" onclick="addProductPlacement()" disabled>加一个产品</button>
-              </div>
-              <div id="linkPlaceLabel" style="font-size:13px;font-weight:600;margin:4px 0 8px;">内链建议（2–3 条，anchor 须为文中自然长尾词）</div>
-              <div class="placement-grid" id="linkPlaceList"></div>
-              <div class="wb-actions">
-                <button class="btn btn-secondary btn-sm" id="btnAddLink" onclick="addLinkPlacement()" disabled>加一条内链</button>
-              </div>
-            </div>
           </div>
 
-          <!-- Phase: Product placements & internal links (LEGACY — kept for backward compat, hidden) -->
-          <div class="wb-panel" id="phase-placements" style="display:none !important;">
+          <!-- Phase: Product placements & internal links -->
+          <div class="wb-panel" id="phase-placements">
+            <div class="wb-card" style="margin-bottom:14px;">
+              <div class="wb-card-header">
+                <h3>产品植入与内链</h3>
+                <span class="wb-status idle" id="placementsStatus">待解析</span>
+              </div>
+              <div class="wb-card-body">
+                <p class="wb-hint">正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」可从当前正文重新解析。确认后进 FAQ。</p>
+                <div class="gen-live-mini" id="placementsLive"></div>
+                <div id="placementWarningsBanner" style="display:none;background:#fef3f2;border:1px solid #fda4af;color:#9f1239;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;"></div>
+                <div class="wb-actions">
+                  <button class="btn btn-primary" id="btnGenPlacements" onclick="generatePlacements()" disabled>重新挑选植入候选</button>
+                  <button class="btn btn-secondary" id="btnEnrichProductImgs" onclick="enrichMissingProductImages()" disabled>补全缺图</button>
+                  <button class="btn btn-secondary" id="btnVerifyPlacementUrls" onclick="verifyPlacementUrls()" disabled>校验链接有效性</button>
+                  <button class="btn btn-secondary" id="btnAcceptAllPlacements" onclick="acceptAllPlacements()" disabled>一键全部接受</button>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost" onclick="setGenPhase('sections')">上一步</button>
+                  <button class="btn btn-primary" id="btnPlacementsNext" onclick="confirmPlacements()" disabled>确认，写 FAQ</button>
+                </div>
+              </div>
+            </div>
+            <div style="font-size:13px;font-weight:600;margin:4px 0 8px;">产品植入（1–2 个，约 40–70 词）</div>
+            <div class="placement-grid" id="productPlaceList"></div>
+            <div class="wb-actions" style="margin-bottom:16px;">
+              <button class="btn btn-secondary btn-sm" id="btnAddProduct" onclick="addProductPlacement()" disabled>加一个产品</button>
+            </div>
+            <div style="font-size:13px;font-weight:600;margin:4px 0 8px;">内链建议（2–3 条，anchor 须为文中自然长尾词）</div>
+            <div class="placement-grid" id="linkPlaceList"></div>
+            <div class="wb-actions">
+              <button class="btn btn-secondary btn-sm" id="btnAddLink" onclick="addLinkPlacement()" disabled>加一条内链</button>
+            </div>
           </div>
 
           <!-- Phase: FAQ -->
@@ -1714,7 +1693,6 @@ let articleState = null; // section workbench state
 let currentGenPhase = 'serp';
 
 function freshArticleState(topic) {
-  var defaultTitle = topic && topic.title ? 'POVISON Picks — ' + topic.title : 'POVISON Picks';
   return {
     topic: topic ? JSON.parse(JSON.stringify(topic)) : null,
     serp: null,
@@ -1724,12 +1702,6 @@ function freshArticleState(topic) {
     products: [],
     links: [],
     placementsConfirmed: false,
-    // Editorial Picks: placementStyle controls whether products render as
-    // inline blurbs (legacy) or as a standalone "POVISON Picks" H2 with 3 H3
-    // editorial review cards. Default 'inline' for backward compatibility.
-    placementStyle: 'inline',
-    editorialTitle: defaultTitle,
-    editorialIntro: '',
     faq: [],
     meta: { title: '', description: '', slug: '', focus: '' },
     phaseDone: { serp: false, outline: false, sections: false, placements: false, faq: false, meta: false, preview: false },
@@ -1922,10 +1894,6 @@ function mergeArticleState(dbState, memState) {
   merged.placementsConfirmed = !!memState.placementsConfirmed;
   // User-edited fields — take in-memory.
   merged.meta = memState.meta || merged.meta;
-  // Editorial Picks style + title are user-toggled/edited — take in-memory.
-  merged.placementStyle = memState.placementStyle || merged.placementStyle || 'inline';
-  merged.editorialTitle = (memState.editorialTitle != null) ? memState.editorialTitle : (merged.editorialTitle || '');
-  merged.editorialIntro = (memState.editorialIntro != null) ? memState.editorialIntro : (merged.editorialIntro || '');
   // products/links: an empty array is an intentional clear (operator deleted all).
   // Do NOT fall back to DB when memState.products === [] — that was restoring
   // deleted 404 recommendations (e.g. Arlo Sofa) while Agent was still running.
@@ -2174,8 +2142,6 @@ function applyArticleState(state) {
   document.getElementById('genActionBar').style.display = 'flex';
   if (state.topic.title) document.getElementById('wbTopicTitle').textContent = state.topic.title;
   restoreWorkbenchUI();
-  // Sync the placement-style toggle + editorial fields to the loaded state.
-  if (typeof applyPlacementStyleUI === 'function') applyPlacementStyleUI();
   setGenPhase(state.phaseDone && state.phaseDone.meta ? 'preview' :
     state.phaseDone && state.phaseDone.faq ? 'meta' :
     state.phaseDone && state.phaseDone.placements ? 'faq' :
@@ -3641,14 +3607,6 @@ function setStatus(id, cls, text) {
 }
 
 function setGenPhase(phase) {
-  // Backward compat: 'placements' was merged into 'sections' (one panel now).
-  // Redirect old calls and scroll to the placement sub-zone.
-  if (phase === 'placements') {
-    phase = 'sections';
-    setTimeout(function() {
-      document.getElementById('placementZone')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 80);
-  }
   currentGenPhase = phase;
   document.querySelectorAll('.wb-panel').forEach(p => p.classList.remove('active'));
   document.getElementById('phase-' + phase)?.classList.add('active');
@@ -3657,19 +3615,14 @@ function setGenPhase(phase) {
   });
   updatePhasePills();
   updateGenProgressBar();
-  if (phase !== 'placements') document.querySelector('.main').scrollTo(0, 0);
+  document.querySelector('.main').scrollTo(0, 0);
 }
 
 function updatePhasePills() {
   if (!articleState) return;
   document.querySelectorAll('.gen-phase-pill').forEach(p => {
     const ph = p.dataset.phase;
-    // 'placements' was merged into 'sections' — show done when either is complete.
-    if (ph === 'sections') {
-      p.classList.toggle('done', !!(articleState.phaseDone.sections && articleState.phaseDone.placements));
-    } else {
-      p.classList.toggle('done', !!articleState.phaseDone[ph]);
-    }
+    p.classList.toggle('done', !!articleState.phaseDone[ph]);
   });
 }
 
@@ -4127,8 +4080,7 @@ function refreshSectionsGate() {
   const allReady = articleState.sections.length > 0 &&
     articleState.sections.every(s => s.content && (s.status === 'ready' || s.status === 'edited'));
   articleState.phaseDone.sections = allReady;
-  // btnSectionsNext was removed when placements merged into this panel; the
-  // confirm gate is now btnPlacementsNext (handled by refreshPlacementsGate).
+  document.getElementById('btnSectionsNext').disabled = !allReady;
   document.getElementById('btnGenPlacements').disabled = !allReady;
   document.getElementById('btnEnrichProductImgs').disabled = !allReady;
   document.getElementById('btnVerifyPlacementUrls').disabled = !allReady;
@@ -4139,63 +4091,6 @@ function refreshSectionsGate() {
   } else if (articleState.sections.some(s => s.content)) setStatus('sectionsStatus', 'edited', '部分完成');
   updatePhasePills();
   updateGenProgressBar();
-}
-
-// ---- Placement style toggle (inline blurb ↔ editorial review cards) ----
-function setPlacementStyle(style) {
-  if (!articleState) return;
-  if (articleState.placementStyle === style) return;
-  articleState.placementStyle = style;
-  applyPlacementStyleUI();
-  // Style change invalidates placements — prose needs reassembly either way.
-  invalidateDownstream('products');
-  persistArticleState();
-}
-
-function applyPlacementStyleUI() {
-  if (!articleState) return;
-  var isEditorial = articleState.placementStyle === 'editorial';
-  // Toggle active state on the segmented control buttons
-  document.querySelectorAll('.seg-btn[data-style]').forEach(function(b) {
-    b.classList.toggle('active', b.dataset.style === (articleState.placementStyle || 'inline'));
-    b.style.background = b.classList.contains('active') ? 'var(--bg-tertiary, #e8e2d8)' : 'transparent';
-    b.style.fontWeight = b.classList.contains('active') ? '600' : '400';
-  });
-  // Toggle hint text
-  var hintInline = document.getElementById('placementsHintInline');
-  var hintEditorial = document.getElementById('placementsHintEditorial');
-  if (hintInline) hintInline.style.display = isEditorial ? 'none' : '';
-  if (hintEditorial) hintEditorial.style.display = isEditorial ? '' : 'none';
-  // Toggle editorial title/intro inputs
-  var editorialFields = document.getElementById('editorialFields');
-  if (editorialFields) editorialFields.style.display = isEditorial ? '' : 'none';
-  // Update labels
-  var prodLabel = document.getElementById('productPlaceLabel');
-  var linkLabel = document.getElementById('linkPlaceLabel');
-  if (prodLabel) prodLabel.textContent = isEditorial ? '产品评测卡（3 个，每卡 90–150 词）' : '产品植入（1–2 个，约 40–70 词）';
-  // Collapse internal links section in editorial mode (editorial cards own the section)
-  var linkPlaceList = document.getElementById('linkPlaceList');
-  var btnAddLink = document.getElementById('btnAddLink');
-  if (linkLabel) linkLabel.style.display = isEditorial ? 'none' : '';
-  if (linkPlaceList) linkPlaceList.style.display = isEditorial ? 'none' : '';
-  if (btnAddLink) btnAddLink.style.display = isEditorial ? 'none' : '';
-  // Populate editorial title/intro inputs from state
-  var titleInput = document.getElementById('editorialTitleInput');
-  var introInput = document.getElementById('editorialIntroInput');
-  if (titleInput) titleInput.value = articleState.editorialTitle || '';
-  if (introInput) introInput.value = articleState.editorialIntro || '';
-}
-
-function onEditorialTitleInput(val) {
-  if (!articleState) return;
-  articleState.editorialTitle = val;
-  persistArticleState();
-}
-
-function onEditorialIntroInput(val) {
-  if (!articleState) return;
-  articleState.editorialIntro = val;
-  persistArticleState();
 }
 
 // ---- Product placements & internal links ----
@@ -4370,19 +4265,9 @@ function renderPlacements() {
         <input type="text" value="${escapeAttr(p.image || '')}" oninput="editProduct(${idx},'image',this.value)" placeholder="POVISON 商品图直链"></div>
       <div class="section-field"><label>挂载到哪个 H2</label>
         <select onchange="editProduct(${idx},'sectionId',this.value)">${h2SectionOptionsHtml(p.sectionId)}</select></div>
-      <div class="section-field"><label>植入文案（${articleState.placementStyle === 'editorial' ? '90–150 词，1–3 段，规格机制段必含' : '40–70 词，链接嵌在产品名上'}）</label>
+      <div class="section-field"><label>植入文案（40–70 词，链接嵌在产品名上）</label>
         <textarea rows="4" oninput="editProduct(${idx},'blurb',this.value)">${p.blurb || ''}</textarea>
         <div class="char-count">${(p.blurb || '').trim().split(/\s+/).filter(Boolean).length} 词</div></div>
-      ${articleState.placementStyle === 'editorial' ? `
-      <div class="section-field"><label>买家评论引用（reviewer）</label>
-        <input type="text" value="${escapeAttr((p.reviewQuote && p.reviewQuote.reviewer) || '')}" oninput="editProductReviewQuote(${idx},'reviewer',this.value)" placeholder="如 Megan"></div>
-      <div class="section-field"><label>评论日期</label>
-        <input type="text" value="${escapeAttr((p.reviewQuote && p.reviewQuote.date) || '')}" oninput="editProductReviewQuote(${idx},'date',this.value)" placeholder="如 October 17, 2025"></div>
-      <div class="section-field"><label>评论引用</label>
-        <textarea rows="2" oninput="editProductReviewQuote(${idx},'quote',this.value)" placeholder="评论一句话">${escapeAttr((p.reviewQuote && p.reviewQuote.quote) || '')}</textarea></div>
-      <div class="section-field"><label>保修/政策（可选）</label>
-        <input type="text" value="${escapeAttr(p.warranty || '')}" oninput="editProduct(${idx},'warranty',this.value)" placeholder="如 30-day returns / 2-year warranty"></div>
-      ` : ''}
       <div class="wb-actions">
         <button class="btn btn-primary btn-sm" onclick="setPlacementStatus('products',${idx},'accepted')">接受</button>
         <button class="btn btn-danger-ghost btn-sm" onclick="setPlacementStatus('products',${idx},'rejected')">驳回</button>
@@ -4425,15 +4310,6 @@ function escapeAttr(s) {
 function editProduct(idx, field, val) {
   articleState.products[idx][field] = val;
   // 改文案不撤销「已接受」，避免审完一点小改又卡死确认按钮
-  articleState.placementsConfirmed = false;
-  articleState.phaseDone.placements = false;
-  saveToRun();
-  refreshPlacementsGate();
-}
-
-function editProductReviewQuote(idx, field, val) {
-  if (!articleState.products[idx].reviewQuote) articleState.products[idx].reviewQuote = {reviewer:'', date:'', quote:''};
-  articleState.products[idx].reviewQuote[field] = val;
   articleState.placementsConfirmed = false;
   articleState.phaseDone.placements = false;
   saveToRun();
@@ -4502,9 +4378,6 @@ function addProductPlacement() {
   articleState.products.push({
     id: 'p' + Date.now(), status: 'pending', name: '', url: 'https://www.povison.com/products/',
     sectionId: h2 ? h2.id : '', blurb: '',
-    // Editorial Picks optional fields (populated by Agent / operator when
-    // placementStyle === 'editorial'; ignored by inline flow).
-    reviewQuote: null, specs: null, warranty: '',
   });
   renderPlacements();
   refreshPlacementsGate();

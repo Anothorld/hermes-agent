@@ -37,7 +37,7 @@ class WatcherStartBody(BaseModel):
 
 
 class SentReconcileBody(BaseModel):
-    env: EnvName = "TEST"
+    env: EnvName = "LIVE"
     lookback_days: int = Field(default=7, ge=1, le=30)
     max_results: int = Field(default=100, ge=1, le=500)
 

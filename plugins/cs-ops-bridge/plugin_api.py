@@ -882,9 +882,7 @@ def update_session_status(
                 status_code=409,
                 detail="draft_ready_requires_cal_draft: 先 cs_bridge_tool draft-save 保存草稿到 CAL，再设置 draft_ready。",
             )
-    cal.update_session_status(
-        session_row_id=sess["id"], status=body.status, allow_regression=True,
-    )
+    cal.update_session_status(session_row_id=sess["id"], status=body.status)
     return {"ok": True}
 
 
@@ -1351,9 +1349,7 @@ def relaunch_session_route(
             # Gateway transiently full (429/5xx/unreachable) — re-queue to
             # pending instead of failing, mirroring the inbound watcher path.
             # The next watcher tick retries when a slot frees.
-            cal.update_session_status(
-                session_row_id=sess["id"], status="pending", allow_regression=True,
-            )
+            cal.update_session_status(session_row_id=sess["id"], status="pending")
             try:
                 cal.write_event(
                     quickcep_session_id=quickcep_session_id,

@@ -1,0 +1,383 @@
+{
+  "topic": {
+    "id": 9,
+    "schema_id": "t09",
+    "title": "Sectional Sofa at Scale: When It Makes Sense and When It's Making Your Room Worse",
+    "priority": "p1",
+    "priority_label": "P1",
+    "category": "Space Layout & Furniture Matching",
+    "cat": "Space Layout & Furniture Matching",
+    "content_type": "comparison_guide",
+    "search_intent": "commercial",
+    "primary_keyword": "scale",
+    "secondary_keywords": [
+      "apartment",
+      "best couches",
+      "sectional sofa",
+      "making",
+      "america"
+    ],
+    "keywords": "scale, apartment, best couches, sectional sofa, making, america",
+    "estimated_traffic": 14739,
+    "competition": null,
+    "priority_score": 73.8,
+    "serp_gap": "Sectional vs sofa guides (Homf, Anabei, American First Finance) present it as a simple either/or. Reddit threads ('sectionals aren't that great') show real dissent. No competitor has written a scale-driven analysis: at what room size threshold does a sectional help vs hurt? The gap between 'buying guide' and 'room-scale analysis' is unclaimed.",
+    "serp_competitors": [
+      "reddit.com",
+      "finnandform.com",
+      "castlery.com",
+      "dreamsofa.com",
+      "homfurniture.com",
+      "anabei.com"
+    ],
+    "angle": "Deconstruct the sectional sofa's dominance in American living rooms through a scale lens — when does a sectional actually work, and when is it making your space worse?",
+    "why_povison": "A fully assembled sectional arrives as a unified piece — no visible seam gaps or alignment issues from connecting modular sections yourself. For a piece whose appeal is visual cohesion, factory-perfect assembly is a significant quality advantage.",
+    "suggested_slug": "sectional-sofa-scale-when-making-sense-america"
+  },
+  "serp": {
+    "queries": [
+      "sectional sofa scale proportions small apartment america",
+      "sectional sofa vs couch making right choice for american home",
+      "couch making living room look bigger scale design mistakes",
+      "sectional sofa too big small living room when does it make sense",
+      "sectional sofa room size guide minimum square footage"
+    ],
+    "topResults": [
+      {
+        "rank": 1,
+        "title": "Best Sectional Sofas for Small Apartments",
+        "url": "https://finnandform.com/blogs/inspiration/the-best-sectional-sofas-for-small-apartments",
+        "source": "finnandform.com"
+      },
+      {
+        "rank": 2,
+        "title": "Is an L-Shape Sectional Sofa Good for Small Spaces",
+        "url": "https://www.castlery.com/us/blog/is-l-shape-sofa-good-for-a-small-living-room",
+        "source": "castlery.com"
+      },
+      {
+        "rank": 3,
+        "title": "10 Best Sectionals for Small Apartments and Studios (2025)",
+        "url": "https://www.dreamsofa.com/best-sectionals-for-small-apartments-and-studios/",
+        "source": "dreamsofa.com"
+      },
+      {
+        "rank": 4,
+        "title": "Sectional or Sofa – Which One Fits Your Living Space Best?",
+        "url": "https://americanfirstfinance.com/blog/sectional-or-sofa-best/",
+        "source": "americanfirstfinance.com"
+      },
+      {
+        "rank": 5,
+        "title": "Unpopular Opinion: Sectionals aren't that great",
+        "url": "https://www.reddit.com/r/InteriorDesign/comments/108ji3m/unpopular_opinion_sectionals_arent_that_great/",
+        "source": "reddit.com"
+      },
+      {
+        "rank": 6,
+        "title": "Sofa vs. Sectional Buying Guide",
+        "url": "https://www.homfurniture.com/info/buying-guides/sofa-vs-sectional-buying-guide",
+        "source": "homfurniture.com"
+      },
+      {
+        "rank": 7,
+        "title": "6 Mistakes Designers Say Are Making Your Living Room Look Small",
+        "url": "https://www.housebeautiful.com/room-decorating/living-family-rooms/a71353795/tacky-small-living-room-decor-mistakes-designer-advice/",
+        "source": "housebeautiful.com"
+      },
+      {
+        "rank": 8,
+        "title": "7 Decorating Mistakes That Make Your Living Room Look Smaller",
+        "url": "https://www.southernliving.com/living-room-decorating-mistakes-11977827",
+        "source": "southernliving.com"
+      },
+      {
+        "rank": 9,
+        "title": "How to Choose the Right Sectional Sofa Size for Your Living Room",
+        "url": "https://modernluxco.com/blogs/news/how-to-choose-the-right-sectional-sofa-size-for-your-living-room",
+        "source": "modernluxco.com"
+      },
+      {
+        "rank": 10,
+        "title": "Sectional too big for living room (Reddit thread)",
+        "url": "https://www.reddit.com/r/interiordecorating/comments/1sxodin/sectional_too_big_for_living_room/",
+        "source": "reddit.com"
+      },
+      {
+        "rank": 11,
+        "title": "Sectional sofa size guide: how to measure and choose",
+        "url": "https://www.cozey.com/en-us/learn/sectional-sofa-size-guide",
+        "source": "cozey.com"
+      },
+      {
+        "rank": 12,
+        "title": "The Ultimate Sofa & Sectional Sizing Guide",
+        "url": "https://medleyhome.com/blogs/gather/the-ultimate-sofa-sectional-sizing-guide",
+        "source": "medleyhome.com"
+      },
+      {
+        "rank": 13,
+        "title": "These Living Room Layout Mistakes Can Make Your Space Feel Cramped",
+        "url": "https://www.thespruce.com/living-room-layout-mistakes-11978550",
+        "source": "thespruce.com"
+      },
+      {
+        "rank": 14,
+        "title": "Designing a Small Living Room with a Large Sectional",
+        "url": "https://www.maisondepax.com/designing-small-living-room-with-large-sectional/",
+        "source": "maisondepax.com"
+      }
+    ],
+    "competitors": [
+      "finnandform.com",
+      "castlery.com",
+      "dreamsofa.com",
+      "americanfirstfinance.com",
+      "reddit.com",
+      "homfurniture.com",
+      "housebeautiful.com",
+      "southernliving.com",
+      "thespruce.com",
+      "modernluxco.com",
+      "cozey.com",
+      "medleyhome.com",
+      "maisondepax.com"
+    ],
+    "contentGaps": [
+      {
+        "gap": "No scale threshold framework exists in the SERP",
+        "evidence": "Competitors like Cozey, ModernLux, and Medley publish measurement guides ('how to measure for a sectional') but none define the room-size threshold at which a sectional helps vs hurts. Finn & Form and DreamSofa list 'best sectionals for small apartments' without specifying what 'small' means in square footage. The gap between 'measurement guide' and 'decision framework' is completely unclaimed.",
+        "opportunity": "Our article will define explicit room-size breakpoints (e.g., below 150 sq ft, a sectional almost always makes the room worse; 150-250 sq ft is the judgment zone; above 250 sq ft, a sectional usually works) — giving readers a scale-driven framework instead of generic measuring tips."
+      },
+      {
+        "gap": "Sectional vs sofa is framed as a binary either/or choice",
+        "evidence": "Homf Furniture ('Sofa vs. Sectional Buying Guide') and American First Finance ('Sectional or Sofa — Which One Fits Best?') present the decision as a simple either/or. Reddit's 'Unpopular Opinion: Sectionals aren't that great' thread shows real dissent but no brand has converted that into a nuanced, scale-dependent analysis. Nobody says 'sectionals work when X, don't work when Y.'",
+        "opportunity": "We reframe the sectional vs sofa debate as scale-dependent: the answer changes based on your room dimensions, ceiling height, and traffic patterns — not on personal preference alone."
+      },
+      {
+        "gap": "Content addresses post-purchase regret, not pre-purchase prevention",
+        "evidence": "Reddit threads ('Sectional too big for living room') and Houzz discussions are full of buyers who already bought and regret it. Maison de Pax writes 'Designing a Small Living Room with a Large Sectional' — a workaround piece. No competitor has written a preventive 'assess before you buy' scale guide.",
+        "opportunity": "Our article gives readers a pre-purchase assessment framework — warning signs, room measurements, and traffic-flow checks to run BEFORE buying, preventing the regret that fills Reddit threads."
+      },
+      {
+        "gap": "Generic 'room feels small' advice is never sectional-specific",
+        "evidence": "House Beautiful ('6 Mistakes Making Your Living Room Look Small'), Southern Living ('7 Decorating Mistakes'), and The Spruce ('Living Room Layout Mistakes') cover general design errors but never connect scale mistakes specifically to sectional sofas — the single largest piece of furniture in most living rooms.",
+        "opportunity": "We isolate the sectional as the dominant scale factor: because it's the largest object in the room, its scale impact is disproportionate. Generic advice doesn't help; sectional-specific scale analysis does."
+      },
+      {
+        "gap": "Assembly quality is never mentioned as a scale factor",
+        "evidence": "Zero SERP results mention that how a sectional is assembled affects its long-term scale performance. Modular sectionals that buyers connect themselves develop seam gaps, alignment drift, and structural issues over time — problems that compound at sectional scale. POVISON's fully assembled differentiator is completely unclaimed in this content space.",
+        "opportunity": "We introduce assembly quality as a hidden scale factor: a fully assembled sectional maintains its structural integrity and visual cohesion over years, while self-assembled modular pieces degrade — making the 'scale' of the problem literally grow over time."
+      }
+    ],
+    "summary": "The SERP for sectional sofa scale guidance splits into three camps: (1) measurement guides (Cozey, ModernLux, Medley) that tell you how to measure but not when to say no; (2) binary either/or comparisons (Homf, American First Finance) that frame sectional vs sofa as a simple preference choice; and (3) post-purchase regret threads on Reddit and Houzz where buyers already bought the wrong size. No competitor has written a scale-driven decision framework that defines room-size thresholds, identifies warning signs before purchase, or connects assembly quality to long-term sectional performance. POVISON's fully assembled angle — a unified piece with no seam gaps or alignment drift — is completely unclaimed and directly relevant to the scale conversation."
+  },
+  "outline": [
+    {
+      "id": "intro",
+      "level": "h2",
+      "text": "Introduction"
+    },
+    {
+      "id": "h2-1",
+      "level": "h2",
+      "text": "What Does \"Scale\" Really Mean When You're Choosing a Sectional Sofa?"
+    },
+    {
+      "id": "h3-1a",
+      "level": "h3",
+      "text": "Footprint vs. Floor Space: The Math Nobody Does Before Buying"
+    },
+    {
+      "id": "h3-1b",
+      "level": "h3",
+      "text": "Visual Weight: Why a Sectional Dominates More Than Its Dimensions Suggest"
+    },
+    {
+      "id": "h2-2",
+      "level": "h2",
+      "text": "How Do You Know if a Sectional Is Making Your Room Worse?"
+    },
+    {
+      "id": "h3-2a",
+      "level": "h3",
+      "text": "Five Warning Signs Your Sectional Is Too Big"
+    },
+    {
+      "id": "h3-2b",
+      "level": "h3",
+      "text": "The Traffic Flow Test: Can Two People Cross the Room Comfortably?"
+    },
+    {
+      "id": "h2-3",
+      "level": "h2",
+      "text": "When Does a Sectional Actually Make Sense?"
+    },
+    {
+      "id": "h3-3a",
+      "level": "h3",
+      "text": "Room Thresholds: Where Sectionals Win and Where They Fail"
+    },
+    {
+      "id": "h3-3b",
+      "level": "h3",
+      "text": "Lifestyle Signals That Point Toward a Sectional"
+    },
+    {
+      "id": "h2-4",
+      "level": "h2",
+      "text": "Sectional vs. Sofa: It's Not Either/Or, It's Scale-Dependent"
+    },
+    {
+      "id": "h3-4a",
+      "level": "h3",
+      "text": "The Square Footage Breakpoints Nobody Publishes"
+    },
+    {
+      "id": "h2-5",
+      "level": "h2",
+      "text": "Why Assembly Quality Matters More at Sectional Scale"
+    },
+    {
+      "id": "h3-5a",
+      "level": "h3",
+      "text": "Seam Gaps, Alignment Drift, and the Modular Problem"
+    },
+    {
+      "id": "h2-6",
+      "level": "h2",
+      "text": "How to Measure Your Room Before You Commit"
+    },
+    {
+      "id": "h3-6a",
+      "level": "h3",
+      "text": "The 18-Inch Clearance Rule and Other Non-Negotiables"
+    },
+    {
+      "id": "h3-6b",
+      "level": "h3",
+      "text": "Mapping Traffic Paths: A 5-Minute Pre-Purchase Exercise"
+    },
+    {
+      "id": "conclusion",
+      "level": "h2",
+      "text": "Conclusion"
+    },
+    {
+      "id": "faq",
+      "level": "h2",
+      "text": "Frequently Asked Questions"
+    },
+    {
+      "id": "faq-1",
+      "level": "h3",
+      "text": "What is the minimum room size for a sectional sofa?"
+    },
+    {
+      "id": "faq-2",
+      "level": "h3",
+      "text": "Can a sectional work in a small living room under 150 square feet?"
+    },
+    {
+      "id": "faq-3",
+      "level": "h3",
+      "text": "Is a sectional worth it if I rarely host guests?"
+    },
+    {
+      "id": "faq-4",
+      "level": "h3",
+      "text": "How far should a sectional sofa be from the wall?"
+    },
+    {
+      "id": "faq-5",
+      "level": "h3",
+      "text": "Are fully assembled sectionals better than modular ones you connect yourself?"
+    }
+  ],
+  "outlineConfirmed": true,
+  "sections": [],
+  "products": [],
+  "links": [],
+  "placementsConfirmed": false,
+  "faq": [],
+  "meta": {
+    "title": "",
+    "description": "",
+    "slug": "",
+    "focus": ""
+  },
+  "phaseDone": {
+    "serp": true,
+    "outline": true,
+    "sections": false,
+    "placements": false,
+    "faq": false,
+    "meta": false,
+    "preview": false
+  },
+  "previewHtml": "",
+  "stale": {},
+  "placementStyle": "editorial",
+  "editorialTitle": "",
+  "editorialIntro": "",
+  "validation": {
+    "version": "1.0",
+    "passed": 4,
+    "total": 10,
+    "ok": false,
+    "checks": [
+      {
+        "id": "word_count",
+        "ok": false,
+        "label": "正文约 0 词（目标 ≥1500）",
+        "value": 0
+      },
+      {
+        "id": "outline_confirmed",
+        "ok": true,
+        "label": "大纲已人工确认"
+      },
+      {
+        "id": "placements_confirmed",
+        "ok": false,
+        "label": "产品与内链已确认"
+      },
+      {
+        "id": "products",
+        "ok": true,
+        "label": "产品植入 0（建议 1–2）"
+      },
+      {
+        "id": "links",
+        "ok": true,
+        "label": "内链 0（建议 2–3）"
+      },
+      {
+        "id": "faq_count",
+        "ok": false,
+        "label": "FAQ 0（4–6）"
+      },
+      {
+        "id": "faq_overlap",
+        "ok": true,
+        "label": "FAQ/正文重叠 0%（≤20%）",
+        "value": 0
+      },
+      {
+        "id": "meta_title",
+        "ok": false,
+        "label": "Meta Title 0 字符（50–60）"
+      },
+      {
+        "id": "meta_desc",
+        "ok": false,
+        "label": "Meta Description 0 字符（150–160）"
+      },
+      {
+        "id": "slug",
+        "ok": false,
+        "label": "URL slug 0（≤75，小写）"
+      }
+    ]
+  }
+}

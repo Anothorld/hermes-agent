@@ -38,12 +38,15 @@
 |------|------|------|
 | SENT 对账 | 操作员在 Gmail 点 Send 后标记已发 + edit-learning | `gmail_poller` tick / `POST /gmail/reconcile-sent` |
 
-SENT 对账护栏（2026-06-11）：
-- **退信 DSN**（`mailer-daemon` / `Address not found`）不会写入 `draft_edit_learning`，也不会把 `offer.outreach_sent` 标为 true。
+SENT 对账护栏（2026-06-11 / 2026-07-30 修订）：
+- **退信 DSN**（`mailer-daemon` / `Address not found`）不会写入 `draft_edit_learning`，也不会把 DSN 正文写成 `offer.last_outbound_terms_proposed`。
+- 一旦 Gmail 线程已出现在 SENT（操作员点过 Send），对账仍会写 `offer.outreach_sent` + `offer.outreach_sent_at`，避免看板卡在「Draft 待发送」。Edit-learning 与 delivery 标记解耦。
 - 已有 `offer.outreach_sent_at` 时，入站分类器不得再用 `email:<message_id>` 把 `offer.outreach_sent` 写回 false（避免 reconcile 每 9 分钟重复跑同一 approved 稿）。
 - `list_approved_reply_drafts` 在 `outreach_sent_at` 已存在时跳过，即使 `outreach_sent` 被误写成 false。
+- **未绑定邮箱 first-claim**：多操作员 Console 下，尚未 bind 的 campaign 可由「已在 SENT 中看到该线程」的操作员邮箱完成对账并 bind（不再要求 `user_id==0`）。
+- 对账结果返回 `skip_reasons`；产品页「SENT 同步」使用当前页面 env（默认 LIVE），toast 展示跳过原因。
 
-**Note:** `run_reconcile_all_mailboxes` must call the unlocked reconcile helper while already holding `gmail_reconcile.lock`; re-entering the lock deadlocks the bridge worker and leaves cards stuck on「Draft 待发送」.
+**Note:** `run_reconcile_all_mailboxes` must call the unlocked reconcile helper while already holding `gmail_reconcile.lock`; re-entering the lock deadlocks the bridge worker and leaves cards stuck on「Draft 待发送」。
 | 入站回信 | 扫 INBOX → `kol_inbound_reply` → gateway dispatch | `gmail_inbound_poller` tick |
 | 运维快照 / one-shot | 最近 tick、手动跑一次 | `GET /gmail/worker/status`、`POST /gmail/inbound-poller/run-once` |
 

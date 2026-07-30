@@ -18,12 +18,6 @@ _ENV = os.environ.get("CS_OPS_ENV", "LIVE")
 # Default 2h — only applies to ``processing``. ``awaiting_expert`` is excluded entirely
 # (Feishu escalation poller + escalation SLA handle that lifecycle).
 _STALE_MIN = float(os.environ.get("CS_OPS_PROCESSING_STALE_MIN", "120"))
-# Short-heartbeat threshold: if ``agent_processing_at`` (the timestamp the agent
-# stamps when it first confirms processing) is older than this AND ``updated_at``
-# is also older than this, the session is treated as stale even before the 2h
-# hard cap. This catches crashed/killed agent runs within ~15 min instead of
-# waiting 2h. Set to 0 to disable the heartbeat path and rely only on _STALE_MIN.
-_HEARTBEAT_MIN = float(os.environ.get("CS_OPS_PROCESSING_HEARTBEAT_MIN", "15"))
 _STALE_TARGET_STATUS = "processing"
 
 
@@ -67,25 +61,7 @@ def check_processing_stale_once() -> dict[str, Any]:
         if not qsid:
             continue
         elapsed_min = _minutes_since(str(sess.get("updated_at") or ""), now=now)
-        if elapsed_min is None:
-            continue
-
-        # Two recovery paths:
-        #   1. Hard cap: updated_at older than _STALE_MIN (2h) — always recover.
-        #   2. Heartbeat: agent_processing_at AND updated_at both older than
-        #      _HEARTBEAT_MIN (15min) — the agent likely crashed/killed and
-        #      never stamped a recent activity. Recovers fast instead of waiting 2h.
-        #      agent_processing_at may be NULL (v5 session / agent never confirmed);
-        #      in that case fall back to the hard cap only.
-        is_stale = elapsed_min >= _STALE_MIN
-        trigger = "hard_cap"
-        if not is_stale and _HEARTBEAT_MIN > 0:
-            agent_ts = _minutes_since(str(sess.get("agent_processing_at") or ""), now=now)
-            if agent_ts is not None and agent_ts >= _HEARTBEAT_MIN and elapsed_min >= _HEARTBEAT_MIN:
-                is_stale = True
-                trigger = "heartbeat"
-
-        if not is_stale:
+        if elapsed_min is None or elapsed_min < _STALE_MIN:
             continue
 
         result = apply_handoff(
@@ -105,10 +81,9 @@ def check_processing_stale_once() -> dict[str, Any]:
             if qsid not in recovered_ids:
                 recovered_ids.append(qsid)
             log.warning(
-                "processing stale recovered session=%s elapsed_min=%.1f trigger=%s",
+                "processing stale recovered session=%s elapsed_min=%.1f",
                 qsid,
                 elapsed_min,
-                trigger,
             )
             try:
                 cal.write_event(
@@ -118,9 +93,6 @@ def check_processing_stale_once() -> dict[str, Any]:
                     payload={
                         "elapsed_min": elapsed_min,
                         "threshold_min": _STALE_MIN,
-                        "trigger": trigger,
-                        "heartbeat_min": _HEARTBEAT_MIN if trigger == "heartbeat" else None,
-                        "agent_processing_at": sess.get("agent_processing_at"),
                     },
                 )
             except Exception as exc:

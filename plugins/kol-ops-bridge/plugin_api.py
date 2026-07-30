@@ -1905,14 +1905,16 @@ def _reply_draft_state(facts: Mapping[str, Any]) -> Optional[str]:
     """Derive the Draft sub-state surfaced on the kanban card.
 
     Decision flow mirrors the cold-outreach + reply-dispatcher pipeline:
-    once ``offer.outreach_sent`` flips true the draft has been delivered
-    (covers both reply drafts and cold-outreach drafts). Before that, a
-    pending ``approval.reply_draft`` means the operator still owes a
-    decision in the approval queue; a decided-approved draft with a
-    ``gmail_draft`` payload is sitting in Gmail waiting on Send. None
-    means the card has no draft in flight.
+    once ``offer.outreach_sent`` or ``offer.outreach_sent_at`` is present the
+    draft has been delivered (covers both reply drafts and cold-outreach
+    drafts). Before that, a pending ``approval.reply_draft`` means the
+    operator still owes a decision in the approval queue; a decided-approved
+    draft with a ``gmail_draft`` payload is sitting in Gmail waiting on Send.
+    None means the card has no draft in flight.
     """
-    if facts.get("offer.outreach_sent"):
+    from .outreach_touch import _fact_is_true
+
+    if _fact_is_true(facts.get("offer.outreach_sent")) or facts.get("offer.outreach_sent_at"):
         return "sent"
     reply = facts.get("approval.reply_draft")
     if isinstance(reply, dict):

@@ -2478,13 +2478,26 @@ export function ProductDetailPage() {
     setErr(null);
     setWatcherBusy(true);
     try {
-      const out = await api.post<{ reconciled_count?: number; sent_threads_seen?: number }>(
+      const out = await api.post<{
+        reconciled_count?: number;
+        sent_threads_seen?: number;
+        skip_reasons?: Record<string, number>;
+      }>(
         '/reply-watcher/reconcile-sent',
-        { env: watcherEnv, lookback_days: 7, max_results: 100 },
+        // Use the page env filter (same as kanban), not the watcher card's
+        // separate TEST default — otherwise LIVE cards never leave 「待发送」.
+        { env: envFilter, lookback_days: 7, max_results: 100 },
       );
+      const skips = out.skip_reasons || {};
+      const skipHint =
+        Object.keys(skips).length > 0
+          ? ` · 跳过 ${Object.entries(skips)
+              .map(([k, v]) => `${k}=${v}`)
+              .join(', ')}`
+          : '';
       toast.success(
         'SENT 同步完成',
-        `已对账 ${out.reconciled_count ?? 0} 条 · 共扫描 ${out.sent_threads_seen ?? 0} 个 SENT 线程`,
+        `已对账 ${out.reconciled_count ?? 0} 条 · 共扫描 ${out.sent_threads_seen ?? 0} 个 SENT 线程${skipHint}`,
       );
       refreshCampaigns();
     } catch (ex) {
