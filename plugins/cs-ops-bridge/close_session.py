@@ -126,7 +126,37 @@ def close_session(
         cli=cli,
         session_id=quickcep_session_id,
     )
-    if proc.returncode != 0 or not payload.get("ok"):
+    leave_ok = proc.returncode == 0 and bool(payload.get("ok"))
+
+    # Record a quickcep_leave_chat CAL event for every close attempt — mirrors
+    # leave_quickcep_after_failed_handoff's audit trail. Without this, the 1000+
+    # historical console_close_session calls left no leave trace, so join/leave
+    # net accounting drifted to 1159+ "stuck" sessions on the AI account.
+    # Fail-soft: write failure must not block the close flow.
+    try:
+        cal.write_event(
+            quickcep_session_id=quickcep_session_id,
+            env=env,
+            event_type="quickcep_leave_chat",
+            payload={
+                "source": "console_close",
+                "ok": leave_ok,
+                "exit_code": proc.returncode,
+                "result_code": payload.get("result_code"),
+                "error": payload.get("error"),
+                "confirmed_via": payload.get("confirmed_via"),
+                "operator_id": operator_id,
+                "operator_name": operator_name,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must not break close
+        log.warning(
+            "quickcep_leave_chat event write failed session=%s: %s",
+            quickcep_session_id,
+            exc,
+        )
+
+    if not leave_ok:
         err = payload.get("error") or proc.stderr.strip() or f"exit {proc.returncode}"
         log.warning(
             "leave-chat failed session=%s code=%s err=%s",
@@ -163,6 +193,7 @@ def close_session(
             "close_escalations_effective": _should_close_escalations(
                 close_escalations=close_escalations, note=note
             ),
+            "leave_chat_recorded": True,
         },
         env=env,
     )

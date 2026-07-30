@@ -267,3 +267,83 @@ def test_close_session_infers_close_escalations_from_out_of_scope_note(close_mod
     assert result["ok"] is True
     assert result["escalations_closed"] == [{"escalation_id": 38, "ok": True}]
     assert len(closed_calls) == 1
+
+
+def test_close_session_records_leave_chat_event_on_success(close_module, monkeypatch, tmp_path, cal):
+    """close_session must write a quickcep_leave_chat CAL event (source=console_close, ok=True) on success.
+
+    Before this fix, ~1000+ console_close_session calls left no leave trace, so
+    join/leave net accounting drifted to 1159+ stuck sessions on the AI account.
+    """
+    _stub_cli(tmp_path, monkeypatch, close_module)
+
+    def fake_run(argv, **kwargs):
+        return type("P", (), {
+            "returncode": 0,
+            "stdout": json.dumps({"ok": True, "chat_end": True}),
+            "stderr": "",
+        })()
+
+    monkeypatch.setattr(close_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(close_module, "apply_handoff", lambda **kw: {"ok": True, "phase": "reviewed"})
+
+    result = close_module.close_session(
+        quickcep_session_id="qc-close",
+        operator_id="op1",
+        operator_name="Arnold",
+    )
+    assert result["ok"] is True
+
+    # Verify the quickcep_leave_chat event was written with source=console_close, ok=True.
+    ctx = cal.get_dispatch_context(quickcep_session_id="qc-close", env="LIVE")
+    events = ctx["recent_events"]
+    leave_events = [e for e in events if e["event_type"] == "quickcep_leave_chat"]
+    assert len(leave_events) == 1, f"expected 1 quickcep_leave_chat event, got {len(leave_events)}"
+    payload = leave_events[0]["payload"]
+    assert payload["source"] == "console_close"
+    assert payload["ok"] is True
+    assert payload["operator_id"] == "op1"
+    assert payload["operator_name"] == "Arnold"
+
+    # The console_close_session event should also note the leave was recorded.
+    close_events = [e for e in events if e["event_type"] == "console_close_session"]
+    assert len(close_events) == 1
+    assert close_events[0]["payload"]["leave_chat_recorded"] is True
+
+
+def test_close_session_records_leave_chat_event_on_failure(close_module, monkeypatch, tmp_path, cal):
+    """On leave-chat failure, close_session must STILL write a quickcep_leave_chat event (ok=False) for audit.
+
+    The event is the only trace that a leave was attempted but failed — without it
+    the session looks like the AI never tried to leave.
+    """
+    _stub_cli(tmp_path, monkeypatch, close_module)
+
+    def fake_run(argv, **kwargs):
+        return type("P", (), {
+            "returncode": 2,
+            "stdout": json.dumps({"ok": False, "error": "chat_end_not_confirmed"}),
+            "stderr": "",
+        })()
+
+    monkeypatch.setattr(close_module.subprocess, "run", fake_run)
+    # apply_handoff still runs (reviewed tags before leave) — stub it so the
+    # failure path isn't masked by a handoff error.
+    monkeypatch.setattr(close_module, "apply_handoff", lambda **kw: {"ok": True, "phase": "reviewed"})
+
+    result = close_module.close_session(quickcep_session_id="qc-close")
+    assert result["ok"] is False
+    assert result["error"] == "quickcep_close_failed"
+
+    ctx = cal.get_dispatch_context(quickcep_session_id="qc-close", env="LIVE")
+    events = ctx["recent_events"]
+    leave_events = [e for e in events if e["event_type"] == "quickcep_leave_chat"]
+    assert len(leave_events) == 1
+    payload = leave_events[0]["payload"]
+    assert payload["source"] == "console_close"
+    assert payload["ok"] is False
+    assert payload["error"] == "chat_end_not_confirmed"
+    # No console_close_session event on failure (the close itself failed).
+    close_events = [e for e in events if e["event_type"] == "console_close_session"]
+    assert len(close_events) == 0
+

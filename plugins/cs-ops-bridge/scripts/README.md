@@ -105,3 +105,67 @@ JSON snippet to stdout. After review, paste approved entries into
 3. Add approved entries to `hindsight_attribute_vocab.json` with canonical `attribute` +
    `synonyms` + `category`.
 4. Re-run to confirm the unknown list shrinks.
+
+---
+
+# leave_chat_backfill.py
+
+One-shot backfill of `leave-chat` for terminal sessions the AI account never
+left. Before `close_session.py` recorded `quickcep_leave_chat` CAL events (and
+before the `leave-on-failed-handoff` fix shipped), every inbound `join-chat`
+had no matching `leave-chat` in CAL. The AI account accumulated 1000+ "stuck"
+sessions in QuickCEP — visible as 200+ assigned in the workbench — even though
+most were `reviewed` / `failed` / `skipped` (terminal) and should have been
+left long ago.
+
+## Scope
+
+- **Read-only** on `cal.db` for candidate discovery (SELECT only).
+- Only touches sessions in **terminal** statuses (`reviewed` / `failed` /
+  `skipped` / `closed`). **Never** touches `processing` / `pending` /
+  `draft_ready` / `awaiting_expert` / `operator_replied` — those are active.
+- Uses the AI account's cached QuickCEP token (`.quickcep_token.json` next to
+  `quickcep_cli.py`). Passes `--token` to the CLI so the AI account's cache is
+  never overwritten.
+- **Dry-run by default**; requires `--apply` to actually call leave-chat and
+  record CAL events.
+- Gentle rate limit (default 0.5s between leaves) to avoid QuickCEP 429.
+- Fail-soft per session: one leave failure does not abort the batch.
+
+## Usage
+
+Run inside the `povison-cs-bridge` container (has `cal.db` + `quickcep_cli` +
+token):
+
+```bash
+# Dry-run (default) — list candidates, no writes
+docker exec povison-cs-bridge /opt/hermes/.venv/bin/python \
+    /opt/hermes/plugins/cs-ops-bridge/scripts/leave_chat_backfill.py \
+    --dry-run --limit 50
+
+# Actually leave (writes CAL events + calls QuickCEP)
+docker exec povison-cs-bridge /opt/hermes/.venv/bin/python \
+    /opt/hermes/plugins/cs-ops-bridge/scripts/leave_chat_backfill.py \
+    --apply --limit 100
+```
+
+Flags: `--dry-run` (default), `--apply`, `--limit N` (default 50), `--env ENV`
+(default LIVE), `--sleep SECONDS` (default 0.5), `--status S,S,...`
+(default `reviewed,failed,skipped,closed`).
+
+## What it writes
+
+- One `quickcep_leave_chat` CAL event per session, with
+  `source=backfill`, `ok`, `exit_code`, `result_code`, `confirmed_via`.
+  Mirrors `close_session`'s leave event (source=`console_close`) and
+  `leave_quickcep_after_failed_handoff`'s (source=`failed_handoff`), so the
+  three leave paths share one event type for audit.
+- Fail-soft: if the CAL write itself fails, a WARNING is logged but the batch
+  continues (the QuickCEP leave already happened).
+
+## When to run
+
+Once after deploying the `close_session.py` leave-event fix + the
+`leave-on-failed-handoff` fix (`5a198673a3`). Re-runnable any time the
+join/leave net drifts again — it only processes terminal statuses and is
+idempotent (QuickCEP `batchLeaveChat` is itself idempotent).
