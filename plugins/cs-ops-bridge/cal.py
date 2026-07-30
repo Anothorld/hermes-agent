@@ -32,6 +32,23 @@ _TERMINAL_DRAFT_STATUSES = frozenset({"operator_replied", "reviewed", "skipped"}
 # are excluded so an in-flight session is never disrupted by a skip event.
 _SKIPPABLE_STATUSES = frozenset({"pending", "failed", "skipped"})
 
+# Monotonic lifecycle ranks — mirror session_handoff._STATUS_ORDER. Used by
+# update_session_status(allow_regression=False) to forbid accidental status
+# regressions from direct callers that bypass the apply_handoff guard. A
+# regression is a target rank strictly lower than the current rank. `pending`
+# (rank 0) is the floor so resetting to pending always "regresses" and must
+# pass allow_regression=True (the watcher's rollback paths do this).
+_STATUS_RANKS: dict[str, int] = {
+    "pending": 0,
+    "processing": 10,
+    "failed": 15,
+    "awaiting_expert": 20,
+    "skipped": 25,
+    "draft_ready": 30,
+    "operator_replied": 40,
+    "reviewed": 50,
+}
+
 
 def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
     # #region agent log
@@ -155,6 +172,7 @@ def enqueue_session(
     intention_tags: Optional[list[str]] = None,
     force_status: Optional[str] = None,
     skip_event_payload: Optional[dict[str, Any]] = None,
+    set_processing: bool = False,
 ) -> dict[str, Any]:
     """Idempotent enqueue; returns ``created`` flag and session row.
 
@@ -169,6 +187,17 @@ def enqueue_session(
     When ``force_status`` is set, the event written is ``inbound_skipped``
     (payload merged with ``skip_event_payload``) instead of the default
     ``inbound_received`` / ``customer_followup_while_busy``.
+
+    ``set_processing``: when True and the session ends up in ``pending``
+    (i.e. ``should_launch`` would be True), the status is atomically set to
+    ``processing`` within this same transaction. This eliminates the crash
+    window between the dedup-row write and the separate
+    ``update_session_status("processing")`` call the watcher used to make —
+    if the process died between them, the dedup row would block future
+    re-enqueue of the same message_id. With this flag the watcher no longer
+    needs the separate call; the row is created/updated + processing-stamped
+    + dedup-inserted in one commit. The returned ``should_launch`` stays
+    True so the caller still launches the gateway run.
     """
     dedup_key = f"{env}:{quickcep_session_id}:{message_id}"
     now = _now()
@@ -197,7 +226,7 @@ def enqueue_session(
         ).fetchone()
         prior_status = str(prior_row[0]) if prior_row else None
         is_reopen = prior_status in (
-            "draft_ready", "operator_replied", "failed", "reviewed",
+            "draft_ready", "awaiting_expert", "operator_replied", "failed", "reviewed",
         )
 
         conn.execute(
@@ -216,7 +245,7 @@ def enqueue_session(
                    chat_session_id=COALESCE(excluded.chat_session_id, chat_session_id),
                    customer_email=COALESCE(excluded.customer_email, customer_email),
                    last_message_id=excluded.last_message_id,
-                   status=CASE WHEN status IN ('draft_ready','operator_replied','failed','reviewed') THEN 'pending'
+                   status=CASE WHEN status IN ('draft_ready','awaiting_expert','operator_replied','failed','reviewed') THEN 'pending'
                            WHEN status = 'skipped' THEN 'skipped'
                            ELSE status END,
                    updated_at=excluded.updated_at,
@@ -250,6 +279,19 @@ def enqueue_session(
             session["status"] = force_status
 
         should_launch = status == "pending"
+        # Atomic processing transition: when the caller asked to set processing
+        # AND the session is in a launchable state, stamp `processing` in this
+        # same transaction so the dedup row + processing status commit together.
+        # The returned should_launch stays True so the caller still launches.
+        if set_processing and should_launch:
+            conn.execute(
+                "UPDATE cs_session SET status='processing', "
+                "processing_started_at=COALESCE(processing_started_at, ?), "
+                "updated_at=? WHERE id=?",
+                (now, now, session["id"]),
+            )
+            status = "processing"
+            session["status"] = "processing"
         if force_status:
             event_type = "inbound_skipped"
             event_payload = {
@@ -1394,11 +1436,43 @@ def update_session_chat_id(*, session_row_id: int, chat_session_id: str) -> None
         conn.commit()
 
 
-def update_session_status(*, session_row_id: int, status: str) -> None:
+def update_session_status(
+    *,
+    session_row_id: int,
+    status: str,
+    allow_regression: bool = False,
+) -> None:
+    """Update the session status. Stamps ``processing_started_at`` on first activation.
+
+    By default forbids status regressions (target rank < current rank) to catch
+    bugs where a caller bypasses ``session_handoff.apply_handoff`` and writes a
+    lower status directly. Callers that intentionally reset a session backward
+    (e.g. the watcher rolling back ``processing`` → ``pending`` on a transient
+    gateway failure, or ``processing_stale`` marking ``processing`` → ``failed``)
+    must pass ``allow_regression=True``. A blocked regression logs a WARNING and
+    leaves the status unchanged — it does NOT raise, so a fail-soft caller is
+    not disrupted.
+    """
     if status not in SESSION_STATUSES:
         raise ValueError(f"invalid status: {status}")
     now = _now()
     with _connect() as conn:
+        if not allow_regression:
+            cur = conn.execute(
+                "SELECT status FROM cs_session WHERE id=?", (session_row_id,)
+            ).fetchone()
+            if cur:
+                cur_status = str(cur[0])
+                cur_rank = _STATUS_RANKS.get(cur_status, 0)
+                target_rank = _STATUS_RANKS.get(status, 0)
+                if target_rank < cur_rank:
+                    log.warning(
+                        "update_session_status blocked regression %s -> %s "
+                        "session_row_id=%s (pass allow_regression=True to override)",
+                        cur_status, status, session_row_id,
+                    )
+                    conn.commit()  # no-op commit; preserve
+                    return
         # v5: stamp processing_started_at the first time a session leaves
         # `pending` for any active state. COALESCE keeps the original value
         # on subsequent transitions so the daily report can bucket by the

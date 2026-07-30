@@ -1078,7 +1078,12 @@ def apply_handoff(
             target_status=plan.target_status,
             phase=phase,
         ):
-            cal.update_session_status(session_row_id=sess["id"], status=plan.target_status)
+            # apply_handoff already validated the transition via _status_update_allowed
+            # (which permits the awaiting_expert escalation override draft_ready→awaiting_expert,
+            # a rank regression). Bypass the cal-level monotonic guard.
+            cal.update_session_status(
+                session_row_id=sess["id"], status=plan.target_status, allow_regression=True,
+            )
             if phase == "processing":
                 try:
                     cal.stamp_agent_processing_at(session_row_id=sess["id"])
