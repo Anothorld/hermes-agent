@@ -3,5 +3,6 @@
 __pycache__/
 seo_studio.db
 seo_studio.db-*
+seo_studio.db.*
 *.bak.*
 output.log

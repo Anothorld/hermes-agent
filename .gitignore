@@ -149,4 +149,6 @@ Resume_Lingzhi_Zhu_EN.*
 *.db-shm
 *.db-wal
 *.db.bak*
+*.db.corrupt*
+*.db.*
 *.bak.*
