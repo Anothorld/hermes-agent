@@ -67,6 +67,10 @@ Other modes: `./start.sh bridge` (UI only) · `./start.sh gateway` (agent only) 
 | `POST /api/povison-blog/search` | Body `{keyword, limit?}` → ranked blog articles `{url, slug, title_guess, category, score, reasons}` |
 | `POST /api/povison-blog/recommend-links` | Body `{topic: {primary_keyword, secondary_keywords, category_keywords}, sections, existing_urls?, limit?}` → `links[]` ready for `articleState.links` (all URLs real povison.com/blog/ articles from the sitemap) |
 | `POST /api/povison-blog/verify` | Body `{url}` → `{ok, verified, url, article?}` — is this a real povison.com/blog/ article? |
+| `GET /api/povison-reviews/health` | magento2 review DB configured? (no secrets surfaced) |
+| `GET /api/povison-reviews/by-spu` | Query `?spu=<id>&limit=5&min_rating=4` → APPROVED reviews `{ok, spu, count, reviews[]}` (best-rated first; ratings converted from 0-100 to 1-5 stars). Returns `ok=false` (not 500) when DB not configured |
+| `GET /api/povison-reviews/by-url` | Query `?url=<povison product URL>&limit=1&min_rating=4` → resolves the magento numeric SPU from the URL slug (via `catalog_product_entity_varchar.url_key`) then returns reviews `{ok, url, spu, count, reviews[]}`. **This is the endpoint the Editorial Picks Agent uses** — the product card only carries the storefront URL, not the numeric SPU |
+| `GET /api/povison-reviews/summary` | Query `?spu=<id>` → aggregate `{ok, spu, reviewsCount, ratingSummary, rating}` from `review_entity_summary` |
 | `GET /api/povison-placements/health` | Placement-guard reachability (probes one povison URL) |
 | `POST /api/povison-placements/verify-urls` | Body `{urls: ["..."], workers?}` → parallel HTTP liveness check (HEAD→GET, 10s timeout, povison host whitelist). Returns `{ok, checked_at, total, dead_count, results: [{url, live, status_code, final_url, error}]}` |
 | `POST /api/tasks/{task_id}/steps/3/verify-placements` | Verify all product + link URLs in the task's step-3 articleState are live; writes `articleState.placementUrlCheck` and forces `placementsConfirmed=false` if any dead |
@@ -230,8 +234,8 @@ on every save, covering both the Agent and script paths.
     POVISON catalog API (keyword search → Detail API takes the main image); PDP scraping is a
     fallback only when the Detail API fails. If a product image cannot be found, `image` is left
     empty (never substituted with a stock photo).
-  - **UI buttons (Placements panel):**
-    - **重新挑选植入候选** (merged flow) — the placements phase is now review/re-resolve
+  - **UI buttons (placement sub-zone within the 正文与植入 panel):**
+    - **重新挑选植入候选** (merged flow) — the placements step is now review/re-resolve
       only. Body sections are written with inline markdown links to REAL povison URLs during
       the section step (the script fetches a candidate pool via the Bridge recommend APIs and
       injects it into the section prompt; the LLM weaves links inline as it drafts). The
@@ -339,8 +343,10 @@ on every save, covering both the Agent and script paths.
     (no forged Rank Math Gutenberg FAQ block). Schema via `rank_math_schema_FAQPage` post meta,
     written through Rank Math's `/wp-json/rankmath/v1/updateMeta` endpoint (see "Rank Math SEO
     meta injection" above) — the old `rank_math_schema` REST-meta write was silently dropped.
-  - **Category/tags:** defaults come from `WP_CATEGORY_ID` / `WP_TAG_IDS`; override per-export by passing
-    `category_id` (int) and `tag_ids` (list[int]) in the request body.
+  - **Category/tags:** defaults come from `WP_CATEGORY_ID` / `WP_TAG_IDS`. Current profile default is
+    **Tips** (`WP_CATEGORY_ID=62`, slug `tips`). Override per-export by passing `category_id` (int)
+    and `tag_ids` (list[int]) in the request body. Code fallback (when env/config omit the key) is
+    also `62`.
   - **External link `rel=nofollow`:** at assembly time `_add_external_link_rel` walks every `<a href>`
     in the article body and, for **external** links (any `http(s)://` host that is not `povison.com`
     or a subdomain of it), bakes in `target="_blank" rel="noreferrer noopener nofollow"`. Internal
@@ -371,7 +377,9 @@ on every save, covering both the Agent and script paths.
 - `completed` — step 3 saved as done
 - Opening a `completed` task (`POST …/activate`) flips it to `idle`
 
-**Keyword pool:** keywords are a shared pool across tasks. Creating a new task from scratch keeps the current keywords and writes them into the new task's step 1; forking copies steps 1..N from the parent. Unfinished steps (current + later) always show empty in the UI when a task is opened — `restoreWorkbenchUI` resets every Step 3 phase panel (SERP / outline / sections / placements / FAQ / meta) before populating from the loaded task, so a parent's rendered output never bleeds into a fork.
+**Keyword pool:** keywords are a shared pool across tasks. Creating a new task from scratch keeps the current keywords and writes them into the new task's step 1; forking copies steps 1..N from the parent. Unfinished steps (current + later) always show empty in the UI when a task is opened — `restoreWorkbenchUI` resets every Step 3 phase panel (SERP / outline / 正文与植入 [sections + placement sub-zone] / FAQ / meta) before populating from the loaded task, so a parent's rendered output never bleeds into a fork.
+
+**Step 3 phase flow (6 pills):** SERP → 大纲 → **正文与植入** (sections editor + product/internal-link sub-zone on one page) → FAQ → SEO 元信息 → 预览发布. Placements are no longer a separate phase pill/panel — they live as a `#placementZone` sub-region inside the 正文与植入 panel. `phaseDone.placements` is retained as a persisted field for backward compatibility but the FAQ gate now reads `phaseDone.sections && (placementsConfirmed || placementStyle==="editorial")`; `recomputeAllGates()` re-locks every gate button from `articleState` on task switch / agent-resume / reject so no stale "enabled" button survives.
 
 **Auto-fork on selection change:** when an in-progress step already has output and the operator changes that step's selection before clicking the next-step button, the action opens a branch instead of overwriting:
 - **Brainstorm (开始头脑风暴):** if topics already exist and the selected keywords differ from the ones that produced them (step 2 `input_keywords`), clicking 开始头脑风暴 forks from step 2 — the old topics are preserved, the new branch re-runs the brainstorm with the new keywords.
@@ -440,6 +448,21 @@ python3 scripts/povison-blog.py recommend-links \
 ```
 
 The sitemap is cached on disk (`.cache/blog_sitemap.xml`, TTL ~6h); pass `--refresh` to `search` to force-refresh. Same operations over HTTP via `/api/povison-blog/*`.
+
+### Product reviews (magento2 DB, read-only)
+
+`scripts/povison-reviews.py` exposes the magento2 review DB to the agent so Editorial Picks product cards can quote one real APPROVED buyer review (name + date + quote + star rating) instead of a fabricated testimonial. Only reads (§4 — deterministic access is tooled, no ad-hoc SQL from the model). Configure via `MAGENTO_DB_*` env in `.env`:
+
+```bash
+python3 scripts/povison-reviews.py fetch --spu 123 --limit 5 --min-rating 4
+python3 scripts/povison-reviews.py summary --spu 123
+```
+
+Same operations over HTTP via `/api/povison-reviews/by-spu` + `/api/povison-reviews/summary`. The Editorial Picks Agent uses `/api/povison-reviews/by-url?url=<product URL>` instead of `by-spu`, because the product card carries the storefront URL (the storefront `id` is a non-numeric handle and the catalog API `spu` is an alphanumeric SKU like `M2-TS8125` — neither is the numeric magento `entity_id` the review DB keys on). `by-url` resolves the numeric SPU from the URL slug via `catalog_product_entity_varchar.url_key` internally. When the DB is not configured (or the URL has no matching product / no reviews) all paths return `ok=false` (not 500) so the Agent gracefully omits the review quote rather than failing.
+
+### Editorial Picks placement style
+
+The placement style (inline blurb vs editorial review cards) is chosen in the **正文与植入** panel (style switch at the top of the sections card) — *before* writing sections — so the section Agent can branch its working mode on the choice. `placementStyle="editorial"` makes the section Agent write body prose WITHOUT inline povison links and instead generate a standalone `POVISON Picks` H2 with exactly 3 H3 product cards (each: plain-text H3 → image wrapping the PDP link → 90-150 word blurb with a required specs paragraph → optional real review quote), plus `editorialTitle` (default `POVISON Picks — {topic.title}`) and `editorialIntro`. The cards are saved as `products` with `status="pending"`; the operator accepts them in the product/internal-link sub-zone (below the section editor in the same panel), then `confirmPlacements()` flips `phaseDone.placements`. Switching style after sections exist marks the body stale (banner prompts re-generation) but keeps the prose. Fewer than 3 accepted products degrades to the inline path (no partial editorial block). See `references/content-guidelines.md` §编辑式评测卡.
 
 ## Sync with standalone UI
 

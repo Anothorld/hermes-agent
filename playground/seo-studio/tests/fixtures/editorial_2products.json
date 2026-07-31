@@ -1,0 +1,44 @@
+{
+  "topic": {
+    "id": 9,
+    "schema_id": "t09",
+    "title": "Sectional Sofa at Scale: When It Makes Sense and When It's Making Your Room Worse",
+    "suggested_slug": "sectional-sofa-scale-when-making-sense-america"
+  },
+  "outline": [
+    {"id": "intro", "level": "h2", "text": "Introduction"},
+    {"id": "conclusion", "level": "h2", "text": "Conclusion"}
+  ],
+  "outlineConfirmed": true,
+  "placementStyle": "editorial",
+  "editorialTitle": "POVISON Picks — Best Sectional Sofas",
+  "sections": [
+    {"id": "intro", "type": "Intro", "title": "", "status": "ready", "content": "Intro text."},
+    {"id": "conclusion", "type": "Conclusion", "title": "Conclusion", "status": "ready", "content": "Conclusion text."}
+  ],
+  "products": [
+    {
+      "id": "p1",
+      "status": "accepted",
+      "name": "Product One",
+      "url": "https://www.povison.com/products/product-one.html?variant=111",
+      "image": "https://cdn.povison.com/media/catalog/product/p/1/product-one.jpg",
+      "blurb": "Product one blurb that is long enough to be meaningful and describes the fully assembled construction clearly.",
+      "sectionId": "editorial-picks"
+    },
+    {
+      "id": "p2",
+      "status": "accepted",
+      "name": "Product Two",
+      "url": "https://www.povison.com/products/product-two.html?variant=222",
+      "image": "https://cdn.povison.com/media/catalog/product/p/2/product-two.jpg",
+      "blurb": "Product two blurb that is long enough to be meaningful and describes the fully assembled construction clearly.",
+      "sectionId": "editorial-picks"
+    }
+  ],
+  "links": [],
+  "faq": [],
+  "meta": {"title": "T", "description": "D", "slug": "t", "focus": "t"},
+  "placementsConfirmed": false,
+  "phaseDone": {"serp": true, "outline": true, "sections": true, "placements": false, "faq": false, "meta": false, "preview": false}
+}

@@ -137,6 +137,35 @@ def _step_id(task_id: str, step_num: int) -> str:
     return f"{task_id}-s{step_num}"
 
 
+def _ensure_step_row(c, task_id: str, step_num: int, *, status: str = "pending") -> bool:
+    """Insert a step row if it is missing, so subsequent UPDATEs are not no-ops.
+
+    Uses the caller's connection ``c`` (must be inside the caller's
+    ``_LOCK``/``get_conn()`` block). Some tasks lost step rows during past DB
+    corruption/recovery events (28/42 tasks were missing step 3).
+    ``set_step_status`` and ``save_step_data`` only UPDATE, so when the row is
+    absent the agent's launch/save silently no-ops: the task list shows idle,
+    the progress bar disappears, and the UI falls back to the empty state.
+    This guard creates the row on demand. Returns True when a missing row was
+    created (for instrumentation).
+    """
+    if step_num not in STEP_TYPES:
+        return False
+    exists = c.execute(
+        "SELECT 1 FROM steps WHERE task_id=? AND step_num=?", (task_id, step_num)
+    ).fetchone()
+    if exists:
+        return False
+    now = _now()
+    sid = _step_id(task_id, step_num)
+    c.execute(
+        "INSERT OR IGNORE INTO steps(step_id,task_id,step_num,step_type,status,data_json,"
+        "parent_step_id,agent_run_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (sid, task_id, step_num, STEP_TYPES[step_num], status, None, None, None, now, now),
+    )
+    return True
+
+
 # ---- tasks ------------------------------------------------------------------
 
 def create_task(
@@ -365,9 +394,17 @@ def get_step(task_id: str, step_num: int) -> dict[str, Any] | None:
                     try:
                         parsed = json.loads(s)
                     except json.JSONDecodeError:
-                        # Try fixing unquoted JS-object-literal keys.
+                        # Last-resort recovery of malformed JSON keys. Two
+                        # corruption patterns observed from agent-generated
+                        # payloads: (a) unquoted JS-literal keys `key:`, and
+                        # (b) keys whose opening quote was dropped but the
+                        # closing quote survived, producing `,key":`. The
+                        # second is not a subset of the first (the stray `"`
+                        # before `:` blocks the first regex), so try both.
                         import re
-                        fixed = re.sub(r'([{,]\s*)([a-zA-Z_]\w*)(\s*:)', r'\1"\2"\3', s)
+                        fixed = s
+                        fixed = re.sub(r'([{,]\s*)([a-zA-Z_]\w*)(\s*:)', r'\1"\2"\3', fixed)
+                        fixed = re.sub(r'([{,]\s*)([a-zA-Z_]\w*)("\s*:)', r'\1"\2\3', fixed)
                         if fixed != s:
                             try:
                                 parsed = json.loads(fixed)
@@ -403,12 +440,58 @@ def save_step_data(
         raise ValueError(f"invalid step_num: {step_num}")
     if status not in STEP_STATUSES:
         raise ValueError(f"invalid step status: {status}")
+    # Guard against double-encoding: the agent sometimes passes an already
+    # JSON-stringified payload as `data`. json.dumps-ing that string again
+    # produces a double-escaped blob that get_step must later unwrap, and any
+    # malformation in the inner string becomes unrecoverable. If `data` is a
+    # str that looks like a JSON object/array, parse it first so we persist a
+    # clean structure. If parsing fails, persist the raw string as-is (legacy
+    # behavior) rather than double-encoding it.
+    if isinstance(data, str):
+        s = data.strip()
+        if s and s[0] in "[{":
+            try:
+                data = json.loads(s)
+            except json.JSONDecodeError:
+                # Malformed JSON string from the agent: keep the raw string
+                # but flag via audit so it is visible. Do NOT double-encode.
+                try:
+                    import time as _t
+                    with get_conn() as _c:
+                        _c.execute(
+                            "INSERT INTO audit_log(task_id,step_num,action,detail,status,ts) "
+                            "VALUES(?,?,?,?,?,?)",
+                            (task_id, step_num, "save_step_malformed",
+                             f"unparseable json str len={len(s)}", "error", _t.strftime('%Y-%m-%dT%H:%M:%SZ')),
+                        )
+                except Exception:
+                    pass
     payload = json.dumps(data, ensure_ascii=False) if data is not None else None
     now = _now()
     with _LOCK, get_conn() as c:
         exists = c.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         if not exists:
             raise KeyError(f"task not found: {task_id}")
+        # Auto-create the step row if missing (past DB recovery dropped some
+        # step 3 rows). Without this the UPDATE below is a silent no-op and the
+        # agent's save is lost → UI shows the empty state.
+        _created = _ensure_step_row(c, task_id, step_num, status=status)
+        if _created:
+            # #region agent log
+            try:
+                import time as _t, json as _json
+                _payload = _json.dumps({
+                    "sessionId": "891da2", "id": f"log_{int(_t.time()*1000)}_db",
+                    "timestamp": int(_t.time() * 1000), "location": "db.py:save_step_data",
+                    "message": "auto-created missing step row",
+                    "data": {"task_id": task_id, "step_num": step_num, "status": status},
+                    "hypothesisId": "H1",
+                }, ensure_ascii=False)
+                with open("/Users/arnold/agent_prj/.cursor/debug-891da2.log", "a", encoding="utf-8") as _f:
+                    _f.write(_payload + "\n")
+            except Exception:
+                pass
+            # #endregion agent log
         c.execute(
             "UPDATE steps SET data_json=?, status=?, agent_run_id=COALESCE(?, agent_run_id), "
             "updated_at=? WHERE task_id=? AND step_num=?",
@@ -458,16 +541,46 @@ def set_step_status(
     status: str,
     *,
     agent_run_id: str | None = None,
+    clear_agent_run_id: bool = False,
 ) -> None:
     if status not in STEP_STATUSES:
         raise ValueError(f"invalid step status: {status}")
     now = _now()
     with _LOCK, get_conn() as c:
-        c.execute(
-            "UPDATE steps SET status=?, agent_run_id=COALESCE(?, agent_run_id), updated_at=? "
-            "WHERE task_id=? AND step_num=?",
-            (status, agent_run_id, now, task_id, step_num),
-        )
+        _created = _ensure_step_row(c, task_id, step_num, status=status)
+        if _created:
+            # #region agent log
+            try:
+                import time as _t, json as _json
+                _payload = _json.dumps({
+                    "sessionId": "891da2", "id": f"log_{int(_t.time()*1000)}_db",
+                    "timestamp": int(_t.time() * 1000), "location": "db.py:set_step_status",
+                    "message": "auto-created missing step row",
+                    "data": {"task_id": task_id, "step_num": step_num, "status": status},
+                    "hypothesisId": "H1",
+                }, ensure_ascii=False)
+                with open("/Users/arnold/agent_prj/.cursor/debug-891da2.log", "a", encoding="utf-8") as _f:
+                    _f.write(_payload + "\n")
+            except Exception:
+                pass
+            # #endregion agent log
+        # clear_agent_run_id: set agent_run_id to '' so the client can tell this
+        # is a SCRIPT job (not a gateway run) — resumeTaskAgentPolling dispatches
+        # to resumeScriptJobPolling only when agent_run_id is empty. Without this,
+        # a stale agent_run_id from a previous agent-path run survives (the
+        # COALESCE below would keep it) and the client wrongly polls the gateway.
+        if clear_agent_run_id:
+            c.execute(
+                "UPDATE steps SET status=?, agent_run_id='', updated_at=? "
+                "WHERE task_id=? AND step_num=?",
+                (status, now, task_id, step_num),
+            )
+        else:
+            c.execute(
+                "UPDATE steps SET status=?, agent_run_id=COALESCE(?, agent_run_id), updated_at=? "
+                "WHERE task_id=? AND step_num=?",
+                (status, agent_run_id, now, task_id, step_num),
+            )
         if status == "running":
             c.execute(
                 "UPDATE tasks SET status=?, updated_at=? WHERE task_id=?",

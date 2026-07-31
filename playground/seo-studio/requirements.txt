@@ -11,3 +11,10 @@ itsdangerous>=2.1,<3
 # Markdown → HTML for WP export (GFM tables, lists, links). Without this,
 # pipe tables land in WordPress as raw "| col | col |" paragraphs.
 markdown>=3.5,<4
+# Editorial Picks review fetch — read-only access to the magento2 review DB.
+# mysql-connector-python is pure-python + supports ssl; chosen over pymysql for
+# its broader GCP Cloud SQL connectivity story (serverCA path if needed later).
+mysql-connector-python>=8.4,<9
+# Test runner for tests/ — dev-only but kept in the main requirements so CI /
+# `./start.sh` environments can run the suite without a second install step.
+pytest>=8,<9

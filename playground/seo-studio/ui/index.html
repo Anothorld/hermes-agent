@@ -1204,11 +1204,10 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
           <div class="gen-phase-pills" id="genPhasePills">
             <button class="gen-phase-pill active" data-phase="serp" onclick="setGenPhase('serp')"><span class="pill-num">1</span>SERP 洞察（可选）</button>
             <button class="gen-phase-pill" data-phase="outline" onclick="setGenPhase('outline')"><span class="pill-num">2</span>大纲</button>
-            <button class="gen-phase-pill" data-phase="sections" onclick="setGenPhase('sections')"><span class="pill-num">3</span>正文板块</button>
-            <button class="gen-phase-pill" data-phase="placements" onclick="setGenPhase('placements')"><span class="pill-num">4</span>产品与内链</button>
-            <button class="gen-phase-pill" data-phase="faq" onclick="setGenPhase('faq')"><span class="pill-num">5</span>FAQ</button>
-            <button class="gen-phase-pill" data-phase="meta" onclick="setGenPhase('meta')"><span class="pill-num">6</span>SEO 元信息</button>
-            <button class="gen-phase-pill" data-phase="preview" onclick="setGenPhase('preview')"><span class="pill-num">7</span>预览发布</button>
+            <button class="gen-phase-pill" data-phase="sections" onclick="setGenPhase('sections')"><span class="pill-num">3</span>正文与植入</button>
+            <button class="gen-phase-pill" data-phase="faq" onclick="setGenPhase('faq')"><span class="pill-num">4</span>FAQ</button>
+            <button class="gen-phase-pill" data-phase="meta" onclick="setGenPhase('meta')"><span class="pill-num">5</span>SEO 元信息</button>
+            <button class="gen-phase-pill" data-phase="preview" onclick="setGenPhase('preview')"><span class="pill-num">6</span>预览发布</button>
           </div>
 
           <!-- Phase: SERP -->
@@ -1267,12 +1266,37 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
               </div>
               <div class="wb-card-body">
                 <p class="wb-hint">按 Intro → 各 H2 → Conclusion 逐块生成。每块可编辑、可单独重写；全部就绪后进入产品植入与内链审核。</p>
+                <!-- Placement-style switch lives in the 正文生成 phase (moved here from
+                     产品与内链): the operator must pick a style BEFORE writing sections,
+                     because the section Agent branches its working mode on this choice
+                     (inline weaves links into prose; editorial writes prose without inline
+                     links and generates 3 review cards + editorialTitle/editorialIntro). -->
+                <div class="placement-style-row" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary,#f5f5f7);border-radius:8px;">
+                  <span style="font-size:13px;font-weight:600;">植入样式</span>
+                  <div class="seg-control" style="display:inline-flex;border:1px solid var(--border,#d2d2d7);border-radius:6px;overflow:hidden;">
+                    <button type="button" class="seg-btn" id="segInline" onclick="setPlacementStyle('inline')" style="border:none;padding:5px 12px;font-size:12px;cursor:pointer;background:transparent;">行内 blurb（默认）</button>
+                    <button type="button" class="seg-btn" id="segEditorial" onclick="setPlacementStyle('editorial')" style="border:none;padding:5px 12px;font-size:12px;cursor:pointer;background:transparent;">编辑式评测卡（3 款）</button>
+                  </div>
+                  <span id="placementStyleHint" style="font-size:11px;color:var(--text-secondary,#86868b);"></span>
+                </div>
+                <!-- Editorial-mode-only fields: editable H2 title + intro for the
+                     POVISON Picks block. The Agent pre-fills these during the section
+                     step; the operator may edit them here. Hidden in inline mode. -->
+                <div id="editorialFields" style="display:none;margin-bottom:10px;padding:10px 12px;background:#faf8f5;border:1px solid #e8e0d0;border-radius:8px;">
+                  <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:#8b6f47;">Editorial Picks H2（可编辑）</div>
+                  <input type="text" id="editorialTitleInput" placeholder="POVISON Picks — {默认用主题标题}" oninput="onEditorialTitleInput(this.value)" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;margin-bottom:8px;">
+                  <textarea id="editorialIntroInput" rows="2" placeholder="一段总览：用什么标准筛出这 3 款（可选）" oninput="onEditorialIntroInput(this.value)" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;"></textarea>
+                </div>
+                <!-- Style-switch banner: shown when the operator changes style AFTER
+                     sections already exist. Keeps the prose (does not clear it) but
+                     marks sections stale so 下一步 stays disabled until re-generation. -->
+                <div id="styleSwitchBanner" style="display:none;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;">已切换植入样式，请重新点击「请 Agent 写全部正文」按新样式重写正文与植入</div>
                 <div class="gen-live-mini" id="sectionsLive"></div>
                 <div class="wb-actions">
                   <button class="btn btn-primary" id="btnGenAllSections" onclick="generateAllSections()" disabled>请 Agent 写全部正文</button>
                   <div class="spacer"></div>
                   <button class="btn btn-ghost" onclick="setGenPhase('outline')">回改大纲</button>
-                  <button class="btn btn-primary" id="btnSectionsNext" onclick="setGenPhase('placements')" disabled>下一步：产品与内链</button>
+                  <button class="btn btn-primary" id="btnSectionsNext" onclick="scrollToPlacementZone()" disabled>下一步：产品与内链</button>
                 </div>
               </div>
             </div>
@@ -1286,39 +1310,52 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                 <div class="section-preview-body" id="sectionPreviewBody"></div>
               </div>
             </div>
-          </div>
 
-          <!-- Phase: Product placements & internal links -->
-          <div class="wb-panel" id="phase-placements">
-            <div class="wb-card" style="margin-bottom:14px;">
-              <div class="wb-card-header">
-                <h3>产品植入与内链</h3>
-                <span class="wb-status idle" id="placementsStatus">待解析</span>
-              </div>
-              <div class="wb-card-body">
-                <p class="wb-hint">正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」可从当前正文重新解析。确认后进 FAQ。</p>
-                <div class="gen-live-mini" id="placementsLive"></div>
-                <div id="placementWarningsBanner" style="display:none;background:#fef3f2;border:1px solid #fda4af;color:#9f1239;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;"></div>
-                <div class="wb-actions">
-                  <button class="btn btn-primary" id="btnGenPlacements" onclick="generatePlacements()" disabled>重新挑选植入候选</button>
-                  <button class="btn btn-secondary" id="btnEnrichProductImgs" onclick="enrichMissingProductImages()" disabled>补全缺图</button>
-                  <button class="btn btn-secondary" id="btnVerifyPlacementUrls" onclick="verifyPlacementUrls()" disabled>校验链接有效性</button>
-                  <button class="btn btn-secondary" id="btnAcceptAllPlacements" onclick="acceptAllPlacements()" disabled>一键全部接受</button>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost" onclick="setGenPhase('sections')">上一步</button>
-                  <button class="btn btn-primary" id="btnPlacementsNext" onclick="confirmPlacements()" disabled>确认，写 FAQ</button>
+            <!-- Product placements & internal links — merged into the 正文
+                 panel as a sub-zone (Phase 2). Previously its own phase pill/panel;
+                 now lives below the section editor with a divider + sub-title so
+                 the operator reviews body and placements on one page. All element
+                 IDs are preserved so existing JS (renderPlacements / gate logic /
+                 live stream) keeps working. -->
+            <div id="placementZone" style="margin-top:24px;border-top:1px solid var(--border,#d2d2d7);padding-top:18px;">
+              <div style="font-size:15px;font-weight:700;margin-bottom:12px;">产品植入与内链</div>
+              <div class="wb-card" style="margin-bottom:14px;">
+                <div class="wb-card-header">
+                  <h3>产品植入与内链</h3>
+                  <span class="wb-status idle" id="placementsStatus">待解析</span>
+                </div>
+                <div class="wb-card-body">
+                  <!-- Placement-style switch lives in the 正文生成 card above. Here
+                       we show a read-only indicator of the current style so the
+                       operator knows which review rules apply. -->
+                  <div class="placement-style-row" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary,#f5f5f7);border-radius:8px;">
+                    <span style="font-size:13px;font-weight:600;">当前植入样式</span>
+                    <span id="placementStyleIndicator" style="font-size:12px;padding:3px 10px;border-radius:6px;background:#fff;border:1px solid var(--border,#d2d2d7);">行内 blurb</span>
+                    <span style="font-size:11px;color:var(--text-secondary,#86868b);">如需切换，请回到上方「正文板块」顶部切换并重新生成正文</span>
+                  </div>
+                  <p class="wb-hint" id="placementsHint">正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」可从当前正文重新解析。确认后进 FAQ。</p>
+                  <div class="gen-live-mini" id="placementsLive"></div>
+                  <div id="placementWarningsBanner" style="display:none;background:#fef3f2;border:1px solid #fda4af;color:#9f1239;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;"></div>
+                  <div class="wb-actions">
+                    <button class="btn btn-primary" id="btnGenPlacements" onclick="generatePlacements()" disabled>重新挑选植入候选</button>
+                    <button class="btn btn-secondary" id="btnEnrichProductImgs" onclick="enrichMissingProductImages()" disabled>补全缺图</button>
+                    <button class="btn btn-secondary" id="btnVerifyPlacementUrls" onclick="verifyPlacementUrls()" disabled>校验链接有效性</button>
+                    <button class="btn btn-secondary" id="btnAcceptAllPlacements" onclick="acceptAllPlacements()" disabled>一键全部接受</button>
+                    <div class="spacer"></div>
+                    <button class="btn btn-primary" id="btnPlacementsNext" onclick="confirmPlacements()" disabled>确认，写 FAQ</button>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div style="font-size:13px;font-weight:600;margin:4px 0 8px;">产品植入（1–2 个，约 40–70 词）</div>
-            <div class="placement-grid" id="productPlaceList"></div>
-            <div class="wb-actions" style="margin-bottom:16px;">
-              <button class="btn btn-secondary btn-sm" id="btnAddProduct" onclick="addProductPlacement()" disabled>加一个产品</button>
-            </div>
-            <div style="font-size:13px;font-weight:600;margin:4px 0 8px;">内链建议（2–3 条，anchor 须为文中自然长尾词）</div>
-            <div class="placement-grid" id="linkPlaceList"></div>
-            <div class="wb-actions">
-              <button class="btn btn-secondary btn-sm" id="btnAddLink" onclick="addLinkPlacement()" disabled>加一条内链</button>
+              <div id="productPlaceHeader" style="font-size:13px;font-weight:600;margin:4px 0 8px;">产品植入（1–2 个，约 40–70 词）</div>
+              <div class="placement-grid" id="productPlaceList"></div>
+              <div class="wb-actions" style="margin-bottom:16px;">
+                <button class="btn btn-secondary btn-sm" id="btnAddProduct" onclick="addProductPlacement()" disabled>加一个产品</button>
+              </div>
+              <div id="linkPlaceHeader" style="font-size:13px;font-weight:600;margin:4px 0 8px;">内链建议（2–3 条，anchor 须为文中自然长尾词）</div>
+              <div class="placement-grid" id="linkPlaceList"></div>
+              <div class="wb-actions" id="linkAddRow">
+                <button class="btn btn-secondary btn-sm" id="btnAddLink" onclick="addLinkPlacement()" disabled>加一条内链</button>
+              </div>
             </div>
           </div>
 
@@ -1346,7 +1383,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                   <button class="btn btn-primary" id="btnGenFaq" onclick="generateFaq()" disabled>生成 FAQ</button>
                   <button class="btn btn-secondary" onclick="addFaqItem()" id="btnAddFaq" disabled>加一问</button>
                   <div class="spacer"></div>
-                  <button class="btn btn-ghost" onclick="setGenPhase('placements')">上一步</button>
+                  <button class="btn btn-ghost" onclick="setGenPhase('sections')">上一步</button>
                   <button class="btn btn-primary" id="btnFaqNext" onclick="setGenPhase('meta')" disabled>下一步：SEO 元信息</button>
                 </div>
               </div>
@@ -1706,6 +1743,13 @@ function freshArticleState(topic) {
     meta: { title: '', description: '', slug: '', focus: '' },
     phaseDone: { serp: false, outline: false, sections: false, placements: false, faq: false, meta: false, preview: false },
     previewHtml: '',
+    // Editorial Picks placement style (K item). Default 'inline' keeps every
+    // existing task on the legacy path; operators switch to 'editorial' in the
+    // placements panel to render a standalone "POVISON Picks" H2 with 3 H3
+    // product cards instead of inline blurbs.
+    placementStyle: 'inline',
+    editorialTitle: '',
+    editorialIntro: '',
   };
 }
 
@@ -1894,6 +1938,12 @@ function mergeArticleState(dbState, memState) {
   merged.placementsConfirmed = !!memState.placementsConfirmed;
   // User-edited fields — take in-memory.
   merged.meta = memState.meta || merged.meta;
+  // Editorial Picks state — operator-chosen style + editable H2 title/intro
+  // (S item). Take in-memory so switching style / editing the title survives a
+  // task-switch round-trip (DB is authoritative for body, not for this choice).
+  merged.placementStyle = memState.placementStyle || merged.placementStyle || 'inline';
+  merged.editorialTitle = (memState.editorialTitle != null) ? memState.editorialTitle : (merged.editorialTitle || '');
+  merged.editorialIntro = (memState.editorialIntro != null) ? memState.editorialIntro : (merged.editorialIntro || '');
   // products/links: an empty array is an intentional clear (operator deleted all).
   // Do NOT fall back to DB when memState.products === [] — that was restoring
   // deleted 404 recommendations (e.g. Arlo Sofa) while Agent was still running.
@@ -1929,14 +1979,27 @@ function mergeArticleState(dbState, memState) {
     return ds; // keep DB section (agent saved content the UI doesn't have)
   });
   // phaseDone — union for most flags, but honor explicit in-memory false for
-  // placements (operator cleared / re-opened the gate).
+  // sections (operator switched placement style, marking body stale for
+  // re-generation). placements is no longer an independent phase (Phase 2
+  // merge): it is derived from sections + placementsConfirmed so the FAQ gate
+  // reflects "body ready AND placements confirmed" without a separate pill.
   var pd = Object.assign({}, merged.phaseDone || {});
   var mpd = memState.phaseDone || {};
   Object.keys(mpd).forEach(function(k) {
     if (mpd[k]) pd[k] = true;
-    else if (k === 'placements') pd[k] = false;
+    else if (k === 'sections') pd[k] = false;
   });
+  // placements mirrors sections readiness; the confirmation status is tracked
+  // separately via placementsConfirmed (the FAQ gate reads both). A stale
+  // style-switch (sections=false) propagates to placements automatically.
+  pd.placements = !!(pd.sections && (memState.placementsConfirmed || merged.placementsConfirmed));
   merged.phaseDone = pd;
+  // stale markers — in-memory is authoritative (the UI is the sole setter/clearer
+  // of stale markers; the Agent does not set them). Use memState.stale as-is when
+  // present so a clearStale() deletion propagates — Object.assign would only
+  // overlay additions and leave DB-side markers (e.g. stale.sections) intact,
+  // making it impossible to clear a style-switch stale marker after regeneration.
+  merged.stale = (memState.stale != null) ? Object.assign({}, memState.stale) : (merged.stale || {});
   // Clear stale URL-check banners when operator wiped placements
   if (Array.isArray(memState.products) && memState.products.length === 0 &&
       Array.isArray(memState.links) && memState.links.length === 0) {
@@ -2036,11 +2099,15 @@ async function switchToRun(runIdOrTaskId) {
 }
 
 async function switchToTask(taskId) {
-  // Stop any in-flight agent poll loop for the previous task so its UI updates
-  // don't bleed into the task we're opening.
-  _activePollTaskId = null;
   // Hide any leftover job progress bar from the previous task and re-enable its
   // disabled buttons so the operator can act on the newly opened task.
+  // NOTE: we intentionally do NOT set `_activePollTaskId = null` here. Setting
+  // it to null killed the previous task's poll loop AND prevented the progress
+  // bar from being restored when switching back to a still-running task. Instead,
+  // we set it to the NEW task id so the old loop's `if (_activePollTaskId !== rid)
+  // return` guard fires on its next iteration (clean exit), and the new task's
+  // resume (below) can re-establish polling if it is running.
+  _activePollTaskId = taskId;
   if (JobProgress._timer) { clearInterval(JobProgress._timer); JobProgress._timer = null; }
   if (JobProgress._el) JobProgress._el.className = 'job-progress';
   (JobProgress._buttons || []).forEach(b => { if (b) { b.classList.remove('is-loading'); b.disabled = false; } });
@@ -2091,7 +2158,7 @@ function resetGenerationUI() {
   var phaseSerp = document.getElementById('phase-serp'); if (phaseSerp) phaseSerp.classList.add('active');
   document.querySelectorAll('.gen-phase-pill').forEach(p => p.classList.remove('done', 'active'));
   var pillSerp = document.querySelector('.gen-phase-pill[data-phase="serp"]'); if (pillSerp) pillSerp.classList.add('active');
-  var genTopicInfo = document.getElementById('genTopicInfo'); if (genTopicInfo) genTopicInfo.textContent = '进度：0/7 · 当前 SERP';
+  var genTopicInfo = document.getElementById('genTopicInfo'); if (genTopicInfo) genTopicInfo.textContent = '进度：0/6 · 当前 SERP';
 }
 
 /** Compare two keyword collections as sets (order-insensitive). */
@@ -2135,6 +2202,9 @@ function applyArticleState(state) {
   if (!state || !state.topic) return false;
   if (Array.isArray(state.sections)) state.sections.forEach(_normalizeSection);
   if (Array.isArray(state.products)) state.products.forEach(_normalizeProduct);
+  // #region agent log
+  try { fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'891da2'},body:JSON.stringify({sessionId:'891da2',location:'ui/index.html:applyArticleState:load',message:'articleState loaded from DB',data:{stale:JSON.stringify(state.stale||{}),placementStyle:state.placementStyle,phaseDoneSections:state.phaseDone&&state.phaseDone.sections,sectionsCount:(state.sections||[]).length},timestamp:Date.now(),runId:'pre',hypothesisId:'H1'})}).catch(()=>{}); } catch(e){}
+  // #endregion
   articleState = state;
   currentGenTopic = state.topic;
   document.getElementById('genEmpty').style.display = 'none';
@@ -2144,8 +2214,7 @@ function applyArticleState(state) {
   restoreWorkbenchUI();
   setGenPhase(state.phaseDone && state.phaseDone.meta ? 'preview' :
     state.phaseDone && state.phaseDone.faq ? 'meta' :
-    state.phaseDone && state.phaseDone.placements ? 'faq' :
-    state.phaseDone && state.phaseDone.sections ? 'placements' :
+    state.phaseDone && state.phaseDone.sections ? 'faq' :
     state.outlineConfirmed ? 'sections' :
     (state.phaseDone && state.phaseDone.serp) || (Array.isArray(state.outline) && state.outline.length) ? 'outline' : 'serp');
   updateGenProgressBar();
@@ -2271,6 +2340,14 @@ async function loadTaskIntoUI(taskId) {
     // bar reflect the restored phase (it calls setGenPhase + updateGenProgressBar,
     // which the inline copy below previously omitted, leaving the UI stuck on
     // the 'serp' phase after reload).
+    var step3Running = false;
+    try {
+      const t = await bridgeFetch('/api/tasks/' + taskId);
+      const tObj = (t && t.task) ? t.task : t;
+      const steps = (tObj && tObj.steps) || [];
+      const s3 = steps.find(function(s){ return s.step_num === 3; });
+      step3Running = !!(s3 && s3.status === 'running') || (tObj && tObj.status === 'running');
+    } catch (e) {}
     try {
       const state = await bridgeFetch('/api/tasks/' + taskId + '/steps/3/data');
       if (!applyArticleState(state)) {
@@ -2287,7 +2364,35 @@ async function loadTaskIntoUI(taskId) {
         restoreWorkbenchUI();
         updateGenProgressBar();
       }
-    } catch (e) {}
+    } catch (e) {
+      // Step-3 data GET failed (usually 404 = no data yet). If step 3 is
+      // actively running (Agent launched but hasn't written articleState yet),
+      // show a "generating…" placeholder instead of the cold empty state — the
+      // operator just switched back to this task mid-run and the prior behavior
+      // (blank "等待主题选择") was indistinguishable from a brand-new task, so
+      // they couldn't tell whether the Agent was working or had crashed.
+      if (step3Running) {
+        var genEmptyBox = document.getElementById('genEmpty');
+        if (genEmptyBox) {
+          genEmptyBox.style.display = 'block';
+          var h4 = genEmptyBox.querySelector('h4');
+          if (h4) h4.textContent = '正在生成大纲…';
+          var p = genEmptyBox.querySelector('p');
+          if (p) p.textContent = 'Agent 正在后台执行该任务的 Step 3，完成后会自动刷新。请稍候或切回即可看到结果。';
+        }
+        document.getElementById('genWorkbench').style.display = 'none';
+        document.getElementById('genActionBar').style.display = 'none';
+      } else {
+        articleState = freshArticleState(null);
+        currentGenTopic = null;
+        document.getElementById('genEmpty').style.display = 'block';
+        document.getElementById('genWorkbench').style.display = 'none';
+        document.getElementById('genActionBar').style.display = 'none';
+        var wbTitle2 = document.getElementById('wbTopicTitle'); if (wbTitle2) wbTitle2.textContent = '';
+        restoreWorkbenchUI();
+        updateGenProgressBar();
+      }
+    }
     saveToRun();
   } catch (e) {
     console.warn('loadTaskIntoUI', e);
@@ -3115,12 +3220,62 @@ async function agentPollProgress(rid, sinceIdx, panelId, stepNum) {
 // When the operator switches tasks or starts a new flow, this is reset so the
 // previous poll loop stops touching the shared JobProgress / live panel.
 let _activePollTaskId = null;
+// Tracks whether a poll loop is currently active for a task, so a second
+// resumeTaskAgentPolling call (e.g. from switching back to a running task
+// while an earlier loop is still spinning) doesn't spawn a duplicate loop.
+let _pollLoopActiveFor = null;
+// Tracks the active agent sub-step ('section', 'faq', 'meta', 'serp', 'outline',
+// 'placements') for the in-flight bridgeAskAgent run, so that after a task switch
+// resumeTaskAgentPolling can (a) restore the correct live panel + JobProgress UI
+// and (b) land on the correct generation phase instead of letting
+// applyArticleState auto-advance past it.
+let _activeAgentStep = null;
+// In-flight script jobs (bridgeGenerateSection path, used by FAQ/Meta/placements
+// re-resolve), keyed by run/task id → job_id. The script path does not go through
+// the gateway agent, so resumeTaskAgentPolling can't restore it via /agent/status;
+// this map + the .script_job DB marker let resumeScriptJobPolling re-attach the
+// progress bar after a task switch.
+let _activeScriptJob = {};
+let _scriptJobPollActiveFor = null;
 
 /** Resume the agent progress bar + live panel for a task that is still running.
  *  Called when the operator switches back to a `running` task. No-op if the
- *  task has no running step. */
+ *  task has no running step or a poll loop is already running for it. */
 async function resumeTaskAgentPolling(taskId) {
   if (!taskId || !String(taskId).startsWith('task-') && !String(taskId).startsWith('run-')) return;
+  // Prevent duplicate poll loops for the same task. If a loop is already
+  // running for this task (e.g. the original bridgeAskAgent loop is still
+  // spinning because the operator switched back before it finished), just
+  // ensure _activePollTaskId points to it so that loop keeps going — do NOT
+  // start a second one.
+  if (_pollLoopActiveFor === taskId) {
+    _activePollTaskId = taskId;
+    // The original bridgeAskAgent loop is still alive, but switchToTask destroyed
+    // the JobProgress UI (timer + element). Re-establish it so the operator sees
+    // the progress bar again, then let the original loop keep polling. Use the
+    // SAME live panel the original loop writes to (derived from _activeAgentStep)
+    // so progress lines append to the right place.
+    try {
+      const t = await bridgeFetch('/api/tasks/' + taskId);
+      const tObj = (t && t.task) ? t.task : t;
+      const tSteps = (tObj && tObj.steps) || [];
+      const rStep = tSteps.find(function(s){ return s.status === 'running'; });
+      const sNum = rStep ? rStep.step_num : 3;
+      const _LIVE_PANEL = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'sectionsLive', faq:'faqLive', meta:'metaLive' };
+      const livePanel = (_activeAgentStep && _LIVE_PANEL[_activeAgentStep]) || (sNum === 2 ? 'bsLive' : 'genLive');
+      const jKind = sNum === 2 ? 'agent-brainstorm' : ('agent-' + (_activeAgentStep || (rStep && rStep.step_type) || 'section'));
+      JobProgress.start(jKind, []);
+      agentLiveReset(livePanel, 'Agent · ' + (_activeAgentStep || ('step ' + sNum)), '已恢复进度轮询…');
+      await agentPollProgress(taskId, 0, livePanel, sNum);
+      // Land on the phase being regenerated instead of letting applyArticleState
+      // auto-advance past it (e.g. regenerating sections with phaseDone.faq=true
+      // would otherwise land on 'meta').
+      const _PHASE_MAP = { serp:'serp', outline:'outline', section:'sections', sections:'sections', placements:'sections', faq:'faq', meta:'meta' };
+      const ph = _activeAgentStep ? _PHASE_MAP[_activeAgentStep] : null;
+      if (ph && typeof setGenPhase === 'function') setGenPhase(ph);
+    } catch (e) {}
+    return;
+  }
   let task;
   try { task = await bridgeFetch('/api/tasks/' + taskId); } catch (e) { return; }
   // Endpoint returns {"ok":true,"task":{...}} — unwrap if needed.
@@ -3131,12 +3286,29 @@ async function resumeTaskAgentPolling(taskId) {
   // if the task itself is running even when no step reports running.
   const runningStep = steps.find(function(s){ return s.status === 'running'; });
   if (!runningStep && (task.status !== 'running')) return;
+  // Script-job dispatch: if a step is running but has NO agent_run_id, it is a
+  // script-based generation (FAQ/Meta/placements re-resolve via
+  // bridgeGenerateSection), not a gateway agent run. Polling /agent/status would
+  // 404 ("no agent run"). Resume via the script job poller instead.
+  if (runningStep && !runningStep.agent_run_id) {
+    resumeScriptJobPolling(taskId, runningStep.step_num);
+    return;
+  }
   const stepNum = runningStep ? runningStep.step_num : 3;
-  const panelId = stepNum === 2 ? 'bsLive' : 'genLive';
-  const jobKind = stepNum === 2 ? 'agent-brainstorm' : ('agent-' + ((runningStep && runningStep.step_type) || 'section'));
+  // Use the same per-phase live panel the original bridgeAskAgent loop writes to
+  // (derived from _activeAgentStep) so resumed progress lines append correctly.
+  const _LIVE_PANEL_RESUME = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'sectionsLive', faq:'faqLive', meta:'metaLive' };
+  const panelId = (_activeAgentStep && _LIVE_PANEL_RESUME[_activeAgentStep]) || (stepNum === 2 ? 'bsLive' : 'genLive');
+  const jobKind = stepNum === 2 ? 'agent-brainstorm' : ('agent-' + (_activeAgentStep || (runningStep && runningStep.step_type) || 'section'));
   _activePollTaskId = taskId;
+  _pollLoopActiveFor = taskId;
   JobProgress.start(jobKind, []);
-  agentLiveReset(panelId, 'Agent · ' + ((runningStep && runningStep.step_type) || ('step ' + stepNum)), '已恢复进度轮询…');
+  agentLiveReset(panelId, 'Agent · ' + (_activeAgentStep || (runningStep && runningStep.step_type) || ('step ' + stepNum)), '已恢复进度轮询…');
+  // Land on the phase being regenerated instead of letting applyArticleState
+  // auto-advance past it.
+  const _PHASE_MAP_RESUME = { serp:'serp', outline:'outline', section:'sections', sections:'sections', placements:'sections', faq:'faq', meta:'meta' };
+  const _resumePh = _activeAgentStep ? _PHASE_MAP_RESUME[_activeAgentStep] : null;
+  if (_resumePh && typeof setGenPhase === 'function') setGenPhase(_resumePh);
   // Replay existing progress lines from DB
   let progressIdx = await agentPollProgress(taskId, 0, panelId, stepNum);
   const statusPath = '/api/tasks/' + taskId + '/steps/' + stepNum + '/agent/status';
@@ -3144,9 +3316,9 @@ async function resumeTaskAgentPolling(taskId) {
   const limit = 15 * 60 * 1000;
   let done = false;
   while (Date.now() - t0 < limit && !done) {
-    if (_activePollTaskId !== taskId) return; // operator switched away
+    if (_activePollTaskId !== taskId) { _pollLoopActiveFor = null; return; } // operator switched away
     await new Promise(function(r){ setTimeout(r, 2000); });
-    if (_activePollTaskId !== taskId) return;
+    if (_activePollTaskId !== taskId) { _pollLoopActiveFor = null; return; }
     progressIdx = await agentPollProgress(taskId, progressIdx, panelId, stepNum);
     try {
       const st = await bridgeFetch(statusPath);
@@ -3154,6 +3326,7 @@ async function resumeTaskAgentPolling(taskId) {
       const status = gw.status || '';
       if (status === 'completed' || status === 'succeeded') {
         done = true;
+        _pollLoopActiveFor = null;
         // Only refresh the UI if this task is still selected.
         if (_activePollTaskId !== taskId) return;
         progressIdx = await agentPollProgress(taskId, progressIdx, panelId, stepNum);
@@ -3164,8 +3337,13 @@ async function resumeTaskAgentPolling(taskId) {
         agentLiveAppend(panelId, '完成', 'done');
         setTimeout(function(){ agentLiveHide(panelId); }, 1800);
         await refreshAuditTrail();
+        // Phase 2 (I): this loop started with an empty JobProgress button list,
+        // so on completion nobody re-locks the gate buttons. recomputeAllGates
+        // restores the correct disabled set from the freshly reloaded state.
+        if (typeof recomputeAllGates === 'function') recomputeAllGates();
       } else if (status === 'failed' || status === 'error') {
         done = true;
+        _pollLoopActiveFor = null;
         JobProgress.done(false, 'Agent 执行失败');
         agentLiveAppend(panelId, 'Agent 执行失败', 'error');
         await refreshAuditTrail();
@@ -3177,14 +3355,134 @@ async function resumeTaskAgentPolling(taskId) {
         // No gateway run recorded (e.g. step marked running without agent_run_id,
         // or gateway restarted). Stop polling — operator can re-trigger.
         done = true;
+        _pollLoopActiveFor = null;
         JobProgress.done(false, '该步骤无 Agent 运行记录 — 请重新点击生成');
       } else {
         JobProgress.update('Agent 状态：' + (status || '未知') + '…');
       }
     } catch (e) { /* keep polling */ }
   }
+  _pollLoopActiveFor = null;
   if (!done && _activePollTaskId === taskId) {
     JobProgress.done(false, 'Agent 超时（15 分钟）');
+  }
+  if (_activePollTaskId === taskId) _activePollTaskId = null;
+}
+
+/** Resume the progress bar for an in-flight SCRIPT job (bridgeGenerateSection
+ *  path — FAQ/Meta/placements re-resolve) after the operator switches back to
+ *  the task. Script jobs are NOT gateway agent runs, so they cannot be resumed
+ *  via /agent/status; instead we poll /api/jobs/{job_id} (the same endpoint
+ *  bridgePollJob uses) until succeeded/failed, then reload the article state.
+ *  The job_id comes from the in-memory _activeScriptJob map (same session) or
+ *  the server's .script_job marker (cross-reload). */
+async function resumeScriptJobPolling(taskId, stepNum) {
+  if (!taskId) return;
+  if (_scriptJobPollActiveFor === taskId) return; // already polling
+  stepNum = stepNum || 3;
+  // Resolve the in-flight job_id + mode: prefer the in-memory map, else ask the
+  // server. The map value is either {jobId, mode} (section-generate) or a plain
+  // job_id string (keyword discover/enrich, brainstorm).
+  let jobId = null;
+  let mode = null;
+  const mem = _activeScriptJob[taskId];
+  if (mem) {
+    if (typeof mem === 'object' && mem !== null) { jobId = mem.jobId; mode = mem.mode || null; }
+    else { jobId = mem; }
+  }
+  if (!jobId) {
+    try {
+      const r = await bridgeFetch('/api/tasks/' + taskId + '/active-script-job');
+      jobId = (r && r.job_id) || null;
+      mode = (r && r.mode) || null;
+    } catch (e) { jobId = null; }
+  }
+  if (!jobId) {
+    return;
+  }
+  _activePollTaskId = taskId;
+  _scriptJobPollActiveFor = taskId;
+  const panelId = stepNum === 2 ? 'bsLive' : 'genLive';
+  JobProgress.start('section-generate', []);
+  if (stepNum === 2) document.getElementById('bsLive').classList.add('show');
+  if (panelId) agentLiveReset(panelId, '脚本生成', '已恢复进度轮询…');
+  // Land on the phase being regenerated (e.g. 'faq') instead of letting
+  // restoreWorkbenchUI auto-advance past it (to 'meta') because phaseDone.faq
+  // is still true from the prior run. Only section-generate carries a mode.
+  if (stepNum === 3 && mode) {
+    const phaseMap = { faq: 'faq', meta: 'meta', section: 'sections', sections: 'sections', placements: 'placements' };
+    const ph = phaseMap[mode] || null;
+    if (ph && typeof setGenPhase === 'function') setGenPhase(ph);
+  }
+  const t0 = Date.now();
+  const limit = 30 * 60 * 1000;
+  let done = false;
+  let lastStatus = '';
+  while (Date.now() - t0 < limit && !done) {
+    if (_activePollTaskId !== taskId) { _scriptJobPollActiveFor = null; return; } // switched away
+    await new Promise(function(r){ setTimeout(r, 1500); });
+    if (_activePollTaskId !== taskId) { _scriptJobPollActiveFor = null; return; }
+    let job;
+    try { job = await bridgeFetch('/api/jobs/' + jobId); }
+    catch (e) { /* keep polling */ continue; }
+    if (_activePollTaskId !== taskId) { _scriptJobPollActiveFor = null; return; }
+    if (job.status !== lastStatus) {
+      lastStatus = job.status;
+      const hint = JobProgress._statusHints[job.kind] || '脚本生成中…';
+      JobProgress.update(job.status === 'running' ? hint : (job.kind + ' · ' + job.status));
+    }
+    if (job.status === 'succeeded') {
+      done = true;
+      _scriptJobPollActiveFor = null;
+      delete _activeScriptJob[taskId];
+      if (_activePollTaskId !== taskId) return;
+      // Step-aware restore (mirrors each bridge* function's post-poll restore).
+      try {
+        if (stepNum === 1) {
+          const kw = await bridgeLoadFile('kw.json');
+          const list = Array.isArray(kw) ? kw : (kw.keywords || []);
+          const n = applyImportedKeywords(list);
+          logStep(1, 'bridge_discover', 'Bridge 导入 ' + n + ' 词');
+          JobProgress.done(true, '已导入 ' + n + ' 个关键词');
+          showToast('关键词已从脚本导入 ' + n + ' 条', 'success');
+        } else if (stepNum === 2) {
+          const topicsDoc = await bridgeLoadFile('topics.json');
+          const topicList = topicsDoc.topics || topicsDoc;
+          brainstormTopics = (Array.isArray(topicList) ? topicList : []).map(function(t, i){ return normalizeTopicItem(t, i + 1); });
+          selectedTopics.clear();
+          renderTopics();
+          document.getElementById('bsActionBar').style.display = 'flex';
+          document.getElementById('bsLiveLabel').textContent = '脚本完成';
+          logStep(2, 'bridge_brainstorm', brainstormTopics.length + ' topics');
+          JobProgress.done(true, '已生成 ' + brainstormTopics.length + ' 个选题');
+          showToast('主题已从 topic-brainstorm 导入', 'success');
+        } else {
+          const state = await bridgeLoadFile('article-state.json');
+          articleState = state;
+          currentGenTopic = articleState.topic || currentGenTopic;
+          document.getElementById('genEmpty').style.display = 'none';
+          document.getElementById('genWorkbench').style.display = 'block';
+          document.getElementById('genActionBar').style.display = 'flex';
+          if (articleState.topic) document.getElementById('wbTopicTitle').textContent = articleState.topic.title;
+          restoreWorkbenchUI();
+          saveToRun();
+          JobProgress.done(true, '脚本已生成');
+        }
+      } catch (e) {}
+      if (panelId) { agentLiveAppend(panelId, '完成', 'done'); setTimeout(function(){ agentLiveHide(panelId); }, 1800); }
+      await refreshAuditTrail();
+    } else if (job.status === 'failed') {
+      done = true;
+      _scriptJobPollActiveFor = null;
+      delete _activeScriptJob[taskId];
+      JobProgress.done(false, job.error || '脚本生成失败');
+      if (panelId) agentLiveAppend(panelId, '脚本生成失败', 'error');
+      await refreshAuditTrail();
+    }
+  }
+  _scriptJobPollActiveFor = null;
+  if (!done && _activePollTaskId === taskId) {
+    JobProgress.done(false, '脚本生成超时');
   }
   if (_activePollTaskId === taskId) _activePollTaskId = null;
 }
@@ -3497,8 +3795,7 @@ function initWorkbench() {
   restoreWorkbenchUI();
   setGenPhase(articleState.phaseDone.meta ? 'preview' :
     articleState.phaseDone.faq ? 'meta' :
-    articleState.phaseDone.placements ? 'faq' :
-    articleState.phaseDone.sections ? 'placements' :
+    articleState.phaseDone.sections ? 'faq' :
     articleState.outlineConfirmed ? 'sections' :
     (articleState.phaseDone.serp || (Array.isArray(articleState.outline) && articleState.outline.length)) ? 'outline' : 'serp');
   updateGenProgressBar();
@@ -3572,6 +3869,10 @@ function restoreWorkbenchUI() {
     document.getElementById('btnAddProduct').disabled = false;
     document.getElementById('btnAddLink').disabled = false;
   }
+  // Always render the placement-style toggle so operators can switch between
+  // inline and editorial even before any placements exist (the choice drives
+  // the Agent's candidate-count when "生成推荐" is clicked).
+  renderPlacementStyleToggle();
   if (articleState.faq.length) {
     renderFaqEditor();
     setStatus('faqStatus', 'ready', '已完成');
@@ -3597,6 +3898,19 @@ function restoreWorkbenchUI() {
   }
   updatePhasePills();
   renderStaleBanners();
+  // Reflect a style-switch stale marker: if sections are marked stale because
+  // the operator switched placement style after writing them, show the
+  // re-generation banner in the 正文板块 panel on reload.
+  var ssBanner = document.getElementById('styleSwitchBanner');
+  if (ssBanner) {
+    ssBanner.style.display = (articleState.stale && articleState.stale.sections === 'placementStyle') ? 'block' : 'none';
+  }
+  // Phase 2 (G): re-lock every gate button to match articleState. switchToTask
+  // force-enables all buttons before this runs, so without a systematic re-lock
+  // a restored task would show stale "enabled" states (e.g. btnGenFaq clickable
+  // when placements not confirmed). Idempotent — safe to call after the per-
+  // phase enables above, which already set the right values for present data.
+  recomputeAllGates();
 }
 
 function setStatus(id, cls, text) {
@@ -3606,7 +3920,18 @@ function setStatus(id, cls, text) {
   el.textContent = text;
 }
 
+/** Phase 2: scroll the merged panel down to the product/link sub-zone.
+ *  Replaces the old setGenPhase('placements') navigation since placements now
+ *  live inside #phase-sections. Stays on the sections phase (no pill change). */
+function scrollToPlacementZone() {
+  var zone = document.getElementById('placementZone');
+  if (zone) zone.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function setGenPhase(phase) {
+  // #region agent log
+  try { fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'891da2'},body:JSON.stringify({sessionId:'891da2',location:'ui/index.html:setGenPhase',message:'setGenPhase called',data:{phase:phase,panelExists:!!document.getElementById('phase-'+phase)},timestamp:Date.now(),runId:'pre',hypothesisId:'H1'})}).catch(()=>{}); } catch(e){}
+  // #endregion
   currentGenPhase = phase;
   document.querySelectorAll('.wb-panel').forEach(p => p.classList.remove('active'));
   document.getElementById('phase-' + phase)?.classList.add('active');
@@ -3634,11 +3959,17 @@ function updatePhasePills() {
 // banner on each affected panel so the operator knows to re-run them. It only
 // fires when the downstream step was already completed — on a fresh forward
 // run all phaseDone flags are false, so this is a no-op.
-const PHASE_ORDER = ['serp','outline','sections','placements','faq','meta','preview'];
+// Phase 2 merge: placements is no longer its own phase pill/panel — it lives as
+// a sub-zone (#placementZone) inside #phase-sections. PHASE_ORDER drops it so
+// renderStaleBanners / progress bar treat the body+placements area as one step.
+// DOWNSTREAM_OF keeps a 'placements' key (still used by setPlacementStyle /
+// generatePlacements to stale-mark faq/meta/preview) — its downstream now equals
+// sections' downstream. STALE_LABEL keeps 'placements' for the sub-zone banner.
+const PHASE_ORDER = ['serp','outline','sections','faq','meta','preview'];
 const DOWNSTREAM_OF = {
   serp:       [],
-  outline:    ['sections','placements','faq','meta','preview'],
-  sections:   ['placements','faq','meta','preview'],
+  outline:    ['sections','faq','meta','preview'],
+  sections:   ['faq','meta','preview'],
   placements: ['faq','meta','preview'],
   faq:        ['meta','preview'],
   meta:       ['preview'],
@@ -3693,15 +4024,39 @@ function renderStaleBanners() {
       banner.remove();
     }
   });
+  // Phase 2 (H): placements is no longer its own panel (it lives as #placementZone
+  // inside #phase-sections), so it is NOT in PHASE_ORDER and the loop above skips
+  // it. Render its stale banner inside the placement sub-zone instead so the
+  // operator still sees "上游已改·建议重跑" next to the product/link cards.
+  const pZone = document.getElementById('placementZone');
+  if (pZone) {
+    let pBanner = pZone.querySelector('.wb-stale-banner');
+    const pFrom = articleState && articleState.stale && articleState.stale.placements;
+    if (pFrom) {
+      if (!pBanner) {
+        pBanner = document.createElement('div');
+        pBanner.className = 'wb-stale-banner';
+        const pBody = pZone.querySelector('.wb-card-body');
+        if (pBody) pBody.insertBefore(pBanner, pBody.firstChild);
+        else pZone.insertBefore(pBanner, pZone.firstChild);
+      }
+      pBanner.textContent = '⚠ 上游「' + (STALE_LABEL[pFrom] || pFrom) + '」已改，本步结果可能陈旧，建议重跑';
+    } else if (pBanner) {
+      pBanner.remove();
+    }
+  }
 }
 
 function updateGenProgressBar() {
   if (!articleState) return;
-  const order = ['serp','outline','sections','placements','faq','meta','preview'];
-  const labels = { serp:'SERP', outline:'大纲', sections:'正文', placements:'植入', faq:'FAQ', meta:'Meta', preview:'预览' };
+  // Phase 2: 6 steps (placements merged into sections). 'placements' is kept in
+  // the order array only to count it if a legacy task still has it set, but the
+  // visible label/total reflect the merged 6-step flow.
+  const order = ['serp','outline','sections','faq','meta','preview'];
+  const labels = { serp:'SERP', outline:'大纲', sections:'正文与植入', faq:'FAQ', meta:'Meta', preview:'预览' };
   const done = order.filter(k => articleState.phaseDone[k]).length;
   document.getElementById('genTopicInfo').textContent =
-    '进度：' + done + '/7 · 当前 ' + (labels[currentGenPhase] || '—');
+    '进度：' + done + '/6 · 当前 ' + (labels[currentGenPhase] || '—');
 }
 
 function showLive(id, lines, onDone) {
@@ -4072,22 +4427,45 @@ function generateAllSections() {
     return;
   }
   clearStale('sections');
+  // Hide the style-switch banner — the operator is about to regenerate the
+  // body for the currently-selected style, so the "needs rewrite" prompt no
+  // longer applies.
+  var banner = document.getElementById('styleSwitchBanner');
+  if (banner) banner.style.display = 'none';
   invalidateDownstream('sections');
-  bridgeAskAgent('section', document.getElementById('btnGenAllSections'));
+  // Flush the latest articleState (including placementStyle) to the DB BEFORE
+  // launching the Agent — the section prompt branches on placementStyle read
+  // from DB step-3 data, and the debounced persist could otherwise lose the race.
+  flushArticlePersist().then(function() {
+    bridgeAskAgent('section', document.getElementById('btnGenAllSections'));
+  });
 }
 
 function refreshSectionsGate() {
   const allReady = articleState.sections.length > 0 &&
     articleState.sections.every(s => s.content && (s.status === 'ready' || s.status === 'edited'));
-  articleState.phaseDone.sections = allReady;
-  document.getElementById('btnSectionsNext').disabled = !allReady;
-  document.getElementById('btnGenPlacements').disabled = !allReady;
-  document.getElementById('btnEnrichProductImgs').disabled = !allReady;
-  document.getElementById('btnVerifyPlacementUrls').disabled = !allReady;
-  if (allReady) {
+  // A style switch marks sections stale (stale.sections === 'placementStyle'):
+  // even if the prose is all present, the body was written for the OTHER style,
+  // so the gate must stay closed until the operator re-generates. Without this
+  // check the content-based gate would re-enable phaseDone.sections on every
+  // reload/poll and hide the re-generation banner.
+  const styleStale = articleState.stale && articleState.stale.sections === 'placementStyle';
+  const gateReady = allReady && !styleStale;
+  // #region agent log
+  try { fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'891da2'},body:JSON.stringify({sessionId:'891da2',location:'ui/index.html:refreshSectionsGate',message:'sections gate eval',data:{allReady:allReady,styleStale:styleStale,gateReady:gateReady,stale:JSON.stringify(articleState.stale||{}),sectionsCount:(articleState.sections||[]).length,placementStyle:articleState.placementStyle},timestamp:Date.now(),runId:'pre',hypothesisId:'H1'})}).catch(()=>{}); } catch(e){}
+  // #endregion
+  articleState.phaseDone.sections = gateReady;
+  const btnSectionsNext = document.getElementById('btnSectionsNext');
+  if (btnSectionsNext) btnSectionsNext.disabled = !gateReady;
+  document.getElementById('btnGenPlacements').disabled = !gateReady;
+  document.getElementById('btnEnrichProductImgs').disabled = !gateReady;
+  document.getElementById('btnVerifyPlacementUrls').disabled = !gateReady;
+  if (gateReady) {
     setStatus('sectionsStatus', 'ready', '全部就绪');
     document.getElementById('btnAddProduct').disabled = false;
     document.getElementById('btnAddLink').disabled = false;
+  } else if (styleStale) {
+    setStatus('sectionsStatus', 'edited', '需按新样式重写');
   } else if (articleState.sections.some(s => s.content)) setStatus('sectionsStatus', 'edited', '部分完成');
   updatePhasePills();
   updateGenProgressBar();
@@ -4221,8 +4599,7 @@ function enrichMissingProductImages() {
       }
     });
     if (updated) {
-      articleState.placementsConfirmed = false;
-      articleState.phaseDone.placements = false;
+      setPlacementsDirty();
       renderPlacements();
       refreshPlacementsGate();
       saveToRun();
@@ -4245,9 +4622,20 @@ function renderPlacements() {
   const lBox = document.getElementById('linkPlaceList');
   pBox.innerHTML = '';
   lBox.innerHTML = '';
+  const isEditorial = (articleState.placementStyle === 'editorial');
+  // Toggle the static section headers + link list visibility per style.
+  const prodHdr = document.getElementById('productPlaceHeader');
+  const linkHdr = document.getElementById('linkPlaceHeader');
+  const linkAddRow = document.getElementById('linkAddRow');
+  if (prodHdr) prodHdr.textContent = isEditorial ? '产品植入（恰好 3 张评测卡，文案 90–150 词/卡）' : '产品植入（1–2 个，约 40–70 词）';
+  if (linkHdr) linkHdr.style.display = isEditorial ? 'none' : 'block';
+  if (linkAddRow) linkAddRow.style.display = isEditorial ? 'none' : 'flex';
   (articleState.products || []).forEach((p, idx) => {
     const card = document.createElement('div');
     card.className = 'place-card' + (p.status === 'accepted' ? ' accepted' : '') + (p.status === 'rejected' ? ' rejected' : '');
+    const blurbLabel = isEditorial ? '评测文案（90–150 词，含规格/机制段，H3 纯文本、图片→PDP）' : '植入文案（40–70 词，链接嵌在产品名上）';
+    const reviewQuote = (p.reviewQuote && typeof p.reviewQuote === 'object') ? p.reviewQuote : null;
+    const specs = (p.specs && typeof p.specs === 'object') ? p.specs : null;
     card.innerHTML = `
       <div class="place-card-top">
         <span class="place-badge product">产品</span>
@@ -4263,11 +4651,15 @@ function renderPlacements() {
         <input type="text" value="${escapeAttr(p.url)}" oninput="editProduct(${idx},'url',this.value)"></div>
       <div class="section-field"><label>产品配图 URL</label>
         <input type="text" value="${escapeAttr(p.image || '')}" oninput="editProduct(${idx},'image',this.value)" placeholder="POVISON 商品图直链"></div>
-      <div class="section-field"><label>挂载到哪个 H2</label>
-        <select onchange="editProduct(${idx},'sectionId',this.value)">${h2SectionOptionsHtml(p.sectionId)}</select></div>
-      <div class="section-field"><label>植入文案（40–70 词，链接嵌在产品名上）</label>
+      ${isEditorial ? '' : `<div class="section-field"><label>挂载到哪个 H2</label>
+        <select onchange="editProduct(${idx},'sectionId',this.value)">${h2SectionOptionsHtml(p.sectionId)}</select></div>`}
+      <div class="section-field"><label>${blurbLabel}</label>
         <textarea rows="4" oninput="editProduct(${idx},'blurb',this.value)">${p.blurb || ''}</textarea>
         <div class="char-count">${(p.blurb || '').trim().split(/\s+/).filter(Boolean).length} 词</div></div>
+      ${isEditorial ? `<div class="section-field"><label>规格/机制（尺寸·机制·材质·颜色）</label>
+        <input type="text" value="${escapeAttr(specs ? (specs.dimensions || '') : '')}" oninput="editProductSpec(${idx},'dimensions',this.value)" placeholder="如 90×180×85 cm"></div>
+        <div class="section-field"><label>买家评价引用（可选）</label>
+        <input type="text" value="${escapeAttr(reviewQuote ? (reviewQuote.quote || '') : '')}" oninput="editProductReview(${idx},'quote',this.value)" placeholder="真实买家评价原文"></div>` : ''}
       <div class="wb-actions">
         <button class="btn btn-primary btn-sm" onclick="setPlacementStatus('products',${idx},'accepted')">接受</button>
         <button class="btn btn-danger-ghost btn-sm" onclick="setPlacementStatus('products',${idx},'rejected')">驳回</button>
@@ -4310,24 +4702,155 @@ function escapeAttr(s) {
 function editProduct(idx, field, val) {
   articleState.products[idx][field] = val;
   // 改文案不撤销「已接受」，避免审完一点小改又卡死确认按钮
-  articleState.placementsConfirmed = false;
-  articleState.phaseDone.placements = false;
+  setPlacementsDirty();
   saveToRun();
   refreshPlacementsGate();
 }
 
-function editLink(idx, field, val) {
-  articleState.links[idx][field] = val;
+// Editorial-mode helpers: edit nested specs / reviewQuote on a product card.
+function editProductSpec(idx, field, val) {
+  if (!articleState || !articleState.products || !articleState.products[idx]) return;
+  var p = articleState.products[idx];
+  p.specs = p.specs || {};
+  p.specs[field] = val;
+  setPlacementsDirty();
+  saveToRun();
+  refreshPlacementsGate();
+}
+function editProductReview(idx, field, val) {
+  if (!articleState || !articleState.products || !articleState.products[idx]) return;
+  var p = articleState.products[idx];
+  p.reviewQuote = p.reviewQuote || {};
+  p.reviewQuote[field] = val;
+  setPlacementsDirty();
+  saveToRun();
+  refreshPlacementsGate();
+}
+
+// ---- Placement style + mutation helpers (L item, phase-1 non-destructive) ----
+// setPlacementsDirty(): mark placements unconfirmed (any edit to a product/link
+//   card invalidates the prior confirmation). Centralizes the 7 inline sites
+//   that previously wrote placementsConfirmed=false + phaseDone.placements=false
+//   directly, so the editorial branch can layer on placementStyle-aware logic
+//   without touching each call site again.
+function setPlacementsDirty() {
   articleState.placementsConfirmed = false;
   articleState.phaseDone.placements = false;
+}
+function setPlacementsConfirmed(confirmed) {
+  articleState.placementsConfirmed = !!confirmed;
+  articleState.phaseDone.placements = !!confirmed;
+}
+
+// Switch between inline-blurb and editorial-review-card placement styles.
+function setPlacementStyle(style) {
+  if (!articleState) return;
+  if (style !== 'inline' && style !== 'editorial') return;
+  if (articleState.placementStyle === style) return;
+  // Guard: do not switch while a step-3 (or step-2) Agent is running — the
+  // in-flight Agent uses guidance frozen at launch and would overwrite the
+  // operator's choice on its next save. Tell the operator to wait.
+  if (_pollLoopActiveFor && _activePollTaskId === (activeTaskId || BRIDGE.taskId)) {
+    showToast('正文生成进行中，请先等待完成或停止后再切换样式', 'error');
+    return;
+  }
+  articleState.placementStyle = style;
+  // Switching style invalidates placements: the cards/blurb count rules differ,
+  // so a prior confirmation no longer applies. Also clear the old products/links
+  // so a count mismatch (e.g. 2 inline cards left in editorial mode) does not
+  // block confirmPlacements, which enforces style-specific counts.
+  setPlacementsDirty();
+  articleState.products = [];
+  articleState.links = [];
+  // If sections already exist, the body was written for the OTHER style: mark
+  // it stale so 下一步 stays disabled and a banner prompts re-generation. Keep
+  // the prose (do not clear) — the operator can still see the old version.
+  if (articleState.sections && articleState.sections.length > 0) {
+    articleState.phaseDone.sections = false;
+    articleState.stale = articleState.stale || {};
+    articleState.stale.sections = 'placementStyle';
+    var banner = document.getElementById('styleSwitchBanner');
+    if (banner) banner.style.display = 'block';
+  }
+  // Narrow the cascade: a style change affects placements + preview assembly,
+  // NOT already-generated FAQ or SEO meta. invalidateDownstream('sections') would
+  // also stale-mark faq/meta, which is over-invalidation.
+  invalidateDownstream('placements');
+  if (articleState.phaseDone && articleState.phaseDone.preview) {
+    articleState.phaseDone.preview = false;
+    articleState.stale = articleState.stale || {};
+    articleState.stale.preview = 'placementStyle';
+  }
+  renderPlacementStyleToggle();
+  renderPlacements();
+  refreshSectionsGate();
+  refreshPlacementsGate();
+  renderStaleBanners();
+  saveToRun();
+  persistArticleState();
+  logStep(3, 'placement_style', style);
+  showToast(style === 'editorial' ? '已切换为编辑式评测卡（需 3 个产品）' : '已切换为行内 blurb', 'success');
+}
+
+// Render the segmented-control highlight + show/hide editorial-only fields.
+function renderPlacementStyleToggle() {
+  if (!articleState) return;
+  var style = articleState.placementStyle || 'inline';
+  var segInline = document.getElementById('segInline');
+  var segEditorial = document.getElementById('segEditorial');
+  var editorialFields = document.getElementById('editorialFields');
+  var hint = document.getElementById('placementStyleHint');
+  if (segInline) segInline.style.background = (style === 'inline') ? '#1d1d1f' : 'transparent';
+  if (segInline) segInline.style.color = (style === 'inline') ? '#fff' : 'inherit';
+  if (segEditorial) segEditorial.style.background = (style === 'editorial') ? '#8b6f47' : 'transparent';
+  if (segEditorial) segEditorial.style.color = (style === 'editorial') ? '#fff' : 'inherit';
+  if (editorialFields) editorialFields.style.display = (style === 'editorial') ? 'block' : 'none';
+  var titleInput = document.getElementById('editorialTitleInput');
+  var introInput = document.getElementById('editorialIntroInput');
+  if (titleInput) titleInput.value = articleState.editorialTitle || '';
+  if (introInput) introInput.value = articleState.editorialIntro || '';
+  if (hint) {
+    hint.textContent = (style === 'editorial')
+      ? '3 个 H3 商品卡，独立 POVISON Picks H2，文案 90-150 词/卡'
+      : '1-2 个产品，40-70 词 blurb，挂在正文 H2 末尾';
+  }
+  // Read-only indicator + dynamic hint in the placements panel.
+  var indicator = document.getElementById('placementStyleIndicator');
+  if (indicator) {
+    indicator.textContent = (style === 'editorial') ? '编辑式评测卡（3 款）' : '行内 blurb';
+    indicator.style.borderColor = (style === 'editorial') ? '#8b6f47' : 'var(--border,#d2d2d7)';
+  }
+  var pHint = document.getElementById('placementsHint');
+  if (pHint) {
+    pHint.textContent = (style === 'editorial')
+      ? 'Editorial 模式：正文生成阶段已产出 3 张评测卡（含 H2 标题/总览）。在此审核每张卡：接受 / 驳回 / 删除 / 改文案。确认恰好 3 张已接受后进 FAQ。点「重新挑选植入候选」可让 Agent 重选 3 款。'
+      : '正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」可从当前正文重新解析。确认后进 FAQ。';
+  }
+}
+
+function onEditorialTitleInput(val) {
+  if (!articleState) return;
+  articleState.editorialTitle = val;
+  saveToRun();
+  persistArticleState();
+}
+function onEditorialIntroInput(val) {
+  if (!articleState) return;
+  articleState.editorialIntro = val;
+  saveToRun();
+  persistArticleState();
+}
+
+function editLink(idx, field, val) {
+  articleState.links[idx][field] = val;
+  setPlacementsDirty();
   saveToRun();
   refreshPlacementsGate();
 }
 
 function setPlacementStatus(kind, idx, status) {
   articleState[kind][idx].status = status;
-  articleState.placementsConfirmed = false;
-  articleState.phaseDone.placements = false;
+  setPlacementsDirty();
   renderPlacements();
   refreshPlacementsGate();
   saveToRun();
@@ -4338,8 +4861,7 @@ function setPlacementStatus(kind, idx, status) {
 function acceptAllPlacements() {
   (articleState.products || []).forEach(p => { if (p.status !== 'rejected') p.status = 'accepted'; });
   (articleState.links || []).forEach(l => { if (l.status !== 'rejected') l.status = 'accepted'; });
-  articleState.placementsConfirmed = false;
-  articleState.phaseDone.placements = false;
+  setPlacementsDirty();
   renderPlacements();
   refreshPlacementsGate();
   saveToRun();
@@ -4359,8 +4881,7 @@ function removePlacement(kind, idx) {
     }
   }
   articleState[kind].splice(idx, 1);
-  articleState.placementsConfirmed = false;
-  articleState.phaseDone.placements = false;
+  setPlacementsDirty();
   // Clearing all products/links is intentional — persist immediately so the next
   // Agent launch materializes an empty list from DB (not the old 404 URLs).
   if (!(articleState.products || []).length && !(articleState.links || []).length) {
@@ -4418,7 +4939,16 @@ function refreshPlacementsGate() {
   const btnFaq = document.getElementById('btnGenFaq');
   if (btnAcceptAll) btnAcceptAll.disabled = !hasAny || allHandled;
   if (btnNext) btnNext.disabled = !canConfirm;
-  if (btnFaq) btnFaq.disabled = !articleState.phaseDone.placements;
+  // Phase 2: FAQ gate no longer reads phaseDone.placements (no longer an
+  // independent phase). It opens when sections are ready AND placements are
+  // confirmed (inline) or the style is editorial (confirmation handled by the
+  // 3-card rule in confirmPlacements). This keeps the gate correct after the
+  // panel merge without depending on the now-vestigial phaseDone.placements.
+  if (btnFaq) {
+    const sectionsReady = !!(articleState.phaseDone && articleState.phaseDone.sections);
+    const placementsOk = !!articleState.placementsConfirmed || articleState.placementStyle === 'editorial';
+    btnFaq.disabled = !(sectionsReady && placementsOk);
+  }
 
   // Render URL-validation warning banner (pattern check + liveness check)
   const banner = document.getElementById('placementWarningsBanner');
@@ -4456,6 +4986,35 @@ function refreshPlacementsGate() {
   updateGenProgressBar();
 }
 
+/** Systematically re-lock every generate/next button to match articleState.
+ *  Phase 2 (G+I): switchToTask force-enables all buttons then nobody re-locked
+ *  them, so a task with phaseDone.faq=false would land with btnGenFaq enabled.
+ *  This walks the gate chain in dependency order so a restored task shows the
+ *  exact same enabled/disabled set as when it was last edited. Idempotent. */
+function recomputeAllGates() {
+  if (!articleState) return;
+  // Sections gate (also toggles placement action buttons + add product/link).
+  refreshSectionsGate();
+  // Placements gate (also sets btnGenFaq from sections+placementsConfirmed).
+  refreshPlacementsGate();
+  // FAQ buttons: btnGenFaq is set by refreshPlacementsGate above; btnAddFaq /
+  // btnFaqNext are enabled only when FAQ items already exist.
+  var hasFaq = !!(articleState.faq && articleState.faq.length);
+  var btnAddFaq = document.getElementById('btnAddFaq'); if (btnAddFaq) btnAddFaq.disabled = !hasFaq;
+  var btnFaqNext = document.getElementById('btnFaqNext'); if (btnFaqNext) btnFaqNext.disabled = !hasFaq;
+  // Meta buttons: generate is allowed once FAQ is done (or meta already exists);
+  // next/assemble + field editing require meta.title present.
+  var faqDone = !!(articleState.phaseDone && articleState.phaseDone.faq);
+  var hasMeta = !!(articleState.meta && articleState.meta.title);
+  var btnGenMeta = document.getElementById('btnGenMeta'); if (btnGenMeta) btnGenMeta.disabled = !(faqDone || hasMeta);
+  var btnMetaNext = document.getElementById('btnMetaNext'); if (btnMetaNext) btnMetaNext.disabled = !hasMeta;
+  if (typeof enableMetaFields === 'function') enableMetaFields(hasMeta);
+  // Publish is the final action — always available (it self-validates).
+  var btnPublishDraft = document.getElementById('btnPublishDraft'); if (btnPublishDraft) btnPublishDraft.disabled = false;
+  updatePhasePills();
+  updateGenProgressBar();
+}
+
 function confirmPlacements() {
   const products = articleState.products || [];
   const links = articleState.links || [];
@@ -4465,15 +5024,48 @@ function confirmPlacements() {
   }
   const acceptedP = products.filter(p => p.status === 'accepted');
   const acceptedL = links.filter(l => l.status === 'accepted');
-  if (acceptedP.length > 2) { showToast('产品植入最多 2 个', ''); return; }
-  if (acceptedL.length > 3) { showToast('内链建议最多 3 条（硬上限 5）', ''); return; }
-  // Soft warn if under targets but allow if all rejected (operator chooses none)
-  if (acceptedP.length === 1 || acceptedP.length === 2 || acceptedP.length === 0) { /* ok */ }
-  if (acceptedL.length > 0 && acceptedL.length < 2) {
-    if (!confirm('内链少于 2 条，确定继续？')) return;
-  }
-  if (acceptedP.length === 0 && acceptedL.length === 0) {
-    if (!confirm('未接受任何产品或内链，确定跳过？')) return;
+  const isEditorial = (articleState.placementStyle === 'editorial');
+  if (isEditorial) {
+    // Editorial mode: exactly 3 product cards, no internal-link requirement.
+    if (acceptedP.length !== 3) {
+      showToast('Editorial 样式需恰好 3 个已接受产品（当前 ' + acceptedP.length + '）', '');
+      return;
+    }
+    // Editorial/inline mismatch guard: the body sections must have been (re)generated
+    // in editorial mode (no inline povison links, no _candidatePool, no body links).
+    // If they still carry inline-mode content, the assembled blog would NOT be
+    // editorial — block here so the operator is forced to regenerate sections in
+    // editorial mode instead of silently shipping an inline-style blog.
+    const secs = articleState.sections || [];
+    let inlineLinks = 0;
+    secs.forEach(function(s) {
+      const c = (s && s.content) || '';
+      // count markdown links to povison.com PDPs/blog/collection in the prose
+      const m = c.match(/\]\((https?:\/\/[^)]*povison\.com[^)]*)\)/g);
+      if (m) inlineLinks += m.length;
+    });
+    // The only reliable signal of inline-mode SECTION CONTENT is inline povison
+    // links woven into the prose. ``_candidatePool`` is an audit artifact (the
+    // candidate pool the Agent used to pick products) that persists across mode
+    // switches and does NOT affect editorial rendering
+    // (``_post_save_step3_inline_placements`` short-circuits in editorial mode),
+    // so it must NOT block. ``links`` (internal links) is also placement
+    // metadata, not section content — it is left out for the same reason.
+    const hasInlineContent = inlineLinks > 0;
+    if (hasInlineContent) {
+      showToast('正文仍为内联模式（含 ' + inlineLinks + ' 条内联商品链接），请先重新点击「生成正文」以编辑式评测卡模式重写后再确认', '');
+      return;
+    }
+  } else {
+    // Inline mode: 1-2 products, 2-3 links (original rules).
+    if (acceptedP.length > 2) { showToast('产品植入最多 2 个', ''); return; }
+    if (acceptedL.length > 3) { showToast('内链建议最多 3 条（硬上限 5）', ''); return; }
+    if (acceptedL.length > 0 && acceptedL.length < 2) {
+      if (!confirm('内链少于 2 条，确定继续？')) return;
+    }
+    if (acceptedP.length === 0 && acceptedL.length === 0) {
+      if (!confirm('未接受任何产品或内链，确定跳过？')) return;
+    }
   }
   articleState.placementsConfirmed = true;
   articleState.phaseDone.placements = true;
@@ -4481,7 +5073,7 @@ function confirmPlacements() {
   refreshPlacementsGate();
   saveToRun();
   persistArticleState();
-  logStep(3, 'placements_confirm', `确认植入：产品 ${acceptedP.length} · 内链 ${acceptedL.length}`);
+  logStep(3, 'placements_confirm', `确认植入：产品 ${acceptedP.length} · 内链 ${acceptedL.length}` + (isEditorial ? ' · editorial' : ''));
   showToast('产品与内链已确认', 'success');
   setGenPhase('faq');
 }
@@ -4997,15 +5589,106 @@ function cleanPersistedPlacementResidue() {
   return changed;
 }
 
+// ---- Editorial Picks rendering (client-side mirror of server _editorial_picks_html) ----
+function buildEditorialPicksHtml() {
+  if (!articleState || (articleState.placementStyle || 'inline') !== 'editorial') return '';
+  var products = (articleState.products || []).filter(function(p) {
+    return p && p.status === 'accepted';
+  });
+  if (products.length !== 3) return ''; // degradation: editorial needs exactly 3
+  var title = (articleState.editorialTitle || '').trim();
+  if (!title) {
+    var topicTitle = (articleState.topic && articleState.topic.title || '').trim();
+    title = topicTitle ? 'POVISON Picks — ' + topicTitle : 'POVISON Picks';
+  }
+  var intro = (articleState.editorialIntro || '').trim();
+  var out = '<h2 id="povison-picks">' + escapeHtml(title) + '</h2>';
+  if (intro) out += '<p class="editorial-intro">' + escapeHtml(intro) + '</p>';
+  products.forEach(function(p, i) {
+    out += buildEditorialCardHtml(p, i + 1);
+  });
+  return out;
+}
+
+var _REVIEW_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+function formatReviewCite(reviewer, date) {
+  if (!reviewer && !date) return '';
+  var pretty = '';
+  if (date) {
+    var p = String(date).split('-');
+    if (p.length === 3) {
+      var y = parseInt(p[0],10), m = parseInt(p[1],10), d = parseInt(p[2],10);
+      if (m >= 1 && m <= 12 && d >= 1 && d <= 31 && _REVIEW_MONTHS[m-1]) {
+        pretty = _REVIEW_MONTHS[m-1] + ' ' + d + ', ' + y;
+      }
+    }
+    // Not ISO → assume already pretty (e.g. "October 17, 2025"); pass through.
+    if (!pretty) pretty = date;
+  }
+  var prefix = reviewer ? ('Customer review by ' + reviewer) : 'Customer review';
+  return pretty ? (prefix + ' (' + pretty + ')') : prefix;
+}
+
+function buildEditorialCardHtml(p, idx) {
+  var name = (p.name || '').trim();
+  var image = (p.image || '').trim();
+  var url = (p.url || '').trim();
+  var blurb = (p.blurb || '').trim();
+  var rq = (typeof p.reviewQuote === 'object' && p.reviewQuote) ? p.reviewQuote : {};
+  var parts = [];
+  parts.push('<h3 id="editorial-pick-' + idx + '">' + escapeHtml(name) + '</h3>');
+  if (image) {
+    // Image wraps to PDP; H3 stays plain text (no link).
+    parts.push(buildCenteredImageHtml(image, name, '', '', 760, '', url));
+  }
+  if (blurb) {
+    // Blurb is markdown — render via the same path sections use.
+    parts.push(formatSectionHtml(blurb).join(''));
+  }
+  var quote = (rq.quote || '').trim();
+  if (quote) {
+    var reviewer = (rq.reviewer || '').trim();
+    var date = (rq.date || '').trim();
+    var cite = formatReviewCite(reviewer, date);
+    var citeHtml = cite ? '<cite>' + escapeHtml(cite) + '</cite>' : '';
+    // Gutenberg core/quote block — `wp-block-quote` is the class WordPress
+    // recognizes as the quote block so the theme applies quote styling.
+    parts.push('<blockquote class="wp-block-quote editorial-review"><p>' + escapeHtml(quote) + '</p>' + citeHtml + '</blockquote>');
+  }
+  // "See Product Details" CTA → PDP. Gutenberg core/button block markup so
+  // WordPress (block editor + front-end) recognizes it as a button block.
+  // Inline styles guarantee it renders as a visible button in the Studio
+  // preview AND in WP when the theme does not style .wp-block-button__link.
+  if (url) {
+    parts.push(
+      '<div class="wp-block-button aligncenter" style="text-align:center;margin-top:20px;">' +
+      '<a class="wp-block-button__link has-text-color has-background" ' +
+      'href="' + escapeAttr(url) + '" target="_blank" rel="noopener noreferrer" ' +
+      'style="display:inline-block;background-color:#1a1a1a;color:#ffffff;' +
+      'padding:12px 28px;border-radius:4px;text-decoration:none;' +
+      'font-weight:600;font-size:15px;line-height:1.4;border:2px solid #1a1a1a;">' +
+      'See Product Details</a></div>'
+    );
+  }
+  return parts.join('');
+}
+
 function buildArticleBody() {
   let body = '';
   let tocInserted = false;
   const tocHtml = buildTocHtml();
+  // Editorial Picks: render the standalone "POVISON Picks" H2 once, just
+  // before the Conclusion. In editorial mode the per-section product image
+  // is suppressed (the product lives in the picks block, not trailing the
+  // section blurb). Returns "" in inline mode → no-op.
+  const editorialHtml = buildEditorialPicksHtml();
+  const isEditorial = !!editorialHtml;
+  let editorialInserted = false;
   articleState.sections.forEach(sec => {
     const chunks = formatSectionHtml(prepareSectionContent(sec));
     let htmlBlock = chunks.join('');
     const inlineImgs = buildInlineImagesHtml(sec);
-    const productImgs = buildProductImageHtml(sec);
+    const productImgs = isEditorial ? '' : buildProductImageHtml(sec);
     if (sec.type === 'Intro') {
       if (!/<h2[^>]*>\s*Introduction\s*<\/h2>/i.test(htmlBlock)) {
         body += '<h2 id="introduction">Introduction</h2>';
@@ -5014,6 +5697,10 @@ function buildArticleBody() {
       }
       body += htmlBlock + inlineImgs;
     } else if (sec.type === 'Conclusion') {
+      if (editorialHtml && !editorialInserted) {
+        body += editorialHtml;
+        editorialInserted = true;
+      }
       body += '<div class="conclusion"><h2 id="conclusion">Conclusion</h2>' + htmlBlock + '</div>';
     } else {
       if (!tocInserted && tocHtml) {
@@ -5029,6 +5716,10 @@ function buildArticleBody() {
       body += productImgs ? productImgs : inlineImgs;
     }
   });
+  // If no Conclusion section exists, append the editorial block at the end.
+  if (editorialHtml && !editorialInserted) {
+    body += editorialHtml;
+  }
   if (articleState.faq && articleState.faq.length) {
     // Plain HTML FAQ — do NOT emit Rank Math Gutenberg block comments.
     // Styled like published POVISON posts: Q&A h2 + body-sized h3/p.
@@ -5156,14 +5847,41 @@ function runClientValidation() {
   var products = (articleState.products || []).filter(function(p){ return p.status === 'accepted'; });
   var links = (articleState.links || []).filter(function(l){ return l.status === 'accepted'; });
   var overlap = faqOverlapRatio();
+  var isEditorial = (articleState.placementStyle === 'editorial');
+  var productsOk, productsLabel, linksOk, linksLabel, editorialOk, editorialLabel;
+  if (isEditorial) {
+    productsOk = products.length === 3;
+    productsLabel = 'Editorial 产品卡 ' + products.length + '（需恰好 3）';
+    linksOk = true;
+    linksLabel = '内链（editorial 模式不要求）';
+    // editorial_card_complete: each card has blurb (>=30 words) + image + url
+    var cardIssues = [];
+    products.forEach(function(p, i) {
+      var blurb = (p.blurb || '').trim();
+      if (!blurb) cardIssues.push('卡' + (i+1) + '缺文案');
+      else if (blurb.split(/\s+/).length < 30) cardIssues.push('卡' + (i+1) + '文案过短');
+      if (!p.image) cardIssues.push('卡' + (i+1) + '缺图片');
+      if (!p.url) cardIssues.push('卡' + (i+1) + '缺PDP链接');
+    });
+    editorialOk = (products.length === 3) && cardIssues.length === 0;
+    editorialLabel = editorialOk ? 'Editorial 卡完整' : 'Editorial 卡不完整：' + cardIssues.join('；');
+  } else {
+    productsOk = products.length <= 2;
+    productsLabel = '产品植入 ' + products.length + '（建议 1–2）';
+    linksOk = links.length === 0 || (links.length >= 2 && links.length <= 3);
+    linksLabel = '内链 ' + links.length + '（建议 2–3）';
+    editorialOk = true;
+    editorialLabel = '（仅 editorial 模式检查）';
+  }
   var checks = [
     { id: 'word_count', ok: wc >= 1500, label: '正文约 ' + wc + ' 词（目标 ≥1500）', value: wc },
     { id: 'outline_confirmed', ok: !!articleState.outlineConfirmed, label: '大纲已人工确认' },
     { id: 'placements_confirmed', ok: !!articleState.placementsConfirmed, label: '产品与内链已确认' },
-    { id: 'products', ok: products.length <= 2, label: '产品植入 ' + products.length + '（建议 1–2）' },
-    { id: 'links', ok: links.length === 0 || (links.length >= 2 && links.length <= 3), label: '内链 ' + links.length + '（建议 2–3）' },
+    { id: 'products', ok: productsOk, label: productsLabel },
+    { id: 'links', ok: linksOk, label: linksLabel },
     { id: 'faq_count', ok: faq.length >= 4 && faq.length <= 6, label: 'FAQ ' + faq.length + '（4–6）' },
     { id: 'faq_overlap', ok: overlap <= 0.2, label: 'FAQ/正文重叠 ' + Math.round(overlap * 100) + '%（≤20%）', value: Math.round(overlap * 1000) / 1000 },
+    { id: 'editorial_card_complete', ok: editorialOk, label: editorialLabel },
     { id: 'meta_title', ok: title.length >= 50 && title.length <= 60, label: 'Meta Title ' + title.length + ' 字符（50–60）' },
     { id: 'meta_desc', ok: desc.length >= 150 && desc.length <= 160, label: 'Meta Description ' + desc.length + ' 字符（150–160）' },
     { id: 'slug', ok: slug.length > 0 && slug.length <= 75 && slug === slug.toLowerCase() && slug.indexOf(' ') < 0, label: 'URL slug ' + slug.length + '（≤75，小写）' },
@@ -5265,7 +5983,7 @@ function rejectArticle() {
   articleState.sections.forEach(s => { s.content = ''; s.status = 'idle'; });
   articleState.products = [];
   articleState.links = [];
-  articleState.placementsConfirmed = false;
+  setPlacementsDirty();
   articleState.faq = [];
   articleState.meta = { title: '', description: '', slug: '', focus: '' };
   articleState.phaseDone.sections = false;
@@ -5275,6 +5993,10 @@ function rejectArticle() {
   articleState.phaseDone.preview = false;
   articleState.previewHtml = '';
   articleState.validation = null;
+  // Preserve Editorial Picks style choice + editable H2 title/intro (O item) —
+  // a reject is a body rewrite, not a style reset; the operator chose editorial
+  // and may have edited the H2 heading, both of which must survive a reject.
+  // (placementStyle / editorialTitle / editorialIntro are NOT cleared here.)
   renderSectionStack();
   renderPlacements();
   document.getElementById('faqEditor').innerHTML = '';
@@ -5290,6 +6012,9 @@ function rejectArticle() {
   logStep(3, 'reject', '人工驳回，要求重写正文');
   showToast('已驳回，请从正文板块重新生成', '');
   setGenPhase('sections');
+  // Phase 2: re-lock all gates from the cleared state so no stale "enabled"
+  // button survives the reject (e.g. btnGenPlacements/btnPlacementsNext).
+  recomputeAllGates();
 }
 
 /** Export the finalized article to WordPress as a draft (reuses wordpress_mcp). */
@@ -6366,11 +7091,19 @@ async function bridgeEnsureRun() {
   return BRIDGE.runId;
 }
 
-async function bridgePollJob(jobId, timeoutMs) {
+async function bridgePollJob(jobId, timeoutMs, ownerTaskId) {
   const t0 = Date.now();
   const limit = timeoutMs || 30 * 60 * 1000;
   let lastStatus = '';
   while (Date.now() - t0 < limit) {
+    // If the caller owns a task slot and the operator has switched to another
+    // task, stop polling so this loop doesn't keep updating the shared
+    // JobProgress bar / bridge job label on the now-active task. The in-flight
+    // job keeps running server-side and is re-attached via
+    // resumeScriptJobPolling when the operator switches back.
+    if (ownerTaskId && _activePollTaskId && _activePollTaskId !== ownerTaskId) {
+      throw new Error('aborted: task switched');
+    }
     const job = await bridgeFetch('/api/jobs/' + jobId);
     setBridgeJob(job.kind + ' · ' + job.status);
     if (job.status !== lastStatus) {
@@ -6436,17 +7169,23 @@ async function bridgeDiscoverKeywords() {
   JobProgress.start('keyword-discovery', [btnDiscover, btnEnrich]);
   try {
     const rid = await bridgeEnsureRun();
+    _activePollTaskId = rid;
     const { job_id } = await bridgeFetch('/api/runs/' + rid + '/keywords/discover', {
       method: 'POST',
       body: JSON.stringify({ sources: sources, min_freq: 2 }),
     });
-    await bridgePollJob(job_id);
+    _activeScriptJob[rid] = job_id;
+    await bridgePollJob(job_id, null, rid);
+    if (_activePollTaskId !== rid) return; // switched away — resume loop owns it
     JobProgress.update('正在补齐 SV / KD / CPC 指标…');
     const en = await bridgeFetch('/api/runs/' + rid + '/keywords/enrich', {
       method: 'POST',
       body: JSON.stringify({ seed_demo: false }),
     });
-    await bridgePollJob(en.job_id);
+    _activeScriptJob[rid] = en.job_id;
+    await bridgePollJob(en.job_id, null, rid);
+    delete _activeScriptJob[rid];
+    if (_activePollTaskId !== rid || _scriptJobPollActiveFor === rid) return;
     const kw = await bridgeLoadFile('kw.json');
     const list = Array.isArray(kw) ? kw : (kw.keywords || []);
     const n = applyImportedKeywords(list);
@@ -6454,8 +7193,12 @@ async function bridgeDiscoverKeywords() {
     JobProgress.done(true, '已导入 ' + n + ' 个关键词');
     showToast('关键词已从脚本导入 ' + n + ' 条', 'success');
   } catch (e) {
-    JobProgress.done(false, e.message || '发现失败');
-    showToast('发现失败：' + e.message, '');
+    if (_activePollTaskId === rid) {
+      JobProgress.done(false, e.message || '发现失败');
+      showToast('发现失败：' + e.message, '');
+    }
+  } finally {
+    if (_activePollTaskId === rid) _activePollTaskId = null;
   }
 }
 
@@ -6477,15 +7220,23 @@ async function bridgeEnrichKeywords() {
       method: 'POST',
       body: JSON.stringify({ seed_demo: false }),
     });
-    await bridgePollJob(en.job_id);
+    _activeScriptJob[rid] = en.job_id;
+    _activePollTaskId = rid;
+    await bridgePollJob(en.job_id, null, rid);
+    delete _activeScriptJob[rid];
+    if (_activePollTaskId !== rid || _scriptJobPollActiveFor === rid) return;
     const kw = await bridgeLoadFile('kw.json');
     const list = Array.isArray(kw) ? kw : (kw.keywords || []);
     const n = applyImportedKeywords(list);
     JobProgress.done(true, '指标已补齐');
     showToast('指标已补齐 · ' + n + ' 词', 'success');
   } catch (e) {
-    JobProgress.done(false, e.message || '补数失败');
-    showToast('补数失败：' + e.message, '');
+    if (_activePollTaskId === rid) {
+      JobProgress.done(false, e.message || '补数失败');
+      showToast('补数失败：' + e.message, '');
+    }
+  } finally {
+    if (_activePollTaskId === rid) _activePollTaskId = null;
   }
 }
 
@@ -6704,8 +7455,16 @@ async function bridgeBrainstormTopics() {
         demo: false,
       }),
     });
+    // Track the in-flight script job so resumeScriptJobPolling can re-attach
+    // the progress bar after a task switch (same pattern as bridgeGenerateSection).
+    _activeScriptJob[rid] = job_id;
+    _activePollTaskId = rid;
     document.getElementById('bsLive').classList.add('show');
-    await bridgePollJob(job_id);
+    await bridgePollJob(job_id, null, rid);
+    delete _activeScriptJob[rid];
+    // If the operator switched away while the script job ran, skip the restore
+    // (resumeScriptJobPolling owns it on switch-back).
+    if (_activePollTaskId !== rid || _scriptJobPollActiveFor === rid) return;
     const topicsDoc = await bridgeLoadFile('topics.json');
     const topicList = topicsDoc.topics || topicsDoc;
     brainstormTopics = (Array.isArray(topicList) ? topicList : []).map(function(t, i){ return normalizeTopicItem(t, i + 1); });
@@ -6717,8 +7476,12 @@ async function bridgeBrainstormTopics() {
     JobProgress.done(true, '已生成 ' + brainstormTopics.length + ' 个选题');
     showToast('主题已从 topic-brainstorm 导入', 'success');
   } catch (e) {
-    JobProgress.done(false, e.message || '选题失败');
-    showToast('选题失败：' + e.message, '');
+    if (_activePollTaskId === rid) {
+      JobProgress.done(false, e.message || '选题失败');
+      showToast('选题失败：' + e.message, '');
+    }
+  } finally {
+    if (_activePollTaskId === rid) _activePollTaskId = null;
   }
 }
 
@@ -6749,7 +7512,20 @@ async function bridgeGenerateSection(mode, sectionId) {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    await bridgePollJob(job_id);
+    // Track the in-flight script job so it can be resumed after a task switch
+    // (resumeScriptJobPolling). The server also writes a .script_job marker
+    // (with mode) for cross-reload resume + phase restore. Claim
+    // _activePollTaskId so the post-poll restore is skipped if the operator
+    // switched to another task while this job ran.
+    _activeScriptJob[rid] = { jobId: job_id, mode: mode };
+    _activePollTaskId = rid;
+    await bridgePollJob(job_id, null, rid);
+    delete _activeScriptJob[rid];
+    // If the operator switched away while the script job ran, do NOT restore the
+    // workbench here — that would clobber the task they are now viewing. Also, if
+    // resumeScriptJobPolling re-attached on switch-back, let it own the restore
+    // (avoid a duplicate restore + double JobProgress.done).
+    if (_activePollTaskId !== rid || _scriptJobPollActiveFor === rid) return;
     const state = await bridgeLoadFile('article-state.json');
     articleState = state;
     currentGenTopic = articleState.topic || currentGenTopic;
@@ -6763,13 +7539,42 @@ async function bridgeGenerateSection(mode, sectionId) {
     JobProgress.done(true, '已生成：' + mode);
     showToast('脚本已生成：' + mode, 'success');
   } catch (e) {
-    JobProgress.done(false, e.message || '生成失败');
-    showToast('生成失败：' + e.message, '');
+    if (_activePollTaskId === rid) {
+      JobProgress.done(false, e.message || '生成失败');
+      showToast('生成失败：' + e.message, '');
+    }
+  } finally {
+    if (_activePollTaskId === rid) _activePollTaskId = null;
   }
 }
 
 async function bridgeValidateAndPreview() {
   if (!(await bridgeHealth())) return;
+  // #region agent log
+  try {
+    var _ap = (articleState && articleState.products) || [];
+    var _acc = _ap.filter(function(p){return p && p.status === 'accepted';});
+    var _il = 0;
+    (articleState && articleState.sections || []).forEach(function(s){var c=(s&&s.content)||'';var m=c.match(/\]\((https?:\/\/[^)]*povison\.com[^)]*)\)/g);if(m)_il+=m.length;});
+    fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'891da2'},body:JSON.stringify({sessionId:'891da2',location:'ui/index.html:bridgeValidateAndPreview',message:'组装预览 clicked — UI articleState',data:{placementStyle:articleState&&articleState.placementStyle,acceptedCount:_acc.length,allStatuses:_ap.map(function(p){return p&&p.status;}),inlineLinksInSections:_il,hasCandidatePool:!!(articleState&&articleState._candidatePool),linksCount:((articleState&&articleState.links)||[]).length,editorialTitle:articleState&&articleState.editorialTitle},timestamp:Date.now(),runId:'pre',hypothesisId:'H1'})}).catch(()=>{});
+  } catch(e){}
+  // #endregion
+  // Editorial/inline mismatch guard (same as confirmPlacements): block preview
+  // assembly when editorial mode is selected but the body sections still carry
+  // inline-mode content — otherwise the assembled blog would not be editorial.
+  if (articleState && articleState.placementStyle === 'editorial') {
+    let inlineLinks = 0;
+    (articleState.sections || []).forEach(function(s) {
+      const c = (s && s.content) || '';
+      const m = c.match(/\]\((https?:\/\/[^)]*povison\.com[^)]*)\)/g);
+      if (m) inlineLinks += m.length;
+    });
+    const hasInlineContent = inlineLinks > 0;
+    if (hasInlineContent) {
+      showToast('正文仍为内联模式（含 ' + inlineLinks + ' 条内联商品链接），请先重新点击「生成正文」以编辑式评测卡模式重写后再预览', '');
+      return;
+    }
+  }
   try {
     const rid = await bridgeEnsureRun();
     if (articleState) await bridgeSaveFile('article-state.json', articleState);
@@ -6789,20 +7594,61 @@ async function bridgeValidateAndPreview() {
 
 async function bridgeAskAgent(step, triggerBtn) {
   if (!(await bridgeHealth())) return;
+
+  // DUPLICATE-LAUNCH GUARD: before starting a new agent run, check if this
+  // task already has a running step-3 agent. If so, do NOT launch a second
+  // run (the operator clicked "生成" again while the first run is still in
+  // flight — often because switching tasks made the progress bar vanish).
+  // Instead, attach to the existing run's polling so the live panel + final
+  // reload happen correctly when the first run completes.
+  const rid = await bridgeEnsureRun();
+  const isTask = String(rid).startsWith('task-');
+  // Flush any debounced articleState to the DB before launching the Agent.
+  // The Agent reads placementStyle (and other fields) from DB step-3 data to
+  // branch its working mode; without this flush a debounced persist could lose
+  // the race and the Agent would run with a stale style choice.
+  if (articleState) await flushArticlePersist();
+  if (isTask) {
+    try {
+      const t = await bridgeFetch('/api/tasks/' + rid);
+      const tObj = (t && t.task) ? t.task : t;
+      const steps = (tObj && tObj.steps) || [];
+      const s3 = steps.find(function(s){ return s.step_num === 3; });
+      if (s3 && s3.status === 'running') {
+        // A step-3 agent is already running for this task. Resume polling it
+        // instead of launching a duplicate. This fixes the "click again →
+        // second agent starts + first run's result ignored" loop.
+        _activeAgentStep = step;
+        showToast('该任务 Agent 仍在运行，已恢复进度跟踪', '');
+        resumeTaskAgentPolling(rid);
+        return;
+      }
+      // Also guard step-2 (brainstorm) runs for the same reason.
+      const s2 = steps.find(function(s){ return s.step_num === 2; });
+      if (step === 'outline' && s2 && s2.status === 'running') {
+        _activeAgentStep = step;
+        showToast('头脑风暴仍在运行，已恢复进度跟踪', '');
+        resumeTaskAgentPolling(rid);
+        return;
+      }
+    } catch (e) { /* fall through to normal launch */ }
+  }
+
   const btns = [];
   // Disable all agent-trigger buttons across all phase panels (original behavior).
   document.querySelectorAll('[onclick*="bridgeAskAgent"], [onclick*="generateSerp"], [onclick*="generateOutline"], [onclick*="generateAllSections"]').forEach(b => btns.push(b));
   if (triggerBtn && !btns.includes(triggerBtn)) btns.push(triggerBtn);
+  // Record the active agent sub-step so resumeTaskAgentPolling can restore the
+  // correct live panel + phase after a task switch (see _activeAgentStep).
+  _activeAgentStep = step;
   const jobKind = 'agent-' + step;
   JobProgress.start(jobKind, btns);
   // Use the per-panel mini live stream (not the global genLive at the top of
   // the workbench) so the viewport doesn't shift when the stream appears.
-  const _LIVE_PANEL = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'placementsLive', faq:'faqLive', meta:'metaLive' };
+  const _LIVE_PANEL = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'sectionsLive', faq:'faqLive', meta:'metaLive' };
   const livePanelId = _LIVE_PANEL[step] || _LIVE_PANEL[currentGenPhase] || 'genLive';
   agentLiveReset(livePanelId, 'Agent · ' + step, '正在执行…');
   try {
-    const rid = await bridgeEnsureRun();
-    const isTask = String(rid).startsWith('task-');
     if (articleState) await bridgeSaveFile('article-state.json', articleState);
     // For DB-backed tasks, route to the task step agent endpoint so the agent
     // persists via seo_save_step_data (DB). Legacy run-* ids use the run endpoint.
@@ -6820,6 +7666,7 @@ async function bridgeAskAgent(step, triggerBtn) {
     if (gwRunId) {
       JobProgress.update('Agent 已启动，等待 Gateway 执行…');
       _activePollTaskId = rid;
+      _pollLoopActiveFor = rid;
       const t0 = Date.now();
       const limit = 10 * 60 * 1000; // 10 min
       let done = false;
@@ -6828,9 +7675,9 @@ async function bridgeAskAgent(step, triggerBtn) {
         ? ('/api/tasks/' + rid + '/steps/3/agent/status')
         : ('/api/runs/' + rid + '/agent/status');
       while (Date.now() - t0 < limit && !done) {
-        if (_activePollTaskId !== rid) return; // operator switched away / started new flow
+        if (_activePollTaskId !== rid) { _pollLoopActiveFor = null; return; } // operator switched away / started new flow
         await new Promise(r => setTimeout(r, 2000));
-        if (_activePollTaskId !== rid) return;
+        if (_activePollTaskId !== rid) { _pollLoopActiveFor = null; return; }
         progressIdx = await agentPollProgress(rid, progressIdx, livePanelId);
         try {
           const st = await bridgeFetch(statusPath);
@@ -6838,6 +7685,8 @@ async function bridgeAskAgent(step, triggerBtn) {
           const status = gw.status || '';
           if (status === 'completed' || status === 'succeeded') {
             done = true;
+            _pollLoopActiveFor = null;
+            _activeAgentStep = null;
             // Only refresh the UI if this task is still the one the operator has
             // selected; otherwise leave the current view untouched.
             if (_activePollTaskId !== rid) return;
@@ -6850,6 +7699,8 @@ async function bridgeAskAgent(step, triggerBtn) {
             setTimeout(function(){ agentLiveHide(livePanelId); }, 1800);
           } else if (status === 'failed' || status === 'error') {
             done = true;
+            _pollLoopActiveFor = null;
+            _activeAgentStep = null;
             JobProgress.done(false, 'Agent 执行失败');
             showToast('Agent 执行失败', '');
             agentLiveAppend(livePanelId, 'Agent 执行失败', 'error');
@@ -6860,6 +7711,8 @@ async function bridgeAskAgent(step, triggerBtn) {
           } else if (st.ok === false && (st.status_code === 404 || (st.detail || '').includes('no agent run'))) {
             // Gateway lost the run (restart / crash) — stop polling, let user retry
             done = true;
+            _pollLoopActiveFor = null;
+            _activeAgentStep = null;
             JobProgress.done(false, 'Agent 运行已丢失（Gateway 重启）— 请重新点击');
             showToast('Agent 运行记录丢失，请重新点击生成', '');
           } else {
@@ -6869,6 +7722,8 @@ async function bridgeAskAgent(step, triggerBtn) {
           // status poll failed — keep trying
         }
       }
+      _pollLoopActiveFor = null;
+      _activeAgentStep = null;
       if (!done) {
         JobProgress.done(false, 'Agent 超时（10 分钟）');
         showToast('Agent 超时，可刷新页面或重新触发该步骤手动检查', '');
@@ -6878,6 +7733,8 @@ async function bridgeAskAgent(step, triggerBtn) {
       showToast('Agent 启动失败', '');
     }
   } catch (e) {
+    _pollLoopActiveFor = null;
+    _activeAgentStep = null;
     JobProgress.done(false, e.message || 'Agent 启动失败');
     showToast('Agent 启动失败：' + e.message + '（需 Gateway 在线）', '');
   }
@@ -6954,8 +7811,7 @@ async function bridgeRestoreFullState() {
       restoreWorkbenchUI();
       setGenPhase(state.phaseDone && state.phaseDone.meta ? 'preview' :
         state.phaseDone && state.phaseDone.faq ? 'meta' :
-        state.phaseDone && state.phaseDone.placements ? 'faq' :
-        state.phaseDone && state.phaseDone.sections ? 'placements' :
+        state.phaseDone && state.phaseDone.sections ? 'faq' :
         state.outlineConfirmed ? 'sections' :
         (state.phaseDone && state.phaseDone.serp) || (Array.isArray(state.outline) && state.outline.length) ? 'outline' : 'serp');
       updateGenProgressBar();

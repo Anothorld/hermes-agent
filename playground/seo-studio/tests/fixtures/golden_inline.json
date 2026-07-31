@@ -1,0 +1,133 @@
+{
+  "topic": {
+    "id": 9,
+    "schema_id": "t09",
+    "title": "Sectional Sofa at Scale: When It Makes Sense and When It's Making Your Room Worse",
+    "priority": "p1",
+    "priority_label": "P1",
+    "category": "Space Layout & Furniture Matching",
+    "content_type": "comparison_guide",
+    "search_intent": "commercial",
+    "primary_keyword": "sectional sofa",
+    "secondary_keywords": ["apartment", "best couches", "sectional sofa", "scale"],
+    "suggested_slug": "sectional-sofa-scale-when-making-sense-america"
+  },
+  "serp": {
+    "queries": ["sectional sofa scale proportions small apartment"],
+    "ranks": [
+      {
+        "cluster": "small-apartment guides",
+        "results": [
+          {"title": "Best Sectional Sofas for Small Apartments", "url": "https://example.com/a", "domain": "example.com", "angle": "listicle"}
+        ]
+      }
+    ],
+    "gaps": ["No competitor has written a scale-driven analysis: at what room size threshold does a sectional help vs hurt?"]
+  },
+  "outline": [
+    {"id": "intro", "level": "h2", "text": "Introduction"},
+    {"id": "h2-1", "level": "h2", "text": "What Does \"Scale\" Really Mean When You're Choosing a Sectional Sofa?"},
+    {"id": "h3-1a", "level": "h3", "text": "Footprint vs. Floor Space: The Math Nobody Does Before Buying"},
+    {"id": "h2-2", "level": "h2", "text": "How Do You Know if a Sectional Is Making Your Room Worse?"},
+    {"id": "h2-3", "level": "h2", "text": "When Does a Sectional Actually Make Sense?"},
+    {"id": "conclusion", "level": "h2", "text": "Conclusion"},
+    {"id": "faq", "level": "h2", "text": "Frequently Asked Questions"},
+    {"id": "faq-1", "level": "h3", "text": "What is the minimum room size for a sectional sofa?"}
+  ],
+  "outlineConfirmed": true,
+  "sections": [
+    {
+      "id": "intro",
+      "type": "Intro",
+      "title": "",
+      "status": "ready",
+      "content": "A sectional sofa can anchor a living room or quietly make it worse. The difference comes down to scale. Most buyers measure the sofa and the wall, then stop. The [Honbay Convertible Sectional Sofa](https://www.povison.com/products/honbay-convertible-sectional-sofa.html?variant=12345) fits smaller footprints, but scale is about more than dimensions."
+    },
+    {
+      "id": "h2-1",
+      "type": "h2",
+      "title": "What Does \"Scale\" Really Mean When You're Choosing a Sectional Sofa?",
+      "status": "ready",
+      "image_queries": ["couple measuring living room sofa"],
+      "images": [{"url": "https://cdn.povison.com/static/stock/measure-room.jpg", "alt": "couple measuring living room before buying sofa", "caption": "Measure the room, not just the sofa.", "credit": "Pixabay"}],
+      "content": "Scale is the relationship between the sofa's footprint, its visual weight, and the room around it. A [sintered stone dining table](https://www.povison.com/blog/furniture/sintered-stone-dining-table.html) shows the same principle: a piece that fits on paper can still overwhelm a space.\n\n### Footprint vs. Floor Space: The Math Nobody Does Before Buying\n\nFootprint is the rectangle the sofa occupies. Floor space is what remains for walking, side tables, and breathing room. A 110-inch sectional leaves surprisingly little in a 12x14 room."
+    },
+    {
+      "id": "h2-2",
+      "type": "h2",
+      "title": "How Do You Know if a Sectional Is Making Your Room Worse?",
+      "status": "ready",
+      "content": "Five warning signs tell you a sectional is too big for the room: the room feels smaller the moment it arrives, traffic paths bend around the chaise, you can't fully open a door, the coffee table disappears against it, and the room reads as storage rather than living space."
+    },
+    {
+      "id": "h2-3",
+      "type": "h2",
+      "title": "When Does a Sectional Actually Make Sense?",
+      "status": "ready",
+      "content": "A sectional earns its footprint when the room is genuinely large and the seating is the room's primary use. The [Povison 132\" Reversible Sectional Sofa](https://www.povison.com/products/povison-reversible-sectional-sofa-132.html?variant=67890) works because fully assembled construction means no visible seam gaps at scale, which is where modular sectionals fall apart."
+    },
+    {
+      "id": "conclusion",
+      "type": "Conclusion",
+      "title": "Conclusion",
+      "status": "ready",
+      "content": "Scale, not style, is the real test for a sectional sofa. Measure the room, map the traffic paths, and respect the clearance rules. A sectional that fits the math will feel intentional; one that doesn't will make the room worse no matter how good it looks in a catalog."
+    }
+  ],
+  "products": [
+    {
+      "id": "p1",
+      "status": "accepted",
+      "name": "Honbay Convertible Sectional Sofa",
+      "url": "https://www.povison.com/products/honbay-convertible-sectional-sofa.html?variant=12345",
+      "image": "https://cdn.povison.com/media/catalog/product/h/o/honbay-convertible-sectional.jpg",
+      "blurb": "The Honbay Convertible Sectional Sofa ships fully assembled in a reversible configuration, so the chaise can flip as the room demands. Its 84-inch footprint keeps walkways open in apartments where every inch counts.",
+      "sectionId": "intro"
+    },
+    {
+      "id": "p2",
+      "status": "accepted",
+      "name": "Povison 132\" Reversible Sectional Sofa",
+      "url": "https://www.povison.com/products/povison-reversible-sectional-sofa-132.html?variant=67890",
+      "image": "https://cdn.povison.com/media/catalog/product/p/o/povison-reversible-sectional-132.jpg",
+      "blurb": "The Povison 132\" Reversible Sectional Sofa arrives fully assembled, which matters at this scale: there are no seam gaps or alignment drift between modules. The deep seat and reversible chaise anchor a large room without the modular wobble that plagues sectionals you connect yourself.",
+      "sectionId": "h2-3"
+    },
+    {
+      "id": "p3",
+      "status": "rejected",
+      "name": "Rejected Product Example",
+      "url": "https://www.povison.com/products/rejected-product.html?variant=00000",
+      "image": "https://cdn.povison.com/media/catalog/product/r/e/rejected.jpg",
+      "blurb": "This rejected blurb should be stripped from prose during assembly.",
+      "sectionId": "h2-2"
+    }
+  ],
+  "links": [
+    {
+      "id": "l1",
+      "status": "accepted",
+      "anchor": "sintered stone dining table",
+      "url": "https://www.povison.com/blog/furniture/sintered-stone-dining-table.html",
+      "sectionId": "h2-1"
+    },
+    {
+      "id": "l2",
+      "status": "rejected",
+      "anchor": "rejected internal link",
+      "url": "https://www.povison.com/blog/furniture/rejected-article.html",
+      "sectionId": "h2-2"
+    }
+  ],
+  "faq": [
+    {"id": "faq-1", "q": "What is the minimum room size for a sectional sofa?", "a": "Aim for at least 150 square feet of usable floor space, with 18 inches of clearance on every walking side. Below that, a standard sofa or loveseat keeps the room functional."}
+  ],
+  "meta": {
+    "title": "Sectional Sofa Scale: When It Makes Sense or Hurts the Room",
+    "description": "Learn when a sectional sofa fits your room and when it makes the space worse. Measure footprint, clearance, and traffic flow before you buy.",
+    "slug": "sectional-sofa-scale-when-making-sense-america",
+    "focus": "sectional sofa"
+  },
+  "placementsConfirmed": true,
+  "phaseDone": {"serp": true, "outline": true, "sections": true, "placements": true, "faq": true, "meta": true, "preview": false}
+}

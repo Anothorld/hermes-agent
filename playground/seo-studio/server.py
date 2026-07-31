@@ -206,8 +206,14 @@ def _resolve_run(rid: str) -> Path:
     return d
 
 
-def _spawn_job(kind: str, cmd: list[str], cwd: Path, rid: str = "", on_done=None) -> str:
-    """Run a subprocess in a thread; return job_id immediately."""
+def _spawn_job(kind: str, cmd: list[str], cwd: Path, rid: str = "", on_done=None, on_finish=None) -> str:
+    """Run a subprocess in a thread; return job_id immediately.
+
+    ``on_done`` runs only on success (rc==0). ``on_finish`` runs in the
+    ``finally`` block with ``(job_id, final_status, returncode)`` regardless of
+    success/failure — used by callers to reset DB step status after a script job
+    (so the task list reflects "running" during the job and is restored after).
+    """
     job_id = uuid.uuid4().hex[:12]
     with _JOBS_LOCK:
         _JOBS[job_id] = {"kind": kind, "status": "running", "started_at": time.time(), "run_id": rid}
@@ -259,6 +265,11 @@ def _spawn_job(kind: str, cmd: list[str], cwd: Path, rid: str = "", on_done=None
                     _db.record_audit(rid, "script", kind, " ".join(cmd[2:6]), status, rc, err)
                 except Exception:
                     pass
+            if on_finish is not None:
+                try:
+                    on_finish(job_id, _JOBS[job_id]["status"], rc)
+                except Exception:
+                    pass
             # #region agent log
             try:
                 _dbg(f"server.py:_spawn_job:{kind}", "JOB_DONE", {
@@ -274,6 +285,66 @@ def _spawn_job(kind: str, cmd: list[str], cwd: Path, rid: str = "", on_done=None
 
     threading.Thread(target=worker, daemon=True).start()
     return job_id
+
+
+def _script_step_track(rid: str, step_num: int, *, mark_done_on_success: bool = False):
+    """Mark a DB-backed task's step as `running` for an in-flight script job and
+    return an `on_finish(job_id, final_status, rc)` callback for `_spawn_job`.
+
+    Script-path endpoints (keyword discover/enrich, brainstorm, section-generate)
+    previously did NOT mark the step/task running in the DB — so the task list
+    showed idle during generation and the client could not restore the progress
+    bar after a task switch. This fixes both: the running status lets the task
+    list show 运行中 and lets `resumeTaskAgentPolling` dispatch to
+    `resumeScriptJobPolling` (via the `.script_job` marker).
+
+    The caller writes the `.script_job` marker after `_spawn_job` returns.
+    `on_finish` clears it; on failure it marks the step `error` (which settles
+    the task status to idle via `set_step_status`). On success, the caller's
+    `on_done` callback is expected to mark the step `done` (e.g.
+    `record_keywords`/`record_topics`/`record_article_state`). For precursors
+    with no `on_done` (keyword discover), pass `mark_done_on_success=True` so
+    the step is not left stuck `running`. No-op for non-task runs."""
+    is_task = str(rid).startswith("task-")
+    if is_task:
+        try:
+            # clear_agent_run_id=True so a stale agent_run_id from a previous
+            # agent-path run does not survive — the client uses an empty
+            # agent_run_id to detect a script job and dispatch to
+            # resumeScriptJobPolling instead of polling the (dead) gateway run.
+            _db.set_step_status(rid, step_num, "running", clear_agent_run_id=True)
+            _db.mark_task_running(rid)
+        except Exception:
+            pass
+
+    def on_finish(job_id, final_status, rc):
+        if not is_task:
+            return
+        try:
+            marker = RUNS_DIR / rid / ".script_job"
+            if marker.exists():
+                marker.unlink()
+        except Exception:
+            pass
+        try:
+            if final_status == "succeeded" and mark_done_on_success:
+                _db.set_step_status(rid, step_num, "done")
+            elif final_status != "succeeded":
+                _db.set_step_status(rid, step_num, "error")
+        except Exception:
+            pass
+
+    return is_task, on_finish
+
+
+def _write_script_job_marker(rid: str, job_id: str) -> None:
+    """Persist the in-flight script job_id so the client can resume polling it
+    after a task switch (see `resumeScriptJobPolling` + the
+    `/api/tasks/{id}/active-script-job` endpoint)."""
+    try:
+        (RUNS_DIR / rid / ".script_job").write_text(job_id, encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _py() -> str:
@@ -336,6 +407,216 @@ _POVISON_HOST_RE = re.compile(r"^(?:[\w-]+\.)*povison\.com$", re.I)
 # Markdown link: [text](url). Used to detect inline placements baked into prose
 # (merged section+placement flow) and to strip rejected ones at assembly time.
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", re.I)
+
+
+# ---- section sub-step guidance (branched on placementStyle) ----------------
+#
+# The operator now picks a placement style in the 正文生成 phase BEFORE writing
+# sections, so the section Agent must branch its working mode on that choice:
+#   - inline: weave 1-2 product links + 1-2 internal links INTO the section prose
+#     (the merged-flow behaviour that existed before this change).
+#   - editorial: write sections WITHOUT any inline povison links, then generate
+#     the standalone POVISON Picks H2 with EXACTLY 3 review cards + editorialTitle
+#     + editorialIntro. The placements panel then only reviews/accepts the 3
+#     pending cards; it must NOT set phaseDone.placements (confirmPlacements owns
+#     that flag, and cards start as 'pending').
+# Extracted as module-level constants so tests can assert the branch without
+# spinning up the agent-run endpoint.
+_SECTION_SUBSTEP_GUIDANCE_INLINE = (
+    "Generate body sections for the confirmed outline. "
+    "Each articleState.sections[] item MUST use this schema: "
+    "{id, type, title, content, status, image_queries?, images?, subheads?, transition?} where "
+    "type is one of 'Intro' (capitalized) for the intro, 'h2' for body sections, "
+    "'Conclusion' (capitalized) for the conclusion; title is the section heading text "
+    "(empty string for Intro); content is the markdown body; status='ready' when done. "
+    "Set articleState.phaseDone.sections = true when all sections have content.\n"
+    "MERGED PLACEMENTS (write inline links while drafting — do NOT defer to a later placements run):\n"
+    "1) FIRST fetch a candidate pool of REAL povison URLs by calling "
+    "`python3 scripts/povison-catalog.py recommend --topic '<JSON>' --sections <file> --limit 5` "
+    "AND `python3 scripts/povison-blog.py recommend-links --topic '<JSON>' --sections <file> --limit 5` "
+    "(or POST http://127.0.0.1:8766/api/povison-products/recommend and /api/povison-blog/recommend-links "
+    "with {topic, sections, limit}). Store the result in articleState._candidatePool for audit.\n"
+    "2) As you write each section's content, weave 1-2 product links and 1-2 internal links INLINE as "
+    "markdown `[anchor](url)` using ONLY URLs from the pool. For a product, write a short 40-60 word "
+    "advice paragraph that links the product name to its PDP. NEVER invent, shorten, or rehost a URL — "
+    "if no pool entry fits, write the section with zero placements rather than fabricate one.\n"
+    "3) Do NOT output a placements_used field. After you save, a server-side hook derives "
+    "articleState.products/links deterministically by parsing the markdown links out of each "
+    "section.content and matching them back to the pool. You do not need to populate products/links "
+    "yourself, but you MAY set them from the pool as a best-effort hint (the hook is the source of truth).\n"
+    "4) If the Bridge is unreachable (no pool), write sections WITHOUT inline links — the legacy "
+    "assembly path will handle placements for that task.\n"
+    "VOICE / HUMANIZE (REQUIRED before saving each section):\n"
+    "1) After drafting each section's content, call `skill_view('humanizer')` and apply its "
+    "anti-AI-pattern rules to rewrite the prose so it sounds like a real person wrote it — "
+    "strip 'stands as a testament', 'underscores the importance', 'in today's fast-paced world', "
+    "'it's not just X, it's Y', em-dash asides, and other tells the skill lists.\n"
+    "2) Keep POVISON buying-guide credibility: first-person experience and opinions are welcome, "
+    "but stay trustworthy and specific — no stand-up bits, no slang, no manufactured drama. "
+    "Vary sentence length, prefer concrete details over filler, and let one or two genuine "
+    "opinions through per section.\n"
+    "3) Preserve all SEO structure: keep H2/H3 headings, tables, data citations, inline product/internal "
+    "links, image_queries, and section boundaries intact — humanize the prose, not the structure.\n"
+    "IMAGES (P0+P1 — structured queries + stock API candidate pool):\n"
+    "1) For each H2 that warrants a visual, FIRST write section.image_queries = "
+    "[2-3 concrete ENGLISH search phrases]. Good: 'couple arranging living room sofa', "
+    "'modern apartment furniture inventory checklist'. Bad: the whole article title, "
+    "vague terms like 'moving', 'home', 'lifestyle', 'together'.\n"
+    "2) Search the stock API — do NOT invent URLs and do NOT browser-scrape random pages. "
+    "Prefer: `python3 scripts/search-stock-images.py -q \"<query>\" -n 5 -o /tmp/stock.json` "
+    "(or POST http://127.0.0.1:8766/api/stock-images/search with {query, per_page:5}). "
+    "Try queries in order until you get candidates.\n"
+    "3) Pick ONE candidate from the returned pool whose photo clearly shows furniture, "
+    "an interior room, or a layout relevant to THIS section. Set "
+    "section.images = [{url, alt, caption, credit}] using the candidate's url/alt/credit. "
+    "caption = short English figure caption matching the section.\n"
+    "4) HARD RULES — skip the section (images=[]) if no good match:\n"
+    "   - Source MUST be Pixabay or Openverse from the API pool. NEVER POVISON product photos here.\n"
+    "   - MUST depict furniture / room interior / layout. FORBIDDEN: moving boxes close-ups, "
+    "     generic handshakes, abstract textures, outdoor scenes unrelated to the section, "
+    "     pure portraits with no furniture.\n"
+    "   - Do NOT duplicate an image URL across sections.\n"
+    "   - Prefer fewer accurate images over forcing a weak match."
+)
+
+_SECTION_SUBSTEP_GUIDANCE_EDITORIAL = (
+    "Generate body sections for the confirmed outline in EDITORIAL PICKS mode. "
+    "Each articleState.sections[] item MUST use the schema: "
+    "{id, type, title, content, status, image_queries?, images?, subheads?, transition?} where "
+    "type is one of 'Intro' (capitalized), 'h2', 'Conclusion' (capitalized); title is the heading "
+    "text (empty string for Intro); content is the markdown body; status='ready' when done.\n"
+    "EDITORIAL MODE — BODY HAS NO INLINE PLACEMENTS:\n"
+    "1) Write Intro / each H2 / Conclusion WITHOUT weaving ANY povison.com inline markdown links into "
+    "the prose. Editorial mode puts all product placements in a standalone POVISON Picks H2 rendered "
+    "server-side from articleState.products — inline links in body sections would double up.\n"
+    "   HARD RULE — no product-feature blurb in body sections: the POVISON Picks cards are the ONLY "
+    "place a POVISON product gets showcased. Body sections MUST NOT contain product-feature/spec blurb "
+    "paragraphs — no dimensions, mechanism, material, construction-quality, or assembly descriptions of "
+    "a specific POVISON product (e.g. 'The Ansel ... handles this well. Its fluted walnut doors have "
+    "integrated pulls ...'). That copy belongs exclusively on the editorial card's `blurb`. A product "
+    "may be named in body prose ONLY as a brief passing plain-text reference (one short sentence, no "
+    "link, no spec detail) when contextually unavoidable; if a paragraph reads like a product review or "
+    "sales pitch, delete it and keep the section about the general topic. Do NOT write body sections "
+    "that double as product showcases.\n"
+    "2) Do NOT call povison-catalog / povison-blog for inline candidates during section drafting. "
+    "Do NOT set articleState._candidatePool. Do NOT populate articleState.links (editorial mode "
+    "carries no internal links in the body).\n"
+    "3) Set articleState.phaseDone.sections = true when all sections have content.\n\n"
+    "EDITORIAL PICKS — GENERATE THE 3 CARDS + H2 TITLE/INTRO (after all sections are written):\n"
+    "1) Set articleState.editorialIntro ONLY IF it is currently empty — a one-line overview of the "
+    "criteria used to pick these 3 (e.g. 'three reclining sofas that balance mid-century lines with "
+    "daily comfort'). Do NOT overwrite a non-empty editorialIntro (the operator may have edited it).\n"
+    "2) Set articleState.editorialTitle ONLY IF it is currently empty — default "
+    "'POVISON Picks — {topic.title}'. Do NOT overwrite a non-empty editorialTitle.\n"
+    "3) Call `povison-catalog.py recommend --topic '<JSON>' --limit 3` (or POST "
+    "http://127.0.0.1:8766/api/povison-products/recommend with {topic, limit:3}) to get EXACTLY 3 "
+    "real product candidates. Each MUST have a real PDP URL (`/<slug>.html?variant=<id>`). NEVER "
+    "fabricate a URL — if fewer than 3 good matches, write fewer (the placements panel will flag the "
+    "shortfall; the operator can re-pick).\n"
+    "4) For EACH of the 3 products, fill a card: {name, url, image (Detail API), "
+    "sectionId='editorial-picks', status='pending', blurb, specs?, reviewQuote?} where:\n"
+    "   - blurb: 90-150 words, 1-3 paragraphs, MUST include a specs/mechanism paragraph "
+    "(dimensions + mechanism + material + colors). Optionally add a scene paragraph, a buyer-review "
+    "quote paragraph, and a value summary.\n"
+    "   - reviewQuote: the product's storefront `url` is the ONLY stable id on the card (the product "
+    "`id` is a non-numeric storefront handle, NOT a magento SPU — do NOT pass it to by-spu). Call "
+    "GET http://127.0.0.1:8766/api/povison-reviews/by-url?url=<product.url>&min_rating=4&limit=1 — it "
+    "resolves the magento numeric SPU from the URL slug internally and returns ONE real APPROVED "
+    "buyer review. Use {reviewer:nickname, date, quote:detail, rating}. If the API returns ok=False "
+    "or empty (no reviews for this product / DB not configured), OMIT reviewQuote — NEVER fabricate a "
+    "review quote.\n"
+    "   - specs: {dimensions, mechanism, material, colors} from the Detail API.\n"
+    "   - warranty: only if surfaced by the PDP/Detail API; omit otherwise.\n"
+    "5) Set articleState.products = [the 3 cards]. Do NOT set articleState.phaseDone.placements (keep "
+    "it false) and do NOT set articleState.placementsConfirmed — the cards are 'pending' and must be "
+    "accepted by the operator in the 产品与内链 panel before confirmPlacements() flips that flag. "
+    "Do NOT populate articleState.links.\n"
+    "HARD RULES: products.length should be exactly 3 (or fewer if the catalog had no good matches); "
+    "H3 headings are PLAIN TEXT (no link); the PDP link goes on the product IMAGE only; blurb 90-150 "
+    "words with a specs paragraph required.\n\n"
+    "VOICE / HUMANIZE + IMAGES: apply the same humanizer + stock-image rules as inline mode (call "
+    "skill_view('humanizer') before saving each section; image_queries + Pixabay/Openverse pool only, "
+    "no POVISON product photos in body sections)."
+)
+
+
+# Module-level placements sub-step guidance (extracted so tests can assert the
+# editorial branch is present without spinning up the agent-run endpoint).
+
+
+def _section_guidance_for_task(task_dir: Path) -> str:
+    """Pick the section sub-step guidance branch based on the article's
+    ``placementStyle`` read from the DB step-3 data materialized into the task
+    context dir. Returns the editorial guidance when the operator chose
+    editorial mode, else the inline merged-placements guidance. Defaults to
+    inline for fresh tasks with no step-3 data yet.
+    """
+    try:
+        state_file = task_dir / "article-state.json"
+        if state_file.exists():
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            if isinstance(state, dict) and state.get("placementStyle") == "editorial":
+                return _SECTION_SUBSTEP_GUIDANCE_EDITORIAL
+    except Exception:
+        pass
+    return _SECTION_SUBSTEP_GUIDANCE_INLINE
+
+
+_PLACEMENTS_SUBSTEP_GUIDANCE = (
+    "RE-RESOLVE placements from EXISTING section prose (merged flow). "
+    "The body sections were already written with inline markdown links to REAL povison URLs during "
+    "the section step. Your job here is NOT to generate new placements from scratch — it is to "
+    "review/confirm and, if needed, re-derive the structured placement cards from the prose.\n"
+    "1) Scan each articleState.sections[].content for markdown `[anchor](url)` links whose url is a "
+    "real povison.com PDP (contains `.html` and `?variant=`), blog article "
+    "(`https://www.povison.com/blog/.../.html`), or collection page. Build articleState.products and "
+    "articleState.links from these: each item gets {id, status:'pending', name/anchor, url, "
+    "sectionId, fit_score/reasons when known from articleState._candidatePool}.\n"
+    "2) If sections have NO inline links (legacy task written before the merge), fall back to the "
+    "old generate path: call `povison-catalog.py recommend` and `povison-blog.py recommend-links` "
+    "(limit 2 / 3) and write the results into products/links. Real PDP URLs contain `.html` + "
+    "`?variant=`; real blog URLs start with `https://www.povison.com/blog/` and end with `.html`. "
+    "NEVER fabricate a URL — if the API returns no good match, write fewer (0-1) rather than a 404.\n"
+    "3) REPLACE articleState.products and articleState.links entirely with the re-derived set "
+    "(the operator may have deleted entries before re-running). Set "
+    "articleState.phaseDone.placements = true once the cards reflect the prose.\n"
+    "NOTE: the merged section path is preferred — this standalone placements run is mainly for "
+    "re-resolving after the operator edits prose or deletes cards. A server-side hook also "
+    "re-derives products/links from prose on every step-3 save, so this run is a confirmation pass.\n\n"
+    "EDITORIAL PICKS BRANCH (when articleState.placementStyle == 'editorial'):\n"
+    "This branch REPLACES the inline re-resolution above. PRIMARY generation of the 3 "
+    "editorial cards now happens in the SECTION step (the operator picks the style before "
+    "writing sections, and the section Agent generates the cards + editorialTitle + "
+    "editorialIntro there). This placements run is a RE-PICK / confirmation pass: use it "
+    "ONLY when the operator wants different products than the section step produced, or to "
+    "re-fill missing blurb/specs/reviewQuote on the existing 3 cards.\n"
+    "1) Do NOT overwrite a non-empty articleState.editorialTitle / editorialIntro (the operator "
+    "or the section step already set them). Only fill them if they are empty.\n"
+    "2) Call `povison-catalog.py recommend --topic '<JSON>' --limit 3` (or POST "
+    "http://127.0.0.1:8766/api/povison-products/recommend) to get EXACTLY 3 real product candidates. "
+    "Each product MUST have a real PDP URL (`/<slug>.html?variant=<id>`). NEVER fabricate URLs.\n"
+    "3) For EACH of the 3 products, fill: {name, url, image (Detail API), sectionId='editorial-picks', "
+    "status='pending', blurb (90-150 words, 1-3 paragraphs, MUST include a specs/mechanism paragraph: "
+    "dimensions + mechanism + material + colors), and OPTIONALLY:\n"
+    "   - reviewQuote: the product's storefront `url` is the ONLY stable id on the card (the product "
+    "`id` is a non-numeric storefront handle, NOT a magento SPU — do NOT pass it to by-spu). Call "
+    "GET http://127.0.0.1:8766/api/povison-reviews/by-url?url=<product.url>&min_rating=4&limit=1 — it "
+    "resolves the magento numeric SPU from the URL slug internally and returns ONE real APPROVED "
+    "buyer review. Use {reviewer:nickname, date, quote:detail, rating}. If the reviews API returns "
+    "ok=False or empty, OMIT reviewQuote — NEVER fabricate a review quote.\n"
+    "   - specs: {dimensions, mechanism, material, colors} from the Detail API.\n"
+    "   - warranty: only if surfaced by the PDP/Detail API; omit otherwise.\n"
+    "4) Do NOT re-resolve inline links from section prose (editorial mode has no inline placements). "
+    "Do NOT populate articleState.links (the editorial H2 carries no internal links).\n"
+    "5) Set articleState.products = [the 3 cards] with status='pending'. Do NOT set "
+    "articleState.phaseDone.placements and do NOT set articleState.placementsConfirmed — the cards "
+    "must be accepted by the operator in the 产品与内链 panel before confirmPlacements() flips that "
+    "flag. Setting phaseDone.placements=true here would skip the review panel and jump to FAQ while "
+    "the cards are still pending.\n"
+    "HARD RULES: products.length should be exactly 3 (or fewer if the catalog had no good matches); "
+    "H3 headings are PLAIN TEXT (no link); the PDP link goes on the product IMAGE only; blurb 90-150 "
+    "words with a specs paragraph required."
+)
 
 
 def _is_inline_placement_url(url: str) -> bool:
@@ -432,6 +713,15 @@ _ARTICLE_CONTENT_FIELDS = (
     ("meta", lambda v: not isinstance(v, dict) or not v),
     ("previewHtml", lambda v: not isinstance(v, str) or v == ""),
     ("validation", lambda v: not isinstance(v, dict) or not v),
+    # Editorial Picks state — protected so an intermediate Agent save that omits
+    # them can't silently flip the article back to inline mode or drop the
+    # operator-edited H2 title/intro (see plan §E). Strings default to "" when
+    # absent; placementStyle defaults to "inline" downstream, so an empty/missing
+    # value IS meaningful (means "unset, treat as inline") and must be backfilled
+    # from the DB rather than overwrite a real "editorial" choice.
+    ("placementStyle", lambda v: not isinstance(v, str) or v == ""),
+    ("editorialTitle", lambda v: not isinstance(v, str) or v == ""),
+    ("editorialIntro", lambda v: not isinstance(v, str) or v == ""),
 )
 
 
@@ -440,7 +730,17 @@ def _backfill_empty_content_fields(data: dict, db_data: dict | None) -> int:
 
     Returns the number of fields backfilled (0 = no change). Only fields listed
     in ``_ARTICLE_CONTENT_FIELDS`` are considered; ``products``/``links`` are
-    untouched. Mutates ``data`` in place.
+    untouched by the base loop. Mutates ``data`` in place.
+
+    EDITORIAL PRODUCTS GUARD: in editorial mode the section step generates the 3
+    review cards into ``products``. An intermediate Agent save that omits
+    ``products`` (or sends ``[]``) would wipe those cards — and unlike
+    sections/outline there is no other source to re-derive them (the editorial
+    short-circuit in ``_post_save_step3_inline_placements`` skips inline
+    re-derivation). So in editorial mode we backfill an empty/missing ``products``
+    from the DB so a later sub-step save can never clobber the section step's
+    cards. ``links`` is intentionally left empty in editorial mode (no body
+    internal links), so it is NOT backfilled.
     """
     if not isinstance(data, dict) or not isinstance(db_data, dict):
         return 0
@@ -451,6 +751,14 @@ def _backfill_empty_content_fields(data: dict, db_data: dict | None) -> int:
             existing = db_data.get(field)
             if not is_empty(existing):
                 data[field] = existing
+                n += 1
+    # Editorial products guard (see docstring).
+    if (data.get("placementStyle") or "inline") == "editorial":
+        incoming_products = data.get("products")
+        if not isinstance(incoming_products, list) or len(incoming_products) == 0:
+            existing_products = db_data.get("products")
+            if isinstance(existing_products, list) and len(existing_products) > 0:
+                data["products"] = existing_products
                 n += 1
     return n
 
@@ -478,6 +786,16 @@ def _post_save_step3_inline_placements(data: dict) -> list[dict]:
     Mutates ``data`` in place. Returns a list of warning dicts (empty = clean).
     """
     if not isinstance(data, dict):
+        return []
+    # Editorial Picks short-circuit (plan §F): in editorial mode the placements
+    # are the 3 product cards the Agent wrote explicitly into articleState.products
+    # (with reviewQuote/specs/warranty), NOT inline links baked into section prose.
+    # Re-running the inline-link scan here would mis-derive products/links from
+    # any incidental povison citation in the body (e.g. a data-source PDP) and
+    # clobber the editorial cards. URL-pattern validation (_validate_placement_urls)
+    # and the HTTP liveness guard still run independently upstream of this hook,
+    # so the double-gate on fabricated/dead URLs is preserved.
+    if (data.get("placementStyle") or "inline") == "editorial":
         return []
     warnings: list[dict] = []
     sections = data.get("sections") or []
@@ -689,8 +1007,9 @@ async def put_step_data(task_id: str, step_num: int, request: Request) -> dict:
     # Article-state field protection: an intermediate Agent save (e.g. during
     # the placements sub-step) can briefly carry an empty `sections`/`faqs`/...
     # field. Backfill those from the DB so a later sub-step never wipes an
-    # earlier sub-step's already-generated output. `products`/`links` are not
-    # touched (empty is meaningful there).
+    # earlier sub-step's already-generated output. In editorial mode `products`
+    # (the 3 review cards) is also backfilled; `links` stays untouched (empty
+    # is meaningful there).
     backfilled = 0
     if step_num == 3 and isinstance(data, dict):
         existing = _db.get_step_data(task_id, step_num)
@@ -923,62 +1242,7 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "Set articleState.outline = [{id, level:'h2'|'h3', text:'...'}, ...] and "
             "articleState.phaseDone.outline = true. Do NOT set outlineConfirmed."
         ),
-        "section": (
-            "Generate body sections for the confirmed outline. "
-            "Each articleState.sections[] item MUST use this schema: "
-            "{id, type, title, content, status, image_queries?, images?, subheads?, transition?} where "
-            "type is one of 'Intro' (capitalized) for the intro, 'h2' for body sections, "
-            "'Conclusion' (capitalized) for the conclusion; title is the section heading text "
-            "(empty string for Intro); content is the markdown body; status='ready' when done. "
-            "Set articleState.phaseDone.sections = true when all sections have content.\n"
-            "MERGED PLACEMENTS (write inline links while drafting — do NOT defer to a later placements run):\n"
-            "1) FIRST fetch a candidate pool of REAL povison URLs by calling "
-            "`python3 scripts/povison-catalog.py recommend --topic '<JSON>' --sections <file> --limit 5` "
-            "AND `python3 scripts/povison-blog.py recommend-links --topic '<JSON>' --sections <file> --limit 5` "
-            "(or POST http://127.0.0.1:8766/api/povison-products/recommend and /api/povison-blog/recommend-links "
-            "with {topic, sections, limit}). Store the result in articleState._candidatePool for audit.\n"
-            "2) As you write each section's content, weave 1-2 product links and 1-2 internal links INLINE as "
-            "markdown `[anchor](url)` using ONLY URLs from the pool. For a product, write a short 40-60 word "
-            "advice paragraph that links the product name to its PDP. NEVER invent, shorten, or rehost a URL — "
-            "if no pool entry fits, write the section with zero placements rather than fabricate one.\n"
-            "3) Do NOT output a placements_used field. After you save, a server-side hook derives "
-            "articleState.products/links deterministically by parsing the markdown links out of each "
-            "section.content and matching them back to the pool. You do not need to populate products/links "
-            "yourself, but you MAY set them from the pool as a best-effort hint (the hook is the source of truth).\n"
-            "4) If the Bridge is unreachable (no pool), write sections WITHOUT inline links — the legacy "
-            "assembly path will handle placements for that task.\n"
-            "VOICE / HUMANIZE (REQUIRED before saving each section):\n"
-            "1) After drafting each section's content, call `skill_view('humanizer')` and apply its "
-            "anti-AI-pattern rules to rewrite the prose so it sounds like a real person wrote it — "
-            "strip 'stands as a testament', 'underscores the importance', 'in today's fast-paced world', "
-            "'it's not just X, it's Y', em-dash asides, and other tells the skill lists.\n"
-            "2) Keep POVISON buying-guide credibility: first-person experience and opinions are welcome, "
-            "but stay trustworthy and specific — no stand-up bits, no slang, no manufactured drama. "
-            "Vary sentence length, prefer concrete details over filler, and let one or two genuine "
-            "opinions through per section.\n"
-            "3) Preserve all SEO structure: keep H2/H3 headings, tables, data citations, inline product/internal "
-            "links, image_queries, and section boundaries intact — humanize the prose, not the structure.\n"
-            "IMAGES (P0+P1 — structured queries + stock API candidate pool):\n"
-            "1) For each H2 that warrants a visual, FIRST write section.image_queries = "
-            "[2-3 concrete ENGLISH search phrases]. Good: 'couple arranging living room sofa', "
-            "'modern apartment furniture inventory checklist'. Bad: the whole article title, "
-            "vague terms like 'moving', 'home', 'lifestyle', 'together'.\n"
-            "2) Search the stock API — do NOT invent URLs and do NOT browser-scrape random pages. "
-            "Prefer: `python3 scripts/search-stock-images.py -q \"<query>\" -n 5 -o /tmp/stock.json` "
-            "(or POST http://127.0.0.1:8766/api/stock-images/search with {query, per_page:5}). "
-            "Try queries in order until you get candidates.\n"
-            "3) Pick ONE candidate from the returned pool whose photo clearly shows furniture, "
-            "an interior room, or a layout relevant to THIS section. Set "
-            "section.images = [{url, alt, caption, credit}] using the candidate's url/alt/credit. "
-            "caption = short English figure caption matching the section.\n"
-            "4) HARD RULES — skip the section (images=[]) if no good match:\n"
-            "   - Source MUST be Pixabay or Openverse from the API pool. NEVER POVISON product photos here.\n"
-            "   - MUST depict furniture / room interior / layout. FORBIDDEN: moving boxes close-ups, "
-            "     generic handshakes, abstract textures, outdoor scenes unrelated to the section, "
-            "     pure portraits with no furniture.\n"
-            "   - Do NOT duplicate an image URL across sections.\n"
-            "   - Prefer fewer accurate images over forcing a weak match."
-        ),
+        "section": _section_guidance_for_task(d),
         "faq": (
             "Generate FAQ (4-6 Q&A). Update articleState.faqs and set articleState.phaseDone.faq = true."
         ),
@@ -997,28 +1261,7 @@ async def task_agent_run(task_id: str, step_num: int, body: dict | None = None) 
             "Before saving, count each field's characters and confirm title is in [50,60] and "
             "description is in [150,160]. If out of range, revise the wording until it fits."
         ),
-        "placements": (
-            "RE-RESOLVE placements from EXISTING section prose (merged flow). "
-            "The body sections were already written with inline markdown links to REAL povison URLs during "
-            "the section step. Your job here is NOT to generate new placements from scratch — it is to "
-            "review/confirm and, if needed, re-derive the structured placement cards from the prose.\n"
-            "1) Scan each articleState.sections[].content for markdown `[anchor](url)` links whose url is a "
-            "real povison.com PDP (contains `.html` and `?variant=`), blog article "
-            "(`https://www.povison.com/blog/.../.html`), or collection page. Build articleState.products and "
-            "articleState.links from these: each item gets {id, status:'pending', name/anchor, url, "
-            "sectionId, fit_score/reasons when known from articleState._candidatePool}.\n"
-            "2) If sections have NO inline links (legacy task written before the merge), fall back to the "
-            "old generate path: call `povison-catalog.py recommend` and `povison-blog.py recommend-links` "
-            "(limit 2 / 3) and write the results into products/links. Real PDP URLs contain `.html` + "
-            "`?variant=`; real blog URLs start with `https://www.povison.com/blog/` and end with `.html`. "
-            "NEVER fabricate a URL — if the API returns no good match, write fewer (0-1) rather than a 404.\n"
-            "3) REPLACE articleState.products and articleState.links entirely with the re-derived set "
-            "(the operator may have deleted entries before re-running). Set "
-            "articleState.phaseDone.placements = true once the cards reflect the prose.\n"
-            "NOTE: the merged section path is preferred — this standalone placements run is mainly for "
-            "re-resolving after the operator edits prose or deletes cards. A server-side hook also "
-            "re-derives products/links from prose on every step-3 save, so this run is a confirmation pass."
-        ),
+        "placements": _PLACEMENTS_SUBSTEP_GUIDANCE,
     }
     step_guidance = {
         1: "Discover / enrich keywords. When done call seo_save_step_data(task_id, step_num=1, data=<keyword array>).",
@@ -1124,6 +1367,57 @@ async def task_agent_progress(task_id: str, step_num: int, since: int = 0) -> di
     """Read-only progress from DB (never mutates)."""
     _task_or_404(task_id)
     return _db.list_progress(task_id, step_num, since)
+
+
+@app.get("/api/tasks/{task_id}/active-script-job")
+async def task_active_script_job(task_id: str) -> dict:
+    """Return the in-flight script job (if any) for a task, so the client can
+    resume polling it after a task switch. Script-based generation (FAQ/Meta/
+    placements re-resolve via ``bridgeGenerateSection``) writes a ``.script_job``
+    marker in the run dir with the job_id; this reads it and looks up the live
+    job status. Returns ``{job_id: null}`` when no script job is in flight."""
+    _task_or_404(task_id)
+    marker = RUNS_DIR / task_id / ".script_job"
+    job_id = None
+    mode = None
+    raw = None
+    if marker.exists():
+        try:
+            raw = marker.read_text(encoding="utf-8").strip()
+        except Exception:
+            raw = None
+    if raw:
+        # Marker is either JSON {"job_id":..., "mode":...} (section-generate) or a
+        # plain job_id string (keyword discover/enrich, brainstorm).
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                job_id = parsed.get("job_id")
+                mode = parsed.get("mode")
+            else:
+                job_id = str(parsed)
+        except (json.JSONDecodeError, ValueError):
+            job_id = raw
+    status = None
+    kind = None
+    if job_id:
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            if job:
+                status = job.get("status")
+                kind = job.get("kind")
+    # If the marker exists but the job is no longer in _JOBS (server restarted
+    # mid-job) OR the job already finished, treat it as not-in-flight so the
+    # client doesn't poll a dead/finished id forever. Clean up a stale marker.
+    if status is None or status in ("succeeded", "failed"):
+        if status is None and job_id:
+            try:
+                marker.unlink()
+            except Exception:
+                pass
+        job_id = None
+        mode = None
+    return {"job_id": job_id, "status": status, "kind": kind, "mode": mode}
 
 
 # ---- WordPress draft export --------------------------------------------------
@@ -1388,6 +1682,90 @@ async def povison_blog_verify(body: dict | None = None) -> dict:
     return _blog.verify_url(url)
 
 
+# ── POVISON product reviews (magento2 DB) — backs Editorial Picks ────────────
+#
+# Read-only surface for the Editorial Picks placement style: each editorial
+# product card can quote one real APPROVED buyer review (name + date + quote +
+# star rating). The DB connection is configured via MAGENTO_DB_* env (profile
+# .env). When not configured, endpoints return ok=False (not 500) so the UI can
+# degrade gracefully and the Agent prompt knows to skip review enrichment.
+
+
+@app.get("/api/povison-reviews/health")
+async def povison_reviews_health() -> dict:
+    """Report whether the magento2 review DB is reachable + configured."""
+    try:
+        import povison_reviews as _rv
+        return {"ok": _rv.is_configured(), "configured": _rv.is_configured()}
+    except Exception as e:
+        return {"ok": False, "configured": False, "error": str(e)}
+
+
+@app.get("/api/povison-reviews/by-spu")
+async def povison_reviews_by_spu(spu: str, limit: int = 5, min_rating: int = 0) -> dict:
+    """Fetch APPROVED reviews for a product SPU, best-rated first.
+
+    Query params: ``spu`` (required), ``limit`` 1-50 (default 5), ``min_rating``
+    0-5 star floor (default 0 = no filter). Returns ``{ok, spu, count,
+    reviews[]}`` where each review has ``reviewId, nickname, date, title,
+    detail, rating(1-5), helpfulCount, sourceType``. Returns ``ok=False`` (not
+    500) when the DB is not configured — callers (Agent / UI) treat that as
+    "no reviews available" and skip review enrichment.
+    """
+    try:
+        import povison_reviews as _rv
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_reviews module missing: {e}") from e
+    if not spu:
+        raise HTTPException(status_code=400, detail="spu is required")
+    reviews = _rv.fetch_reviews(spu=spu, limit=int(limit), min_rating=int(min_rating))
+    return {"ok": bool(reviews), "spu": spu, "count": len(reviews), "reviews": reviews}
+
+
+@app.get("/api/povison-reviews/summary")
+async def povison_reviews_summary(spu: str) -> dict:
+    """Aggregate review count + average rating for a SPU (from the pre-computed
+    ``review_entity_summary`` table). Returns ``{ok, spu, reviewsCount,
+    ratingSummary, rating}``. Never raises."""
+    try:
+        import povison_reviews as _rv
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_reviews module missing: {e}") from e
+    if not spu:
+        raise HTTPException(status_code=400, detail="spu is required")
+    out = _rv.fetch_summary(spu=spu)
+    return {"ok": out["reviewsCount"] > 0, "spu": spu, **out}
+
+
+@app.get("/api/povison-reviews/by-url")
+async def povison_reviews_by_url(url: str, limit: int = 1, min_rating: int = 4) -> dict:
+    """Resolve a povison product URL to its magento SPU and fetch APPROVED reviews.
+
+    This is the entry point the Editorial Picks Agent should use: it accepts the
+    product's storefront URL (the only stable id on the editorial card) and
+    internally resolves the numeric magento ``entity_id`` via the ``url_key``
+    attribute, then returns the best-rated review. Use this instead of
+    ``by-spu`` when you only have the product URL.
+
+    Query params: ``url`` (required, povison product URL), ``limit`` 1-50
+    (default 1 — one good quote per card), ``min_rating`` 0-5 star floor
+    (default 4). Returns ``{ok, url, spu, count, reviews[]}`` with the same
+    review shape as ``by-spu``. ``ok=False`` when not configured, URL not
+    resolvable, or no matching reviews — callers OMIT reviewQuote in that case.
+    """
+    try:
+        import povison_reviews as _rv
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"povison_reviews module missing: {e}") from e
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    spu = _rv.resolve_spu_by_url(url)
+    if not spu:
+        return {"ok": False, "url": url, "spu": None, "count": 0, "reviews": []}
+    reviews = _rv.fetch_reviews(spu=spu, limit=int(limit), min_rating=int(min_rating))
+    return {"ok": bool(reviews), "url": url, "spu": spu, "count": len(reviews), "reviews": reviews}
+
+
 # ---- Placement URL liveness guard (HTTP reachability) ----
 
 @app.get("/api/povison-placements/health")
@@ -1645,7 +2023,10 @@ async def keywords_discover(rid: str, body: dict | None = None) -> dict:
         "--min-freq", str(b.get("min_freq", 2)),
         "-o", str(d / "kw.raw.json"),
     ]
-    job_id = _spawn_job("keyword-discovery", cmd, d, rid)
+    _is_task, _on_disc_finish = _script_step_track(rid, 1, mark_done_on_success=True)
+    job_id = _spawn_job("keyword-discovery", cmd, d, rid, None, _on_disc_finish)
+    if _is_task:
+        _write_script_job_marker(rid, job_id)
     return {"job_id": job_id}
 
 
@@ -1668,7 +2049,10 @@ async def keywords_enrich(rid: str, body: dict | None = None) -> dict:
             _db.record_keywords(rid, kw if isinstance(kw, list) else kw.get("keywords") or [])
         except Exception:
             pass
-    job_id = _spawn_job("enrich-keyword-metrics", cmd, d, rid, _on_enrich_done)
+    _is_task, _on_enrich_finish = _script_step_track(rid, 1)
+    job_id = _spawn_job("enrich-keyword-metrics", cmd, d, rid, _on_enrich_done, _on_enrich_finish)
+    if _is_task:
+        _write_script_job_marker(rid, job_id)
     return {"job_id": job_id}
 
 
@@ -1718,7 +2102,10 @@ async def topics_brainstorm(rid: str, body: dict | None = None) -> dict:
             _db.record_topics(rid, doc.get("topics") or doc if isinstance(doc, list) else doc.get("topics") or [])
         except Exception:
             pass
-    job_id = _spawn_job("topic-brainstorm", cmd, d, rid, _on_bs_done)
+    _is_task, _on_bs_finish = _script_step_track(rid, 2)
+    job_id = _spawn_job("topic-brainstorm", cmd, d, rid, _on_bs_done, _on_bs_finish)
+    if _is_task:
+        _write_script_job_marker(rid, job_id)
     return {"job_id": job_id}
 
 
@@ -1770,6 +2157,18 @@ async def sections_generate(rid: str, body: dict | None = None) -> dict:
     if b.get("section_id"):
         cmd += ["--section-id", str(b["section_id"])]
     cmd += ["-o", str(state_path)]
+    is_task = str(rid).startswith("task-")
+    # Mark step 3 (and the task) as running in the DB so the task list shows
+    # "运行中" during script-based generation (FAQ/Meta/placements re-resolve).
+    # The agent path does this in task_agent_run; the script path previously did
+    # NOT, so the task list showed idle and resumeTaskAgentPolling could not
+    # restore the progress bar after a task switch.
+    if is_task:
+        try:
+            _db.set_step_status(rid, 3, "running", clear_agent_run_id=True)
+            _db.mark_task_running(rid)
+        except Exception:
+            pass
     def _on_sec_done():
         try:
             st = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1788,7 +2187,41 @@ async def sections_generate(rid: str, body: dict | None = None) -> dict:
             _db.record_article_state(rid, st)
         except Exception:
             pass
-    job_id = _spawn_job("section-generate", cmd, d, rid, _on_sec_done)
+    def _on_sec_finish(job_id, final_status, rc):
+        # Runs in finally (success OR failure). record_article_state already
+        # marked step 3 "done" on success; on failure mark "error" so the step
+        # is not stuck "running". Always clear the script-job marker and let the
+        # task settle (completed if step 3 done, else idle so it is not stuck).
+        if is_task:
+            try:
+                marker = d / ".script_job"
+                if marker.exists():
+                    marker.unlink()
+            except Exception:
+                pass
+            try:
+                if final_status != "succeeded":
+                    _db.set_step_status(rid, 3, "error")
+                _db.mark_task_completed_if_ready(rid)
+                # If the task is still "running" after the above (e.g. step 3
+                # errored), flip it to idle so the operator can retry and the
+                # task list does not show a phantom "运行中".
+                if final_status != "succeeded":
+                    _db.set_task_status(rid, "idle")
+            except Exception:
+                pass
+    job_id = _spawn_job("section-generate", cmd, d, rid, _on_sec_done, _on_sec_finish)
+    # Persist the job_id + mode in a run-dir marker so the client can resume
+    # polling this script job after a task switch AND land on the right phase
+    # (faq/meta/sections) instead of auto-advancing past it.
+    if is_task:
+        try:
+            (d / ".script_job").write_text(
+                json.dumps({"job_id": job_id, "mode": str(b.get("mode") or "section")}),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
     return {"job_id": job_id}
 
 
@@ -1993,6 +2426,15 @@ def _prepare_section_content(state: dict, sec: dict) -> str:
       accepted product blurbs once at the end.
     """
     raw = sec.get("content") or ""
+    # Editorial Picks dispatch (plan §V): in editorial mode the body sections
+    # must NOT carry inline povison links (the product cards live in the
+    # standalone POVISON Picks H2, rendered by _editorial_picks_html). Force the
+    # legacy assembly path so that even if the Agent accidentally wrote a
+    # povison citation into a section, it is NOT treated as a merged-flow
+    # placement (which would strip/reject it). The merged-flow path is reserved
+    # for inline-mode articles.
+    if (state.get("placementStyle") or "inline") == "editorial":
+        return _prepare_section_content_legacy(state, sec, raw)
     if _has_inline_povison_links(raw):
         # Merged flow: links are already inline. Strip rejected ones, then append
         # blurbs for accepted products that are NOT inline in the prose (e.g.
@@ -2023,6 +2465,18 @@ def _prepare_section_content(state: dict, sec: dict) -> str:
         return cleaned
 
     # Legacy flow
+    return _prepare_section_content_legacy(state, sec, raw)
+
+
+def _prepare_section_content_legacy(state: dict, sec: dict, raw: str) -> str:
+    """Legacy assembly path: strip legacy markers/orphan blurbs, weave accepted
+    internal links inline into prose (first occurrence, ``Related:`` fallback),
+    then append accepted product blurbs once at the end.
+
+    Used directly in editorial mode (placements live in the POVISON Picks H2,
+    not the body) and as the legacy fallback for inline-mode sections that have
+    no inline povison links.
+    """
     sec_content = _strip_legacy_placements(raw)
     sec_content = _strip_orphaned_placement_blurbs(sec_content, state, sec)
     # Inline-link accepted internal links into body prose (first occurrence).
@@ -2547,6 +3001,153 @@ def _add_external_link_rel(html: str) -> str:
     return _A_OPEN_TAG_RE.sub(_process, html)
 
 
+def _editorial_picks_html(state: dict) -> str:
+    """Render the ``POVISON Picks`` editorial H2 + 3 H3 product cards.
+
+    Activated only when ``state["placementStyle"] == "editorial"`` AND there are
+    exactly 3 accepted products. When not active (inline mode, fewer than 3
+    accepted products, or missing fields), returns ``""`` so ``_article_body``
+    falls through to the legacy inline assembly — that is the degradation path,
+    not an error.
+
+    Structure (matches the POVISON blog reference):
+      <h2 id="povison-picks">POVISON Picks — {editorialTitle or topic.title}</h2>
+      <p class="editorial-intro">{editorialIntro}</p>            # optional
+      for each accepted product:
+        <h3 id="...">{product name}</h3>                         # plain text, NO link
+        <a href="{pdp url}"><img ...></a>                         # image wraps to PDP
+        <p>{blurb}</p>                                           # 90-150 word copy
+        <blockquote>{review quote}</blockquote>                  # optional
+        <div class="wp-block-button">...See Product Details</div> # Gutenberg core/button CTA → PDP
+    """
+    if not isinstance(state, dict):
+        return ""
+    if (state.get("placementStyle") or "inline") != "editorial":
+        return ""
+    products = [p for p in (state.get("products") or []) if isinstance(p, dict) and p.get("status") == "accepted"]
+    if len(products) != 3:
+        # Degradation: editorial needs exactly 3 cards. Fewer → render nothing
+        # and let _article_body fall back to inline placement per section.
+        return ""
+
+    title = (state.get("editorialTitle") or "").strip()
+    if not title:
+        topic = state.get("topic") or {}
+        topic_title = (topic.get("title") or "").strip()
+        title = f"POVISON Picks — {topic_title}" if topic_title else "POVISON Picks"
+    intro = (state.get("editorialIntro") or "").strip()
+
+    out = [f'<h2 id="povison-picks">{_esc(title)}</h2>']
+    if intro:
+        out.append(f'<p class="editorial-intro">{_esc(intro)}</p>')
+    for idx, p in enumerate(products, 1):
+        out.append(_editorial_card_html(p, idx))
+    return "".join(out)
+
+
+_REVIEW_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
+def _format_review_cite(reviewer: str, date: str) -> str:
+    """Build the editorial review citation: "Customer review by {reviewer} ({Month D, YYYY})".
+
+    ``date`` is normally the ISO ``YYYY-MM-DD`` stored on reviewQuote.date (the
+    magento2 review DB returns ISO). Already-pretty dates (e.g. the golden
+    fixture's "October 17, 2025") are passed through as-is. Falls back
+    gracefully when the date is missing or unparseable.
+    """
+    if not reviewer and not date:
+        return ""
+    pretty_date = ""
+    if date:
+        try:
+            parts = date.split("-")
+            if len(parts) == 3:
+                y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                if 1 <= m <= 12 and 1 <= d <= 31:
+                    pretty_date = f"{_REVIEW_MONTHS[m - 1]} {d}, {y}"
+        except (ValueError, TypeError):
+            pretty_date = ""
+        # Not ISO → assume already pretty (e.g. "October 17, 2025"); pass through.
+        if not pretty_date:
+            pretty_date = date
+    prefix = "Customer review by " + reviewer if reviewer else "Customer review"
+    return f"{prefix} ({pretty_date})" if pretty_date else prefix
+
+
+def _editorial_card_html(p: dict, idx: int) -> str:
+    """Render one editorial product card (H3 + image→PDP + blurb + optional quote).
+
+    The H3 heading is PLAIN TEXT (no link) — the PDP entry point is the image,
+    which wraps in ``<a href=PDP>``. This matches the reference blog and keeps
+    the visual anchor on the product image rather than the heading text. Reuses
+    ``_centered_image_html`` (which already supports ``link_url``) so the WP
+    theme + ``wp_publish`` image-download path treats the figure identically to
+    inline product images.
+    """
+    name = (p.get("name") or "").strip()
+    image = (p.get("image") or "").strip()
+    url = (p.get("url") or "").strip()
+    blurb = (p.get("blurb") or "").strip()
+    rq = p.get("reviewQuote") if isinstance(p.get("reviewQuote"), dict) else {}
+
+    parts: list[str] = []
+    # H3 id must be unique and stable across re-renders.
+    heading_id = f"editorial-pick-{idx}"
+    parts.append(f'<h3 id="{heading_id}">{_esc(name)}</h3>')
+    # Image → PDP. _centered_image_html already wraps both <img> and caption in
+    # <a href> when link_url is set; pass link_url=url so the whole figure links.
+    if image:
+        parts.append(
+            _centered_image_html(
+                url=image,
+                alt=name,
+                caption="",
+                credit="",
+                max_width=760,
+                link_url=url,
+            )
+        )
+    if blurb:
+        # Blurb is markdown body (may contain inline markdown already). Render to
+        # HTML via the same path sections use so links/lists come through.
+        parts.append(_chunks_to_html(_section_html(blurb)))
+    if rq:
+        reviewer = (rq.get("reviewer") or "").strip()
+        date = (rq.get("date") or "").strip()
+        quote = (rq.get("quote") or "").strip()
+        if quote:
+            cite = _format_review_cite(reviewer, date)
+            cite_html = f"<cite>{_esc(cite)}</cite>" if cite else ""
+            # Gutenberg core/quote block markup — `wp-block-quote` is the class
+            # WordPress recognizes as the quote block so the theme applies its
+            # quote styling (italic/large quote / citation) rather than a plain
+            # indented blockquote.
+            parts.append(
+                f'<blockquote class="wp-block-quote editorial-review">'
+                f"<p>{_esc(quote)}</p>{cite_html}</blockquote>"
+            )
+    # "See Product Details" CTA → PDP. Use the Gutenberg core/button block
+    # markup so WordPress (block editor + front-end) recognizes it as a button
+    # block. Inline styles guarantee it renders as a visible button in the
+    # Studio preview AND in WP when the theme does not style .wp-block-button__link
+    # (WP preserves these as the block's style attributes on import).
+    if url:
+        parts.append(
+            f'<div class="wp-block-button aligncenter" style="text-align:center;margin-top:20px;">'
+            f'<a class="wp-block-button__link has-text-color has-background" '
+            f'href="{_esc(url)}" target="_blank" rel="noopener noreferrer" '
+            f'style="display:inline-block;background-color:#1a1a1a;color:#ffffff;'
+            f'padding:12px 28px;border-radius:4px;text-decoration:none;'
+            f'font-weight:600;font-size:15px;line-height:1.4;border:2px solid #1a1a1a;">'
+            f'See Product Details</a></div>'
+        )
+    return "".join(parts)
+
+
 def _article_body(state: dict) -> str:
     """Build article body for WP export / preview.
 
@@ -2556,6 +3157,13 @@ def _article_body(state: dict) -> str:
     body = ""
     toc = _toc_html(state)
     toc_inserted = False
+    # Editorial Picks: render the standalone "POVISON Picks" H2 once, just
+    # before the Conclusion (or FAQ if no Conclusion). In editorial mode the
+    # per-section product image is suppressed (the product lives in the picks
+    # block, not trailing the section blurb). Returns "" in inline mode → no-op.
+    editorial_html = _editorial_picks_html(state)
+    is_editorial = bool(editorial_html)
+    editorial_inserted = False
     for sec in state.get("sections") or []:
         # Strip legacy/orphan placement residue, weave accepted internal links
         # inline into body prose (first occurrence), append accepted product
@@ -2564,7 +3172,7 @@ def _article_body(state: dict) -> str:
         sec_content = _prepare_section_content(state, sec)
         chunks = _section_html(sec_content)
         inline_imgs = _inline_images_html(sec)
-        product_imgs = _product_images_html(state, sec)
+        product_imgs = "" if is_editorial else _product_images_html(state, sec)
         if sec.get("type") == "Intro":
             intro_html = _chunks_to_html(chunks)
             if not re.search(r"<h2[^>]*>\s*Introduction\s*</h2>", intro_html, re.I):
@@ -2588,6 +3196,9 @@ def _article_body(state: dict) -> str:
                     )
             body += intro_html + inline_imgs
         elif sec.get("type") == "Conclusion":
+            if editorial_html and not editorial_inserted:
+                body += editorial_html
+                editorial_inserted = True
             body += '<div class="conclusion"><h2 id="conclusion">Conclusion</h2>'
             body += _chunks_to_html(chunks)
             body += "</div>"
@@ -2604,6 +3215,10 @@ def _article_body(state: dict) -> str:
             # product blurb from its image. Product image wins.
             body += product_imgs if product_imgs else inline_imgs
     faq = state.get("faq") or []
+    if editorial_html and not editorial_inserted:
+        # No Conclusion section existed — insert the picks block before FAQ.
+        body += editorial_html
+        editorial_inserted = True
     if faq:
         body += f'<h2 id="q-a">{_esc("Q&A")}</h2>' + _faq_block_html(faq)
     # Bake nofollow/target into external links so the WP draft ships with correct
@@ -2699,7 +3314,14 @@ def fill_blog_template(state: dict) -> str:
 
 
 _FALLBACK_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{{META_TITLE}} | POVISON</title>
-<meta name="description" content="{{META_DESC}}">{{FAQ_JSON_LD}}</head>
+<meta name="description" content="{{META_DESC}}">
+<style>
+.editorial-intro { font-style: italic; color: #6b6b6b; margin: 12px 0 24px; }
+.wp-block-quote.editorial-review { border-left: 4px solid #8b6f47; padding: 8px 0 8px 20px; margin: 20px 0; color: #6b6b6b; font-style: italic; background: #fbf9f5; border-radius: 0 6px 6px 0; }
+.wp-block-quote.editorial-review p { font-size: 17px; line-height: 1.7; }
+.wp-block-quote.editorial-review cite { display: block; margin-top: 8px; font-size: 13px; font-style: normal; color: #8b6f47; }
+.wp-block-button { margin: 20px 0 8px; }
+</style>{{FAQ_JSON_LD}}</head>
 <body><article class="article-body">{{ARTICLE_BODY}}</article></body></html>"""
 
 
