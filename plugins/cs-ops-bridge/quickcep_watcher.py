@@ -775,21 +775,31 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         except Exception as exc:  # noqa: BLE001 — audit must not block
             log.warning("launch_dedup_skipped event write failed session=%s: %s", session_id, exc)
         return None
-    # Transient gateway failure (429/5xx/unreachable) — re-queue to ``pending``
-    # instead of failing the session. The next watcher tick retries when a
-    # gateway slot frees up. This is the pending-queue behavior: a full gateway
-    # must never permanently fail a session that has not been processed.
+    # Transient gateway failure (429/5xx/unreachable) — keep status as
+    # ``processing`` (do NOT roll back to ``pending``). Rolling back to ``pending``
+    # is unsafe: enqueue_session wrote a ``cs_message_dedup`` row for this
+    # message_id, and REST reconcile skips sessions whose ``last_message_id``
+    # matches the current message — so a transient-rolled-back session would
+    # never be re-enqueued and ``processing_stale`` only scans ``processing``.
+    # That leaves it stuck in ``pending`` with no recovery path (the exact hole
+    # the dedup-skip branch above avoids).
+    #
+    # Instead, keep ``processing`` and let processing_stale's never-confirmed
+    # heartbeat recover it: ``agent_processing_at`` is NULL (no run confirmed)
+    # and ``processing_started_at`` was stamped atomically at enqueue, so after
+    # _HEARTBEAT_MIN (15min) with no agent confirmation the heartbeat marks it
+    # ``failed`` and the session re-enters the queue via the failed-handoff path.
+    # This mirrors the dedup-skip branch's recovery contract. A manual relaunch
+    # from Console also works (relaunch passes allow_regression=True).
     if outcome.transient:
-        cal.update_session_status(
-            session_row_id=result["session"]["id"], status="pending", allow_regression=True,
-        )
         log.warning(
-            "launch requeued (transient) session=%s message=%s — back to pending",
+            "launch requeued (transient) session=%s message=%s — kept processing, "
+            "processing_stale heartbeat will recover if no agent confirms",
             session_id, message_id,
         )
         # Roll back a successful joinChat so the AI account doesn't stay joined
-        # while CAL is back at `pending` (operators would see "AI joined, nothing
-        # happening" until the next REST tick re-launches).
+        # while no run is in flight (operators would see "AI joined, nothing
+        # happening"). Fail-soft.
         if _join_succeeded:
             _leave_chat_after_failed_launch(
                 session_id=session_id, message_id=message_id, reason="gateway_transient",
@@ -803,6 +813,7 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
                     "message_id": message_id,
                     "error": "gateway transient (429/5xx/unreachable)",
                     "run_id": None,
+                    "kept_status": "processing",
                 },
             )
         except Exception as exc:
@@ -1220,6 +1231,29 @@ def _rearm_check_session(sess: dict[str, Any]) -> bool:
         inbound_received_at=inbound_received_at,
     ):
         return False
+
+    # Guard: a follow-up during an OPEN escalation (awaiting_answer / resuming)
+    # must NOT reset to pending — that would orphan the Feishu escalation and
+    # launch a duplicate inbound run racing the expert-reply resume path.
+    # escalation_resume owns the awaiting_expert → resuming/pending transition
+    # (triggered by the expert answer or run-finished hook). Skip rearm here;
+    # the follow-up message is still recorded in QuickCEP and will be picked up
+    # after the escalation closes (enqueue reopen handles terminal → pending).
+    prior_status = str(sess.get("status") or "")
+    if prior_status == "awaiting_expert":
+        try:
+            if cal.session_has_open_escalation(quickcep_session_id=sid, env=_ENV):
+                log.info(
+                    "rearm: skip session %s (awaiting_expert with open escalation; "
+                    "escalation_resume owns the transition)",
+                    sid,
+                )
+                return False
+        except Exception as exc:
+            # Fail-safe: if the lookup crashes, do NOT reset (avoid orphaning the
+            # escalation). The hard cap / operator path still recovers later.
+            log.warning("rearm: open-escalation lookup failed session=%s: %s", sid, exc)
+            return False
 
     # enqueue_session will handle the dedup check properly on the next reconcile.
     log.info(

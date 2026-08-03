@@ -292,9 +292,18 @@ def enqueue_session(
         # same transaction so the dedup row + processing status commit together.
         # The returned should_launch stays True so the caller still launches.
         if set_processing and should_launch:
+            # Fresh processing cycle: stamp processing_started_at to NOW (not
+            # COALESCE) and clear agent_processing_at. A reopened session
+            # (terminal → pending → processing) is a NEW cycle — the old
+            # processing_started_at/agent_processing_at anchors belong to the
+            # prior cycle and would mislead processing_stale's heartbeat. The
+            # never-confirmed heartbeat fires when agent_processing_at IS NULL
+            # + processing_started_at ages past _HEARTBEAT_MIN, so the anchor
+            # must reflect this cycle's start.
             conn.execute(
                 "UPDATE cs_session SET status='processing', "
-                "processing_started_at=COALESCE(processing_started_at, ?), "
+                "processing_started_at=?, "
+                "agent_processing_at=NULL, "
                 "updated_at=? WHERE id=?",
                 (now, now, session["id"]),
             )
@@ -1500,21 +1509,33 @@ def update_session_status(
         conn.commit()
 
 
-def stamp_agent_processing_at(*, session_row_id: int) -> None:
+def stamp_agent_processing_at(*, session_row_id: int, reset: bool = False) -> None:
     """Stamp ``agent_processing_at`` once, when the agent first confirms processing.
 
     Distinct from ``processing_started_at`` (which the watcher stamps when it
     sets status=processing). The gap between the two = agent startup + first
     model response latency. Idempotent: COALESCE keeps the earliest value so
     repeat ``apply-handoff --phase processing`` calls do not overwrite.
+
+    ``reset=True`` clears the anchor (sets it to NULL) — used when a session
+    re-enters ``processing`` via reopen or manual relaunch. A stale anchor from
+    a prior cycle would suppress the never-confirmed heartbeat in
+    processing_stale (which fires when ``agent_processing_at`` IS NULL), so the
+    new cycle must re-confirm or be recovered fast.
     """
     now = _now()
     with _connect() as conn:
-        conn.execute(
-            "UPDATE cs_session SET agent_processing_at=COALESCE(agent_processing_at, ?), "
-            "updated_at=? WHERE id=?",
-            (now, now, session_row_id),
-        )
+        if reset:
+            conn.execute(
+                "UPDATE cs_session SET agent_processing_at=NULL, updated_at=? WHERE id=?",
+                (now, session_row_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE cs_session SET agent_processing_at=COALESCE(agent_processing_at, ?), "
+                "updated_at=? WHERE id=?",
+                (now, now, session_row_id),
+            )
         conn.commit()
 
 

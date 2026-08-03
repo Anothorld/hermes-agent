@@ -145,8 +145,13 @@ def test_launch_failure_applies_failed_handoff(monkeypatch, tmp_path):
     assert handoffs[0]["phase"] == "failed"
 
 
-def test_launch_transient_requeues_to_pending(monkeypatch, tmp_path):
-    """A transient gateway failure (429/5xx) must re-queue to pending, not fail."""
+def test_launch_transient_keeps_processing(monkeypatch, tmp_path):
+    """A transient gateway failure (429/5xx) keeps `processing` (not pending/failed).
+
+    Rolling back to `pending` is unsafe: the dedup row + last_message_id skip
+    would prevent re-enqueue, and processing_stale only scans `processing`.
+    The never-confirmed heartbeat recovers via processing_started_at (15min).
+    """
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
     monkeypatch.setenv("CS_OPS_INTENT_FILTER", "false")
     cal = _load_module("cal")
@@ -177,7 +182,9 @@ def test_launch_transient_requeues_to_pending(monkeypatch, tmp_path):
     )
     assert run_id is None
     sess = cal.get_session(quickcep_session_id="sess-429", env="LIVE")
-    assert sess["status"] == "pending"
+    # Transient keeps `processing` — processing_stale heartbeat recovers via
+    # processing_started_at if no agent confirms within 15min.
+    assert sess["status"] == "processing"
     # No failed handoff must be applied for transient requeue.
     assert handoffs == []
 

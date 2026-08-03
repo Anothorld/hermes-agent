@@ -72,18 +72,27 @@ def check_processing_stale_once() -> dict[str, Any]:
 
         # Two recovery paths:
         #   1. Hard cap: updated_at older than _STALE_MIN (2h) — always recover.
-        #   2. Heartbeat: agent_processing_at AND updated_at both older than
-        #      _HEARTBEAT_MIN (15min) — the agent likely crashed/killed and
-        #      never stamped a recent activity. Recovers fast instead of waiting 2h.
-        #      agent_processing_at may be NULL (v5 session / agent never confirmed);
-        #      in that case fall back to the hard cap only.
+        #      Covers confirmed agents that crashed mid-run (agent_processing_at
+        #      was stamped, so the never-confirmed heartbeat below doesn't fire).
+        #   2. Never-confirmed heartbeat: agent_processing_at IS NULL (the agent
+        #      never confirmed this processing cycle — e.g. dedup-skip kept
+        #      processing with no run, transient-keep, or the launch crashed
+        #      before apply-handoff processing) AND processing_started_at aged
+        #      past _HEARTBEAT_MIN (15min). Recovers fast instead of waiting 2h.
+        #      We fire ONLY when agent_processing_at is NULL to avoid false-failing
+        #      a legitimate long-running agent that confirmed processing then does
+        #      >15min of silent tool work — a confirmed agent is trusted until the
+        #      2h hard cap. processing_started_at is reset on every new processing
+        #      cycle (enqueue_session set_processing), so it reflects THIS cycle.
         is_stale = elapsed_min >= _STALE_MIN
         trigger = "hard_cap"
         if not is_stale and _HEARTBEAT_MIN > 0:
-            agent_ts = _minutes_since(str(sess.get("agent_processing_at") or ""), now=now)
-            if agent_ts is not None and agent_ts >= _HEARTBEAT_MIN and elapsed_min >= _HEARTBEAT_MIN:
-                is_stale = True
-                trigger = "heartbeat"
+            agent_ts_str = str(sess.get("agent_processing_at") or "")
+            if not agent_ts_str:
+                proc_ts = _minutes_since(str(sess.get("processing_started_at") or ""), now=now)
+                if proc_ts is not None and proc_ts >= _HEARTBEAT_MIN and elapsed_min >= _HEARTBEAT_MIN:
+                    is_stale = True
+                    trigger = "heartbeat"
 
         if not is_stale:
             continue

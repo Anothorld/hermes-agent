@@ -204,8 +204,13 @@ def test_relaunch_join_disabled_by_env(monkeypatch, tmp_path):
     mock_join.assert_not_called()
 
 
-def test_relaunch_transient_requeues_to_pending(monkeypatch, tmp_path):
-    """Manual relaunch on a transient (429/5xx) gateway failure re-queues to pending, not failed."""
+def test_relaunch_transient_keeps_processing(monkeypatch, tmp_path):
+    """Manual relaunch on a transient (429/5xx) gateway failure keeps `processing`.
+
+    Rolling back to `pending` is unsafe: the dedup row + last_message_id skip
+    would prevent re-enqueue, and processing_stale only scans `processing`.
+    The never-confirmed heartbeat recovers via processing_started_at (15min).
+    """
     _reset_modules()
     monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
     monkeypatch.setenv("CS_OPS_BRIDGE_KEY", "test-key")
@@ -240,4 +245,6 @@ def test_relaunch_transient_requeues_to_pending(monkeypatch, tmp_path):
 
     assert exc_info.value.status_code == 503
     sess = cal.get_session(quickcep_session_id="s-rel-429", env="LIVE")
-    assert sess["status"] == "pending"
+    # Transient keeps `processing` (not pending) — processing_stale heartbeat
+    # recovers via processing_started_at if no agent confirms within 15min.
+    assert sess["status"] == "processing"

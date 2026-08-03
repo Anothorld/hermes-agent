@@ -1310,7 +1310,20 @@ def relaunch_session_route(
     if sess["status"] == "awaiting_expert":
         raise HTTPException(status_code=409, detail=f"session busy: {sess['status']}")
     msg_id = body.message_id or sess.get("last_message_id") or "manual-relaunch"
-    cal.update_session_status(session_row_id=sess["id"], status="processing")
+    # Manual relaunch intentionally regresses failed/draft_ready → processing so
+    # the operator can re-trigger the gateway. Pass allow_regression=True: the
+    # _STATUS_RANKS guard (failed=15 > processing=10) would otherwise block this
+    # transition, leaving CAL stuck at `failed` while the gateway run starts —
+    # Console "重新处理" would lie about lifecycle and agent_processing_at would
+    # never stamp. This is the authorized rollback path, mirroring the watcher's
+    # transient/rearm rollbacks.
+    cal.update_session_status(
+        session_row_id=sess["id"], status="processing", allow_regression=True,
+    )
+    # Fresh processing cycle — reset the heartbeat anchor so processing_stale's
+    # never-confirmed heartbeat can recover this run if the agent crashes before
+    # confirming (mirrors enqueue_session's set_processing reset).
+    cal.stamp_agent_processing_at(session_row_id=sess["id"], reset=True)
     # ── Relaunch joinChat (fail-soft) ────────────────────────────────
     # Same fail-soft join as the inbound watcher launch path: make the AI
     # account visible in QuickCEP as soon as the session re-enters processing.
@@ -1348,12 +1361,13 @@ def relaunch_session_route(
         if outcome.dedup_skipped:
             raise HTTPException(status_code=409, detail="launch deduped (already in flight)")
         if outcome.transient:
-            # Gateway transiently full (429/5xx/unreachable) — re-queue to
-            # pending instead of failing, mirroring the inbound watcher path.
-            # The next watcher tick retries when a slot frees.
-            cal.update_session_status(
-                session_row_id=sess["id"], status="pending", allow_regression=True,
-            )
+            # Gateway transiently full (429/5xx/unreachable) — keep status as
+            # ``processing`` (do NOT roll back to ``pending``). Rolling back to
+            # ``pending`` is unsafe: the dedup row + last_message_id skip would
+            # prevent re-enqueue, and processing_stale only scans ``processing``.
+            # The never-confirmed heartbeat recovers this at _HEARTBEAT_MIN via
+            # processing_started_at (stamped above). Mirrors the inbound watcher
+            # transient path. Operator can retry manually (relaunch is idempotent).
             try:
                 cal.write_event(
                     quickcep_session_id=quickcep_session_id,
@@ -1363,13 +1377,14 @@ def relaunch_session_route(
                         "message_id": str(msg_id),
                         "error": "gateway transient (429/5xx/unreachable) on manual relaunch",
                         "run_id": None,
+                        "kept_status": "processing",
                     },
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("relaunch launch_requeued event write failed session=%s: %s", quickcep_session_id, exc)
             raise HTTPException(
                 status_code=503,
-                detail="gateway 暂时满载，已重新排队（pending），稍后自动重试",
+                detail="gateway 暂时满载，已保留 processing 状态，processing_stale 15min 心跳会恢复，或稍后重试",
             )
         cal.update_session_status(session_row_id=sess["id"], status="failed")
         raise HTTPException(status_code=502, detail="gateway launch failed")
