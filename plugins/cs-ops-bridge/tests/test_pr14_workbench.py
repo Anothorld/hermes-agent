@@ -82,8 +82,8 @@ def test_sessions_list_with_counts(app):
     assert r.status_code == 200
     body = r.json()
     assert "sessions" in body
-    assert body["counts"]["total"] >= 1
-    assert body["counts"]["draft_ready"] >= 1
+    assert body["counts"]["all"] >= 1
+    assert body["counts"]["draft"] >= 1
     assert body["total"] >= 1
     assert body["offset"] == 0
     assert body["limit"] == 50

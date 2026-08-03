@@ -15,7 +15,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from profile_refs import quickcep_skill_dir
+from .profile_refs import quickcep_skill_dir
 
 log = logging.getLogger(__name__)
 

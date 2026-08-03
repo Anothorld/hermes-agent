@@ -268,6 +268,51 @@ def _record_followup_while_busy(*, session_id: str, message_id: str, status: str
     )
 
 
+def _leave_chat_after_failed_launch(*, session_id: str, message_id: str, reason: str) -> None:
+    """Roll back a successful joinChat when the gateway launch fails transiently.
+
+    Without this, the AI account stays joined in QuickCEP while CAL rolls the
+    session back to ``pending`` — operators see "AI joined but nothing happens".
+    The next REST tick re-launches (joinChat is idempotent), but the window is
+    confusing. This leaves immediately so the session returns to the unassigned
+    queue. Fail-soft: leave failure is logged but does not block the rollback.
+    """
+    try:
+        from .session_handoff import _run_quickcep_cli
+        from .quickcep_leave_confirm import reconcile_leave_chat_payload
+
+        code, out, _err = _run_quickcep_cli(["leave-chat", session_id])
+        cli = "email" if False else "live"  # placeholder — reconcile handles both
+        payload = _parse_json(out) if out else {}
+        payload = reconcile_leave_chat_payload(payload, cli=cli, session_id=session_id)
+        ok = code == 0 and not payload.get("failed_step")
+        try:
+            cal.write_event(
+                quickcep_session_id=session_id,
+                env=_ENV,
+                event_type="quickcep_leave_chat",
+                payload={"source": "launch_transient_rollback", "ok": ok, "reason": reason,
+                         "message_id": message_id, "exit_code": code, "result_code": payload.get("result_code")},
+            )
+        except Exception as exc:
+            log.warning("launch leave-chat event write failed session=%s: %s", session_id, exc)
+        if ok:
+            log.info("launch leave-chat ok session=%s reason=%s", session_id, reason)
+        else:
+            log.warning("launch leave-chat failed session=%s code=%s reason=%s", session_id, code, reason)
+    except Exception as exc:
+        log.warning("launch leave-chat crashed session=%s: %s", session_id, exc)
+
+
+def _parse_json(text: str) -> dict:
+    """Best-effort JSON parse for QuickCEP CLI stdout."""
+    try:
+        import json as _json
+        return _json.loads(text)
+    except Exception:
+        return {}
+
+
 def _visitor_name(visitor_info: Any) -> Optional[str]:
     """Best-effort display name from a QuickCEP visitorInfo dict."""
     if not isinstance(visitor_info, dict):
@@ -624,6 +669,7 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         ),
         customer_name=_visitor_name(info.get("visitorInfo")),
         locale=_visitor_locale(info.get("visitorInfo")),
+        set_processing=True,
     )
     if result.get("deduped"):
         log.info("deduped session %s message %s", session_id, message_id)
@@ -663,7 +709,9 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             },
         )
         return None
-    cal.update_session_status(session_row_id=result["session"]["id"], status="processing")
+    # Status was already set to `processing` atomically inside enqueue_session
+    # (set_processing=True) — no separate commit, so a crash here can't leave the
+    # session at `pending` with a dedup row blocking future re-enqueue.
     # ── Launch joinChat (fail-soft) ─────────────────────────────────
     # Join the QuickCEP session as soon as the inbound email has passed all
     # gates and is confirmed for AI processing. This makes the AI account
@@ -686,6 +734,10 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             )
         except Exception as exc:
             log.warning("launch joinChat error session=%s: %s", session_id, exc)
+            join_result = {"ok": False}
+    else:
+        join_result = {"ok": False}
+    _join_succeeded = bool(join_result.get("ok"))
     gw = GatewayClient.from_env()
     outcome = gw.start_process_run(
         quickcep_session_id=session_id,
@@ -699,16 +751,15 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         # Another launch for the same session:message_id is in-flight (process-
         # local `_inflight` set in gateway_launch.try_acquire_launch). The
         # status was already set to `processing` above, but no run will start
-        # here. Roll back to `pending` so the session is not stuck in a
-        # `processing` state with no run — processing_stale would otherwise
-        # take 2h to recover it. enqueue_session's cs_message_dedup table
-        # prevents a duplicate launch on the next REST tick (same message_id),
-        # so the rollback is safe: if the in-flight launch succeeds, the other
-        # path already set processing + run_id; if it fails, its own
-        # launch_failed/transient handler moves the session forward.
-        cal.update_session_status(session_row_id=result["session"]["id"], status="pending")
+        # here. Leave status as `processing` — processing_stale (2h) is the
+        # proven backstop if the in-flight launch also crashes without handoff.
+        # Rolling back to `pending` would be unsafe: cs_message_dedup blocks
+        # re-enqueue of the same message_id, so the session would be stuck in
+        # `pending` with no recovery (processing_stale only scans `processing`).
+        # Write the event for auditability so operators can see why no run
+        # started for this message.
         log.info(
-            "launch dedup skip session=%s message=%s — rolled back to pending",
+            "launch dedup skip session=%s message=%s — another launch in-flight",
             session_id, message_id,
         )
         try:
@@ -729,11 +780,20 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     # gateway slot frees up. This is the pending-queue behavior: a full gateway
     # must never permanently fail a session that has not been processed.
     if outcome.transient:
-        cal.update_session_status(session_row_id=result["session"]["id"], status="pending")
+        cal.update_session_status(
+            session_row_id=result["session"]["id"], status="pending", allow_regression=True,
+        )
         log.warning(
             "launch requeued (transient) session=%s message=%s — back to pending",
             session_id, message_id,
         )
+        # Roll back a successful joinChat so the AI account doesn't stay joined
+        # while CAL is back at `pending` (operators would see "AI joined, nothing
+        # happening" until the next REST tick re-launches).
+        if _join_succeeded:
+            _leave_chat_after_failed_launch(
+                session_id=session_id, message_id=message_id, reason="gateway_transient",
+            )
         try:
             cal.write_event(
                 quickcep_session_id=session_id,
@@ -949,14 +1009,20 @@ def request_stop() -> None:
     _stop_event.set()
 
 
-# ── Re-arming: detect customer follow-ups on operator_replied/reviewed sessions ──
-# Independently scans CAL for sessions in terminal statuses and checks QuickCEP
+# ── Re-arming: detect customer follow-ups on non-pending sessions ──
+# Independently scans CAL for sessions in idle/busy statuses and checks QuickCEP
 # for newer visitor messages. If found, resets the CAL status to "pending" so the
 # next REST reconcile cycle picks it up. This compensates for:
 #   1. SIO event loss (visitorSendMsg missed during disconnects)
 #   2. --unread-only filtering out sessions where an operator joined (clearing unreadNum)
 #   3. REST pagination not reaching older sessions
-_REARM_STATUSES = frozenset({"operator_replied", "reviewed"})
+# Includes draft_ready / awaiting_expert so a customer follow-up while the agent
+# is waiting for operator review or expert escalation is NOT silently swallowed
+# (the _rearm_check_session guard ensures only genuinely NEW visitor messages
+# trigger a reset — no false re-arm on stale state). `processing` is excluded
+# because the agent may still be actively running; processing_stale.py owns
+# that recovery path.
+_REARM_STATUSES = frozenset({"draft_ready", "awaiting_expert", "operator_replied", "reviewed"})
 _REARM_INTERVAL_SEC = int(os.environ.get("CS_OPS_REARM_INTERVAL_SEC", "300"))
 _REARM_MAX_SESSIONS = int(os.environ.get("CS_OPS_REARM_MAX_SESSIONS", "50"))
 # Only re-arm sessions updated within this many hours (avoids scanning ancient history)
@@ -1162,12 +1228,14 @@ def _rearm_check_session(sess: dict[str, Any]) -> bool:
     )
 
     try:
-        cal.update_session_status(session_row_id=int(sess["id"]), status="pending")
+        cal.update_session_status(
+            session_row_id=int(sess["id"]), status="pending", allow_regression=True,
+        )
         # Write a rearm event for auditability.
         cal.write_event(
             quickcep_session_id=sid,
             env=_ENV,
-            event_type="rearm_operator_replied",
+            event_type="rearm_followup",
             payload={
                 "prior_status": sess.get("status"),
                 "visitor_msg_id": visitor_msg_id,

@@ -185,7 +185,7 @@ def test_rerank_drops_expired_policy():
         {"metadata": {"source": "official_policy", "effective_from": "2026-01-01", "effective_to": "2026-06-01"}, "final_score": 0.9},  # expired
         {"metadata": {"source": "human_confirmed", "effective_from": "2026-07-01", "effective_to": ""}, "final_score": 0.5},  # current
     ]
-    import hindsight_ko as mod
+    mod = m  # use the already-loaded module (bare `import hindsight_ko` fails — not on sys.path)
     kept = mod.rerank_results(results)
     assert len(kept) == 1
     assert kept[0]["metadata"]["source"] == "human_confirmed"
@@ -249,7 +249,7 @@ def test_force_retain_does_not_bypass_pii_scan(monkeypatch):
     AND redact is bypassed by asserting the residual-scan branch is reachable. We do
     this by monkeypatching heuristic_redact to a no-op for this test (proving the
     residual scan is the backstop, not redact alone)."""
-    import hindsight_ko as mod
+    mod = m  # use the already-loaded module (bare `import hindsight_ko` fails — not on sys.path)
 
     # Mock LLM to return a refined KO that still contains an email (simulating LLM miss)
     def fake_llm(prompt):
@@ -279,7 +279,7 @@ def test_recall_degradation_retries_with_empty_metadata_filter(monkeypatch):
 
     ``{}`` is a SQL no-op (``metadata @> '{}'::jsonb`` is always true) and signals
     "no filter" distinctly from "param absent" (the auto-derive trigger)."""
-    import hindsight_ko as mod
+    mod = m  # use the already-loaded module (bare `import hindsight_ko` fails — not on sys.path)
 
     calls: list[dict] = []
 

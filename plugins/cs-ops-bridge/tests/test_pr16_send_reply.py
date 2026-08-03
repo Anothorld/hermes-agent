@@ -81,7 +81,7 @@ def test_send_reply_invokes_send_email_with_scoped_env(send_module, monkeypatch,
         return MagicMock(returncode=0, stdout=json.dumps({"action": "send_email", "success": True}), stderr="")
 
     monkeypatch.setattr(send_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att: None)
+    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att, **kwargs: None)
     monkeypatch.setattr(
         send_module, "fetch_messages",
         lambda *, quickcep_session_id, **kwargs: {"messages": [{"id": "outbound-1"}]},
@@ -122,7 +122,7 @@ def test_send_reply_unknown_session(send_module):
 
 def test_send_reply_send_failure_returns_error(send_module, monkeypatch, tmp_path):
     _stub_cli(tmp_path, monkeypatch, send_module)
-    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att: None)
+    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att, **kwargs: None)
     monkeypatch.setattr(
         send_module.subprocess, "run",
         lambda argv, **kwargs: MagicMock(returncode=2, stdout="", stderr="send blocked"),
@@ -136,7 +136,7 @@ def test_send_reply_send_failure_returns_error(send_module, monkeypatch, tmp_pat
 def test_send_reply_guard_block_returns_error(send_module, monkeypatch):
     monkeypatch.setattr(
         send_module, "_guard_draft",
-        lambda content, att: {"blocked": True, "error": "internal domain", "matches": ["oss.internal"]},
+        lambda content, att, **kwargs: {"blocked": True, "error": "internal domain", "matches": ["oss.internal"]},
     )
     res = send_module.send_reply(quickcep_session_id="qc-send")
     assert res["ok"] is False
@@ -145,7 +145,7 @@ def test_send_reply_guard_block_returns_error(send_module, monkeypatch):
 
 def test_send_reply_records_audit_event(send_module, monkeypatch, tmp_path):
     _stub_cli(tmp_path, monkeypatch, send_module)
-    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att: None)
+    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att, **kwargs: None)
     monkeypatch.setattr(
         send_module.subprocess, "run",
         lambda argv, **kwargs: MagicMock(returncode=0, stdout='{"success":true}', stderr=""),
@@ -179,7 +179,7 @@ def test_send_reply_calls_fetch_messages_with_force_fresh(send_module, monkeypat
     until TTL expiry. Regression guard for the P1 cache rollout.
     """
     _stub_cli(tmp_path, monkeypatch, send_module)
-    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att: None)
+    monkeypatch.setattr(send_module, "_guard_draft", lambda content, att, **kwargs: None)
     monkeypatch.setattr(
         send_module.subprocess, "run",
         lambda argv, **kwargs: MagicMock(returncode=0, stdout='{"success":true}', stderr=""),

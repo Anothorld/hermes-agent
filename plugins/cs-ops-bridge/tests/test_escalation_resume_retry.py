@@ -8,6 +8,8 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _PKG = "cs_ops_bridge_resume_retry_test"
 
@@ -32,6 +34,26 @@ def _load(sub: str):
     spec.loader.exec_module(mod)
     setattr(sys.modules[_PKG], sub, mod)
     return mod
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cal_db(monkeypatch, tmp_path):
+    """Per-test fresh CAL DB.
+
+    ``_load("cal")`` caches the module, so ``cal._DB_PATH`` (read from the env
+    at import time) would otherwise stay pinned to the FIRST test's tmp_path —
+    every subsequent test in this file would share that DB and cross-contaminate
+    (e.g. a prior test's ``resume_failed_notified`` marker surfaces as
+    "already notified" in a later test). Re-sync ``_DB_PATH`` from the per-test
+    env var and reset the schema-init flags so each test gets its own fresh DB.
+    """
+    db = tmp_path / "cal.db"
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(db))
+    cal = _load("cal")
+    cal._DB_PATH = db
+    cal._schema_initialized = False
+    cal._initialized_db_path = None
+    yield
 
 
 def _setup_escalation_with_answer(cal, *, qsid="qs-det", env="LIVE", answer="Expert says: 10% off",
