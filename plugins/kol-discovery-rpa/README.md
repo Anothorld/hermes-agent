@@ -61,23 +61,38 @@ Qualification` (L134-155). When the skill or bridge thresholds change, the
 the candidate and cannot override with learned criteria (skill L100-103
 priority: HARD > learned > default).
 
-## Video Eval Switch
+## Content Screening Modes
 
-| Switch | Mode | Screening combination |
-|--------|------|-----------------------|
-| OFF (default) | cover | 10 covers + 10 comments |
-| ON | video | 10 covers + 3 random videos + 10 comments |
+| Vision (`KOL_RPA_VISION_EVAL_ENABLED`) | Video (`KOL_RPA_VIDEO_EVAL_ENABLED`) | Mode | Screening |
+|---|---|---|---|
+| OFF (default) | — | **text** | 10× caption + comments only |
+| ON | OFF | cover | 10 covers + vision_analyze + comments |
+| ON | ON | video | cover mode + 3 random videos + video_analyze |
 
-Priority: brief field `rpa_video_eval_enabled` > env `KOL_RPA_VIDEO_EVAL_ENABLED` > default OFF.
+Priority: brief `rpa_vision_eval_enabled` / `rpa_video_eval_enabled` > env > defaults
+(vision OFF, video OFF).
 
-The `pre_tool_call` hook blocks `rpa_download_ig_reel` when OFF, and limits
-to 3 downloads per candidate when ON.
+The `pre_tool_call` hook when vision is OFF:
+- blocks `rpa_download_ig_content` / `rpa_download_ig_cover` /
+  `rpa_download_ig_reel` always;
+- blocks `vision_analyze` / `video_analyze` **only** in `kol-campaign:*`
+  discovery sessions (not `kol-email-discover:` / creator-brief / draft).
+
+When vision ON and video OFF, only `rpa_download_ig_reel` is blocked; when
+video ON, downloads are capped at 3.
 
 ## Anti-Scrape Strategy
 
 - Uses local debug Chrome with real user profile (not headless)
 - Pacing: 2-4s between profiles, 1-2s between reels (jitter)
-- Per-run caps: 40 profiles, 200 reel page loads
+- Per-run caps: 80 profiles, 400 reel page loads (env-overridable)
+- Quota epoch: counters reset on each new agent `turn_id` (gateway
+  rediscover/auto-retry reuses the same `kol-campaign:…` task_id; without
+  turn-scoped reset, exhausted 94/40 counters stuck across launches)
+- Cookies for yt-dlp / cover download: shared
+  `$HOME/.hermes/local-chrome-debug-profile` (same as tab-pool /
+  `start-debug-chrome.sh`), **not** `$HERMES_HOME/...` under a Hermes
+  profile — override with `DEBUG_CHROME_PROFILE_DIR`
 - Risk detection: checkpoint/captcha/login-wall → stop run
 - Read-only: no follow/like/comment/DM actions
 - Fallback: RPA failure grants one-shot browser fallback token
@@ -184,21 +199,19 @@ reliable on a bloks reel page:
 
 | Field | Meaning |
 |-------|---------|
-| `cover_reels` | First 10 reels from the profile `/reels/` grid (most recent), each with RPA-scraped `thumbnail_url` |
+| `cover_reels` | First 10 reels from the profile `/reels/` grid (most recent); comment/caption targets in text mode; also carry `thumbnail_url` when vision ON |
 | `video_reels` | When video eval is ON: **random 3** sampled from that same 10-reel pool (deterministic per handle) |
-| `eval_mode` | `cover` or `video` (from brief/env switch) |
-| `selection` | Metadata for ingest payloads (`random_3_from_recent_10`, etc.) |
+| `eval_mode` | `text` (default), `cover`, or `video` |
+| `selection` | Metadata for ingest payloads (`caption_and_comments_only`, etc.) |
 
-**Recommended flow:**
+**Recommended flow (text mode, default):**
 
 1. `rpa_fetch_ig_reels(handle, max_reels=10)` → read `data.content_eval`
-2. `rpa_download_ig_content(content_eval=...)` → local `cover_path` for all 10 + MP4 for random 3 when ON
-3. `rpa_fetch_reel_comments` ×10 on `cover_reels[].url`
-4. `vision_analyze(cover_path=...)` ×10; `video_analyze(file_path=...)` ×3 when ON
+2. `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` ×10 on `cover_reels[].url`
+3. Score from caption + comments — do **not** download covers or call vision
 
-Cover downloads prefer the RPA grid `thumbnail_url` (HTTP GET with IG Referer) —
-no yt-dlp round-trip when the grid already exposed the CDN URL. Falls back to
-`rpa_download_ig_cover` / yt-dlp when the thumbnail is missing or HTTP fails.
+**Vision ON flow:** download covers → comments ×10 → `vision_analyze` ×10
+(+ `video_analyze` ×3 when video ON). Cover downloads prefer RPA `thumbnail_url`.
 
 ## Reel Download (yt-dlp)
 
@@ -236,11 +249,10 @@ Chrome profile.
 - `download_cover`: `cover_path`, `file_size_bytes`, `thumbnail_url`, `reel_id`.
 
 **Limits & gating**:
-- `rpa_download_ig_reel` is blocked by the pre-tool-call hook when video eval is
-  OFF (`KOL_RPA_VIDEO_EVAL_ENABLED=0`) and capped at 3 distinct reels per run
-  when ON.
-- `rpa_download_ig_cover` is **not** gated by the video-eval switch — cover mode
-  is the default, so the agent can always fetch cover images for `vision_analyze`.
+- When vision is OFF (default): all download tools + `vision_analyze` /
+  `video_analyze` are blocked — text screening only.
+- When vision ON and video OFF: `rpa_download_ig_reel` blocked; cover downloads OK.
+- When video ON: `rpa_download_ig_reel` capped at 3 distinct reels per run.
 - Disk: auto-cleans videos **and** cover images older than 1 hour; 2 GB cap.
 
 **Upstream IG breakage**: yt-dlp's Instagram extractor intermittently returns
@@ -255,13 +267,15 @@ there is no direct MP4 URL in the page DOM to fall back to.
 |----------|---------|---------|
 | `KOL_RPA_ENABLED` | `1` | Master kill switch (`0` = disable all RPA tools) |
 | `KOL_RPA_PHASE` | `1` | Which tools to register (1=3, 2=8, 3=11) |
-| `KOL_RPA_VIDEO_EVAL_ENABLED` | `0` | Video eval switch (`1` = ON) |
+| `KOL_RPA_VISION_EVAL_ENABLED` | `0` | Multimodal vision switch (`1` = allow cover/video analyze) |
+| `KOL_RPA_VIDEO_EVAL_ENABLED` | `0` | Video eval switch (`1` = ON; requires vision ON) |
 | `KOL_RPA_STRICT_BROWSER_BLOCK` | `1` | Guard blocks browser_* to IG/Google URLs in discovery |
 | `KOL_RPA_STRICT` | `0` | `1` = block ALL browser_* in discovery (extreme mode) |
-| `KOL_RPA_MAX_PROFILES_PER_RUN` | `40` | Profile visit quota |
-| `KOL_RPA_MAX_REEL_LOADS_PER_RUN` | `200` | Reel page load quota |
+| `KOL_RPA_MAX_PROFILES_PER_RUN` | `80` | Profile visit quota |
+| `KOL_RPA_MAX_REEL_LOADS_PER_RUN` | `400` | Reel page load quota |
 | `KOL_RPA_PROFILE_DELAY_S` | `2.0,4.0` | Jitter range between profiles |
 | `KOL_RPA_REEL_DELAY_S` | `1.0,2.0` | Jitter range between reels |
+| `DEBUG_CHROME_PROFILE_DIR` | `$HOME/.hermes/local-chrome-debug-profile` | Shared Chrome user-data dir for IG cookies (cover/yt-dlp) |
 
 ## Dependencies
 
@@ -275,7 +289,7 @@ there is no direct MP4 URL in the page DOM to fall back to.
 kol-discovery-rpa/
   __init__.py          # register(ctx) — loads tools.py + hooks.py via importlib
   tools.py             # 11 SCHEMA constants + handlers + as_function_schema
-  hooks.py             # pre_tool_call: video eval switch enforcement
+  hooks.py             # pre_tool_call: video eval + per-turn quota reset
   plugin.yaml          # manifest
   internal/
     cdp_runner.py       # tab_pool.acquire + cdp_page wrapper + _seed_session
@@ -286,6 +300,7 @@ kol-discovery-rpa/
     precheck.py             # exclusion_set precheck
     eval_mode.py            # video/cover switch resolver
     pacing.py               # jitter sleep + per-run quota
+    chrome_paths.py         # shared debug-Chrome profile / Cookies DB resolve
     risk_detector.py        # checkpoint/captcha/login-wall detection
     session_health.py       # sessionid cookie check
     ip_check.py             # ipinfo.io preflight

@@ -56,7 +56,7 @@
 
 | 机制 | 说明 |
 |------|------|
-| **数量门控** | 发现/rediscover run 结束后，比较 CAL 可见候选人数与 `product_campaigns.target_floor`；不足且 `retry_count < 5` 时自动再跑 rediscover |
+| **数量门控** | 发现/rediscover run 结束后，比较 CAL 可见候选人数与 `product_campaigns.target_floor`；不足且 `retry_count < 5` 时自动再跑 rediscover。**同轮优先**：brief/`REDISCOVERY_INSTRUCTIONS` 要求在**当前 run** 内循环 ingest 直到 floor 或硬阻塞；auto-retry 只补硬阻塞后的缺口，不是「每轮入库 1 个」的默认路径 |
 | **async 占位符** | 队列繁忙时 `/rediscover` 与 **auto-retry** 共用 `launch_or_accept`（202 + `pending:*`）；后台 launch 成功后必须把 placeholder 换成真实 `run_id`。`run_state_reconciler` 若发现 registry 中 `pending:*` 已结束，会将活动置为 `closed` 并把 `run_id` 还原为 registry 里最近一条非 pending 的 run |
 | **diagnostics_history** | 每轮终态答案解析为 JSON 追加到 `product_campaigns.diagnostics_history`（`attempted_angles`、`next_round_focus`、`pending_ingests` 等） |
 | **pending_ingests** | 已 qualify 但未 `ingest-confirmed-candidate` 的 handle；下一轮 brief 生成 `# resume_directives` + **STEP_0**（先入库再浏览） |
@@ -65,7 +65,7 @@
 | **排除已入库** | 已在 `list-candidates` 池中的 handle 不会出现在 `resume_directives` |
 | **重置** | 操作员 `POST /campaigns/start` 将 `diagnostics_history` 置为 `[]` |
 
-Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingests` / `next_round_focus` 字段名，勿用「Next round should:」纯 prose）。Rediscover gateway instructions 含 `terminal_safety` + browser no-hang（单页单次、禁止并行 browser fan-out）。
+Agent 契约：skill `instagram-kol-discovery`（终态必须含 `pending_ingests` / `next_round_focus` 字段名，勿用「Next round should:」纯 prose）。Rediscover gateway instructions 含 `terminal_safety` + browser no-hang（单页单次、禁止并行 browser fan-out）。**内容筛选默认 text mode**（`KOL_RPA_VISION_EVAL_ENABLED=0`）：只采 caption + 评论，不跑 `vision_analyze` / 封面下载；重开视觉设 env=`1`。
 
 **Launch brief 与 ingest 对齐（2026-06）：** `_LAUNCH_INSTRUCTIONS` step 4 要求 **`ingest-confirmed-candidate`**（嵌套 JSON），不再教 legacy `upsert-identity` → `add-candidate` 三步链。数量下限按 ingest 成功计数。Launch 阶段 **不** 跑全池 `route-discovery`（路由在 Console **批准短名单** 时 scoped 执行）。跨阶段 I/O 见 `agent_prj/docs/kol-pipeline-io-contracts.md`。
 

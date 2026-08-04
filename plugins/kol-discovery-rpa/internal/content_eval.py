@@ -1,10 +1,11 @@
-"""Content-evaluation reel selection — cover pool + random video sample.
+"""Content-evaluation reel selection — comment pool + optional cover/video.
 
 After ``fetch_reels`` extracts the profile /reels/ grid, this module builds
-the structured plan that downstream download + vision tools consume:
+the structured plan for content screening:
 
-- **cover_reels**: first N reels from the profile grid (default 10), each with
-  ``thumbnail_url`` scraped by RPA from the grid ``img[src]``.
+- **cover_reels**: first N reels from the profile grid (default 10). In
+  ``text`` mode these are comment/caption targets only (no download).
+  When vision is ON they also carry ``thumbnail_url`` for cover download.
 - **video_reels**: when video eval is ON, a random sample of M reels (default 3)
   from that same recent-N pool — not top-by-views.
 
@@ -40,9 +41,10 @@ def build_content_eval_plan(
     Args:
         reels: Reel dicts from ``fetch_reels`` (order = profile grid, most
             recent first).
-        eval_mode: ``"cover"`` or ``"video"``. Resolved from env/brief when
-            omitted.
-        cover_count: How many recent reels to use for cover screening.
+        eval_mode: ``"text"``, ``"cover"``, or ``"video"``. Resolved from
+            env/brief when omitted.
+        cover_count: How many recent reels to use for caption/comment
+            (and cover when vision ON) screening.
         video_count: How many reels to randomly sample for video deep-eval
             when ``eval_mode == "video"``.
         handle: IG handle — used for deterministic random seed when ``seed``
@@ -58,14 +60,21 @@ def build_content_eval_plan(
     cover_reels = [_slim_reel(r) for r in pool if r.get("url")]
 
     video_reels: list[dict[str, Any]] = []
-    selection_note = "covers_only"
-    if mode == "video" and pool:
-        rng = random.Random(seed if seed is not None else _seed_for_handle(handle))
-        k = min(video_count, len(pool))
-        if k > 0:
-            picked = rng.sample(pool, k)
-            video_reels = [_slim_reel(r) for r in picked]
-            selection_note = f"random_{k}_from_recent_{len(pool)}"
+    if mode == "text":
+        selection_note = "caption_and_comments_only"
+    elif mode == "video":
+        selection_note = "covers_only"
+        if pool:
+            rng = random.Random(
+                seed if seed is not None else _seed_for_handle(handle)
+            )
+            k = min(video_count, len(pool))
+            if k > 0:
+                picked = rng.sample(pool, k)
+                video_reels = [_slim_reel(r) for r in picked]
+                selection_note = f"random_{k}_from_recent_{len(pool)}"
+    else:
+        selection_note = "covers_only"
 
     return {
         "eval_mode": mode,
@@ -78,12 +87,17 @@ def build_content_eval_plan(
             "video_source": "random_from_recent_pool" if mode == "video" else None,
             "video_selection": selection_note,
             "pool_size": len(pool),
+            "screening_basis": (
+                "caption_and_comments"
+                if mode == "text"
+                else "cover_vision_and_comments"
+            ),
         },
     }
 
 
 def _slim_reel(reel: dict[str, Any]) -> dict[str, Any]:
-    """Keep only fields needed for download + vision_analyze wiring."""
+    """Keep fields needed for comment targets and optional vision wiring."""
     return {
         "reel_id": reel.get("reel_id", ""),
         "url": reel.get("url", ""),

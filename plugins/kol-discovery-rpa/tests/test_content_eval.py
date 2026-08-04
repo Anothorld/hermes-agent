@@ -22,6 +22,18 @@ def _reel(n: int, views: int = 100_000) -> dict:
     }
 
 
+def test_text_mode_caption_comments_only():
+    reels = [_reel(i) for i in range(12)]
+    plan = build_content_eval_plan(reels, eval_mode="text", handle="textkol")
+
+    assert plan["eval_mode"] == "text"
+    assert plan["videos_target"] == 0
+    assert len(plan["cover_reels"]) == 10
+    assert plan["video_reels"] == []
+    assert plan["selection"]["video_selection"] == "caption_and_comments_only"
+    assert plan["selection"]["screening_basis"] == "caption_and_comments"
+
+
 def test_cover_mode_returns_ten_covers_no_videos():
     reels = [_reel(i, views=i * 10_000) for i in range(15)]
     plan = build_content_eval_plan(reels, eval_mode="cover", handle="testkol")

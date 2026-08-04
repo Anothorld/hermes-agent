@@ -235,15 +235,14 @@ on every save, covering both the Agent and script paths.
     fallback only when the Detail API fails. If a product image cannot be found, `image` is left
     empty (never substituted with a stock photo).
   - **UI buttons (placement sub-zone within the 正文与植入 panel):**
-    - **重新挑选植入候选** (merged flow) — the placements step is now review/re-resolve
-      only. Body sections are written with inline markdown links to REAL povison URLs during
-      the section step (the script fetches a candidate pool via the Bridge recommend APIs and
-      injects it into the section prompt; the LLM weaves links inline as it drafts). The
-      structured `products`/`links` cards are backfilled from the prose. This button calls
-      `bridgeGenerateSection('placements')` → `section-generate.py --mode placements`, which
-      re-scans `sections[].content` for inline links and re-derives the cards (no new LLM call,
-      no wholesale replace) — use it after editing prose or deleting cards. Per-section merge
-      preserves other sections' accepted placements on single-block rewrites.
+    - **重新挑选植入候选** — launches the Hermes Agent via `bridgeAskAgent('placements')` →
+      `POST /api/tasks/{id}/steps/3/agent` with `step=placements` (NOT the demo script path
+      `section-generate.py --mode placements`). Bridge injects `_PLACEMENTS_SUBSTEP_GUIDANCE`:
+      **inline** mode re-resolves cards from prose / calls recommend APIs for real POVISON URLs;
+      **editorial** mode RE-PICKs exactly 3 review cards (catalog + Detail + reviews APIs) and
+      fills `editorialTitle`/`editorialIntro` only when empty. Never falls through to
+      `demo_placements` / `placement-catalog.json` seed data. Use after editing prose, deleting
+      cards, or when the operator wants a fresh pick.
     - **补全缺图** — calls `POST /api/povison-products/enrich-batch` for products that have a
       `url` but no `image`; fills `image` from the Detail API (scrape fallback).
     - **校验链接有效性** — calls `POST /api/tasks/{id}/steps/3/verify-placements` which does a
@@ -462,7 +461,12 @@ Same operations over HTTP via `/api/povison-reviews/by-spu` + `/api/povison-revi
 
 ### Editorial Picks placement style
 
-The placement style (inline blurb vs editorial review cards) is chosen in the **正文与植入** panel (style switch at the top of the sections card) — *before* writing sections — so the section Agent can branch its working mode on the choice. `placementStyle="editorial"` makes the section Agent write body prose WITHOUT inline povison links and instead generate a standalone `POVISON Picks` H2 with exactly 3 H3 product cards (each: plain-text H3 → image wrapping the PDP link → 90-150 word blurb with a required specs paragraph → optional real review quote), plus `editorialTitle` (default `POVISON Picks — {topic.title}`) and `editorialIntro`. The cards are saved as `products` with `status="pending"`; the operator accepts them in the product/internal-link sub-zone (below the section editor in the same panel), then `confirmPlacements()` flips `phaseDone.placements`. Switching style after sections exist marks the body stale (banner prompts re-generation) but keeps the prose. Fewer than 3 accepted products degrades to the inline path (no partial editorial block). See `references/content-guidelines.md` §编辑式评测卡.
+The placement style (inline blurb vs editorial review cards) is chosen in the **正文与植入** panel (style switch at the top of the sections card) — *before* writing sections — so the section Agent can branch its working mode on the choice. `placementStyle="editorial"` makes the section Agent write body prose WITHOUT inline povison links and instead generate a standalone `POVISON Picks` H2 with exactly 3 H3 product cards (each: plain-text H3 → image wrapping the PDP link → 90-150 word blurb with a required specs paragraph → optional real review quote), plus `editorialTitle` and `editorialIntro`:
+
+- **`editorialTitle`** — a descriptive H2 heading that combines the product category and the topic scenario, derived from `topic.primary_keyword` + `topic.angle` + outline H2s (e.g. `Best media console picks for OLED TV setup`). It is NOT the blog title; the `POVISON Picks — {topic.title}` form is only a code fallback when the Agent leaves it empty. The rendered H2 also appears in the article TOC (id `povison-picks`), inserted before Conclusion.
+- **`editorialIntro`** — a 50-70 word overview paragraph that names the product category + scenario, states the selection criteria, and ends with a disclaimer: dimensions/mechanism/finishes/pricing are for reference only — refer to each product's detail page on povison.com for the most current specs and price.
+
+The cards are saved as `products` with `status="pending"`; the operator accepts them in the product/internal-link sub-zone (below the section editor in the same panel), then `confirmPlacements()` flips `phaseDone.placements`. Switching style after sections exist marks the body stale (banner prompts re-generation) but keeps the prose. Fewer than 3 accepted products degrades to the inline path (no partial editorial block, and the TOC entry is omitted). See `references/content-guidelines.md` §编辑式评测卡.
 
 ## Sync with standalone UI
 

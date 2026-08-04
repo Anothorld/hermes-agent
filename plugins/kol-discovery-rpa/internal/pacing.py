@@ -2,7 +2,8 @@
 
 Enforces the conservative browsing rules from ``instagram-kol-discovery``
 skill: random 2-4s between profiles, 1-2s between reels,
-max 40 profiles and 200 reel page loads per run.
+max 80 profiles and 400 reel page loads per run
+(override via ``KOL_RPA_MAX_*_PER_RUN``).
 
 Quota counters are per-task (same key as tab-pool ``task_id``) and
 in-process (single gateway worker assumption, same as
@@ -36,8 +37,8 @@ _REEL_DELAY = tuple(
         "KOL_RPA_REEL_DELAY_S", "1.0,2.0"
     ).split(",")
 )
-_MAX_PROFILES = int(os.environ.get("KOL_RPA_MAX_PROFILES_PER_RUN", "40"))
-_MAX_REEL_LOADS = int(os.environ.get("KOL_RPA_MAX_REEL_LOADS_PER_RUN", "200"))
+_MAX_PROFILES = int(os.environ.get("KOL_RPA_MAX_PROFILES_PER_RUN", "80"))
+_MAX_REEL_LOADS = int(os.environ.get("KOL_RPA_MAX_REEL_LOADS_PER_RUN", "400"))
 _RATE_LIMIT_BACKOFF = tuple(
     float(x) for x in os.environ.get(
         "KOL_RPA_RATE_LIMIT_BACKOFF_S", "30,120"
@@ -65,7 +66,11 @@ def _get(task_id: str) -> _RunQuota:
 
 
 def reset(task_id: str) -> None:
-    """Clear quota for a task (called on run end / cleanup)."""
+    """Clear quota for a task.
+
+    Called by ``hooks.maybe_reset_run_quota`` when a new agent turn/gateway
+    discover run starts for ``task_id`` (and on explicit cleanup).
+    """
     with _lock:
         _counters.pop(task_id, None)
 

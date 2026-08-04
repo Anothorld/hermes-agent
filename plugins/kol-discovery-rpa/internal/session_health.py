@@ -21,15 +21,14 @@ if _INTERNAL_DIR not in sys.path:
 
 from errors import SessionExpiredError  # noqa: E402
 
-_HERMES_HOME = os.environ.get(
-    "HERMES_HOME", os.path.expanduser("~/.hermes")
-)
-_CHROME_PROFILE = os.environ.get(
-    "DEBUG_CHROME_PROFILE_DIR",
-    os.path.join(_HERMES_HOME, "local-chrome-debug-profile"),
-)
-# Chrome cookie DB path (macOS Chrome default layout inside custom profile)
-_COOKIE_DB = os.path.join(_CHROME_PROFILE, "Default", "Cookies")
+try:
+    from chrome_paths import default_chrome_profile_dir, resolve_chrome_cookie_db
+except ImportError:  # pragma: no cover
+    from .chrome_paths import default_chrome_profile_dir, resolve_chrome_cookie_db  # type: ignore
+
+_CHROME_PROFILE = default_chrome_profile_dir()
+# Shared debug-Chrome Cookies DB (same profile as tab-pool / start-debug-chrome.sh)
+_COOKIE_DB = str(resolve_chrome_cookie_db())
 
 # sessionid is IG's primary auth cookie; without it, the session is dead
 _IG_COOKIE_DOMAIN = ".instagram.com"

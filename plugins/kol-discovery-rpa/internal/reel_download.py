@@ -17,12 +17,16 @@ import time
 from pathlib import Path
 
 _HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
-_CHROME_PROFILE = os.environ.get(
-    "DEBUG_CHROME_PROFILE_DIR",
-    os.path.join(_HERMES_HOME, "local-chrome-debug-profile"),
-)
 _DEFAULT_DEST = os.path.join(_HERMES_HOME, "kol-rpa-reels")
-_COOKIE_DB = os.path.join(_CHROME_PROFILE, "Default", "Cookies")
+# Resolved against the shared debug-Chrome profile (not profile HERMES_HOME).
+# Tests may monkeypatch this module attribute.
+try:
+    from chrome_paths import default_chrome_profile_dir, resolve_chrome_cookie_db
+except ImportError:  # pragma: no cover — package-style import fallback
+    from .chrome_paths import default_chrome_profile_dir, resolve_chrome_cookie_db  # type: ignore
+
+_CHROME_PROFILE = default_chrome_profile_dir()
+_COOKIE_DB = str(resolve_chrome_cookie_db())
 _IG_COOKIE_DOMAIN = ".instagram.com"
 _DISK_CAP_MB = float(os.environ.get("KOL_RPA_REEL_DISK_CAP_MB", "2000"))
 _MAX_AGE_HOURS = float(os.environ.get("KOL_RPA_REEL_MAX_AGE_HOURS", "1"))
@@ -528,9 +532,31 @@ def download_content_eval(
     """
     from eval_mode import resolve_eval_mode
 
-    from errors import DownloadError, RpaError
+    from errors import RpaError
 
     mode = resolve_eval_mode(brief_fields)
+    if mode == "text":
+        return {
+            "eval_mode": "text",
+            "covers_target": 0,
+            "videos_target": 0,
+            "covers_downloaded": 0,
+            "videos_downloaded": 0,
+            "covers": [],
+            "videos": [],
+            "errors": [{
+                "code": "vision_eval_disabled",
+                "message": (
+                    "Vision/multimodal screening is OFF "
+                    "(KOL_RPA_VISION_EVAL_ENABLED=0). Do not download covers "
+                    "or videos. Use rpa_fetch_reel_comments(mode=evaluation, "
+                    "include_caption=true) ×10 and score from caption + comments only."
+                ),
+            }],
+            "partial": False,
+            "blocked": True,
+        }
+
     cover_reels = content_eval.get("cover_reels") or []
     video_reels = (content_eval.get("video_reels") or []) if mode == "video" else []
 
@@ -552,17 +578,9 @@ def download_content_eval(
                 "reel_id": reel_id,
                 "url": reel_url,
                 "code": e.code,
-                "message": e.message,
+                "message": e.detail,
             })
-            covers.append({"ok": False, **reel, "error_code": e.code, "error": e.message})
-        except DownloadError as e:
-            cover_errors.append({
-                "reel_id": reel_id,
-                "url": reel_url,
-                "code": e.code,
-                "message": e.message,
-            })
-            covers.append({"ok": False, **reel, "error_code": e.code, "error": e.message})
+            covers.append({"ok": False, **reel, "error_code": e.code, "error": e.detail})
 
     videos: list[dict] = []
     video_errors: list[dict] = []
@@ -583,17 +601,9 @@ def download_content_eval(
                 "reel_id": reel_id,
                 "url": reel_url,
                 "code": e.code,
-                "message": e.message,
+                "message": e.detail,
             })
-            videos.append({"ok": False, **reel, "error_code": e.code, "error": e.message})
-        except DownloadError as e:
-            video_errors.append({
-                "reel_id": reel_id,
-                "url": reel_url,
-                "code": e.code,
-                "message": e.message,
-            })
-            videos.append({"ok": False, **reel, "error_code": e.code, "error": e.message})
+            videos.append({"ok": False, **reel, "error_code": e.code, "error": e.detail})
 
     covers_ok = sum(1 for c in covers if c.get("ok"))
     videos_ok = sum(1 for v in videos if v.get("ok"))

@@ -28,7 +28,7 @@ def test_mark_reel_load_increments():
 
 def test_profile_quota_exceeded():
     pacing.reset("quota_test_profile")
-    for _ in range(40):
+    for _ in range(pacing._MAX_PROFILES):
         pacing.mark_profile("quota_test_profile")
     try:
         pacing.mark_profile("quota_test_profile")
@@ -39,7 +39,7 @@ def test_profile_quota_exceeded():
 
 def test_reel_quota_exceeded():
     pacing.reset("quota_test_reel")
-    for _ in range(200):
+    for _ in range(pacing._MAX_REEL_LOADS):
         pacing.mark_reel_load("quota_test_reel")
     try:
         pacing.mark_reel_load("quota_test_reel")

@@ -21,6 +21,11 @@ class RpaError(Exception):
         self.detail = detail or code
         super().__init__(f"{code}: {self.detail}")
 
+    @property
+    def message(self) -> str:
+        """Alias for ``detail`` — some handlers historically used ``.message``."""
+        return self.detail
+
 
 class DomChangedError(RpaError):
     """IG DOM structure changed — JS selectors no longer match.
@@ -72,7 +77,7 @@ class DownloadError(RpaError):
 
 
 class QuotaExceededError(RpaError):
-    """Per-run profile or reel page quota exhausted (40 profile / 200 reel)."""
+    """Per-run profile or reel page quota exhausted (default 80 / 400)."""
 
     def __init__(self, detail: str = "per-run quota exceeded") -> None:
         super().__init__("quota_exceeded", detail)

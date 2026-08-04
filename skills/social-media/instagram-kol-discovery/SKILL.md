@@ -70,34 +70,29 @@ When the `kol-discovery-rpa` toolset is available, use RPA tools instead of step
    → hard_discard? skip to next handle
 3. rpa_fetch_ig_profile(handle)                  → profile data + qualification.gates.followers/region
    → hard_discard? log discard_reason, next handle
-4. rpa_fetch_ig_reels(handle, max_reels=10)      → 10 reels + thumbnail_url + content_eval plan
+4. rpa_fetch_ig_reels(handle, max_reels=10)      → 10 reels + content_eval plan (text mode)
    → hard_discard? discard
-5. rpa_download_ig_content(content_eval)           → 10 cover files (+ 3 random videos when ON)
-6. [gates all pass OR deferred] 10 covers + 10 comments → content screening (Step 1.5)
-7. [switch ON] content_eval.video_reels → video_analyze → deep eval
-8. ingest-confirmed-candidate
+5. [gates all pass OR deferred] caption + comments → content screening (Step 1.5)
+6. ingest-confirmed-candidate
 ```
 
 ### Per-candidate todo checklist (HARD)
 
-每个进入内容筛选的候选，**必须**用 `todo` 工具创建一个步骤清单，逐步勾选完成，防止遗漏封面/评论/视觉评估。清单模板：
+每个进入内容筛选的候选，**必须**用 `todo` 工具创建一个步骤清单，逐步勾选完成。**当前默认（视觉禁用）**模板：
 
 ```
 todo: evaluate <handle>
   □ rpa_fetch_ig_profile(handle)          → gates pass / hard_discard?
-  □ rpa_fetch_ig_reels(handle, max_reels=10)  → content_eval plan
-  □ rpa_download_ig_content(content_eval)  → 10 cover_path files downloaded (MANDATORY)
-  □ rpa_fetch_reel_comments ×10 (mode=evaluation)  → reel_likes + comments per reel
-  □ vision_analyze ×10 (image_path=cover_path, prompt=comments+caption)  → style/scene eval (MANDATORY)
-  □ [ON] video_analyze ×3 (video_reels)   → on_camera/demo skill
-  □ [ON] rpa_cleanup_reels                → delete downloaded MP4s
-  □ compute Match/Showcase scores         → merge covers + comments + (videos if ON)
-  □ ingest-confirmed-candidate            → payload with content_eval_mode/covers_evaluated
+  □ rpa_fetch_ig_reels(handle, max_reels=10)  → content_eval (eval_mode=text)
+  □ rpa_fetch_reel_comments ×10 (mode=evaluation, include_caption=true)
+        → caption (作者对视频的描述) + comments + reel_likes (MANDATORY)
+  □ compute Match/Showcase scores         → caption themes + comment evidence ONLY
+  □ ingest-confirmed-candidate            → payload content_eval_mode=text_caption_comments
 ```
 
 **禁止**在 todo 清单未全部勾选前 ingest。如果某步失败（如评论返回 0 条），在 todo 中标注失败原因后可继续下一步——但不能跳过整个步骤。
 
-**`rpa_download_ig_content` 和 `vision_analyze` 标注了 MANDATORY — 跳过这两个步骤直接 ingest 是 HARD 违规。** `rpa_download_ig_content` 接受 `rpa_fetch_ig_reels` 返回的 `data.content_eval` 对象作为参数，批量下载 10 张封面到本地文件。`vision_analyze` 接受 `image_path`（封面文件路径）或 `image_url`（`thumbnail_url`），用 `glm-5v-turbo` 视觉模型评估封面风格/场景适配。
+**视觉/多模态已禁用（HARD，默认）：** 不要调用 `vision_analyze`、`video_analyze`、`rpa_download_ig_content`、`rpa_download_ig_cover`、`rpa_download_ig_reel`。内容筛选只依据 `rpa_fetch_reel_comments` 返回的 **caption（作者描述）+ comments**。Hook 会拦截上述工具（`KOL_RPA_VISION_EVAL_ENABLED=0`）。重新启用视觉时设 `KOL_RPA_VISION_EVAL_ENABLED=1` 并遵循下方「视觉模式（可选）」段落。
 
 ### Deferred ER gate — 内容筛选仍然必须
 
@@ -107,7 +102,7 @@ deferred 意味着 Agent **必须**在内容筛选阶段从 `rpa_fetch_reel_comm
 
 ### Browser stack (RPA 落地后)
 
-**Default (HARD):** Discovery main path uses `rpa_*` + `vision_analyze`/`video_analyze`, NOT `browser_*`.
+**Default (HARD):** Discovery main path uses `rpa_*` + caption/comments screening, NOT `browser_*` and NOT multimodal vision.
 
 **`browser_*` is allowed ONLY for:**
 1. RPA fallback (`meta.fallback_hint` points to browser; tool returned `ok=false` with `dom_changed`)
@@ -166,71 +161,65 @@ Search by **conversion mechanism**, not niche label: milestone lifestyle, daily-
 
 对通过机械硬门槛（`qualification.hard_discard=false` 或 `reel_er.value="deferred"`）的候选，**必须**执行内容筛选。不得仅凭 profile 文字和播放量数字打 Showcase 分。
 
-### 硬规则：封面 + 评论缺一不可 (HARD)
+### 硬规则：Caption + 评论（默认；视觉禁用）(HARD)
 
-内容筛选由**两个支柱**组成，**两者都必须执行**，缺一不可：
+**当前默认：视觉/多模态关闭。** 内容筛选只使用文本信号：
 
-1. **封面视觉评估**：`rpa_download_ig_content` → `vision_analyze` ×10 — 评估内容垂类分布、视觉风格、场景适配、product_placement
-2. **评论采集**：`rpa_fetch_reel_comments(mode=evaluation)` ×10 — 评估 voice_descriptors、audience_vibe、signature_hooks、真实 ER
+1. **作者描述（caption）**：`rpa_fetch_reel_comments(..., include_caption=true)` 返回的 caption / hashtags — 评估内容主题、场景声称、product mention
+2. **评论**：同工具返回的 comments — 评估 voice_descriptors、audience_vibe、signature_hooks、真实 ER
 
-**禁止只做评论不做封面，也禁止只做封面不做评论。** 仅做评论采集而跳过 `rpa_download_ig_content` + `vision_analyze` 是违规——封面视觉是 Showcase 分的核心依据，评论无法替代。
+**禁止**调用 `vision_analyze` / `video_analyze` / `rpa_download_ig_*`（cover/content/reel）做内容筛选。不得用浏览器截图识图替代。
 
-**`vision_analyze` 工具在 `vision` 工具集里，使用 `glm-5v-turbo` 模型。传入 `image_path`（本地封面文件路径，来自 `rpa_download_ig_content` 的 `cover_path`）或 `image_url`（`thumbnail_url`），prompt 嵌入对应 Reel 的 comments + caption。**
+### 默认流程（text mode，HARD）
 
-### 开关：10 封面 + 评论（OFF，默认）/ 10 封面 + 3 视频 + 评论（ON）
+1. `rpa_fetch_ig_reels(handle, max_reels=10)` → `data.content_eval`（`eval_mode: "text"`；`cover_reels`=最近 10 条 URL，作评论目标）
+2. 对 **10 条** `cover_reels[].url` 各一次 `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` → caption + comments + likes/comments counts
+3. **汇总 10 组 caption + 评论** → 内容主题分布、风格一致性、场景声称、voice_descriptors → Match / Showcase
+4. ingest（见 payload 字段）
 
-| 开关来源 | 值 | 筛选组合 |
-|---------|-----|---------|
-| brief `rpa_video_eval_enabled: false` / env `KOL_RPA_VIDEO_EVAL_ENABLED=0` / 默认 | OFF | **10 封面 + 评论** |
-| brief `rpa_video_eval_enabled: true` / env `KOL_RPA_VIDEO_EVAL_ENABLED=1` | ON | **10 封面 + 3 视频 + 评论** |
+### 合并打分权重（text mode）
 
-### 公共流程（OFF/ON 共有，HARD）
-
-1. `rpa_fetch_ig_reels(handle, max_reels=10)` → 主页 Reels 网格最近 10 条 + `thumbnail_url`（RPA 从 grid `img[src]` 提取）+ `data.content_eval` 计划（`cover_reels`=10 条；`video_reels`=从该 10 条中**随机**抽 3 条，仅 ON 时有值）
-2. `rpa_download_ig_content(content_eval=<上一步 data.content_eval>)` → 批量下载 10 张封面到本地（优先 RPA `thumbnail_url` HTTP 下载；失败则 yt-dlp fallback）；ON 时另下载 `video_reels` 的 3 个 MP4
-3. 对 **10 条 Reel 各一次** `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` → 10 组 comments + caption
-4. 对 **10 张封面** 各 `vision_analyze(image_path=cover_path, …)` 或 `image_url=thumbnail_url` — prompt 嵌入该 Reel 的 comments + caption
-5. **汇总 10 封面 + 评论** → 内容主题分布、风格一致性、场景多样性、voice_descriptors
-
-单条封面也可：`rpa_download_ig_cover(reel_url, thumbnail_url=<RPA 值>)`。
-
-### 开关 ON 追加（3 视频深评）
-
-6. `content_eval.video_reels` 已是最近 10 条中的**随机 3 条**（非播放量 top 3）；`rpa_download_ig_content` 已下载 MP4 → 对每条 `video_analyze`（prompt 嵌入对应 comments）
-7. **最终合并**：10 封面视觉 + 10 组评论（广度）+ 3 视频视觉（深度演示/on_camera）→ Showcase / Match
-
-### 合并打分权重
-
-- **评论（10 组）**：audience_vibe、voice_descriptors、signature_hooks — 始终参与
-- **10 封面**：内容垂类分布、视觉风格、场景适配 — 广度筛选
-- **3 视频（仅 ON）**：on_camera_skill、动态演示、product_placement — 深度加分
+- **Caption（10 组）**：主题/场景/产品提及 — 替代原封面视觉广度
+- **评论（10 组）**：audience_vibe、voice_descriptors、signature_hooks、ER — 始终参与
+- Showcase 的「visual quality / on_camera」在 text mode 下改为 **caption 场景声称 + 评论侧证**；勿臆造未见过的画面细节
 
 ### 成本控制 (HARD)
 
 | 模式 | 每候选上限 |
 |------|-----------|
-| OFF | 10× comments + 10× vision_analyze(封面) + `rpa_download_ig_content`（封面） |
-| ON | 上述 + `rpa_download_ig_content`（含 3 随机视频）+ 3× video_analyze(1fps) + rpa_cleanup_reels |
+| text（默认） | 10× `rpa_fetch_reel_comments(include_caption=true)` |
+| cover（需 `KOL_RPA_VISION_EVAL_ENABLED=1`） | 上述 + 10× vision_analyze + cover download |
+| video（vision ON + `KOL_RPA_VIDEO_EVAL_ENABLED=1`） | cover 模式 + 3× video_analyze + cleanup |
 
 - 评论：first viewport only，不展开 replies
-- 10 条中某条 comments 为空 → 该条仅用封面+caption，注明 `comments_partial`
-- 10 条中 ≥6 条有 comments + ≥6 张封面 → 可完成完整筛选（对齐 partial grid 规则 L611-615）
-- 封面/评论大面积失败 → `content_eval_degraded`，payload 披露
-- ON 模式：评估完必须 `rpa_cleanup_reels` 清理下载的 MP4
+- 10 条中某条 comments 为空 → 该条仅用 caption，注明 `comments_partial`
+- 10 条中 ≥6 条有 **caption 或 comments** → 可完成完整筛选
+- 评论大面积失败 → `content_eval_degraded`，payload 披露
 
 ### ingest payload 记录
 
 `candidate.payload` 写入：
-- `content_eval_mode: "cover_only" | "cover_plus_video"`
-- `covers_evaluated: 10`（实际成功数）
+- `content_eval_mode: "text_caption_comments" | "cover_only" | "cover_plus_video"`
+- `covers_evaluated: 0`（text mode）或实际封面成功数
 - `videos_evaluated: 0 | 3`
 - `comments_collected_count: N`（目标 10）
-- `content_eval_basis: "10cover_and_comments" | "10cover_3video_and_comments" | "degraded"`
+- `captions_collected_count: N`（目标 10）
+- `content_eval_basis: "10caption_and_comments" | "10cover_and_comments" | "10cover_3video_and_comments" | "degraded"`
+
+### 视觉模式（可选；默认关闭）
+
+仅当 brief `rpa_vision_eval_enabled: true` 或 env `KOL_RPA_VISION_EVAL_ENABLED=1` 时启用：
+
+| 视频开关 | 筛选组合 |
+|---------|---------|
+| `rpa_video_eval_enabled: false` / `KOL_RPA_VIDEO_EVAL_ENABLED=0` | 10 封面 vision + 10 评论 |
+| `rpa_video_eval_enabled: true` / `KOL_RPA_VIDEO_EVAL_ENABLED=1` | 上述 + 3 随机视频 video_analyze |
+
+流程：`rpa_download_ig_content` → comments ×10 → `vision_analyze` ×10（[+ `video_analyze` ×3]）。**在视觉关闭期间不要走这条路径。**
 
 ### 何时可跳过内容筛选
 
 - skip list / cooldown / `qualification.hard_discard=true` → 不需要
-- 已有 veedcrawl_extract 覆盖该 Reel → 可复用，不重复识图/下载
 
 **deferred gate ≠ 可跳过内容筛选。** `reel_er.value="deferred"` 表示 gate 已通过（`pass=true`），ER 因网格数据限制暂缓计算——内容筛选**必须**执行，并在筛选阶段从 `rpa_fetch_reel_comments` 的 `reel_likes`/`reel_comments_count` 补算真实 ER。仅凭 profile 文字 + 播放量数字直接入库是**违规**（违反 Step 1.5 HARD 约束）。
 
@@ -722,7 +711,18 @@ remediation_attempted:
 
 These fields feed the rediscover brief composer; round N+1 reads them from `# prior_runs` and `# resume_directives` (see **Prior runs handling**) and avoids re-tracing exhausted angles or losing pending ingests. Omitting them silently degrades subsequent auto-retries.
 
-**Quantity floor (hard).** When the brief carries `discovery_target_count` or `additional_target_count`, treat it as a HARD FLOOR on PERSISTED candidates (visited via `browser_navigate`, then qualified, then successful `ingest-confirmed-candidate`). The console's quantity gate compares your persisted count against the floor immediately after this run terminates. If you are short of the floor AND auto-retry budget remains, the backend AUTO-FIRES the rediscover skill again (up to 5 auto-retries total = 6 runs max); after that, the operator gets a `discovery_floor_unmet` escalation. Stopping short is therefore a failure mode — finishing partial is acceptable only when truly blocked (rate limits, niche exhausted, IG checkpoint). When stopping short, you MUST set `floor_unmet_reason` (one-sentence why) in the structured diagnostics block above so the backend can decide between auto-retry and early escalation; `attempted_angles` is already mandatory regardless.
+**Quantity floor (hard).** When the brief carries `discovery_target_count` or `additional_target_count`, treat it as a HARD FLOOR on PERSISTED candidates (visited via `browser_navigate` / RPA profile+reels, then qualified, then successful `ingest-confirmed-candidate`).
+
+**Same-run batching (mandatory).** Fill as much of the floor as possible **inside the current gateway run**. After every successful ingest, re-count NEW persisted vs the target; if still short and not hard-blocked, keep discovering/qualifying/ingesting in THIS turn. Auto-retry exists only for residual shortfall after a hard blocker — do **not** end after 1 (or a few) ingests and rely on Console auto-retry to finish the quota.
+
+Forbidden early exits while still below the floor:
+- ending because one focus handle was discarded (media account, ER fail, content-screen fail);
+- ending because STEP_0 pending handles were already in CAL;
+- ending to “leave work for next_round_focus / auto-retry”.
+
+Hard blockers that allow stopping short (must set `floor_unmet_reason`): IG rate limit / checkpoint / captcha, RPA+browser both unavailable, dead session after re-login attempt, niche exhausted after ≥3 distinct angles with zero new outside `exclusion_set`, bridge/gateway down.
+
+The console's quantity gate still compares persisted count after the run terminates. If short AND auto-retry budget remains, the backend may AUTO-FIRE rediscover (up to 5). That is a backstop, not the preferred fill path. When stopping short, you MUST set `floor_unmet_reason` (one-sentence why) in the structured diagnostics block above; `attempted_angles` is already mandatory regardless.
 
 **Vertical diversity floor (hard).** Across the persisted shortlist, the **designer / interior-stylist share** must fall inside the **active range** for this run. "Designer" = creators whose bio or last 15 Reels primarily anchor in interior design, home staging, design education, premium stylist content, or "design firm / studio principal" identity.
 
@@ -945,7 +945,7 @@ Notes:
 
 **`primary_email` — only a real email address, never anything else.**
 
-- If the IG profile (bio text, contact button reveal, pinned post, or bio image you OCR'd via `vision_analyze`) clearly exposes a real address matching `x@y.tld` and it visibly belongs to the creator (not a sponsor / unrelated brand sidebar), you MAY include it in the `upsert-identity` payload. Attach provenance facts in the same `write-facts-multi` call: `identity.email_source = "ig_bio"`, `identity.email_discovered_at`, `identity.email_discovered_url`, `identity.email_discovery_tier = "0"` (tier 0 = discovered during shortlist qualification, before `kol-email-discovery` ever runs). Do NOT overwrite a non-empty existing `primary_email`.
+- If the IG profile (bio text, contact button reveal, or pinned post) clearly exposes a real address matching `x@y.tld` and it visibly belongs to the creator (not a sponsor / unrelated brand sidebar), you MAY include it in the `upsert-identity` payload. Attach provenance facts in the same `write-facts-multi` call: `identity.email_source = "ig_bio"`, `identity.email_discovered_at`, `identity.email_discovered_url`, `identity.email_discovery_tier = "0"` (tier 0 = discovered during shortlist qualification, before `kol-email-discovery` ever runs). Do NOT overwrite a non-empty existing `primary_email`. While `KOL_RPA_VISION_EVAL_ENABLED=0`, do **not** use `vision_analyze` for bio-image OCR in this discovery run — leave image emails to `kol-email-discovery` post-approval.
 - If the profile shows ONLY a link-in-bio URL, a personal website domain, or a brand display name, do NOT shove those into `primary_email` — the bridge will 422 with a `ValueError`, wasting a turn. Route them to identity facts instead (table below) and leave `primary_email` for `kol-email-discovery` (which runs post-approval) to resolve.
 
 Identity facts for non-email contact signals — write these in the same `write-facts-multi` call you already issue for `identity.instagram_profile_url`:
@@ -983,9 +983,9 @@ and likewise for the other 5 keys.
 
 **Signal sources** — all already in your tool surface, no new page loads:
 - Bio text from the profile page (already loaded for qualification).
-- Captions / hashtags from the 2-3 Reels you scored.
-- Reel cover overlay text via `browser_get_images` + `vision_analyze` when the caption is too thin (creators often print the theme on the cover).
-- Top-of-page Reel comments (first viewport only, do NOT scroll or expand "View replies") via `browser_console` — comments reveal **how viewers describe the creator**, which is more honest signal for `voice_descriptors` and `signature_hooks` than the creator's self-pitch.
+- Captions / hashtags from the 10 Reels you scored via `rpa_fetch_reel_comments(include_caption=true)` — primary theme signal while vision is disabled.
+- Top-of-page Reel comments (first viewport only, do NOT scroll or expand "View replies") via the same RPA call — comments reveal **how viewers describe the creator**, which is more honest signal for `voice_descriptors` and `signature_hooks` than the creator's self-pitch.
+- Do **not** use `vision_analyze` / cover OCR while `KOL_RPA_VISION_EVAL_ENABLED=0`.
 
 Before writing `identity.hero_post_url`, do a canonicalization check:
 - open the candidate Reel URL once;
@@ -995,7 +995,7 @@ If the resolved URL includes `/share/`, a handle-prefixed path, query params, or
 
 **Write rules** (same as the IG URL above):
 - **Do NOT overwrite a non-empty existing value.** Read `identity.content_pillars_discovered_at` first; if it exists and is **within 90 days**, skip the write. If it's older than 90 days, the loader (`kol-creator-brief-loader`) will refresh on next draft anyway — leave the stale value alone here.
-- Best-effort: if the brief generation fails (vision call errors, comments empty, LLM disagrees with itself), skip the brief writes but still write the IG profile URL. The loader has its own fallback path.
+- Best-effort: if the brief generation fails (comments/captions empty, LLM disagrees with itself), skip the brief writes but still write the IG profile URL. The loader has its own fallback path.
 - Applies to ALL qualified candidates, not only the final shortlist.
 
 Workflow: interpret context -> split product into 2-4 feature/selling-point groups -> choose driver/roles/history prior per group -> seed and enqueue -> capture canonical URLs with `browser_console(expression="window.location.href")` -> qualify region/Reels/context/scores -> measure views + ER -> expand laterally -> rank by Final Fit and role coverage within each group. Close posts via the in-page × button, not `browser_back`.
@@ -1088,7 +1088,7 @@ The agent operates the user's Instagram session in debug Chrome. Treat every
 action as visible to IG's risk system.
 
 - **Pacing**: random `2-4s` pause between candidate profiles; `1-2s` between reels within the same profile. No concurrent profile/reel browsing.
-- **Per-run caps**: at most **40 distinct profiles** and **200 reel page loads** per invocation. On hitting either cap, stop and deliver partial results.
+- **Per-run caps**: at most **80 distinct profiles** and **400 reel page loads** per invocation (RPA `run_quota` / env `KOL_RPA_MAX_*_PER_RUN`). On hitting either cap, stop and deliver partial results.
 - **Forbidden actions**: `follow`, `unfollow`, `like`, `save`, `comment`, send DM, `share`, `subscribe`, any form submission, any login-page interaction. Read-only navigation, snapshots, `browser_console` extraction, and scrolling are allowed.
 - **Login assumption**: user already logged into IG in the debug-Chrome profile. Never navigate to auth flows or type credentials.
 - **Risk-page response**: checkpoint, captcha, "Action blocked", etc. → stop with `mode_gate_blocked: rate_limited`. Do not refresh or retry.

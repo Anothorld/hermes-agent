@@ -1,30 +1,26 @@
 """Pre-tool-call hook for kol-discovery-rpa.
 
-Enforces the video-eval switch:
-- When OFF (default): block ``rpa_download_ig_reel`` — cover mode only.
-- When ON: limit to 3 downloads per candidate handle (not per run).
+Enforces content-screening modes:
 
-Also resets per-run pacing quota (profile/reel counters) when a new task_id
-is seen for the first time in this process — without this, a new discover
-run that reuses the same ``kol-campaign:LIVE:...`` task_id inherits the
-previous run's exhausted quota (e.g. 39/40 profiles used), blocking all
-RPA profile evaluations in the new run.
+- Vision OFF (default, ``KOL_RPA_VISION_EVAL_ENABLED=0``):
+  - In ``kol-campaign:*`` discovery sessions: block ``vision_analyze`` /
+    ``video_analyze`` (does NOT affect email-discover / brief-loader /
+    other skills that need OCR).
+  - Always block cover/video download tools (``rpa_download_ig_*``) —
+    those exist only for multimodal content screening.
+  Screening is caption + comments via
+  ``rpa_fetch_reel_comments(include_caption=true)``.
+- Vision ON + video OFF: block ``rpa_download_ig_reel`` (cover batch OK).
+- Vision ON + video ON: limit ``rpa_download_ig_reel`` to 3 per candidate.
 
-The eval mode is resolved from env ``KOL_RPA_VIDEO_EVAL_ENABLED``.
-Brief field ``rpa_video_eval_enabled`` is checked if the gateway passes
-brief context in kwargs, but the standard gateway pre_tool_call hook
-does not currently inject brief — so env is the primary switch.
-
-Download limit is per-(task_id, handle) — each candidate gets up to 3
-video downloads, not 3 for the entire run. The handle is extracted from
-the reel_url in args (IG reel URLs contain the reel ID, not the handle,
-so we use a separate counter keyed by task_id + reel_url prefix).
+Also resets per-run pacing quota (profile/reel counters) at each new agent
+turn boundary. Gateway rediscover/auto-retry reuses the same
+``kol-campaign:LIVE:...`` task_id across runs; ``turn_id`` (unique per
+``run_conversation``) is the correct per-run epoch.
 """
 
 from __future__ import annotations
 
-import os
-import re
 import sys
 import threading
 from pathlib import Path
@@ -40,26 +36,57 @@ HookResult = Optional[Union[None, Dict[str, str]]]
 
 _RPA_TOOL_PREFIX = "rpa_"
 _DOWNLOAD_TOOL = "rpa_download_ig_reel"
+_VISION_TOOLS = frozenset({"vision_analyze", "video_analyze"})
+_VISION_ASSET_TOOLS = frozenset({
+    "rpa_download_ig_content",
+    "rpa_download_ig_cover",
+    "rpa_download_ig_reel",
+})
 _MAX_DOWNLOADS_PER_CANDIDATE = 3
 
+# Align with kol-bridge-agent-guard session taxonomy (discovery vs draft/outreach).
+_NON_DISCOVERY_CAMPAIGN_PREFIXES = (
+    "kol-campaign-outreach:",
+    "kol-campaign-draft:",
+)
+
 _lock = threading.Lock()
-# (task_id, handle) → download count — per-candidate limit
-_download_counts: dict[tuple[str, str], int] = {}
 
-# Task IDs that have been seen in this process. When a new task_id is
-# encountered, we reset its pacing quota so a fresh discover run doesn't
-# inherit the previous run's exhausted profile/reel counters.
-_seen_task_ids: set[str] = set()
+# task_id → turn epoch that currently owns the pacing/download counters.
+# When turn_id changes (new gateway discover run), counters are cleared.
+_quota_epoch_by_task: dict[str, str] = {}
 
-# Extract handle from reel_url: instagram.com/reel/<id>/ has no handle,
-# but the Agent typically calls rpa_fetch_ig_profile(handle) before
-# rpa_download_ig_reel. We key by task_id + a "candidate key" derived
-# from the reel_url. Since multiple reels from the same candidate should
-# share the 3-download budget, we use a coarse key: task_id alone is too
-# broad (entire run), reel_url alone is too narrow (per-reel).
-# Best available: task_id + first 3 reel URLs share the budget — we
-# track by (task_id, reel_url) but allow up to 3 distinct reel_urls.
+# Distinct reel URLs downloaded per task (video mode cap).
 _download_reels: dict[str, list[str]] = {}
+
+_TEXT_MODE_MESSAGE = (
+    "Vision/multimodal content screening is DISABLED for kol-campaign "
+    "discovery (KOL_RPA_VISION_EVAL_ENABLED=0 / brief "
+    "rpa_vision_eval_enabled=false). "
+    "Do NOT call vision_analyze, video_analyze, rpa_download_ig_content, "
+    "rpa_download_ig_cover, or rpa_download_ig_reel for content screening. "
+    "Use rpa_fetch_ig_reels → rpa_fetch_reel_comments(mode=evaluation, "
+    "include_caption=true) ×10 on cover_reels[].url, then score Showcase/"
+    "Match from the author's caption/description + scraped comments only."
+)
+
+
+def _session_key(session_id: str = "", task_id: str = "") -> str:
+    """Prefer task_id when it carries the stable KOL session key."""
+    sid = (session_id or "").strip()
+    tid = (task_id or "").strip()
+    for candidate in (tid, sid):
+        if candidate.startswith("kol-"):
+            return candidate
+    return sid or tid
+
+
+def _is_campaign_discovery_session(session_id: str = "", task_id: str = "") -> bool:
+    """True for launch/rediscover ``kol-campaign:ENV:id``, not draft/outreach."""
+    key = _session_key(session_id, task_id)
+    if not key.startswith("kol-campaign"):
+        return False
+    return not any(key.startswith(p) for p in _NON_DISCOVERY_CAMPAIGN_PREFIXES)
 
 
 def _resolve_brief_fields(kwargs: dict) -> dict | None:
@@ -96,42 +123,80 @@ def reset_download_count(task_id: str) -> None:
         _download_reels.pop(task_id, None)
 
 
+def _epoch_for_task(task_id: str, turn_id: str = "") -> str:
+    """Return the quota epoch key for ``task_id``.
+
+    Prefer ``turn_id`` (unique per agent turn / gateway run). When absent,
+    fall back to a stable legacy key so older callers keep one-shot reset
+    semantics instead of clearing on every tool call.
+    """
+    tid = (task_id or "default").strip() or "default"
+    turn = (turn_id or "").strip()
+    if turn:
+        return turn
+    return f"legacy:{tid}"
+
+
+def maybe_reset_run_quota(task_id: str, turn_id: str = "") -> bool:
+    """Clear pacing + download counters when ``task_id`` enters a new turn.
+
+    Returns:
+        True if counters were reset for this call.
+    """
+    tid = (task_id or "default").strip() or "default"
+    epoch = _epoch_for_task(tid, turn_id)
+    with _lock:
+        if _quota_epoch_by_task.get(tid) == epoch:
+            return False
+        _quota_epoch_by_task[tid] = epoch
+        try:
+            import pacing as _pacing
+            _pacing.reset(tid)
+        except Exception:
+            pass  # Best-effort — don't block the tool call
+        _download_reels.pop(tid, None)
+        return True
+
+
 def pre_tool_call(
     tool_name: str,
     args: Dict[str, Any],
     task_id: str = "",
     session_id: str = "",
     tool_call_id: str = "",
+    turn_id: str = "",
     **kwargs: Any,
 ) -> HookResult:
-    """Pre-tool-call hook — enforce video-eval switch, download limits, and quota reset."""
-    del tool_call_id, session_id
+    """Pre-tool-call hook — vision/text mode, video switch, quota reset."""
+    del tool_call_id
+
+    from eval_mode import is_vision_eval_enabled, resolve_eval_mode
+
+    brief = _resolve_brief_fields(kwargs)
+    vision_on = is_vision_eval_enabled(brief)
+    discovery = _is_campaign_discovery_session(session_id, task_id)
+
+    if not vision_on:
+        # Download tools are discovery-only multimodal assets — always block.
+        if tool_name in _VISION_ASSET_TOOLS:
+            return {"action": "block", "message": _TEXT_MODE_MESSAGE}
+        # Core vision tools: only block inside campaign discovery so
+        # kol-email-discover / creator-brief / other skills keep OCR.
+        if tool_name in _VISION_TOOLS and discovery:
+            return {"action": "block", "message": _TEXT_MODE_MESSAGE}
 
     if not tool_name.startswith(_RPA_TOOL_PREFIX):
         return None
 
     tid = task_id or "default"
+    # turn_id may also arrive via kwargs on older plugin loaders.
+    effective_turn_id = turn_id or str(kwargs.get("turn_id") or "")
+    maybe_reset_run_quota(tid, effective_turn_id)
 
-    # Reset pacing quota on first RPA call for a new task_id in this process.
-    # Without this, a new discover run reusing the same task_id (e.g.
-    # kol-campaign:LIVE:SEB8008-20260525) inherits the previous run's
-    # exhausted profile quota (39/40) and can't evaluate any new candidates.
-    with _lock:
-        if tid not in _seen_task_ids:
-            _seen_task_ids.add(tid)
-            try:
-                import pacing as _pacing
-                _pacing.reset(tid)
-            except Exception:
-                pass  # Best-effort — don't block the tool call
-
-    # Only enforce on the download tool
+    # Only enforce download limits on the single-reel video tool
     if tool_name != _DOWNLOAD_TOOL:
         return None
 
-    # Resolve eval mode (brief > env > default OFF)
-    from eval_mode import resolve_eval_mode
-    brief = _resolve_brief_fields(kwargs)
     mode = resolve_eval_mode(brief)
 
     if mode == "cover":
@@ -161,10 +226,10 @@ def pre_tool_call(
                     f"rpa_download_ig_reel limit reached: {len(downloaded)} distinct "
                     f"reels already downloaded for this run (max "
                     f"{_MAX_DOWNLOADS_PER_CANDIDATE}). "
-                    "Proceed with the downloaded videos + 10 covers + comments."
+                    "Use rpa_download_ig_content for the planned video_reels, or "
+                    "rpa_cleanup_reels then continue with another candidate."
                 ),
             }
-        # Pre-approve this new reel
         _add_downloaded_reel(tid, reel_url)
 
     return None

@@ -503,11 +503,20 @@ _SECTION_SUBSTEP_GUIDANCE_EDITORIAL = (
     "carries no internal links in the body).\n"
     "3) Set articleState.phaseDone.sections = true when all sections have content.\n\n"
     "EDITORIAL PICKS — GENERATE THE 3 CARDS + H2 TITLE/INTRO (after all sections are written):\n"
-    "1) Set articleState.editorialIntro ONLY IF it is currently empty — a one-line overview of the "
-    "criteria used to pick these 3 (e.g. 'three reclining sofas that balance mid-century lines with "
-    "daily comfort'). Do NOT overwrite a non-empty editorialIntro (the operator may have edited it).\n"
-    "2) Set articleState.editorialTitle ONLY IF it is currently empty — default "
-    "'POVISON Picks — {topic.title}'. Do NOT overwrite a non-empty editorialTitle.\n"
+    "1) Set articleState.editorialIntro ONLY IF it is currently empty — a 50-70 word overview "
+    "paragraph that (a) names the product category and the scenario/room the article addresses "
+    "(derived from topic.primary_keyword + outline H2s), (b) states the criteria used to pick these "
+    "3 (e.g. footprint, assembly, materials), and (c) ends with a disclaimer sentence: 'Dimensions, "
+    "mechanism, finishes, and pricing shown below are for reference only — please refer to each "
+    "product's detail page on povison.com for the most current specs and price.' Do NOT overwrite a "
+    "non-empty editorialIntro (the operator may have edited it).\n"
+    "2) Set articleState.editorialTitle ONLY IF it is currently empty — a descriptive H2 heading "
+    "that combines the product category and the topic scenario (NOT the blog title). Derive it from "
+    "topic.primary_keyword + topic.angle + outline H2s, formatted like 'Best {product category} "
+    "picks for {scenario}' (e.g. 'Best media console picks for OLED TV setup', 'Best sectional "
+    "sofas for small-space living'). Do NOT use the 'POVISON Picks — {topic.title}' default — that "
+    "is only a code fallback when the Agent leaves it empty. Do NOT overwrite a non-empty "
+    "editorialTitle.\n"
     "3) Call `povison-catalog.py recommend --topic '<JSON>' --limit 3` (or POST "
     "http://127.0.0.1:8766/api/povison-products/recommend with {topic, limit:3}) to get EXACTLY 3 "
     "real product candidates. Each MUST have a real PDP URL (`/<slug>.html?variant=<id>`). NEVER "
@@ -563,10 +572,13 @@ def _section_guidance_for_task(task_dir: Path) -> str:
 
 
 _PLACEMENTS_SUBSTEP_GUIDANCE = (
-    "RE-RESOLVE placements from EXISTING section prose (merged flow). "
-    "The body sections were already written with inline markdown links to REAL povison URLs during "
-    "the section step. Your job here is NOT to generate new placements from scratch — it is to "
-    "review/confirm and, if needed, re-derive the structured placement cards from the prose.\n"
+    "RE-PICK / RE-RESOLVE placements (UI button「重新挑选植入候选」). "
+    "This is a live Hermes Agent run — NEVER invent URLs and NEVER use static demo catalog "
+    "seeds (placement-catalog.json / demo_placements). Always call the Bridge recommend APIs "
+    "(or equivalent CLI) for real povison.com PDP / blog URLs.\n"
+    "The body sections were already written (inline mode weaves REAL povison URLs into prose; "
+    "editorial mode keeps products in the standalone POVISON Picks cards). Your job is to "
+    "review/confirm and, if needed, re-derive or re-pick the structured placement cards.\n"
     "1) Scan each articleState.sections[].content for markdown `[anchor](url)` links whose url is a "
     "real povison.com PDP (contains `.html` and `?variant=`), blog article "
     "(`https://www.povison.com/blog/.../.html`), or collection page. Build articleState.products and "
@@ -591,7 +603,13 @@ _PLACEMENTS_SUBSTEP_GUIDANCE = (
     "ONLY when the operator wants different products than the section step produced, or to "
     "re-fill missing blurb/specs/reviewQuote on the existing 3 cards.\n"
     "1) Do NOT overwrite a non-empty articleState.editorialTitle / editorialIntro (the operator "
-    "or the section step already set them). Only fill them if they are empty.\n"
+    "or the section step already set them). Only fill them if they are empty. When filling "
+    "editorialTitle, write a descriptive H2 combining product category + topic scenario (e.g. "
+    "'Best media console picks for OLED TV setup'), NOT the blog title. When filling "
+    "editorialIntro, write a 50-70 word overview paragraph (criteria + scenario) ending with the "
+    "PDP disclaimer: 'Dimensions, mechanism, finishes, and pricing shown below are for reference "
+    "only — please refer to each product's detail page on povison.com for the most current specs "
+    "and price.'\n"
     "2) Call `povison-catalog.py recommend --topic '<JSON>' --limit 3` (or POST "
     "http://127.0.0.1:8766/api/povison-products/recommend) to get EXACTLY 3 real product candidates. "
     "Each product MUST have a real PDP URL (`/<slug>.html?variant=<id>`). NEVER fabricate URLs.\n"
@@ -2907,6 +2925,20 @@ def _toc_html(state: dict) -> str:
     if has_intro:
         items.append({"text": "Introduction", "id": "introduction", "children": []})
     items.extend(headings)
+    # Editorial Picks: when the standalone POVISON Picks H2 will render (editorial
+    # mode + exactly 3 accepted products), surface it in the TOC before Conclusion
+    # so readers can jump to the product roundup. Mirrors the _editorial_picks_html
+    # activation check so the TOC never advertises a section that won't render.
+    # The link text matches the rendered H2 (editorialTitle, or the code fallback)
+    # so the TOC entry reads the same heading the reader sees in the body.
+    if (state.get("placementStyle") or "inline") == "editorial":
+        accepted = [p for p in (state.get("products") or []) if isinstance(p, dict) and p.get("status") == "accepted"]
+        if len(accepted) == 3:
+            pick_title = (state.get("editorialTitle") or "").strip()
+            if not pick_title:
+                topic_title = ((state.get("topic") or {}).get("title") or "").strip()
+                pick_title = f"POVISON Picks — {topic_title}" if topic_title else "POVISON Picks"
+            items.append({"text": pick_title, "id": "povison-picks", "children": []})
     if has_conclusion:
         items.append({"text": "Conclusion", "id": "conclusion", "children": []})
 
@@ -3011,8 +3043,12 @@ def _editorial_picks_html(state: dict) -> str:
     not an error.
 
     Structure (matches the POVISON blog reference):
-      <h2 id="povison-picks">POVISON Picks — {editorialTitle or topic.title}</h2>
-      <p class="editorial-intro">{editorialIntro}</p>            # optional
+      <h2 id="povison-picks">{editorialTitle}</h2>          # descriptive H2 from
+                                                            # topic+outline; falls back to
+                                                            # "POVISON Picks — {topic.title}"
+                                                            # only when the Agent left it empty
+      <p class="editorial-intro">{editorialIntro}</p>        # 50-70 word overview + PDP
+                                                            # disclaimer; optional
       for each accepted product:
         <h3 id="...">{product name}</h3>                         # plain text, NO link
         <a href="{pdp url}"><img ...></a>                         # image wraps to PDP

@@ -1284,8 +1284,8 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                      step; the operator may edit them here. Hidden in inline mode. -->
                 <div id="editorialFields" style="display:none;margin-bottom:10px;padding:10px 12px;background:#faf8f5;border:1px solid #e8e0d0;border-radius:8px;">
                   <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:#8b6f47;">Editorial Picks H2（可编辑）</div>
-                  <input type="text" id="editorialTitleInput" placeholder="POVISON Picks — {默认用主题标题}" oninput="onEditorialTitleInput(this.value)" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;margin-bottom:8px;">
-                  <textarea id="editorialIntroInput" rows="2" placeholder="一段总览：用什么标准筛出这 3 款（可选）" oninput="onEditorialIntroInput(this.value)" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;"></textarea>
+                  <input type="text" id="editorialTitleInput" placeholder="如 Best media console picks for OLED TV setup（按主题+大纲生成）" oninput="onEditorialTitleInput(this.value)" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;margin-bottom:8px;">
+                  <textarea id="editorialIntroInput" rows="3" placeholder="50-70 词总览：产品类别+场景+筛选标准，末尾注明尺寸/功能/价格以商详页为准" oninput="onEditorialIntroInput(this.value)" style="width:100%;padding:6px 8px;border:1px solid #d2d2d7;border-radius:6px;font-size:13px;"></textarea>
                 </div>
                 <!-- Style-switch banner: shown when the operator changes style AFTER
                      sections already exist. Keeps the prose (does not clear it) but
@@ -1333,7 +1333,7 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
                     <span id="placementStyleIndicator" style="font-size:12px;padding:3px 10px;border-radius:6px;background:#fff;border:1px solid var(--border,#d2d2d7);">行内 blurb</span>
                     <span style="font-size:11px;color:var(--text-secondary,#86868b);">如需切换，请回到上方「正文板块」顶部切换并重新生成正文</span>
                   </div>
-                  <p class="wb-hint" id="placementsHint">正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」可从当前正文重新解析。确认后进 FAQ。</p>
+                  <p class="wb-hint" id="placementsHint">正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」会启动 Agent 按真实目录 API 重新挑选/回填（非演示脚本）。确认后进 FAQ。</p>
                   <div class="gen-live-mini" id="placementsLive"></div>
                   <div id="placementWarningsBanner" style="display:none;background:#fef3f2;border:1px solid #fda4af;color:#9f1239;border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12px;line-height:1.5;"></div>
                   <div class="wb-actions">
@@ -3261,7 +3261,7 @@ async function resumeTaskAgentPolling(taskId) {
       const tSteps = (tObj && tObj.steps) || [];
       const rStep = tSteps.find(function(s){ return s.status === 'running'; });
       const sNum = rStep ? rStep.step_num : 3;
-      const _LIVE_PANEL = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'sectionsLive', faq:'faqLive', meta:'metaLive' };
+      const _LIVE_PANEL = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'placementsLive', faq:'faqLive', meta:'metaLive' };
       const livePanel = (_activeAgentStep && _LIVE_PANEL[_activeAgentStep]) || (sNum === 2 ? 'bsLive' : 'genLive');
       const jKind = sNum === 2 ? 'agent-brainstorm' : ('agent-' + (_activeAgentStep || (rStep && rStep.step_type) || 'section'));
       JobProgress.start(jKind, []);
@@ -3297,7 +3297,7 @@ async function resumeTaskAgentPolling(taskId) {
   const stepNum = runningStep ? runningStep.step_num : 3;
   // Use the same per-phase live panel the original bridgeAskAgent loop writes to
   // (derived from _activeAgentStep) so resumed progress lines append correctly.
-  const _LIVE_PANEL_RESUME = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'sectionsLive', faq:'faqLive', meta:'metaLive' };
+  const _LIVE_PANEL_RESUME = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'placementsLive', faq:'faqLive', meta:'metaLive' };
   const panelId = (_activeAgentStep && _LIVE_PANEL_RESUME[_activeAgentStep]) || (stepNum === 2 ? 'bsLive' : 'genLive');
   const jobKind = stepNum === 2 ? 'agent-brainstorm' : ('agent-' + (_activeAgentStep || (runningStep && runningStep.step_type) || 'section'));
   _activePollTaskId = taskId;
@@ -4486,19 +4486,14 @@ function generatePlacements() {
   }
   clearStale('placements');
   invalidateDownstream('placements');
-  // Merged flow (C4): placements are now woven inline into section prose during
-  // the section step. This button no longer launches a from-scratch Agent run
-  // (which REPLACED products/links wholesale and could diverge from prose).
-  // Instead it re-resolves the structured cards FROM the existing prose: the
-  // script (--mode placements) scans sections[].content for inline markdown
-  // links and backfills articleState.products/links. Use this after editing
-  // prose or deleting cards. Real URLs only — invented ones are flagged.
+  // Launch the Hermes Agent (step=placements), NOT section-generate.py.
+  // The Bridge injects _PLACEMENTS_SUBSTEP_GUIDANCE:
+  //   - inline: re-resolve cards from prose / recommend APIs (real POVISON URLs)
+  //   - editorial: RE-PICK exactly 3 review cards via catalog + Detail + reviews APIs
+  // Never fall through to demo_placements / placement-catalog.json seed data.
+  // Flush placementStyle + latest cards to DB before launch so the Agent branches correctly.
   flushArticlePersist().then(function() {
-    const btn = document.getElementById('btnGenPlacements');
-    if (btn) { btn.disabled = true; btn.textContent = '解析中…'; }
-    bridgeGenerateSection('placements', null).finally(function() {
-      if (btn) { btn.textContent = '重新挑选植入候选'; }
-    });
+    bridgeAskAgent('placements', document.getElementById('btnGenPlacements'));
   });
 }
 
@@ -4823,8 +4818,8 @@ function renderPlacementStyleToggle() {
   var pHint = document.getElementById('placementsHint');
   if (pHint) {
     pHint.textContent = (style === 'editorial')
-      ? 'Editorial 模式：正文生成阶段已产出 3 张评测卡（含 H2 标题/总览）。在此审核每张卡：接受 / 驳回 / 删除 / 改文案。确认恰好 3 张已接受后进 FAQ。点「重新挑选植入候选」可让 Agent 重选 3 款。'
-      : '正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」可从当前正文重新解析。确认后进 FAQ。';
+      ? 'Editorial 模式：正文生成阶段已产出 3 张评测卡，含按主题+大纲生成的 H2 标题（产品词+场景，如 Best media console picks for OLED TV setup）与 50-70 词总览（含尺寸/功能/价格以商详页为准的声明），并已加入文章目录。在此审核每张卡：接受 / 驳回 / 删除 / 改文案。确认恰好 3 张已接受后进 FAQ。点「重新挑选植入候选」可让 Agent 重选 3 款。'
+      : '正文写作时已把真实 POVISON 产品与内链以行内链接织入正文，下方卡片由正文自动解析回填。你审核每条植入的合理性：接受 / 驳回（驳回会在组装时从正文剥离该链接）/ 删除（同时从正文移除）/ 改文案或换挂载板块。若编辑过正文或删过卡片，点「重新挑选植入候选」会启动 Agent 按真实目录 API 重新挑选/回填（非演示脚本）。确认后进 FAQ。';
   }
 }
 
@@ -4967,7 +4962,7 @@ function refreshPlacementsGate() {
     if (parts.length) {
       banner.style.display = '';
       banner.innerHTML = parts.join('<hr style="margin:6px 0;border:none;border-top:1px solid #fda4af;">') +
-        '<div style="margin-top:6px;">请点「重新挑选植入候选」从正文重新解析植入，或手动修正 URL 后点「校验链接有效性」复检。</div>';
+        '<div style="margin-top:6px;">请点「重新挑选植入候选」让 Agent 重新挑选真实产品/内链，或手动修正 URL 后点「校验链接有效性」复检。</div>';
     } else if (urlCheck && urlCheck.results && urlCheck.results.length) {
       banner.style.display = '';
       banner.innerHTML = '<b style="color:#15803d;">链接有效性校验通过：' + urlCheck.total + ' 个 URL 全部有效 ✓</b>';
@@ -6894,6 +6889,7 @@ const JobProgress = {
     'agent-serp': 'Agent SERP 洞察',
     'agent-outline': 'Agent 生成大纲',
     'agent-section': 'Agent 撰写正文',
+    'agent-placements': 'Agent 挑选植入候选',
   },
   _statusHints: {
     'keyword-discovery': '正在爬取 16 个家居博客站点并提取标题…',
@@ -6904,6 +6900,7 @@ const JobProgress = {
     'agent-serp': 'Agent 正在分析 SERP 竞品与内容缺口…',
     'agent-outline': 'Agent 正在基于选题与 SERP 生成大纲…',
     'agent-section': 'Agent 正在逐块撰写正文…',
+    'agent-placements': 'Agent 正在调用真实目录 API 挑选产品与内链…',
   },
   start(kind, buttons) {
     this._state = 'running';
@@ -7636,7 +7633,7 @@ async function bridgeAskAgent(step, triggerBtn) {
 
   const btns = [];
   // Disable all agent-trigger buttons across all phase panels (original behavior).
-  document.querySelectorAll('[onclick*="bridgeAskAgent"], [onclick*="generateSerp"], [onclick*="generateOutline"], [onclick*="generateAllSections"]').forEach(b => btns.push(b));
+  document.querySelectorAll('[onclick*="bridgeAskAgent"], [onclick*="generateSerp"], [onclick*="generateOutline"], [onclick*="generateAllSections"], [onclick*="generatePlacements"]').forEach(b => btns.push(b));
   if (triggerBtn && !btns.includes(triggerBtn)) btns.push(triggerBtn);
   // Record the active agent sub-step so resumeTaskAgentPolling can restore the
   // correct live panel + phase after a task switch (see _activeAgentStep).
@@ -7645,7 +7642,7 @@ async function bridgeAskAgent(step, triggerBtn) {
   JobProgress.start(jobKind, btns);
   // Use the per-panel mini live stream (not the global genLive at the top of
   // the workbench) so the viewport doesn't shift when the stream appears.
-  const _LIVE_PANEL = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'sectionsLive', faq:'faqLive', meta:'metaLive' };
+  const _LIVE_PANEL = { serp:'serpLive', outline:'outlineLive', section:'sectionsLive', sections:'sectionsLive', placements:'placementsLive', faq:'faqLive', meta:'metaLive' };
   const livePanelId = _LIVE_PANEL[step] || _LIVE_PANEL[currentGenPhase] || 'genLive';
   agentLiveReset(livePanelId, 'Agent · ' + step, '正在执行…');
   try {
