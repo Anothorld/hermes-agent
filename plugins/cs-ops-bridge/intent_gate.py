@@ -507,8 +507,12 @@ def _context_turns() -> int:
 # ownerType values that are NOT conversation content (system actions, internal
 # notes, bot messages). These are filtered out when building conversation history.
 _NON_CONVERSATION_TYPES = frozenset({"system", "botsystem", "bot", "operatornote"})
-# contentType values that are NOT email conversation (e.g. phone-call metadata).
-_NON_CONVERSATION_CONTENT_TYPES = frozenset({"call"})
+# contentType values that are NOT email conversation. Includes phone-call
+# metadata and customer rating / survey events (invite_score / score_notify).
+# Rating rows are excluded so the classifier never treats a CSAT payload
+# (e.g. "Terrible communication") as the latest visitor email body, and so
+# conversation history does not include rating telemetry as a turn.
+_NON_CONVERSATION_CONTENT_TYPES = frozenset({"call", "invite_score", "score_notify"})
 
 
 def _is_conversation_message(msg: dict[str, Any]) -> bool:

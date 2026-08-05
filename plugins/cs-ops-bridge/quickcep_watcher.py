@@ -26,6 +26,7 @@ from .quickcep_join import (
 )
 from .session_handoff import handle_operator_send, apply_handoff
 from .operator_send_reconcile import reconcile_operator_sent_once
+from .rating_inbound import is_customer_rating_inbound, is_customer_rating_content_type
 
 from .profile_refs import quickcep_skill_dir
 
@@ -331,6 +332,91 @@ def _visitor_locale(visitor_info: Any) -> Optional[str]:
     return val or None
 
 
+def _consume_customer_rating(*, session_id: str, info: dict[str, Any]) -> None:
+    """Message-level consume of a QuickCEP customer rating / survey message.
+
+    Unlike the PR3 permanent skip gates (``non_email`` / ``blocklist`` / ``ad`` /
+    ``intent_gate``), this NEVER:
+
+    - calls ``_enqueue_permanent_skip`` / ``enqueue_session`` (which would
+      reopen terminal/in-flight statuses via the UPSERT, then force
+      ``status=skipped`` — relabeling a successfully handled ticket from
+      已回 → 跳过 and locking out later real emails)
+    - inserts a ``cs_message_dedup`` row (REST dedup is handled by the
+      ``last_message_id`` bump below; SIO is one-shot per event)
+    - calls ``_leave_quickcep_if_previously_joined`` (CSAT is post-close
+      telemetry; the AI is usually not joined, and even if it was, leaving
+      on a rating would orphan the active gateway run)
+
+    Delegates to ``cal.consume_rating_atomic`` which performs the session
+    lookup, cross-namespace dedup, ``last_message_id`` bump, and
+    ``inbound_skipped`` audit insert in a single ``BEGIN IMMEDIATE``
+    transaction. This makes the consume:
+
+    - **idempotent** on same-namespace redelivery (SIO reconnect re-sends the
+      same native ``id`` → ``last_message_id`` already equals it → no-op)
+    - **cross-namespace dedup** when SIO and REST deliver the same rating
+      with different id formats (native ``id`` vs ``rest:{lastMsgTime}``):
+      the second transport bumps ``last_message_id`` (so REST stops
+      re-polling) but does NOT write a duplicate audit event
+    - **race-safe** under concurrent SIO + REST (BEGIN IMMEDIATE serializes
+      the two consumers)
+    - **partial-failure-safe**: the bump and audit are in one transaction,
+      so a failed bump cannot leave an audit row without a matching cursor
+      bump (which would otherwise re-write the audit every ~60s)
+
+    ``message_id`` is taken ONLY from ``info["id"]``. The previous
+    ``lastMsgTime`` fallback conflated a timestamp with a message id and
+    split the SIO/REST id namespaces further; if SIO delivers a rating
+    with no ``id`` we log and return — REST reconcile will pick it up via
+    its ``rest:{lastMsgTime}`` synthetic id.
+    """
+    message_id = str(info.get("id") or "")
+    if not message_id:
+        log.info(
+            "skip launch session %s customer_rating — no message id (SIO; REST will pick up)",
+            session_id,
+        )
+        return
+    content_type = str(info.get("contentType") or info.get("lastMsgContentType") or "")
+    try:
+        outcome = cal.consume_rating_atomic(
+            quickcep_session_id=session_id,
+            message_id=message_id,
+            content_type=content_type,
+            env=_ENV,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Surface persistent DB failures: a swallowed bump failure would let
+        # REST re-enter the same CSAT row every ~60s with no audit and no
+        # alarm. Log at WARNING so operators can correlate repeated entries.
+        log.warning(
+            "customer_rating consume failed session=%s msg=%s: %s",
+            session_id, message_id, exc,
+        )
+        return
+    if outcome == "missing":
+        log.info(
+            "skip launch session %s customer_rating — no CAL row (rating-only session, no action)",
+            session_id,
+        )
+    elif outcome == "idempotent":
+        log.debug(
+            "skip launch session %s customer_rating — already consumed (idempotent) msg=%s",
+            session_id, message_id,
+        )
+    elif outcome == "cross_namespace_dedup":
+        log.info(
+            "skip launch session %s customer_rating — cross-namespace dedup (bump only) msg=%s",
+            session_id, message_id,
+        )
+    else:  # "consumed"
+        log.info(
+            "skip launch session %s customer_rating (consumed) msg=%s",
+            session_id, message_id,
+        )
+
+
 def _enqueue_permanent_skip(
     *,
     session_id: str,
@@ -537,6 +623,16 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
             gate="non_email",
             extra_payload={"channel": info.get("channel")},
         )
+        return None
+
+    # ── Customer rating / survey (message-level consume) ────────────
+    # QuickCEP emits invite_score / score_notify after a case is resolved.
+    # These are telemetry, not customer email — AI must NOT launch on them,
+    # the CAL session status must NOT change (so 已回 stays 已回 and later
+    # real emails still process), and leave-chat must NOT fire. See
+    # rating_inbound.py and _consume_customer_rating for the full contract.
+    if is_customer_rating_inbound(info):
+        _consume_customer_rating(session_id=session_id, info=info)
         return None
 
     email = info.get("email")
@@ -941,6 +1037,26 @@ def run_rest_reconcile_once() -> dict[str, Any]:
             sid = str(row.get("id") or "")
             if not sid:
                 continue
+            # Customer rating / survey rows: consume (or drop if no CAL row)
+            # BEFORE the eligibility/dedup checks below. Without this, a
+            # closed session (operator_replied/reviewed) that received a
+            # CSAT would loop every ~60s: rest_reconcile_eligible is True,
+            # last_message_id != rest:{lastMsgTime}, closed-session pre-check
+            # does not cover score types, and _launch_for_message would
+            # launch AI. For sessions with no CAL row (never AI-processed),
+            # we drop the row without creating a skipped session.
+            last_msg_type_raw = str(row.get("lastMsgContentType") or "")
+            if is_customer_rating_content_type(last_msg_type_raw):
+                msg_id = rest_session_message_id(row)
+                _consume_customer_rating(
+                    session_id=sid,
+                    info={
+                        "chatSubSessionId": sid,
+                        "id": msg_id,
+                        "lastMsgContentType": last_msg_type_raw,
+                    },
+                )
+                continue
             if not rest_reconcile_eligible(quickcep_session_id=sid, env=_ENV):
                 skipped_busy += 1
                 busy_sess = cal.get_session(quickcep_session_id=sid, env=_ENV)
@@ -994,6 +1110,9 @@ def run_rest_reconcile_once() -> dict[str, Any]:
                 "visitorInfo": vi,
                 "email_subject": rest_subject,
                 "content_preview": rest_content[:300] if rest_content else "",
+                # Forward so _launch_for_message's rating gate sees REST rows
+                # that slip past the pre-filter above (defense in depth).
+                "lastMsgContentType": last_msg_type_raw,
             }
             if not inbound_payload_is_email(info):
                 continue

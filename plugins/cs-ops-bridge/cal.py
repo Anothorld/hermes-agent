@@ -1453,6 +1453,158 @@ def update_session_chat_id(*, session_row_id: int, chat_session_id: str) -> None
         conn.commit()
 
 
+def update_last_message_id(
+    *,
+    quickcep_session_id: str,
+    message_id: str,
+    env: str = "LIVE",
+) -> bool:
+    """Bump ``last_message_id`` only — status-preserving consume helper.
+
+    Used by the customer-rating message consume gate. Unlike
+    ``enqueue_session``, this NEVER:
+
+    - inserts a ``cs_message_dedup`` row (caller decides dedup separately)
+    - changes ``status`` (terminal/in-flight statuses stay as-is)
+    - stamps ``processing_started_at`` / ``agent_processing_at``
+
+    ``updated_at`` is intentionally NOT bumped so the re-arm scanner's
+    age filter (``_REARM_MAX_AGE_HOURS``) is not reset by a CSAT event —
+    otherwise a closed session that received a rating would be re-scanned
+    every 5 minutes for 168 hours. The bump is observable via
+    ``last_message_id`` itself plus the ``inbound_skipped`` audit event.
+
+    Returns True when a session row was found and updated.
+    """
+    if not quickcep_session_id or not message_id:
+        return False
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE cs_session SET last_message_id=? "
+            "WHERE quickcep_session_id=? AND env=?",
+            (str(message_id), quickcep_session_id, env),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# Cross-namespace dedup window: SIO and REST re-deliver the SAME rating within
+# ~1-2 minutes (SIO immediate, REST reconcile ~60s poll). A DISTINCT second
+# rating (session reopened → re-resolved → re-rated) arrives hours later. The
+# dedup suppresses the duplicate audit only within this window so a later
+# distinct rating still gets its own audit event (funnel accuracy).
+_RATING_DEDUP_WINDOW_MINUTES = 5
+
+
+def consume_rating_atomic(
+    *,
+    quickcep_session_id: str,
+    message_id: str,
+    content_type: str = "",
+    env: str = "LIVE",
+) -> str:
+    """Atomic rating consume: idempotent bump + audit in one transaction.
+
+    Single-transaction consume of a customer rating / CSAT message. Wraps the
+    session lookup, cross-namespace dedup check, ``last_message_id`` bump,
+    and ``inbound_skipped`` audit insert in one ``BEGIN IMMEDIATE`` transaction
+    so concurrent SIO + REST delivery of the same rating cannot write
+    duplicate audit events or race on ``last_message_id``.
+
+    Unlike ``enqueue_session``, this NEVER:
+
+    - inserts a ``cs_message_dedup`` row
+    - changes ``status`` (terminal/in-flight statuses stay as-is)
+    - stamps ``processing_started_at`` / ``agent_processing_at``
+    - bumps ``updated_at`` (re-arm scanner age filter stays intact)
+
+    Cross-namespace dedup: SIO delivers a rating with a native ``id`` (e.g.
+    ``"abc123"``) while REST reconcile builds ``rest:{lastMsgTime}``. Exact-
+    string idempotency on ``last_message_id`` would let the second transport
+    re-consume and write a duplicate audit event. This function detects a
+    prior ``inbound_skipped`` event with ``gate=customer_rating`` for the
+    session **within a short dedup window** (``_RATING_DEDUP_WINDOW_MINUTES``)
+    and, if present, bumps ``last_message_id`` (so REST stops re-polling) but
+    does NOT write a new audit event. The window is bounded so a DISTINCT
+    second rating (session reopened → re-resolved → re-rated, hours later)
+    still gets its own audit event instead of being suppressed.
+
+    Returns one of:
+
+    - ``"consumed"``: first consume for this session (audit written + bump)
+    - ``"idempotent"``: ``last_message_id`` already equals ``message_id``
+      (same-namespace redelivery — no audit, no bump)
+    - ``"cross_namespace_dedup"``: a prior rating audit exists for this
+      session; ``last_message_id`` is bumped to stop the REST loop but no
+      new audit is written
+    - ``"missing"``: no CAL session row (rating on a never-AI-processed
+      session — no action)
+    - ``"invalid"``: empty ``quickcep_session_id`` or ``message_id``
+    """
+    if not quickcep_session_id or not message_id:
+        return "invalid"
+    with _connect() as conn:
+        # BEGIN IMMEDIATE acquires the write lock up front so two concurrent
+        # consumers (SIO + REST) serialize: the second blocks until the first
+        # commits, then sees the committed last_message_id / audit row.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT id, status, last_message_id FROM cs_session "
+                "WHERE quickcep_session_id=? AND env=?",
+                (quickcep_session_id, env),
+            ).fetchone()
+            if not row:
+                conn.execute("ROLLBACK")
+                return "missing"
+            sess_id = row["id"]
+            status = str(row["status"] or "")
+            last_msg = str(row["last_message_id"] or "")
+            if last_msg == str(message_id):
+                conn.execute("ROLLBACK")
+                return "idempotent"
+            prior = conn.execute(
+                "SELECT 1 FROM cs_conversation_events "
+                "WHERE session_id=? AND event_type='inbound_skipped' "
+                "AND json_extract(payload_json, '$.gate')='customer_rating' "
+                "AND datetime(created_at) >= datetime('now', ?) "
+                "LIMIT 1",
+                (sess_id, f"-{_RATING_DEDUP_WINDOW_MINUTES} minutes"),
+            ).fetchone()
+            conn.execute(
+                "UPDATE cs_session SET last_message_id=? WHERE id=?",
+                (str(message_id), sess_id),
+            )
+            if not prior:
+                payload = {
+                    "gate": "customer_rating",
+                    "message_id": str(message_id),
+                    "contentType": str(content_type or ""),
+                    "prior_status": status,
+                    "status": status,
+                }
+                conn.execute(
+                    """INSERT INTO cs_conversation_events
+                       (session_id, event_type, payload_json, env, created_at)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        sess_id,
+                        "inbound_skipped",
+                        json.dumps(sanitize_mapping(payload)),
+                        env,
+                        _now(),
+                    ),
+                )
+            conn.execute("COMMIT")
+            return "cross_namespace_dedup" if prior else "consumed"
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+
 def update_session_status(
     *,
     session_row_id: int,
