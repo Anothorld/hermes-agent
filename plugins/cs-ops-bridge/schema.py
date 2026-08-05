@@ -177,6 +177,14 @@ INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_cs_events_session ON cs_conversation_events(session_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_cs_session_processing_started ON cs_session(processing_started_at, env)",
     "CREATE INDEX IF NOT EXISTS idx_cs_session_agent_processing ON cs_session(agent_processing_at) WHERE agent_processing_at IS NOT NULL",
+    # Hot path for the Console workbench "全部" list filter: the default
+    # `SELECT * FROM cs_session WHERE env=? ORDER BY updated_at DESC LIMIT N`
+    # has no status predicate, so idx_cs_session_status cannot help and the
+    # planner falls back to a full scan + TEMP B-TREE sort of every session
+    # row (each carrying large draft_html / draft_attachments JSON). On the
+    # prod LIVE DB this turned the "switch to 全部" click into a ~30s hang.
+    # This composite index turns it into an index seek + LIMIT N.
+    "CREATE INDEX IF NOT EXISTS idx_cs_session_env_updated ON cs_session(env, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_cs_escalations_created ON cs_escalations(created_at, env)",
     "CREATE INDEX IF NOT EXISTS idx_vault_link_esc ON escalation_vault_link(escalation_id)",
     "CREATE INDEX IF NOT EXISTS idx_vault_link_blob ON escalation_vault_link(blob_md5)",

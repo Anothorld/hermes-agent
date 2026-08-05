@@ -190,5 +190,64 @@ def test_v4_db_migrates_to_v5_adds_processing_started_at():
         conn.close()
 
 
+def test_env_updated_index_exists_and_serves_all_filter():
+    """The "全部" list filter has no status predicate, so idx_cs_session_status
+    cannot help and the planner would full-scan + temp-sort every session row
+    (each carrying large draft_html / draft_attachments JSON). On the prod LIVE
+    DB this turned the "switch to 全部" click into a ~30s hang.
+
+    idx_cs_session_env_updated(env, updated_at DESC) must exist after
+    recreate_all and must be picked by the planner for the no-status list query.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        conn = sqlite3.connect(Path(td) / "idx.db")
+        recreate_all(conn)
+        # Seed a mix of statuses so the planner has realistic selectivity
+        # stats; ANALYZE so it picks the index even on a tiny sample (without
+        # stats SQLite may prefer a scan on near-empty tables, which is fine
+        # in prod but masks the index in a unit test).
+        statuses = (["draft_ready"] * 5 + ["operator_replied"] * 5
+                    + ["pending"] * 5 + ["skipped"] * 5)
+        for i, st in enumerate(statuses):
+            conn.execute(
+                "INSERT INTO cs_session(quickcep_session_id, status, env, created_at, updated_at) "
+                "VALUES(?, ?, 'LIVE', ?, ?)",
+                (f"qc-{i}", st,
+                 f"2026-08-0{i%5+1}T00:00:00+00:00",
+                 f"2026-08-0{i%5+1}T0{i%6}m:00+00:00"),
+            )
+        conn.commit()
+        conn.execute("ANALYZE")
+        # The index exists.
+        idx_names = {
+            r[1]
+            for r in conn.execute("PRAGMA index_list(cs_session)").fetchall()
+        }
+        assert "idx_cs_session_env_updated" in idx_names
+        # The "all" list query (no status predicate) uses the env+updated_at
+        # index instead of a full scan + temp B-tree sort.
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT * FROM cs_session WHERE env=? ORDER BY updated_at DESC LIMIT 50 OFFSET 0",
+            ("LIVE",),
+        ).fetchall()
+        plan_text = " ".join(str(p) for p in plan)
+        assert "idx_cs_session_env_updated" in plan_text, plan
+        assert "TEMP B-TREE" not in plan_text, plan
+        # Regression guard: the status-filtered query must still use an index
+        # (not degrade to a full SCAN) and must not need a temp sort. Either
+        # the status index or the env+updated index is acceptable — the
+        # planner picks based on selectivity, and both avoid the slow path.
+        plan2 = conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT * FROM cs_session WHERE env=? AND status=? ORDER BY updated_at DESC LIMIT 50 OFFSET 0",
+            ("LIVE", "draft_ready"),
+        ).fetchall()
+        plan2_text = " ".join(str(p) for p in plan2)
+        assert "SCAN cs_session" not in plan2_text, plan2
+        assert "TEMP B-TREE" not in plan2_text, plan2
+        conn.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
