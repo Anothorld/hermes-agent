@@ -76,6 +76,7 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
+
 SKILL_DIR = Path(os.environ.get("SEO_SKILL_DIR", "")).resolve() or Path.home() / ".hermes/skills/productivity/povison-seo-blog"
 RUNS_DIR = Path(os.environ.get("SEO_RUNS_DIR", str(SKILL_DIR / "runs"))).resolve()
 STUDIO_HTML = Path(os.environ.get("SEO_STUDIO_HTML", "")).resolve() or (Path(__file__).parent / "ui" / "index.html")
@@ -158,22 +159,6 @@ async def _auth_middleware(request: Request, call_next):
     else:
         request.state.operator = {"oidc_sub": "studio", "name": "操作员"}
     return await call_next(request)
-
-_DEBUG_LOG = Path("/Users/arnold/agent_prj/.cursor/debug-5d4e3c.log")
-_DEBUG_ENDPOINT = "http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb"
-
-def _dbg(location: str, message: str, data: dict | None = None, hid: str = "H4") -> None:
-    try:
-        import time as _t
-        payload = {"sessionId": "5d4e3c", "id": f"log_{int(_t.time()*1000)}", "timestamp": int(_t.time() * 1000), "location": location, "message": message, "data": data or {}, "runId": "repro2", "hypothesisId": hid}
-        # Prefer HTTP ingest (avoids .cursor/ file permission issues); fall back to file.
-        try:
-            httpx.post(_DEBUG_ENDPOINT, json=payload, headers={"X-Debug-Session-Id": "5d4e3c"}, timeout=2)
-        except Exception:
-            with _DEBUG_LOG.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
 
 # ---- background job registry -------------------------------------------------
 _JOBS: dict[str, dict[str, Any]] = {}
@@ -270,18 +255,6 @@ def _spawn_job(kind: str, cmd: list[str], cwd: Path, rid: str = "", on_done=None
                     on_finish(job_id, _JOBS[job_id]["status"], rc)
                 except Exception:
                     pass
-            # #region agent log
-            try:
-                _dbg(f"server.py:_spawn_job:{kind}", "JOB_DONE", {
-                    "job_id": job_id, "kind": kind, "run_id": rid, "status": status,
-                    "returncode": rc,
-                    "stderr_tail": (proc.stderr or "")[-800:] if proc else "",
-                    "stdout_tail": (proc.stdout or "")[-400:] if proc else "",
-                    "error": err[:400],
-                }, "H1")
-            except Exception:
-                pass
-            # #endregion agent log
 
     threading.Thread(target=worker, daemon=True).start()
     return job_id
@@ -354,7 +327,6 @@ def _py() -> str:
 # ---- health ------------------------------------------------------------------
 @app.get("/api/health")
 async def health(request: Request) -> dict:
-    _dbg("server.py:health", "HEALTH_HIT", {"origin": request.headers.get("origin"), "user_agent": request.headers.get("user-agent", "")[:60]}, "H4")
     scripts_ok = (SCRIPTS / "section-generate.py").exists() and (SCRIPTS / "validate-article.py").exists()
     from auth import feishu_setup
 
@@ -1626,6 +1598,256 @@ async def povison_products_enrich_batch(body: dict | None = None) -> dict:
     return {"ok": True, "products": out}
 
 
+# ---- One-click parse-card: URL → full product card (lookup + reviews + LLM blurb) ----
+
+def _flatten_dimensions(dims: dict) -> str:
+    """Flatten ``lookup_detail``'s ``dimensions`` dict into a single string.
+
+    Prefers an ``overall`` key if the API provides it; otherwise joins
+    width/depth/height/weight in that order, then any remaining keys.
+    """
+    if not isinstance(dims, dict) or not dims:
+        return ""
+    overall = dims.get("overall") or dims.get("Overall")
+    if overall:
+        return str(overall).strip()
+    preferred = ("width", "depth", "height", "weight")
+    parts: list[str] = []
+    seen: set[str] = set()
+    for k in preferred:
+        if k in dims and dims[k]:
+            parts.append(str(dims[k]))
+            seen.add(k)
+    for k, v in dims.items():
+        if k not in seen and v:
+            parts.append(f"{k}: {v}")
+    return " × ".join(parts) if len(parts) <= 3 else "; ".join(parts)
+
+
+def _infer_mechanism(detail: dict) -> str:
+    """Best-effort ``mechanism`` string from assembly/style/drawers.
+
+    The Detail API has no ``mechanism`` field — we infer from what's
+    available so the editorial card's ``specs.mechanism`` is at least
+    partially populated. Product-specific phrases (e.g. "reversible
+    chaise") are left for the LLM blurb step to surface from the product
+    name + specs context.
+    """
+    raw = detail.get("specs") or {}
+    parts: list[str] = []
+    assembly = detail.get("assembly") or raw.get("assembly_required")
+    if assembly:
+        a = str(assembly).strip()
+        if a.lower() in ("no", "false", "0"):
+            parts.append("no assembly required")
+        else:
+            parts.append(f"assembly: {a}")
+    if raw.get("style"):
+        parts.append(str(raw["style"]))
+    if raw.get("number_of_drawers"):
+        parts.append(f"{raw['number_of_drawers']} drawers")
+    return ", ".join(parts)
+
+
+def _map_detail_to_specs(detail: dict) -> dict:
+    """Map ``lookup_detail`` → editorial card ``specs`` shape.
+
+    Editorial cards expect ``specs`` as a dict of strings:
+    ``{dimensions, mechanism, material, colors}``. ``lookup_detail``
+    returns a flat ``specs`` dict (``assembly_required``, ``material``,
+    ``color``…) and a separate top-level ``dimensions`` dict. This bridges
+    the mismatch.
+    """
+    raw = detail.get("specs") or {}
+    specs: dict[str, str] = {}
+    dim_str = _flatten_dimensions(detail.get("dimensions") or {})
+    if dim_str:
+        specs["dimensions"] = dim_str
+    if raw.get("material"):
+        specs["material"] = str(raw["material"])
+    if raw.get("color"):
+        # singular API key → plural editorial convention
+        specs["colors"] = str(raw["color"])
+    mechanism = _infer_mechanism(detail)
+    if mechanism:
+        specs["mechanism"] = mechanism
+    return specs
+
+
+# Reasoning-model / chatty-model leak markers seen in parse-card blurbs
+# (chain-of-thought written into message.content instead of the final copy).
+_BLURB_COT_MARKERS = (
+    "the user wants",
+    "let me analyze",
+    "let me write",
+    "let me draft",
+    "let me count",
+    "let me trim",
+    "word count",
+    "paragraph 1",
+    "paragraph 2",
+    "i'll skip",
+    "i will write",
+    "here's my draft",
+    "here is my draft",
+)
+
+
+def _sanitize_parse_card_blurb(raw: str | None, *, style: str) -> tuple[str | None, str]:
+    """Accept only a final product blurb; reject chain-of-thought dumps.
+
+    Returns ``(blurb_or_none, reason)`` where reason is ``ok``, ``empty``,
+    ``cot_leak``, or ``too_long``. Editorial blurbs must stay within ~90-150
+    words (hard cap 180); inline within ~40-70 (hard cap 100). Over-length or
+    CoT-looking text is discarded so it never lands in article preview.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None, "empty"
+    low = text.lower()
+    if any(m in low for m in _BLURB_COT_MARKERS):
+        return None, "cot_leak"
+    words = len(text.split())
+    max_words = 180 if style == "editorial" else 100
+    if words > max_words:
+        return None, "too_long"
+    return text, "ok"
+
+
+@app.post("/api/povison-products/parse-card")
+async def povison_products_parse_card(body: dict | None = None) -> dict:
+    """One-click parse a PDP URL into a full product card.
+
+    Body: ``{url, style?, topic?}`` where ``style`` is ``"inline"`` (40-70w
+    blurb) or ``"editorial"`` (90-150w blurb with specs paragraph). Chains:
+      1. ``povison_catalog.lookup_detail(url)`` → name, image, specs, price
+      2. ``povison_reviews.resolve_spu_by_url`` + ``fetch_reviews(limit=1)``
+         → reviewQuote
+      3. ``llm_client.chat()`` → blurb (from specs + review context)
+
+    Each sub-step is independent (graceful degradation): a failed lookup,
+    review fetch, or LLM call returns ``null`` for that field rather than
+    failing the whole endpoint. Returns ``{ok, name, url, image, specs,
+    price, review_count, reviewQuote, blurb}``.
+
+    ``specs`` and ``reviewQuote`` are only populated in editorial mode
+    (inline mode ignores them — the UI doesn't render those fields).
+    """
+    b = body or {}
+    url = str(b.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    style = str(b.get("style") or "inline").strip()
+    is_editorial = style == "editorial"
+    topic = b.get("topic") or {}
+
+    # Step 1: Detail API lookup (name, image, specs, dimensions, price).
+    try:
+        import povison_catalog as _cat
+    except ImportError:
+        raise HTTPException(status_code=503, detail="povison_catalog module missing")
+    try:
+        detail = _cat.lookup_detail(url)
+    except Exception as e:
+        return {"ok": False, "error": f"lookup failed: {e}", "url": url}
+    if not detail.get("ok"):
+        return {"ok": False, "error": detail.get("error", "product not found"), "url": url}
+
+    name = detail.get("name") or ""
+    image = detail.get("image") or ""
+    price = detail.get("price")
+    review_count = detail.get("review_count")
+    specs = _map_detail_to_specs(detail) if is_editorial else None
+
+    # Step 2: Buyer review (editorial only — inline cards don't render reviewQuote).
+    review_quote: dict | None = None
+    if is_editorial:
+        try:
+            import povison_reviews as _rv
+            spu = _rv.resolve_spu_by_url(url)
+            if spu:
+                reviews = _rv.fetch_reviews(spu=spu, limit=1, min_rating=4)
+                if reviews:
+                    r = reviews[0]
+                    review_quote = {
+                        "reviewer": r.get("nickname") or "",
+                        "date": r.get("date") or "",
+                        "quote": r.get("detail") or "",
+                        "rating": r.get("rating"),
+                    }
+        except Exception as e:
+            pass  # review_quote stays None — never fabricate
+
+    # Step 3: LLM blurb generation from specs + review context.
+    blurb: str | None = None
+    try:
+        import sys as _sys
+        if str(SCRIPTS) not in _sys.path:
+            _sys.path.insert(0, str(SCRIPTS))
+        from llm_client import chat as _chat
+
+        if is_editorial:
+            blurb_instr = (
+                "Write a 90-150 word editorial blurb in 1-3 paragraphs. "
+                "MUST include a specs paragraph covering dimensions, "
+                "mechanism, material, and colors. Optionally add a scene "
+                "paragraph and a buyer-review quote paragraph."
+            )
+            max_tok = 500
+        else:
+            blurb_instr = (
+                "Write a 40-70 word inline product blurb. Link the product "
+                "name to the PDP."
+            )
+            max_tok = 250
+
+        system_prompt = (
+            "You are a POVISON product copywriter. "
+            f"{blurb_instr} "
+            "Use the product specs and optional buyer review below as source. "
+            "CRITICAL: Output ONLY the final blurb prose that will be published. "
+            "Do NOT explain your plan, analyze the brief, count words, draft "
+            "alternatives, or narrate your reasoning. "
+            "Plain text only — no JSON, no markdown headings, no preamble, "
+            "no postamble."
+        )
+        user_payload = json.dumps(
+            {
+                "name": name,
+                "url": url,
+                "specs": specs or (detail.get("specs") or {}),
+                "dimensions": detail.get("dimensions") or {},
+                "price": price,
+                "reviewQuote": review_quote,
+                "topic": topic,
+            },
+            ensure_ascii=False,
+        )
+        raw = _chat(
+            system_prompt,
+            user_payload,
+            max_tokens=max_tok,
+            temperature=0.4,
+            timeout=60,
+        )
+        blurb, _reason = _sanitize_parse_card_blurb(raw, style=style)
+    except Exception:
+        pass  # blurb stays None — UI keeps existing value
+
+    result = {
+        "ok": True,
+        "name": name,
+        "url": detail.get("url") or url,
+        "image": image,
+        "specs": specs,
+        "price": price,
+        "review_count": review_count,
+        "reviewQuote": review_quote,
+        "blurb": blurb,
+    }
+    return result
+
+
 # ---- POVISON blog internal-link catalog (sitemap-based; no secrets) ----
 
 @app.get("/api/povison-blog/health")
@@ -1971,9 +2193,6 @@ async def put_file(rid: str, name: str, request: Request):
             body = json.loads(raw)
         except json.JSONDecodeError:
             body = raw
-    # #region agent log
-    _dbg("server.py:put_file", "PUT_FILE", {"rid": rid, "name": name, "body_type": type(body).__name__, "body_is_none": body is None, "body_len": len(body) if isinstance(body, (list, str, dict)) else None, "raw_head": raw[:80]}, "H2")
-    # #endregion agent log
     if isinstance(body, (dict, list)):
         p.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     elif isinstance(body, str):
@@ -2023,9 +2242,6 @@ async def get_job(job_id: str) -> dict:
 async def keywords_discover(rid: str, body: dict | None = None) -> dict:
     d = _resolve_run(rid)
     b = body or {}
-    # #region agent log
-    _dbg("server.py:keywords_discover", "DISCOVER_HIT", {"rid": rid, "sources": b.get("sources"), "min_freq": b.get("min_freq", 2)}, "H1")
-    # #endregion agent log
     # sources may arrive as "brand media" (string) or ["brand","media"] (list);
     # argparse nargs='+' needs separate argv elements.
     raw_sources = b.get("sources", "brand media")
@@ -2107,9 +2323,6 @@ async def topics_brainstorm(rid: str, body: dict | None = None) -> dict:
             use_raw = True
     if use_raw and raw.exists():
         kw_path = raw
-    # #region agent log
-    _dbg("server.py:topics_brainstorm", "BRAINSTORM_HIT", {"rid": rid, "kw_input": kw_path.name, "n": b.get("n", 10), "demo": b.get("demo")}, "H2")
-    # #endregion agent log
     cmd = [_py(), str(SCRIPTS / "topic-brainstorm.py"), "-i", str(kw_path), "-n", str(b.get("n", 10))]
     if b.get("demo"):
         cmd.append("--demo")
@@ -2935,6 +3148,7 @@ def _toc_html(state: dict) -> str:
         accepted = [p for p in (state.get("products") or []) if isinstance(p, dict) and p.get("status") == "accepted"]
         if len(accepted) == 3:
             pick_title = (state.get("editorialTitle") or "").strip()
+            title_source = "editorialTitle" if pick_title else "fallback"
             if not pick_title:
                 topic_title = ((state.get("topic") or {}).get("title") or "").strip()
                 pick_title = f"POVISON Picks — {topic_title}" if topic_title else "POVISON Picks"
@@ -3067,11 +3281,13 @@ def _editorial_picks_html(state: dict) -> str:
         return ""
 
     title = (state.get("editorialTitle") or "").strip()
+    title_source = "editorialTitle" if title else "fallback"
     if not title:
         topic = state.get("topic") or {}
         topic_title = (topic.get("title") or "").strip()
         title = f"POVISON Picks — {topic_title}" if topic_title else "POVISON Picks"
     intro = (state.get("editorialIntro") or "").strip()
+    intro_words = len(intro.split()) if intro else 0
 
     out = [f'<h2 id="povison-picks">{_esc(title)}</h2>']
     if intro:
@@ -3590,7 +3806,6 @@ async def db_stats() -> dict:
 # ---- serve the Studio UI -----------------------------------------------------
 @app.get("/")
 async def index(request: Request):
-    _dbg("server.py:index", "INDEX_HIT", {"origin": request.headers.get("origin"), "ua": request.headers.get("user-agent", "")[:60]}, "H4")
     if STUDIO_HTML.exists():
         return FileResponse(str(STUDIO_HTML), media_type="text/html", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
     raise HTTPException(status_code=404, detail="Studio HTML not found (set SEO_STUDIO_HTML)")

@@ -475,23 +475,7 @@ def save_step_data(
         # Auto-create the step row if missing (past DB recovery dropped some
         # step 3 rows). Without this the UPDATE below is a silent no-op and the
         # agent's save is lost → UI shows the empty state.
-        _created = _ensure_step_row(c, task_id, step_num, status=status)
-        if _created:
-            # #region agent log
-            try:
-                import time as _t, json as _json
-                _payload = _json.dumps({
-                    "sessionId": "891da2", "id": f"log_{int(_t.time()*1000)}_db",
-                    "timestamp": int(_t.time() * 1000), "location": "db.py:save_step_data",
-                    "message": "auto-created missing step row",
-                    "data": {"task_id": task_id, "step_num": step_num, "status": status},
-                    "hypothesisId": "H1",
-                }, ensure_ascii=False)
-                with open("/Users/arnold/agent_prj/.cursor/debug-891da2.log", "a", encoding="utf-8") as _f:
-                    _f.write(_payload + "\n")
-            except Exception:
-                pass
-            # #endregion agent log
+        _ensure_step_row(c, task_id, step_num, status=status)
         c.execute(
             "UPDATE steps SET data_json=?, status=?, agent_run_id=COALESCE(?, agent_run_id), "
             "updated_at=? WHERE task_id=? AND step_num=?",
@@ -547,23 +531,7 @@ def set_step_status(
         raise ValueError(f"invalid step status: {status}")
     now = _now()
     with _LOCK, get_conn() as c:
-        _created = _ensure_step_row(c, task_id, step_num, status=status)
-        if _created:
-            # #region agent log
-            try:
-                import time as _t, json as _json
-                _payload = _json.dumps({
-                    "sessionId": "891da2", "id": f"log_{int(_t.time()*1000)}_db",
-                    "timestamp": int(_t.time() * 1000), "location": "db.py:set_step_status",
-                    "message": "auto-created missing step row",
-                    "data": {"task_id": task_id, "step_num": step_num, "status": status},
-                    "hypothesisId": "H1",
-                }, ensure_ascii=False)
-                with open("/Users/arnold/agent_prj/.cursor/debug-891da2.log", "a", encoding="utf-8") as _f:
-                    _f.write(_payload + "\n")
-            except Exception:
-                pass
-            # #endregion agent log
+        _ensure_step_row(c, task_id, step_num, status=status)
         # clear_agent_run_id: set agent_run_id to '' so the client can tell this
         # is a SCRIPT job (not a gateway run) — resumeTaskAgentPolling dispatches
         # to resumeScriptJobPolling only when agent_run_id is empty. Without this,

@@ -1499,9 +1499,6 @@ body { font-family: var(--sf-font); background: var(--bg-primary); color: var(--
 </div>
 
 <script>
-// #region agent log
-fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:1126',message:'JS_EXEC_START: main script tag entered',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H3'})}).catch(()=>{});
-// #endregion
 // ==================== Keyword Data ====================
 // Keywords are loaded exclusively from keyword-discovery.py via the Bridge.
 // Run「桥接：发现关键词」to populate; nothing is hardcoded.
@@ -1644,9 +1641,6 @@ const PEXELS_HEROES = [
   'https://images.pexels.com/photos/1648776/pexels-photo-1648776.jpeg?auto=compress&cs=tinysrgb&w=1200',
   'https://images.pexels.com/photos/276583/pexels-photo-276583.jpeg?auto=compress&cs=tinysrgb&w=1200',
 ];
-// #region agent log
-fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:DEFAULT_RULES',message:'JS_EXEC_AFTER_TEMPLATE: reached DEFAULT_RULES (past BLOG_POST_TEMPLATE)',data:{},timestamp:Date.now(),runId:'repro1',hypothesisId:'H7'})}).catch(()=>{});
-// #endregion
 const DEFAULT_RULES_VERSION = '2.4';
 // Defaults for「规则设置」. Cross-block duplicates are folded here:
 //  - Voice / no-keyword-stuffing / no-fabrication → global only
@@ -2202,9 +2196,6 @@ function applyArticleState(state) {
   if (!state || !state.topic) return false;
   if (Array.isArray(state.sections)) state.sections.forEach(_normalizeSection);
   if (Array.isArray(state.products)) state.products.forEach(_normalizeProduct);
-  // #region agent log
-  try { fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'891da2'},body:JSON.stringify({sessionId:'891da2',location:'ui/index.html:applyArticleState:load',message:'articleState loaded from DB',data:{stale:JSON.stringify(state.stale||{}),placementStyle:state.placementStyle,phaseDoneSections:state.phaseDone&&state.phaseDone.sections,sectionsCount:(state.sections||[]).length},timestamp:Date.now(),runId:'pre',hypothesisId:'H1'})}).catch(()=>{}); } catch(e){}
-  // #endregion
   articleState = state;
   currentGenTopic = state.topic;
   document.getElementById('genEmpty').style.display = 'none';
@@ -3929,9 +3920,6 @@ function scrollToPlacementZone() {
 }
 
 function setGenPhase(phase) {
-  // #region agent log
-  try { fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'891da2'},body:JSON.stringify({sessionId:'891da2',location:'ui/index.html:setGenPhase',message:'setGenPhase called',data:{phase:phase,panelExists:!!document.getElementById('phase-'+phase)},timestamp:Date.now(),runId:'pre',hypothesisId:'H1'})}).catch(()=>{}); } catch(e){}
-  // #endregion
   currentGenPhase = phase;
   document.querySelectorAll('.wb-panel').forEach(p => p.classList.remove('active'));
   document.getElementById('phase-' + phase)?.classList.add('active');
@@ -4451,9 +4439,6 @@ function refreshSectionsGate() {
   // reload/poll and hide the re-generation banner.
   const styleStale = articleState.stale && articleState.stale.sections === 'placementStyle';
   const gateReady = allReady && !styleStale;
-  // #region agent log
-  try { fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'891da2'},body:JSON.stringify({sessionId:'891da2',location:'ui/index.html:refreshSectionsGate',message:'sections gate eval',data:{allReady:allReady,styleStale:styleStale,gateReady:gateReady,stale:JSON.stringify(articleState.stale||{}),sectionsCount:(articleState.sections||[]).length,placementStyle:articleState.placementStyle},timestamp:Date.now(),runId:'pre',hypothesisId:'H1'})}).catch(()=>{}); } catch(e){}
-  // #endregion
   articleState.phaseDone.sections = gateReady;
   const btnSectionsNext = document.getElementById('btnSectionsNext');
   if (btnSectionsNext) btnSectionsNext.disabled = !gateReady;
@@ -4659,6 +4644,7 @@ function renderPlacements() {
         <button class="btn btn-primary btn-sm" onclick="setPlacementStatus('products',${idx},'accepted')">接受</button>
         <button class="btn btn-danger-ghost btn-sm" onclick="setPlacementStatus('products',${idx},'rejected')">驳回</button>
         <button class="btn btn-secondary btn-sm" onclick="removePlacement('products',${idx})">删除</button>
+        <button class="btn btn-secondary btn-sm" onclick="parseProductCard(${idx})"${p.url ? '' : ' disabled title="请先填写产品链接"'}>解析链接</button>
       </div>`;
     pBox.appendChild(card);
   });
@@ -4720,6 +4706,58 @@ function editProductReview(idx, field, val) {
   setPlacementsDirty();
   saveToRun();
   refreshPlacementsGate();
+}
+
+// One-click parse: hit /api/povison-products/parse-card and backfill the
+// product card (name, image, specs, reviewQuote, blurb) from the PDP URL.
+// Only fills fields the API returned (ok=true with non-empty values); the
+// operator keeps any pre-existing content for fields the API couldn't fill.
+function parseProductCard(idx) {
+  if (!articleState || !articleState.products || !articleState.products[idx]) return;
+  var p = articleState.products[idx];
+  var url = (p.url || '').trim();
+  if (!url) { showToast('请先填写产品链接', ''); return; }
+  var style = articleState.placementStyle || 'inline';
+  var topic = articleState.topic || {};
+  // Locate the clicked button to show in-flight state.
+  var cards = document.querySelectorAll('#productPlaceList .place-card');
+  var btn = null;
+  if (cards[idx]) {
+    var btns = cards[idx].querySelectorAll('.wb-actions .btn');
+    for (var i = 0; i < btns.length; i++) {
+      if (btns[i].textContent.indexOf('解析链接') >= 0) { btn = btns[i]; break; }
+    }
+  }
+  if (btn) { btn.disabled = true; btn.textContent = '解析中…'; }
+  bridgeFetch('/api/povison-products/parse-card', {
+    method: 'POST',
+    body: JSON.stringify({ url: url, style: style, topic: topic })
+  }).then(function (data) {
+    if (!data || !data.ok) {
+      throw new Error((data && data.error) || '解析失败');
+    }
+    if (data.name) p.name = data.name;
+    if (data.image) p.image = data.image;
+    if (data.url) p.url = data.url;
+    if (data.price != null) p.price = data.price;
+    if (data.review_count != null) p.review_count = data.review_count;
+    if (style === 'editorial') {
+      if (data.specs && typeof data.specs === 'object') p.specs = data.specs;
+      if (data.reviewQuote && typeof data.reviewQuote === 'object') p.reviewQuote = data.reviewQuote;
+    }
+    if (data.blurb) p.blurb = data.blurb;
+    articleState._placementsBackfilled = true;
+    setPlacementsDirty();
+    renderPlacements();
+    refreshPlacementsGate();
+    saveToRun();
+    persistArticleState();
+    showToast('已解析填入：' + (data.name || p.url), 'success');
+  }).catch(function (e) {
+    showToast('解析失败：' + e.message, '');
+  }).finally(function () {
+    if (btn) { btn.disabled = false; btn.textContent = '解析链接'; }
+  });
 }
 
 // ---- Placement style + mutation helpers (L item, phase-1 non-destructive) ----
@@ -5315,6 +5353,21 @@ function buildTocHtml() {
   const toc = [];
   if (hasIntro) toc.push({ text: 'Introduction', id: 'introduction', children: [] });
   toc.push.apply(toc, items);
+  // Mirror server _toc_html: editorial + exactly 3 accepted cards → TOC entry
+  // before Conclusion, linking to #povison-picks (same heading as the picks H2).
+  if ((articleState.placementStyle || 'inline') === 'editorial') {
+    var acceptedPicks = (articleState.products || []).filter(function(p) {
+      return p && p.status === 'accepted';
+    });
+    if (acceptedPicks.length === 3) {
+      var editorialTocTitle = (articleState.editorialTitle || '').trim();
+      if (!editorialTocTitle) {
+        var topicTitle = (articleState.topic && articleState.topic.title || '').trim();
+        editorialTocTitle = topicTitle ? ('POVISON Picks — ' + topicTitle) : 'POVISON Picks';
+      }
+      toc.push({ text: editorialTocTitle, id: 'povison-picks', children: [] });
+    }
+  }
   if (hasConclusion) toc.push({ text: 'Conclusion', id: 'conclusion', children: [] });
   const faqKids = [];
   (articleState.faq || []).forEach((f, i) => {
@@ -7423,9 +7476,6 @@ async function bridgeBrainstormTopics() {
     showToast('请先在关键词页选择品类并开启联想关键词', '');
     return;
   }
-  // #region agent log
-  fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d4e3c'},body:JSON.stringify({sessionId:'5d4e3c',location:'index.html:bridgeBrainstormTopics',message:'BS_CLICK',data:{kwLen:(KEYWORDS&&KEYWORDS.length)||0,selKw:selectedKeywords.size,selCat:selectedCategories.size},timestamp:Date.now(),runId:'repro2',hypothesisId:'H5'})}).catch(()=>{});
-  // #endregion agent log
   const btn = document.querySelector('[onclick="bridgeBrainstormTopics()"]');
   JobProgress.start('topic-brainstorm', [btn]);
   try {
@@ -7547,15 +7597,6 @@ async function bridgeGenerateSection(mode, sectionId) {
 
 async function bridgeValidateAndPreview() {
   if (!(await bridgeHealth())) return;
-  // #region agent log
-  try {
-    var _ap = (articleState && articleState.products) || [];
-    var _acc = _ap.filter(function(p){return p && p.status === 'accepted';});
-    var _il = 0;
-    (articleState && articleState.sections || []).forEach(function(s){var c=(s&&s.content)||'';var m=c.match(/\]\((https?:\/\/[^)]*povison\.com[^)]*)\)/g);if(m)_il+=m.length;});
-    fetch('http://127.0.0.1:7552/ingest/6dae660f-ff9f-42cd-9716-19333bd7e7cb',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'891da2'},body:JSON.stringify({sessionId:'891da2',location:'ui/index.html:bridgeValidateAndPreview',message:'组装预览 clicked — UI articleState',data:{placementStyle:articleState&&articleState.placementStyle,acceptedCount:_acc.length,allStatuses:_ap.map(function(p){return p&&p.status;}),inlineLinksInSections:_il,hasCandidatePool:!!(articleState&&articleState._candidatePool),linksCount:((articleState&&articleState.links)||[]).length,editorialTitle:articleState&&articleState.editorialTitle},timestamp:Date.now(),runId:'pre',hypothesisId:'H1'})}).catch(()=>{});
-  } catch(e){}
-  // #endregion
   // Editorial/inline mismatch guard (same as confirmPlacements): block preview
   // assembly when editorial mode is selected but the body sections still carry
   // inline-mode content — otherwise the assembled blog would not be editorial.

@@ -18,6 +18,10 @@ Browser (Studio UI)  ──HTTP──►  Bridge (FastAPI :8766)  ──subproce
 | `requirements.txt` | `fastapi`, `uvicorn`, `httpx` |
 | `.venv/` | Local venv (created by `./start.sh install`) |
 
+## Manual QA (editorial / placements / parse-card)
+
+手测跑测步骤与日志判定标准见 [docs/manual-qa-editorial-placements.md](docs/manual-qa-editorial-placements.md)。
+
 ## Quick start
 
 ```bash
@@ -63,6 +67,7 @@ Other modes: `./start.sh bridge` (UI only) · `./start.sh gateway` (agent only) 
 | `POST /api/povison-products/scrape` | Body `{url}` → fallback PDP scrape (JSON-LD Product) |
 | `POST /api/povison-products/enrich-image` | Body `{url}` → `{ok, image, name?}` (Detail API first, scrape fallback) |
 | `POST /api/povison-products/enrich-batch` | Body `{products: [{url, name?}]}` → updated products with `image` filled where missing |
+| `POST /api/povison-products/parse-card` | Body `{url, style?, topic?}` → one-click parse a PDP URL into a full product card. Chains `lookup_detail` (name/image/specs/price) + `povison-reviews/by-url` (reviewQuote, editorial only) + `llm_client.chat` (blurb). Each sub-step degrades independently (failed step → `null` for that field, not a 500). `style="editorial"` returns `specs` + `reviewQuote`; `style="inline"` (default) omits them. |
 | `GET /api/povison-blog/health` | POVISON blog sitemap reachability + cached article count (no secrets) |
 | `POST /api/povison-blog/search` | Body `{keyword, limit?}` → ranked blog articles `{url, slug, title_guess, category, score, reasons}` |
 | `POST /api/povison-blog/recommend-links` | Body `{topic: {primary_keyword, secondary_keywords, category_keywords}, sections, existing_urls?, limit?}` → `links[]` ready for `articleState.links` (all URLs real povison.com/blog/ articles from the sitemap) |
@@ -245,6 +250,14 @@ on every save, covering both the Agent and script paths.
       cards, or when the operator wants a fresh pick.
     - **补全缺图** — calls `POST /api/povison-products/enrich-batch` for products that have a
       `url` but no `image`; fills `image` from the Detail API (scrape fallback).
+    - **解析链接** (per-card) — calls `POST /api/povison-products/parse-card` for a single
+      product card. Parses the PDP `url` into a full card: name, image, price, and (editorial
+      mode only) `specs` (dimensions/mechanism/material/colors) + `reviewQuote`, then generates
+      the blurb via the LLM (90-150 words editorial / 40-70 words inline). Each sub-step is
+      independent — a failed lookup/review/LLM step leaves that field untouched rather than
+      failing the whole card. Use to backfill a card whose URL is known but whose details were
+      never fetched, or to refresh a card after the PDP changed. Disabled when the card has no
+      `url`.
     - **校验链接有效性** — calls `POST /api/tasks/{id}/steps/3/verify-placements` which does a
       parallel HTTP liveness check (HEAD→GET, 10s timeout, povison host whitelist) on every
       product + link URL. Dead URLs (4xx/5xx/unreachable) are written to
