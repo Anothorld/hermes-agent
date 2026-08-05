@@ -87,10 +87,31 @@ def cmd_add_candidate(args: argparse.Namespace) -> None:
 
 
 def cmd_list_candidates(args: argparse.Namespace) -> None:
-    print_json(client_from_args(args).request(
+    data = client_from_args(args).request(
         "GET", f"/campaigns/{args.campaign_id}/candidates",
         params={"env": args.env},
-    ))
+    )
+    if getattr(args, "summary", False):
+        cands = data.get("candidates") if isinstance(data, dict) else None
+        if not isinstance(cands, list):
+            cands = data if isinstance(data, list) else []
+        by_status: dict[str, int] = {}
+        for row in cands:
+            if not isinstance(row, dict):
+                continue
+            st = str(row.get("candidate_status") or "unknown")
+            by_status[st] = by_status.get(st, 0) + 1
+        print_json({
+            "summary": True,
+            "count": len(cands),
+            "by_status": by_status,
+            "note": (
+                "Full candidate JSON omitted — use count/by_status for "
+                "bootstrap stats; membership via rpa_precheck_handle."
+            ),
+        })
+        return
+    print_json(data)
 
 
 def cmd_list_candidate_handles(args: argparse.Namespace) -> None:
@@ -98,6 +119,26 @@ def cmd_list_candidate_handles(args: argparse.Namespace) -> None:
         "GET", f"/campaigns/{args.campaign_id}/candidate-handles",
         params={"env": args.env},
     )
+    if getattr(args, "summary", False):
+        handles = list(data.get("handles") or [])
+        items = data.get("items") or []
+        by_status: dict[str, int] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            st = str(item.get("candidate_status") or "unknown")
+            by_status[st] = by_status.get(st, 0) + 1
+        print_json({
+            "summary": True,
+            "count": len(handles) or len(items),
+            "by_status": by_status,
+            "sample": handles[:20],
+            "note": (
+                "Full handle list omitted to protect LLM context; "
+                "use rpa_precheck_handle for exclusion checks."
+            ),
+        })
+        return
     if args.plain:
         items = data.get("items") or []
         if args.with_status:
@@ -267,6 +308,12 @@ def register(sub: "argparse._SubParsersAction") -> None:
     add_common_args(p)
     add_env_arg(p)
     p.add_argument("--campaign-id", required=True)
+    p.add_argument(
+        "--summary",
+        action="store_true",
+        help=("Print count + by_status only (bootstrap-safe; avoids dumping "
+              "hundreds of candidate rows into the LLM context)."),
+    )
     p.set_defaults(func=cmd_list_candidates)
 
     p = sub.add_parser(
@@ -283,6 +330,11 @@ def register(sub: "argparse._SubParsersAction") -> None:
         help=("With --plain, print '<handle>\\t<candidate_status>' TSV rows "
               "so callers can build a status-bucketed exclusion set without "
               "pulling the full JSON items array."),
+    )
+    p.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print count + sample only (bootstrap-safe).",
     )
     p.set_defaults(func=cmd_list_candidate_handles)
 

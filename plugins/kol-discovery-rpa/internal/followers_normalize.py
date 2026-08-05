@@ -8,9 +8,9 @@ Synced with ``instagram-kol-discovery`` SKILL.md L149:
     亿 = 100,000,000
 
 Examples:
-    "125K"  → 125000  (passes ≥100k)
-    "73.8万" → 738000 (passes ≥100k)
-    "4.6万"  → 46000  (fails <100k)
+    "125K"  → 125000  (passes ≥80k)
+    "73.8万" → 738000 (passes ≥80k)
+    "4.6万"  → 46000  (fails <80k)
     "1.2M"  → 1200000
     "3.5B"  → 3500000000
 """
@@ -86,10 +86,10 @@ def normalize_followers(raw: str | int | float | None) -> int:
 
 
 def is_borderline(followers: int) -> bool:
-    """Check if follower count is in the 100k-110k borderline range.
+    """Check if follower count is in the borderline band [MIN, BORDERLINE_MAX).
 
-    Per skill L149-155, Agent must either ingest or discard with explicit
-    reason — never "pending verification".
+    Per skill Roles And Qualification, Agent must either ingest or discard
+    with an explicit reason — never "pending verification".
     """
     import sys
     from pathlib import Path

@@ -22,25 +22,13 @@ def _reel(n: int, views: int = 100_000) -> dict:
     }
 
 
-def test_text_mode_caption_comments_only():
-    reels = [_reel(i) for i in range(12)]
-    plan = build_content_eval_plan(reels, eval_mode="text", handle="textkol")
-
-    assert plan["eval_mode"] == "text"
-    assert plan["videos_target"] == 0
-    assert len(plan["cover_reels"]) == 10
-    assert plan["video_reels"] == []
-    assert plan["selection"]["video_selection"] == "caption_and_comments_only"
-    assert plan["selection"]["screening_basis"] == "caption_and_comments"
-
-
-def test_cover_mode_returns_ten_covers_no_videos():
+def test_cover_mode_returns_two_covers_no_videos():
     reels = [_reel(i, views=i * 10_000) for i in range(15)]
     plan = build_content_eval_plan(reels, eval_mode="cover", handle="testkol")
 
     assert plan["eval_mode"] == "cover"
     assert plan["videos_target"] == 0
-    assert len(plan["cover_reels"]) == 10
+    assert len(plan["cover_reels"]) == 2
     assert plan["video_reels"] == []
     assert plan["cover_reels"][0]["reel_id"] == "reel0"
     assert plan["selection"]["video_selection"] == "covers_only"
@@ -52,12 +40,15 @@ def test_video_mode_random_three_from_recent_ten():
 
     assert plan["eval_mode"] == "video"
     assert plan["videos_target"] == 3
-    assert len(plan["cover_reels"]) == 10
+    assert len(plan["cover_reels"]) == 2
     assert len(plan["video_reels"]) == 3
+    # Videos sampled from recent-10 pool, not limited to the 2 cover slots
     cover_ids = {r["reel_id"] for r in plan["cover_reels"]}
-    for picked in plan["video_reels"]:
-        assert picked["reel_id"] in cover_ids
+    video_ids = {r["reel_id"] for r in plan["video_reels"]}
+    assert video_ids.issubset({f"reel{i}" for i in range(10)})
     assert plan["selection"]["video_selection"] == "random_3_from_recent_10"
+    # At least one video may be outside the 2-cover set
+    assert len(video_ids | cover_ids) >= 2
 
 
 def test_video_mode_deterministic_per_handle():
@@ -67,10 +58,10 @@ def test_video_mode_deterministic_per_handle():
     assert [r["reel_id"] for r in a["video_reels"]] == [r["reel_id"] for r in b["video_reels"]]
 
 
-def test_fewer_than_ten_reels_still_builds_plan():
-    reels = [_reel(0), _reel(1)]
+def test_fewer_than_cover_count_still_builds_plan():
+    reels = [_reel(0)]
     plan = build_content_eval_plan(reels, eval_mode="video", handle="tiny", seed=1)
 
-    assert len(plan["cover_reels"]) == 2
-    assert len(plan["video_reels"]) == 2
-    assert plan["selection"]["pool_size"] == 2
+    assert len(plan["cover_reels"]) == 1
+    assert len(plan["video_reels"]) == 1
+    assert plan["selection"]["pool_size"] == 1

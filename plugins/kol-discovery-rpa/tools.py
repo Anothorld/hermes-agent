@@ -100,7 +100,7 @@ RPA_FETCH_IG_PROFILE_SCHEMA: dict[str, Any] = {
     "description": (
         "Navigate to instagram.com/<handle>/ and extract structured profile "
         "data (followers, bio, account_location, bio_links, is_business, etc.) "
-        "plus profile-level qualification gates (followers ≥100k, region US/CA, "
+        "plus profile-level qualification gates (followers ≥80k, region US/CA, "
         "account type, furniture self-commerce heuristic). The account country "
         "is read from the '...' → '账户简介' / 'About this account' dialog "
         "(authoritative, locale-rendered) and used as the primary region signal. "
@@ -140,13 +140,11 @@ RPA_FETCH_IG_REELS_SCHEMA: dict[str, Any] = {
         "Navigate to the profile Reels tab and extract up to max_reels items "
         "(default 10 — most recent on the grid) with url, views, and "
         "thumbnail_url scraped from the grid img[src]. Also returns a "
-        "content_eval plan: cover_reels = first 10 reel URLs (comment/caption "
-        "targets in text mode; cover download targets when vision ON); "
-        "video_reels = random 3 when video eval is ON. Default screening is "
-        "text mode: call rpa_fetch_reel_comments(include_caption=true) ×10 on "
-        "cover_reels[].url — do NOT call rpa_download_ig_content unless "
-        "KOL_RPA_VISION_EVAL_ENABLED=1. Runs reels-level qualification gates "
-        "(≥5 reels/3mo, avg views ≥30k, reel ER ≥3%, static-only discard)."
+        "content_eval plan: cover_reels = first 2 for vision screening; "
+        "video_reels = random 3 from the recent-10 pool when video eval is ON. Pass "
+        "data.content_eval to rpa_download_ig_content for batch download. "
+        "Runs reels-level qualification gates (≥5 reels/3mo, avg views ≥20k, "
+        "reel ER ≥2%, static-only discard)."
     ),
     "properties": {
         "handle": {"type": "string", "description": "IG handle."},
@@ -160,8 +158,8 @@ RPA_FETCH_IG_REELS_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": True,
             "description": (
-                "Attach content_eval block (10 cover reels + random 3 video "
-                "sample when video mode ON). Default True."
+                "Attach content_eval block (2 cover reels for vision + random "
+                "3 video sample from recent-10 when video mode ON). Default True."
             ),
         },
     },
@@ -173,14 +171,36 @@ RPA_FETCH_GOOGLE_SERP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Navigate to google.com/search?q=<query> and extract SERP results "
-        "(title, url, snippet, rank). For public-web KOL discovery."
+        "(title, url, snippet, rank) plus candidate_handles from profile URLs, "
+        "@mentions, and (by default) authors resolved from /reel/ and /p/ URLs. "
+        "Expect dozens of candidate_handles per query when resolve_authors=true. "
+        "Use candidate_handles for bulk rpa_precheck_handle + "
+        "rpa_fetch_ig_profile (followers/region) triage."
     ),
     "properties": {
         "query": {"type": "string", "description": "Search query (will be URL-encoded)."},
         "max_results": {
             "type": "integer",
+            "default": 30,
+            "maximum": 40,
+            "description": "Organic result rows to return (default 30, max 40).",
+        },
+        "resolve_authors": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Open reel/post URLs from the SERP to recover author handles "
+                "(default true). Disable only for cheap SERP-only probes."
+            ),
+        },
+        "max_author_resolves": {
+            "type": "integer",
             "default": 20,
-            "maximum": 20,
+            "maximum": 30,
+            "description": (
+                "Max reel/post pages to open per SERP call when resolving "
+                "authors (default 20, max 30)."
+            ),
         },
     },
     "required": ["query"],
@@ -203,9 +223,9 @@ RPA_DOWNLOAD_IG_REEL_SCHEMA: dict[str, Any] = {
     "description": (
         "Download an IG Reel as MP4 via yt-dlp + local-chrome cookies. Also "
         "downloads the cover image (--write-thumbnail) for vision_analyze. "
-        "BLOCKED when vision is OFF (KOL_RPA_VISION_EVAL_ENABLED=0, default — "
-        "use caption+comments via rpa_fetch_reel_comments). Also BLOCKED when "
-        "video eval is OFF. Max 3 downloads per candidate when enabled. "
+        "BLOCKED when KOL_RPA_VIDEO_EVAL_ENABLED=0 or brief rpa_video_eval_enabled=false "
+        "(use rpa_download_ig_cover for cover-only in cover mode). "
+        "Max 3 downloads per candidate when enabled. Auto-cleans files >1h old. "
         "Returns file_path, file_size_bytes, thumbnail_url, cover_path, reel_id. "
         "Requires yt-dlp on PATH (pip install yt-dlp); ffmpeg recommended for best quality."
     ),
@@ -222,10 +242,10 @@ RPA_DOWNLOAD_IG_COVER_SCHEMA: dict[str, Any] = {
     "description": (
         "Download a single IG Reel cover image (no video). Prefer "
         "thumbnail_url from rpa_fetch_ig_reels grid RPA (HTTP fetch); "
-        "falls back to yt-dlp --write-thumbnail --skip-download. "
-        "BLOCKED when vision is OFF (KOL_RPA_VISION_EVAL_ENABLED=0, default). "
-        "For cover-mode screening only when vision is re-enabled. "
-        "Returns cover_path, file_size_bytes, thumbnail_url, reel_id, source."
+        "falls back to yt-dlp --write-thumbnail --skip-download. For cover-mode "
+        "content screening (KOL_RPA_VIDEO_EVAL_ENABLED=0). Not gated by the "
+        "video-eval switch. Returns cover_path, file_size_bytes, thumbnail_url, "
+        "reel_id, source."
     ),
     "properties": {
         "reel_url": {"type": "string", "description": "IG Reel URL."},
@@ -245,11 +265,11 @@ RPA_DOWNLOAD_IG_CONTENT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Batch-download content-eval assets after rpa_fetch_ig_reels. "
-        "BLOCKED when vision is OFF (KOL_RPA_VISION_EVAL_ENABLED=0, default — "
-        "use rpa_fetch_reel_comments with include_caption=true instead). "
-        "When vision ON: downloads cover_reels for vision_analyze; when video "
-        "eval ON also downloads video_reels MP4s. Pass data.content_eval from "
-        "the fetch response. Partial failures reported in data.errors."
+        "Downloads cover_reels (default 2 profile-grid thumbnails → local files "
+        "for vision_analyze). When video eval is ON, also downloads video_reels "
+        "(random 3 from the recent-10 pool) as MP4 for video_analyze. Pass "
+        "the data.content_eval block from the fetch response. Partial failures "
+        "are reported per reel in data.errors."
     ),
     "properties": {
         "content_eval": {
@@ -277,7 +297,7 @@ RPA_FETCH_REEL_COMMENTS_SCHEMA: dict[str, Any] = {
         "reel_url": {"type": "string"},
         "mode": {"type": "string", "enum": ["evaluation", "discovery"], "default": "evaluation"},
         "max_items": {"type": "integer", "default": 15},
-        "min_followers_hint": {"type": "integer", "default": 100000},
+        "min_followers_hint": {"type": "integer", "default": 80000},
         "include_caption": {"type": "boolean", "default": True},
         "scroll_comments": {"type": "integer", "default": 0},
     },
@@ -590,15 +610,27 @@ def _handle_fetch_google_serp(args: dict, *, task_id: str = "", **_: Any) -> str
     if not query:
         return tool_error("query is required", code="missing_arg")
 
-    max_results = min(int(args.get("max_results", 20)), 20)
+    max_results = min(int(args.get("max_results", 30)), 40)
+    resolve_authors = args.get("resolve_authors", True)
+    if isinstance(resolve_authors, str):
+        resolve_authors = resolve_authors.strip().lower() not in {"0", "false", "no"}
+    max_author_resolves = min(int(args.get("max_author_resolves", 20)), 30)
     runner = CdpRunner(task_id)
-    result = fetch_serp(runner, query, max_results=max_results)
+    result = fetch_serp(
+        runner,
+        query,
+        max_results=max_results,
+        resolve_authors=bool(resolve_authors),
+        max_author_resolves=max_author_resolves,
+    )
+    data = result["data"]
+    page_loads = 1 + int(data.get("author_navigations") or 0)
 
     return tool_result({
         "ok": True,
-        "data": result["data"],
+        "data": data,
         "errors": [],
-        "meta": _meta(task_id, page_loads=1),
+        "meta": _meta(task_id, page_loads=page_loads),
     })
 
 
@@ -652,16 +684,12 @@ def _handle_download_ig_content(args: dict, *, task_id: str = "", **_: Any) -> s
         )
 
     result = download_content_eval(content_eval)
-    if result.get("blocked"):
-        err = (result.get("errors") or [{}])[0]
-        return tool_error(
-            str(err.get("message") or "Vision/multimodal screening is disabled"),
-            code=str(err.get("code") or "vision_eval_disabled"),
-        )
-
-    ok = result["covers_downloaded"] > 0 or (
-        result.get("videos_target", 0) == 0 and result["covers_downloaded"] >= 0
-    )
+    # At least one cover must land; video mode also requires ≥1 video when
+    # videos were requested. Never report ok when every cover failed.
+    covers_ok = int(result.get("covers_downloaded") or 0) > 0
+    videos_target = int(result.get("videos_target") or 0)
+    videos_ok = int(result.get("videos_downloaded") or 0) > 0
+    ok = covers_ok and (videos_ok if videos_target > 0 else True)
 
     return tool_result({
         "ok": ok,
@@ -683,7 +711,7 @@ def _handle_fetch_reel_comments(args: dict, *, task_id: str = "", **_: Any) -> s
     mode = args.get("mode", "evaluation")
     max_items = int(args.get("max_items", 15))
     include_caption = args.get("include_caption", True)
-    min_followers_hint = int(args.get("min_followers_hint", 100000))
+    min_followers_hint = int(args.get("min_followers_hint", 80000))
     scroll_comments = int(args.get("scroll_comments", 0))
 
     runner = CdpRunner(task_id)

@@ -267,32 +267,12 @@ def test_download_cover_prefers_rpa_thumbnail(monkeypatch, tmp_path):
     assert r["source"] == "rpa_thumbnail"
 
 
-def test_download_content_eval_blocked_in_text_mode(monkeypatch, tmp_path):
-    import eval_mode
-    import reel_download
-
-    monkeypatch.setattr(eval_mode, "resolve_eval_mode", lambda brief=None: "text")
-    plan = {
-        "eval_mode": "text",
-        "cover_reels": [
-            {"reel_id": "a", "url": "https://www.instagram.com/reel/a/", "thumbnail_url": "https://x/a.jpg"},
-        ],
-        "video_reels": [],
-    }
-    result = reel_download.download_content_eval(plan, dest_dir=str(tmp_path))
-    assert result["blocked"] is True
-    assert result["covers_downloaded"] == 0
-    assert result["errors"][0]["code"] == "vision_eval_disabled"
-
-
 def test_download_content_eval_cover_only(monkeypatch, tmp_path):
     """download_content_eval downloads all cover_reels; skips videos in cover mode."""
     import eval_mode
     import reel_download
 
     monkeypatch.setattr(eval_mode, "resolve_eval_mode", lambda brief=None: "cover")
-
-    covers = []
 
     def fake_cover(reel_url, **kw):
         rid = reel_download._reel_id_from_url(reel_url)
@@ -316,6 +296,37 @@ def test_download_content_eval_cover_only(monkeypatch, tmp_path):
     assert result["covers_downloaded"] == 2
     assert result["videos_downloaded"] == 0
     assert result["videos"] == []
+
+
+def test_download_content_eval_surfaces_detail_on_failure(monkeypatch, tmp_path):
+    """Cover download failures must return code+detail — not AttributeError on .message."""
+    import eval_mode
+    import reel_download
+    from errors import DownloadError
+
+    monkeypatch.setattr(eval_mode, "resolve_eval_mode", lambda brief=None: "cover")
+
+    def boom(reel_url, **kw):
+        raise DownloadError("thumbnail_fetch_failed", "HTTP Error 403: Forbidden")
+
+    monkeypatch.setattr(reel_download, "download_cover", boom)
+
+    plan = {
+        "eval_mode": "cover",
+        "covers_target": 1,
+        "videos_target": 0,
+        "cover_reels": [
+            {"reel_id": "a", "url": "https://www.instagram.com/reel/a/", "thumbnail_url": "https://x/a.jpg"},
+        ],
+        "video_reels": [],
+    }
+    result = reel_download.download_content_eval(plan, dest_dir=str(tmp_path))
+    assert result["covers_downloaded"] == 0
+    assert result["partial"] is True
+    assert result["errors"][0]["code"] == "thumbnail_fetch_failed"
+    assert "403" in result["errors"][0]["message"]
+    assert result["covers"][0]["ok"] is False
+    assert result["covers"][0]["error_code"] == "thumbnail_fetch_failed"
 
 
 def test_reel_id_from_url():

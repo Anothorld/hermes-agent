@@ -56,6 +56,23 @@ def cmd_list_outreach_cooldown_handles(args: argparse.Namespace) -> None:
         "/outreach-touch/cooldown-handles",
         params={"env": args.env, "limit": args.limit},
     )
+    if getattr(args, "summary", False):
+        items = data.get("items") or []
+        handles = [
+            str(row.get("handle"))
+            for row in items
+            if isinstance(row, dict) and row.get("handle")
+        ]
+        print_json({
+            "summary": True,
+            "count": int(data.get("count") or len(handles)),
+            "sample": handles[:20],
+            "note": (
+                "Full cooldown list omitted — use rpa_precheck_handle for "
+                "membership; do not dump into LLM context."
+            ),
+        })
+        return
     if args.plain:
         for row in data.get("items", []):
             handle = row.get("handle")
@@ -71,6 +88,23 @@ def cmd_list_discovery_skip_handles(args: argparse.Namespace) -> None:
         "/discovery-skip-handles",
         params={"env": args.env, "limit": args.limit},
     )
+    if getattr(args, "summary", False):
+        items = data.get("items") or []
+        handles = [
+            str(row.get("handle"))
+            for row in items
+            if isinstance(row, dict) and row.get("handle")
+        ]
+        print_json({
+            "summary": True,
+            "count": int(data.get("count") or len(handles)),
+            "sample": handles[:20],
+            "note": (
+                "Full skip list omitted — use rpa_precheck_handle for "
+                "membership; do not dump into LLM context."
+            ),
+        })
+        return
     if args.plain:
         for row in data.get("items", []):
             handle = row.get("handle")
@@ -366,6 +400,11 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--limit", type=int, default=5000)
     p.add_argument("--plain", action="store_true",
                    help="Print one handle per line (for brief exclusion sets).")
+    p.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print count + sample only (bootstrap-safe).",
+    )
     p.set_defaults(func=cmd_list_outreach_cooldown_handles)
 
     p = sub.add_parser(
@@ -378,6 +417,11 @@ def register(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--limit", type=int, default=10_000)
     p.add_argument("--plain", action="store_true",
                    help="Print one handle per line (for brief exclusion sets).")
+    p.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print count + sample only (bootstrap-safe).",
+    )
     p.set_defaults(func=cmd_list_discovery_skip_handles)
 
     p = sub.add_parser(

@@ -238,7 +238,7 @@ def test_non_dict_eval_raises():
 # --------------------------------------------------------------- qualification wiring
 
 def test_followers_below_min_hard_discard():
-    """A real sub-100k profile (followers extracted) still hard_discards."""
+    """A real sub-80k profile (followers extracted) still hard_discards."""
     runner = _FakeRunner(
         "t1",
         [_profile_result(followers_raw="4.6万", location_signals=["US"], bio="decor")],
@@ -246,7 +246,7 @@ def test_followers_below_min_hard_discard():
     out = ig_profile.fetch_profile(runner, "smallkol", include_account_location=False)
     assert out["data"]["followers_raw"] == "4.6万"
     assert out["qualification"]["hard_discard"] is True
-    assert "followers_below_100k" in out["qualification"]["discard_reasons"]
+    assert "followers_below_min" in out["qualification"]["discard_reasons"]
 
 
 def test_handle_strips_at_prefix():

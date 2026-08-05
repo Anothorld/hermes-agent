@@ -60,7 +60,7 @@ If no brief exists, infer a provisional persona from product category + visible 
 
 When the `kol-discovery-rpa` toolset is available, use RPA tools instead of step-by-step `browser_*` for the main discovery path. RPA tools return structured JSON with a `qualification` block — no need to parse snapshots or count followers manually.
 
-**Hard rule: `qualification.hard_discard=true` → Agent MUST discard, cannot override with learned criteria.** Mechanical gates (followers ≥100k, region US/CA, ≥5 reels/3mo, avg views ≥30k, reel ER ≥3%) are evaluated by the RPA tool. The Agent still decides `agent_judgment_required` items (product_context, match_score, showcase_score).
+**Hard rule: `qualification.hard_discard=true` → Agent MUST discard, cannot override with learned criteria.** Mechanical gates (followers ≥80k, region US/CA, ≥5 reels/3mo, avg views ≥20k, reel ER ≥2%) are evaluated by the RPA tool. The Agent still decides `agent_judgment_required` items (product_context, match_score, showcase_score).
 
 ### Main path (no `browser_*` needed)
 
@@ -70,39 +70,44 @@ When the `kol-discovery-rpa` toolset is available, use RPA tools instead of step
    → hard_discard? skip to next handle
 3. rpa_fetch_ig_profile(handle)                  → profile data + qualification.gates.followers/region
    → hard_discard? log discard_reason, next handle
-4. rpa_fetch_ig_reels(handle, max_reels=10)      → 10 reels + content_eval plan (text mode)
+4. rpa_fetch_ig_reels(handle, max_reels=10)      → 10 reels + thumbnail_url + content_eval plan
    → hard_discard? discard
-5. [gates all pass OR deferred] caption + comments → content screening (Step 1.5)
-6. ingest-confirmed-candidate
+5. rpa_download_ig_content(content_eval)           → 10 cover files (+ 3 random videos when ON)
+6. [gates all pass OR deferred] 2 covers + 10 comments → content screening (Step 1.5)
+7. [switch ON] content_eval.video_reels → video_analyze → deep eval
+8. ingest-confirmed-candidate
 ```
 
 ### Per-candidate todo checklist (HARD)
 
-每个进入内容筛选的候选，**必须**用 `todo` 工具创建一个步骤清单，逐步勾选完成。**当前默认（视觉禁用）**模板：
+每个进入内容筛选的候选，**必须**用 `todo` 工具创建一个步骤清单，逐步勾选完成，防止遗漏封面/评论/视觉评估。清单模板：
 
 ```
 todo: evaluate <handle>
   □ rpa_fetch_ig_profile(handle)          → gates pass / hard_discard?
-  □ rpa_fetch_ig_reels(handle, max_reels=10)  → content_eval (eval_mode=text)
-  □ rpa_fetch_reel_comments ×10 (mode=evaluation, include_caption=true)
-        → caption (作者对视频的描述) + comments + reel_likes (MANDATORY)
-  □ compute Match/Showcase scores         → caption themes + comment evidence ONLY
-  □ ingest-confirmed-candidate            → payload content_eval_mode=text_caption_comments
+  □ rpa_fetch_ig_reels(handle, max_reels=10)  → content_eval plan
+  □ rpa_download_ig_content(content_eval)  → 2 cover_path files downloaded (MANDATORY)
+  □ rpa_fetch_reel_comments ×10 (mode=evaluation)  → reel_likes + comments per reel
+  □ vision_analyze ×2 (image_path=cover_path, prompt=comments+caption)  → style/scene eval (MANDATORY)
+  □ [ON] video_analyze ×3 (video_reels)   → on_camera/demo skill
+  □ [ON] rpa_cleanup_reels                → delete downloaded MP4s
+  □ compute Match/Showcase scores         → merge covers + comments + (videos if ON)
+  □ ingest-confirmed-candidate            → payload with content_eval_mode/covers_evaluated
 ```
 
 **禁止**在 todo 清单未全部勾选前 ingest。如果某步失败（如评论返回 0 条），在 todo 中标注失败原因后可继续下一步——但不能跳过整个步骤。
 
-**视觉/多模态已禁用（HARD，默认）：** 不要调用 `vision_analyze`、`video_analyze`、`rpa_download_ig_content`、`rpa_download_ig_cover`、`rpa_download_ig_reel`。内容筛选只依据 `rpa_fetch_reel_comments` 返回的 **caption（作者描述）+ comments**。Hook 会拦截上述工具（`KOL_RPA_VISION_EVAL_ENABLED=0`）。重新启用视觉时设 `KOL_RPA_VISION_EVAL_ENABLED=1` 并遵循下方「视觉模式（可选）」段落。
+**`rpa_download_ig_content` 和 `vision_analyze` 标注了 MANDATORY — 跳过这两个步骤直接 ingest 是 HARD 违规。** `rpa_download_ig_content` 接受 `rpa_fetch_ig_reels` 返回的 `data.content_eval` 对象作为参数，批量下载 **2** 张封面到本地文件。`vision_analyze` 接受 `image_path`（封面文件路径）或 `image_url`（`thumbnail_url`），用 `glm-5v-turbo` 视觉模型评估封面风格/场景适配。
 
 ### Deferred ER gate — 内容筛选仍然必须
 
 当 `qualification.gates.reel_er.value == "deferred"`（`reason="likes_comments_unavailable_from_grid"`），ER gate **已通过**（`pass=true`，不是 hard_discard）。这是因为 `/reels/` 网格只提供播放量，不提供点赞/评论数——不是真实的 0% ER。
 
-deferred 意味着 Agent **必须**在内容筛选阶段从 `rpa_fetch_reel_comments` 的 `reel_likes` + `reel_comments_count` 重新计算真实 ER，而非跳过内容筛选直接入库。真实 ER 低于 3% 时，在 ingest payload 中注明 `reel_er_computed: <value>` 供运营审查。
+deferred 意味着 Agent **必须**在内容筛选阶段从 `rpa_fetch_reel_comments` 的 `reel_likes` + `reel_comments_count` 重新计算真实 ER，而非跳过内容筛选直接入库。真实 ER 低于 2% 时，在 ingest payload 中注明 `reel_er_computed: <value>` 供运营审查。
 
 ### Browser stack (RPA 落地后)
 
-**Default (HARD):** Discovery main path uses `rpa_*` + caption/comments screening, NOT `browser_*` and NOT multimodal vision.
+**Default (HARD):** Discovery main path uses `rpa_*` + `vision_analyze`/`video_analyze`, NOT `browser_*`.
 
 **`browser_*` is allowed ONLY for:**
 1. RPA fallback (`meta.fallback_hint` points to browser; tool returned `ok=false` with `dom_changed`)
@@ -161,65 +166,71 @@ Search by **conversion mechanism**, not niche label: milestone lifestyle, daily-
 
 对通过机械硬门槛（`qualification.hard_discard=false` 或 `reel_er.value="deferred"`）的候选，**必须**执行内容筛选。不得仅凭 profile 文字和播放量数字打 Showcase 分。
 
-### 硬规则：Caption + 评论（默认；视觉禁用）(HARD)
+### 硬规则：封面 + 评论缺一不可 (HARD)
 
-**当前默认：视觉/多模态关闭。** 内容筛选只使用文本信号：
+内容筛选由**两个支柱**组成，**两者都必须执行**，缺一不可：
 
-1. **作者描述（caption）**：`rpa_fetch_reel_comments(..., include_caption=true)` 返回的 caption / hashtags — 评估内容主题、场景声称、product mention
-2. **评论**：同工具返回的 comments — 评估 voice_descriptors、audience_vibe、signature_hooks、真实 ER
+1. **封面视觉评估**：`rpa_download_ig_content` → `vision_analyze` ×**2** — 评估内容垂类分布、视觉风格、场景适配、product_placement（成本控制：仅最近 2 条封面）
+2. **评论采集**：`rpa_fetch_reel_comments(mode=evaluation)` ×10 — 评估 voice_descriptors、audience_vibe、signature_hooks、真实 ER
 
-**禁止**调用 `vision_analyze` / `video_analyze` / `rpa_download_ig_*`（cover/content/reel）做内容筛选。不得用浏览器截图识图替代。
+**禁止只做评论不做封面，也禁止只做封面不做评论。** 仅做评论采集而跳过 `rpa_download_ig_content` + `vision_analyze` 是违规——封面视觉是 Showcase 分的核心依据，评论无法替代。
 
-### 默认流程（text mode，HARD）
+**`vision_analyze` 工具在 `vision` 工具集里，使用 `glm-5v-turbo` 模型。传入 `image_path`（本地封面文件路径，来自 `rpa_download_ig_content` 的 `cover_path`）或 `image_url`（`thumbnail_url`），prompt 嵌入对应 Reel 的 comments + caption。**
 
-1. `rpa_fetch_ig_reels(handle, max_reels=10)` → `data.content_eval`（`eval_mode: "text"`；`cover_reels`=最近 10 条 URL，作评论目标）
-2. 对 **10 条** `cover_reels[].url` 各一次 `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` → caption + comments + likes/comments counts
-3. **汇总 10 组 caption + 评论** → 内容主题分布、风格一致性、场景声称、voice_descriptors → Match / Showcase
-4. ingest（见 payload 字段）
+### 开关：2 封面 + 评论（OFF，默认）/ 2 封面 + 3 视频 + 评论（ON）
 
-### 合并打分权重（text mode）
+| 开关来源 | 值 | 筛选组合 |
+|---------|-----|---------|
+| brief `rpa_video_eval_enabled: false` / env `KOL_RPA_VIDEO_EVAL_ENABLED=0` / 默认 | OFF | **2 封面 + 10 评论** |
+| brief `rpa_video_eval_enabled: true` / env `KOL_RPA_VIDEO_EVAL_ENABLED=1` | ON | **2 封面 + 3 视频 + 10 评论** |
 
-- **Caption（10 组）**：主题/场景/产品提及 — 替代原封面视觉广度
-- **评论（10 组）**：audience_vibe、voice_descriptors、signature_hooks、ER — 始终参与
-- Showcase 的「visual quality / on_camera」在 text mode 下改为 **caption 场景声称 + 评论侧证**；勿臆造未见过的画面细节
+### 公共流程（OFF/ON 共有，HARD）
+
+1. `rpa_fetch_ig_reels(handle, max_reels=10)` → 主页 Reels 网格最近 10 条 + `thumbnail_url` + `data.content_eval`（`cover_reels`=**最近 2 条**；`video_reels`=从最近 10 条中**随机**抽 3 条，仅 ON 时有值）
+2. `rpa_download_ig_content(content_eval=<上一步 data.content_eval>)` → 批量下载 **2** 张封面到本地（优先 RPA `thumbnail_url`；失败则 yt-dlp）；ON 时另下载 `video_reels` 的 3 个 MP4
+3. 对 **10 条 Reel 各一次** `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` → 10 组 comments + caption（ER / voice）
+4. 对 **2 张封面** 各 `vision_analyze(image_path=cover_path, …)` 或 `image_url=thumbnail_url` — prompt 嵌入该 Reel 的 comments + caption
+5. **汇总 2 封面 + 10 评论** → 内容主题分布、风格一致性、场景多样性、voice_descriptors
+
+单条封面也可：`rpa_download_ig_cover(reel_url, thumbnail_url=<RPA 值>)`。
+
+### 开关 ON 追加（3 视频深评）
+
+6. `content_eval.video_reels` 已是最近 10 条中的**随机 3 条**（非播放量 top 3）；`rpa_download_ig_content` 已下载 MP4 → 对每条 `video_analyze`（prompt 嵌入对应 comments）
+7. **最终合并**：2 封面视觉 + 10 组评论（广度）+ 3 视频视觉（深度演示/on_camera）→ Showcase / Match
+
+### 合并打分权重
+
+- **评论（10 组）**：audience_vibe、voice_descriptors、signature_hooks — 始终参与
+- **2 封面**：内容垂类分布、视觉风格、场景适配 — 轻量视觉筛
+- **3 视频（仅 ON）**：on_camera_skill、动态演示、product_placement — 深度加分
 
 ### 成本控制 (HARD)
 
 | 模式 | 每候选上限 |
 |------|-----------|
-| text（默认） | 10× `rpa_fetch_reel_comments(include_caption=true)` |
-| cover（需 `KOL_RPA_VISION_EVAL_ENABLED=1`） | 上述 + 10× vision_analyze + cover download |
-| video（vision ON + `KOL_RPA_VIDEO_EVAL_ENABLED=1`） | cover 模式 + 3× video_analyze + cleanup |
+| OFF | 10× comments + 2× vision_analyze(封面) + `rpa_download_ig_content`（2 封面） |
+| ON | 上述 + `rpa_download_ig_content`（含 3 随机视频）+ 3× video_analyze(1fps) + rpa_cleanup_reels |
 
 - 评论：first viewport only，不展开 replies
-- 10 条中某条 comments 为空 → 该条仅用 caption，注明 `comments_partial`
-- 10 条中 ≥6 条有 **caption 或 comments** → 可完成完整筛选
-- 评论大面积失败 → `content_eval_degraded`，payload 披露
+- 10 条中某条 comments 为空 → 该条仅用 caption（封面若在 2 张集合内则一并），注明 `comments_partial`
+- 10 条中 ≥6 条有 comments + **2 张封面均成功** → 可完成完整筛选
+- 封面/评论大面积失败 → `content_eval_degraded`，payload 披露
+- ON 模式：评估完必须 `rpa_cleanup_reels` 清理下载的 MP4
 
 ### ingest payload 记录
 
 `candidate.payload` 写入：
-- `content_eval_mode: "text_caption_comments" | "cover_only" | "cover_plus_video"`
-- `covers_evaluated: 0`（text mode）或实际封面成功数
+- `content_eval_mode: "cover_only" | "cover_plus_video"`
+- `covers_evaluated: 2`（实际成功数，目标 2）
 - `videos_evaluated: 0 | 3`
 - `comments_collected_count: N`（目标 10）
-- `captions_collected_count: N`（目标 10）
-- `content_eval_basis: "10caption_and_comments" | "10cover_and_comments" | "10cover_3video_and_comments" | "degraded"`
-
-### 视觉模式（可选；默认关闭）
-
-仅当 brief `rpa_vision_eval_enabled: true` 或 env `KOL_RPA_VISION_EVAL_ENABLED=1` 时启用：
-
-| 视频开关 | 筛选组合 |
-|---------|---------|
-| `rpa_video_eval_enabled: false` / `KOL_RPA_VIDEO_EVAL_ENABLED=0` | 10 封面 vision + 10 评论 |
-| `rpa_video_eval_enabled: true` / `KOL_RPA_VIDEO_EVAL_ENABLED=1` | 上述 + 3 随机视频 video_analyze |
-
-流程：`rpa_download_ig_content` → comments ×10 → `vision_analyze` ×10（[+ `video_analyze` ×3]）。**在视觉关闭期间不要走这条路径。**
+- `content_eval_basis: "2cover_and_comments" | "2cover_3video_and_comments" | "degraded"`
 
 ### 何时可跳过内容筛选
 
 - skip list / cooldown / `qualification.hard_discard=true` → 不需要
+- 已有 veedcrawl_extract 覆盖该 Reel → 可复用，不重复识图/下载
 
 **deferred gate ≠ 可跳过内容筛选。** `reel_er.value="deferred"` 表示 gate 已通过（`pass=true`），ER 因网格数据限制暂缓计算——内容筛选**必须**执行，并在筛选阶段从 `rpa_fetch_reel_comments` 的 `reel_likes`/`reel_comments_count` 补算真实 ER。仅凭 profile 文字 + 播放量数字直接入库是**违规**（违反 Step 1.5 HARD 约束）。
 
@@ -228,13 +239,13 @@ Score only after reviewing recent Reels, not from profile niche alone.
 
 **Match Score (0-100)**: demographic fit, need-state fit, space-context fit, purchase-stage fit, content-native fit, performance, authority/professionalism. Weight dynamically by driver: A favors content-native/aesthetic fit; B favors household/practical fit; C/D favor need-state and use-case fit; E favors authority and visual taste. Disclose any weight shift.
 
-**Showcase Score (0-100)**: visual quality, on-camera/demo skill, scene fit, prior furniture/large-object/AV/organization placement, format fit, branded-content execution. Strong ≥ 70, Workable 50-69, Weak < 50.
+**Showcase Score (0-100)**: visual quality, on-camera/demo skill, scene fit, prior furniture/large-object/AV/organization placement, format fit, branded-content execution. Strong ≥ 70, Workable 40-69, Weak < 40.
 
 **Final Fit**:
 ```
 Final Fit = 0.6 × Match Score + 0.4 × Showcase Score
 ```
-Use **50/50** for Driver D or E. Shortlist eligibility requires **Match Score ≥ 70 AND Showcase Score ≥ 50**. No score-trading.
+Use **50/50** for Driver D or E. Shortlist eligibility requires **Match Score ≥ 60 AND Showcase Score ≥ 40**. No score-trading.
 
 ## Learned Criteria (brief-injected)
 
@@ -272,7 +283,7 @@ record the reason in the candidate payload.
 
 ❌ Bad: learned criteria praise "premium minimalist visual style"; you use
 that to admit a 60k-follower creator ("style compensates for reach") → HARD
-threshold violation; the bridge-side floor is 100k regardless of style fit.
+threshold violation; the bridge-side floor is 80k regardless of style fit.
 
 ## Roles And Qualification
 Choose 1-3 roles per campaign: **Conversion**, **Authority**, **Lifestyle**, **Niche use-case**, **Showcase**, **Narrative / entertainment**. The shortlist must cover the chosen roles instead of duplicating one archetype; non-home creators are valid when they fill a role better.
@@ -282,48 +293,53 @@ All candidates must meet:
 | Criterion | Threshold |
 |---|---|
 | Region | US / Canada creator and audience signals; unknown region = discard |
-| Followers | ≥ 100k |
+| Followers | ≥ 80k |
 | Video activity | ≥ 5 Reels in last 3 months; static-only = discard |
 | Product context | Last 10-15 Reels contain believable scenes for this product/driver |
-| Avg Reel views | ≥ 30k, excluding Reels posted in last 72h |
-| Reel ER | ≥ 3%, using `(likes + comments) / views` |
+| Avg Reel views | ≥ 20k, excluding Reels posted in last 72h |
+| Reel ER | ≥ 2%, using `(likes + comments) / views` |
 | Account type | individual personal blogger, not agency/media/brand |
 | Self-commerce (furniture only) | NOT a furniture seller themselves — DISCARD if bio, link-in-bio (Linktree/Beacons/Stan etc.), pinned posts, or any of the last 10-15 Reels promote their own furniture brand, furniture DTC store, furniture dropshipping, or a persistent furniture storefront (e.g. Amazon shop / LTK / Shop My where furniture is a recurring category, not a one-off affiliate post). Non-furniture self-commerce (fashion / beauty / food / kitchenware / decor accessories / tech / pet) does NOT trigger this rule — those creators are fine and often better at branded-content execution. |
 | Prior-collab skip list | DISCARD if the handle appears in the bridge discovery skip set: `competitor` (竞品不合作), `success` (已合作完成), `aborted` (主动叫停), `legacy_collab` (历史合作). Fetch ONCE at run start (see **Pre-discovery skip pull** below) and match before any per-profile qualification. 曾触达列表仅用于指标页的触达次数，**不**触发发现跳过。 |
 | 14-day outreach cooldown | DISCARD if we already sent a confirmed outreach email to this handle within the last **14 days** (cross-campaign). Fetch the cooldown handle set ONCE at run start (see **Pre-discovery outreach cooldown pull** below). The bridge also hard-rejects `add-candidate` with `outreach_cooldown_active` if you skip the pre-check. |
 | Competitor deals | no active exclusive direct competitor deal; past one-off competitor collab is a positive flag |
-| Scores | Match ≥ 70 and Showcase ≥ 50 |
+| Scores | Match ≥ 60 and Showcase ≥ 40 |
 
-Before applying the follower threshold, normalize any locale-specific shorthand to an absolute count. Treat `K/k = 1,000`, `M = 1,000,000`, `B = 1,000,000,000`, `万/w = 10,000`, and `亿 = 100,000,000`. Example: `73.8万` = `738,000`, so it PASSES the `≥ 100k` gate; `4.6万` = `46,000`, so it fails.
+Before applying the follower threshold, normalize any locale-specific shorthand to an absolute count. Treat `K/k = 1,000`, `M = 1,000,000`, `B = 1,000,000,000`, `万/w = 10,000`, and `亿 = 100,000,000`. Example: `73.8万` = `738,000`, so it PASSES the `≥ 80k` gate; `4.6万` = `46,000`, so it fails.
 
-**Borderline followers (100k–110k) — no “需进一步评估”.** When normalized followers are **≥ 100k and < 110k**, you MUST either:
+**Borderline followers (80k–100k) — no “需进一步评估”.** When normalized followers are **≥ 80k and < 100k**, you MUST either:
 - **Ingest immediately** via `ingest-confirmed-candidate` if all other gates pass (region, Reels activity, not skip/cooldown, not self-sell furniture), OR
 - **Discard with an explicit reason** logged in your answer and list the handle under `pending_ingests` / `floor_unmet_reason` — never end the run with “需进一步评估”, “pending verification”, or “worth a look” without ingest or a written discard reason.
 
-Handles **below 100k** after normalization are hard discards — do not queue them for “later review”.
+Handles **below 80k** after normalization are hard discards — do not queue them for “later review”.
 
 ## Run bootstrap (STEP −1 — gateway-enforced)
 
 Before **any** `browser_navigate`, `browser_snapshot`, or `veedcrawl_*` call, run these bridge CLI commands for **this session's** `--env` and `--campaign-id` (the guard blocks browser tools until the three required steps — `list-candidates`, `list-discovery-skip-handles`, `list-outreach-cooldown-handles` — complete; `list-candidate-handles` below is an additional read that the guard ignores but the agent needs for status-bucketed exclusion):
 
+**Context-safe bootstrap (hard):** Always pass `--summary` on these list commands.
+Full dumps of 500+ handles into the chat hang the next LLM call (seen as
+`running` with no tool activity for 10–30 min). Membership checks use
+`rpa_precheck_handle`, not pasted lists.
+
 ```bash
 python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
-  list-candidates --env <TEST|LIVE> --campaign-id <campaign_id>
+  list-candidates --env <TEST|LIVE> --campaign-id <campaign_id> --summary
 
 python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
-  list-candidate-handles --env <TEST|LIVE> --campaign-id <campaign_id> --plain --with-status
+  list-candidate-handles --env <TEST|LIVE> --campaign-id <campaign_id> --summary
 
 python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
-  list-discovery-skip-handles --env <TEST|LIVE>
+  list-discovery-skip-handles --env <TEST|LIVE> --summary
 
 python3 -u plugins/kol-ops-bridge/scripts/kol_bridge_tool.py \
-  list-outreach-cooldown-handles --env <TEST|LIVE> --plain
+  list-outreach-cooldown-handles --env <TEST|LIVE> --summary
 ```
 
-The `--plain --with-status` flag on `list-candidate-handles` emits
-`<handle>\t<candidate_status>` TSV rows (e.g. `newdarlings\tselected_for_outreach`).
-Parse each line into `(handle, status)` and build a **status-bucketed** in-memory map;
-do NOT only keep `discovered` rows — every status is exclusion-relevant.
+`--summary` returns `count` (+ `by_status` / `sample`). Do **not** re-run without
+`--summary` or `--plain` dump full lists into the transcript. For rare debugging,
+`--plain --with-status` on `list-candidate-handles` still emits
+`<handle>\t<candidate_status>` TSV — keep that off the hot rediscover path.
 
 In your **next assistant message after bootstrap**, print exclusion stats AND the
 merged exclusion set construction:
@@ -457,7 +473,7 @@ Maintain a prioritized queue and cover at least **2 discovery surfaces** unless 
 - **Curated-list surfaces (FeedSpot / Influencer Hero / "Top N" blog lists) — small-batch forced-conclusion quota (hard).** These lists surface many names cheaply but invite the failure mode of batch-opening 8 profiles in 2 minutes with zero persist/discard records. Rules:
   - Per Run, extract at most **5 handles** from any single curated list into the verification queue. If the list has more promising names, carry the rest into `next_round_focus` with ` — from <list name>, surfaced not yet verified` as the rationale.
   - **One-at-a-time with conclusion**: each extracted handle must complete `ingest-confirmed-candidate` OR an explicit DISCARD (with reason in `visited_handles:`) before you open the next handle's `browser_navigate`. Forbidden: opening 5 profiles back-to-back then "deciding later".
-  - **List browsing ≠ profile visiting**: while reading the list page itself (e.g. FeedSpot HTML), only record candidate name + stated follower count + one-sentence angle in your in-memory queue. Do NOT `browser_navigate` to IG during list browsing. Profile-visit quota (≤40/run) starts counting only when you navigate to `instagram.com/<handle>/`.
+  - **List browsing ≠ profile visiting**: while reading the list page itself (e.g. FeedSpot HTML), only record candidate name + stated follower count + one-sentence angle in your in-memory queue. Do NOT `browser_navigate` to IG during list browsing. Profile-visit quota (≤80/run) starts counting only when you navigate to `instagram.com/<handle>/`.
   - Rationale: a 2-minute list scan that consumes 8 profile slots and produces 0 candidates is a pure waste; the small-batch rule forces every slot to either pay off or be reclaimed with a discard reason.
 
 - **Hashtags**: generate 12-16 dynamic seeds, split into THREE buckets with HARD QUOTAS to prevent filter-bubble collapse. The two non-product buckets are mandatory, NOT "when relevant" suggestions:
@@ -466,11 +482,12 @@ Maintain a prioritized queue and cover at least **2 discovery surfaces** unless 
   - **Cross-vertical bridge seeds (4-5, MANDATORY):** pulled from the driver routing table's "Cross-vertical bridges" column. **At least 3 of these must come from non-home subcultures** (gaming, comedy, foodie, fashion, pet, book, fitness, etc.). E.g. for driver A: `#cozybooktok`, `#slowmorning`, `#comfortmeal`; for D: `#streamersetup`, `#vinylcollection`, `#cinephile`; for B: `#dogmomlife`, `#parentingcomedy`, `#dinnerpartytok`.
   Direct URL: `https://www.instagram.com/explore/search/keyword/?q=%23<tag-name>`. If you cannot populate the two mandatory buckets, list the gap under `attempted_angles` and treat the discovery surface as incomplete — do NOT proceed to lateral expansion until you've at least tried the cross-vertical seeds, because lateral expansion from home-only seeds is precisely the loop that produces designer-heavy shortlists.
 - **Comment mining (two sources, both required):**
-  - From **qualified top Reels** (same-vertical signal): inspect creator-looking commenters; enqueue only if preview/profile shows ≥ 100k followers.
-  - From **buyer-moment hashtag Reels** (cross-vertical signal — the single most effective break-out lever): pick 2-3 high-engagement Reels under buyer-moment hashtags whose AUTHOR is NOT a qualified home/design KOL (could be a comedy duo, couple vlog, foodie, pet creator — anyone). The criterion is that the AUDIENCE overlaps with our buyer, not that the creator sits in our niche. Mine their commenters the same way (≥ 100k filter still applies). Audience overlap predicts branded-content fit better than creator vertical.
-- **Following / Suggested / Similar**: expand from qualified profiles, applying ≥ 100k and NA checks before enqueueing. **Cross-vertical jump rule:** in every 3-hop expansion chain, AT LEAST ONE hop must land on a creator whose primary vertical differs from the seed's vertical (verify via their last 10-15 Reels content theme, not just bio). Prefer hops that follow a visible cross-vertical collab (a home creator collab'd with a foodie → enqueue the foodie). Pure same-vertical chains beyond hop 2 are not allowed; if IG's similar-accounts panel only surfaces same-vertical handles for two hops in a row, abandon the chain and switch surface — that's the algorithm telling you the bubble is closed.
-- **Public web (Google / TikTok / Reddit) — co-primary surface, not just fallback**: required, NOT only when IG search blocks. IG's similar-accounts engine is structurally same-vertical, so this is the primary lever for surfacing creators that IG won't recommend to you. Run NA-scoped queries against the buyer-moment and cross-vertical seeds — e.g. `"first apartment tour" instagram reels`, `"streamer setup" creator NA 100k`, `site:tiktok.com cozy bookshelf US`, `reddit r/InteriorDesign favorite non-designer home creators`. MUST be invoked when (a) IG seed search returns < 5 distinct vertical sources after 2 hashtags, OR (b) the running persisted-candidate pool is ≥ 70% concentrated in one vertical (designer / interior / home-decor). Cross-verify each surfaced handle on IG before qualifying. Treat this surface as cheap insurance against the bubble — invoke it early, not only after IG breaks.
-  **Google queries use local Chrome only** (see § Public web via browser Google below) — never `web_search`, `web_extract`, terminal `curl`/`requests`, or Serper/`python3 -c` HTTP one-liners.
+  - From **qualified top Reels** (same-vertical signal): inspect creator-looking commenters; enqueue only if preview/profile shows ≥ 80k followers.
+  - From **buyer-moment hashtag Reels** (cross-vertical signal — the single most effective break-out lever): pick 2-3 high-engagement Reels under buyer-moment hashtags whose AUTHOR is NOT a qualified home/design KOL (could be a comedy duo, couple vlog, foodie, pet creator — anyone). The criterion is that the AUDIENCE overlaps with our buyer, not that the creator sits in our niche. Mine their commenters the same way (≥ 80k filter still applies). Audience overlap predicts branded-content fit better than creator vertical.
+- **Following / Suggested / Similar**: expand from qualified profiles, applying ≥ 80k and NA checks before enqueueing. **Cross-vertical jump rule:** in every 3-hop expansion chain, AT LEAST ONE hop must land on a creator whose primary vertical differs from the seed's vertical (verify via their last 10-15 Reels content theme, not just bio). Prefer hops that follow a visible cross-vertical collab (a home creator collab'd with a foodie → enqueue the foodie). Pure same-vertical chains beyond hop 2 are not allowed; if IG's similar-accounts panel only surfaces same-vertical handles for two hops in a row, abandon the chain and switch surface — that's the algorithm telling you the bubble is closed.
+- **Public web (Google / TikTok / Reddit) — co-primary surface, not just fallback**: required, NOT only when IG search blocks. IG's similar-accounts engine is structurally same-vertical, so this is the primary lever for surfacing creators that IG won't recommend to you. Run NA-scoped queries against the buyer-moment and cross-vertical seeds — e.g. `"first apartment tour" instagram reels`, `"streamer setup" creator NA 80k`, `site:tiktok.com cozy bookshelf US`, `reddit r/InteriorDesign favorite non-designer home creators`. MUST be invoked when (a) IG seed search returns < 5 distinct vertical sources after 2 hashtags, OR (b) the running persisted-candidate pool is ≥ 70% concentrated in one vertical (designer / interior / home-decor). Cross-verify each surfaced handle on IG before qualifying. Treat this surface as cheap insurance against the bubble — invoke it early, not only after IG breaks.
+  **Google queries use `rpa_fetch_google_serp` (preferred) or local Chrome** (see § Public web via browser Google below) — never `web_search`, `web_extract`, terminal `curl`/`requests`, or Serper/`python3 -c` HTTP one-liners.
+  **Google yield + cheap triage (hard):** After each `rpa_fetch_google_serp`, read `data.candidate_handles` (IG profile URLs + `@mentions` + **reel/post authors** resolved by default via `resolve_authors=true`). Expect **dozens** of candidates across a multi-query public-search step (≈6 SERP queries × up to ~20 resolved authors each, minus exclusion). Per query, enqueue **up to 25** handles that pass `rpa_precheck_handle` (not in exclusion/skip/cooldown) into a **followers/region triage queue**. Run `rpa_fetch_ig_profile` on those handles to filter ≥80k + US/CA **before** spending reels/cover/vision budget. Only promote handles that clear profile gates into full content screening. Do **not** stop after verifying 3–4 low-follower SERP names when `candidate_handles` still has unchecked names outside the exclusion set. Carry unused handles into `next_round_focus`.
 - **Reference expansion**: if user supplies winners, inspect 5-10 Reels, extract the conversion mechanism, then expand through following/similar/commenters even outside home vertical.
 
 ### Veedcrawl supplement (optional — does NOT replace browser discovery)
@@ -562,7 +579,7 @@ it recovers mid-run:
 | Surface | Failure signal | Lock threshold | On lock |
 |---------|----------------|----------------|---------|
 | IG hashtag explore | `browser_navigate` to `instagram.com/explore/...` returns only footer / empty grid (no Reel cards render) | 2 consecutive seeds | Mark `ig_hashtag_locked_this_run: true` in `attempted_angles`; switch to public-web + Veedcrawl for the rest of this run. |
-| Veedcrawl `search_social_videos` | Returns 0 candidates that are both ≥100K followers AND North American AND home/furniture-relevant | 2 consecutive queries | Mark `veedcrawl_locked_this_run: true`; switch to browser hashtag + public web. |
+| Veedcrawl `search_social_videos` | Returns 0 candidates that are both ≥80K followers AND North American AND home/furniture-relevant | 2 consecutive queries | Mark `veedcrawl_locked_this_run: true`; switch to browser hashtag + public web. |
 | Public web (Google) | 3 consecutive queries surface no new handle outside `exclusion_set` | 3 consecutive queries | Set `floor_unmet_reason: "排除集 ~N handles + niche 枯竭，3 个 surface 均无新候选"` and prepare to end the run with current persisted count rather than burn more queries. |
 
 When all three surfaces are locked in the same run, do NOT keep issuing
@@ -603,7 +620,7 @@ gray zone:
    diagnostics block below with a one-sentence reason (e.g.
    `reels_render_failed`, `iteration_limit`, `json_validation`).
 3. **DISCARD with reason** — explicit disqualification written into the run
-   answer prose (e.g. "DISCARD @handle — followers 85K < 100K hard threshold")
+   answer prose (e.g. "DISCARD @handle — followers 75K < 80K hard threshold")
    AND, if the handle had partial signal worth revisiting, also mirrored into
    `next_round_focus` per the rule in **next_round_focus rules** below.
 
@@ -614,7 +631,7 @@ profile slot consumed:
 ```
 visited_handles:
   - "@handle1 — ingested (candidate_id=480)"
-  - "@handle2 — DISCARD: 粉丝 85K < 100K 门槛"
+  - "@handle2 — DISCARD: 粉丝 75K < 80K 门槛"
   - "@handle3 — pending_ingests: Reels 渲染失败"
   - "@handle4 — DISCARD: Bangalore, 非 US 区域"
 ```
@@ -711,18 +728,9 @@ remediation_attempted:
 
 These fields feed the rediscover brief composer; round N+1 reads them from `# prior_runs` and `# resume_directives` (see **Prior runs handling**) and avoids re-tracing exhausted angles or losing pending ingests. Omitting them silently degrades subsequent auto-retries.
 
-**Quantity floor (hard).** When the brief carries `discovery_target_count` or `additional_target_count`, treat it as a HARD FLOOR on PERSISTED candidates (visited via `browser_navigate` / RPA profile+reels, then qualified, then successful `ingest-confirmed-candidate`).
+**Quantity floor (hard).** When the brief carries `discovery_target_count` or `additional_target_count`, treat it as a HARD FLOOR on PERSISTED candidates (visited via `browser_navigate`, then qualified, then successful `ingest-confirmed-candidate`). The console's quantity gate compares your persisted count against the floor immediately after this run terminates. If you are short of the floor AND auto-retry budget remains, the backend AUTO-FIRES the rediscover skill again (up to 5 auto-retries total = 6 runs max); after that, the operator gets a `discovery_floor_unmet` escalation. Stopping short is therefore a failure mode — finishing partial is acceptable only when truly blocked (rate limits, niche exhausted, IG checkpoint). When stopping short, you MUST set `floor_unmet_reason` (one-sentence why) in the structured diagnostics block above so the backend can decide between auto-retry and early escalation; `attempted_angles` is already mandatory regardless.
 
-**Same-run batching (mandatory).** Fill as much of the floor as possible **inside the current gateway run**. After every successful ingest, re-count NEW persisted vs the target; if still short and not hard-blocked, keep discovering/qualifying/ingesting in THIS turn. Auto-retry exists only for residual shortfall after a hard blocker — do **not** end after 1 (or a few) ingests and rely on Console auto-retry to finish the quota.
-
-Forbidden early exits while still below the floor:
-- ending because one focus handle was discarded (media account, ER fail, content-screen fail);
-- ending because STEP_0 pending handles were already in CAL;
-- ending to “leave work for next_round_focus / auto-retry”.
-
-Hard blockers that allow stopping short (must set `floor_unmet_reason`): IG rate limit / checkpoint / captcha, RPA+browser both unavailable, dead session after re-login attempt, niche exhausted after ≥3 distinct angles with zero new outside `exclusion_set`, bridge/gateway down.
-
-The console's quantity gate still compares persisted count after the run terminates. If short AND auto-retry budget remains, the backend may AUTO-FIRE rediscover (up to 5). That is a backstop, not the preferred fill path. When stopping short, you MUST set `floor_unmet_reason` (one-sentence why) in the structured diagnostics block above; `attempted_angles` is already mandatory regardless.
+**Illegal premature end (hard — Console-enforced).** Ending the turn with text-only status after bootstrap (no RPA/profile work, empty `visited_handles` / `attempted_angles` / `floor_unmet_reason`, or closing with “requires profile verification” / “pending verification” / “需进一步评估” alone) is illegal. The Console tags `exit_kind: premature_bootstrap_stop`, auto-retries with `# premature_exit_recovery (HARD)`, and does **not** count those rounds toward niche `consecutive_zero` early-escalation. After repeated premature stops it escalates `premature_exit_repeated` (model early-stop, not niche exhaustion).
 
 **Vertical diversity floor (hard).** Across the persisted shortlist, the **designer / interior-stylist share** must fall inside the **active range** for this run. "Designer" = creators whose bio or last 15 Reels primarily anchor in interior design, home staging, design education, premium stylist content, or "design firm / studio principal" identity.
 
@@ -945,7 +953,7 @@ Notes:
 
 **`primary_email` — only a real email address, never anything else.**
 
-- If the IG profile (bio text, contact button reveal, or pinned post) clearly exposes a real address matching `x@y.tld` and it visibly belongs to the creator (not a sponsor / unrelated brand sidebar), you MAY include it in the `upsert-identity` payload. Attach provenance facts in the same `write-facts-multi` call: `identity.email_source = "ig_bio"`, `identity.email_discovered_at`, `identity.email_discovered_url`, `identity.email_discovery_tier = "0"` (tier 0 = discovered during shortlist qualification, before `kol-email-discovery` ever runs). Do NOT overwrite a non-empty existing `primary_email`. While `KOL_RPA_VISION_EVAL_ENABLED=0`, do **not** use `vision_analyze` for bio-image OCR in this discovery run — leave image emails to `kol-email-discovery` post-approval.
+- If the IG profile (bio text, contact button reveal, pinned post, or bio image you OCR'd via `vision_analyze`) clearly exposes a real address matching `x@y.tld` and it visibly belongs to the creator (not a sponsor / unrelated brand sidebar), you MAY include it in the `upsert-identity` payload. Attach provenance facts in the same `write-facts-multi` call: `identity.email_source = "ig_bio"`, `identity.email_discovered_at`, `identity.email_discovered_url`, `identity.email_discovery_tier = "0"` (tier 0 = discovered during shortlist qualification, before `kol-email-discovery` ever runs). Do NOT overwrite a non-empty existing `primary_email`.
 - If the profile shows ONLY a link-in-bio URL, a personal website domain, or a brand display name, do NOT shove those into `primary_email` — the bridge will 422 with a `ValueError`, wasting a turn. Route them to identity facts instead (table below) and leave `primary_email` for `kol-email-discovery` (which runs post-approval) to resolve.
 
 Identity facts for non-email contact signals — write these in the same `write-facts-multi` call you already issue for `identity.instagram_profile_url`:
@@ -983,9 +991,9 @@ and likewise for the other 5 keys.
 
 **Signal sources** — all already in your tool surface, no new page loads:
 - Bio text from the profile page (already loaded for qualification).
-- Captions / hashtags from the 10 Reels you scored via `rpa_fetch_reel_comments(include_caption=true)` — primary theme signal while vision is disabled.
-- Top-of-page Reel comments (first viewport only, do NOT scroll or expand "View replies") via the same RPA call — comments reveal **how viewers describe the creator**, which is more honest signal for `voice_descriptors` and `signature_hooks` than the creator's self-pitch.
-- Do **not** use `vision_analyze` / cover OCR while `KOL_RPA_VISION_EVAL_ENABLED=0`.
+- Captions / hashtags from the 2-3 Reels you scored.
+- Reel cover overlay text via `browser_get_images` + `vision_analyze` when the caption is too thin (creators often print the theme on the cover).
+- Top-of-page Reel comments (first viewport only, do NOT scroll or expand "View replies") via `browser_console` — comments reveal **how viewers describe the creator**, which is more honest signal for `voice_descriptors` and `signature_hooks` than the creator's self-pitch.
 
 Before writing `identity.hero_post_url`, do a canonicalization check:
 - open the candidate Reel URL once;
@@ -995,7 +1003,7 @@ If the resolved URL includes `/share/`, a handle-prefixed path, query params, or
 
 **Write rules** (same as the IG URL above):
 - **Do NOT overwrite a non-empty existing value.** Read `identity.content_pillars_discovered_at` first; if it exists and is **within 90 days**, skip the write. If it's older than 90 days, the loader (`kol-creator-brief-loader`) will refresh on next draft anyway — leave the stale value alone here.
-- Best-effort: if the brief generation fails (comments/captions empty, LLM disagrees with itself), skip the brief writes but still write the IG profile URL. The loader has its own fallback path.
+- Best-effort: if the brief generation fails (vision call errors, comments empty, LLM disagrees with itself), skip the brief writes but still write the IG profile URL. The loader has its own fallback path.
 - Applies to ALL qualified candidates, not only the final shortlist.
 
 Workflow: interpret context -> split product into 2-4 feature/selling-point groups -> choose driver/roles/history prior per group -> seed and enqueue -> capture canonical URLs with `browser_console(expression="window.location.href")` -> qualify region/Reels/context/scores -> measure views + ER -> expand laterally -> rank by Final Fit and role coverage within each group. Close posts via the in-page × button, not `browser_back`.
@@ -1059,36 +1067,41 @@ First tool call of the run, before any IG URL:
 3. If `country != "US"` → stop immediately and return `mode_gate_blocked: non-US exit (got <country>)`. Do not navigate to instagram.com.
 4. If `country == "US"` → log the org/IP in the run report and proceed.
 
-### Public web via browser Google (mandatory co-primary surface)
+### Public web via Google RPA (mandatory co-primary surface)
 
-Use built-in `browser_*` on local debug Chrome for **all** Google/public-web discovery.
+Prefer **`rpa_fetch_google_serp(query, max_results=30)`** for Google discovery
+(default `resolve_authors=true`, `max_author_resolves=20`).
 Do **not** use `web_search`, `web_extract`, terminal HTTP (`curl`, `wget`, `requests`,
 `urllib`), Serper API scripts, or truncated `python3 -c "import requests..."` one-liners —
 they fail silently or get blocked by guard; they are not part of this workflow.
 
-For each public-web query:
+For each Google query:
 
-1. URL-encode the query string (spaces → `+` or `%20`).
-2. `browser_navigate("https://www.google.com/search?q=<encoded_query>")`
-3. `browser_snapshot` — read titles/snippets for IG `@handle`s or creator names.
-4. Open promising creator-owned result URLs with `browser_navigate` + `browser_snapshot`.
-5. Cross-verify on IG: `browser_navigate("https://www.instagram.com/<handle>/")` and read
-   `ig_readiness` / `ig_followers_hint` before qualification.
+1. `rpa_fetch_google_serp` with `max_results` 30 (up to 40 when the niche is thin);
+   leave `resolve_authors` on so `/reel/` and `/p/` rows become author handles.
+2. Read `data.results` **and** `data.candidate_handles` (profile URLs + `@mentions` +
+   resolved reel/post authors). Check `authors_resolved` / `content_urls_found` in diagnostics.
+3. `rpa_precheck_handle` on candidate handles; keep up to **25** new ones per query.
+4. Cheap gate: `rpa_fetch_ig_profile` on those handles for followers ≥80k + US/CA.
+5. Only then run reels / comments / cover vision on gate-passers.
 
-Example encoded navigations:
+Fallback when Google RPA is blocked: `browser_navigate` to the same encoded Google URL +
+`browser_snapshot`, then the same triage rules.
 
-- `https://www.google.com/search?q=first+apartment+tour+instagram+reels+US+creator+100k`
-- `https://www.google.com/search?q=home+cinema+cozy+living+room+instagram+influencer+NA`
-- `https://www.google.com/search?q=site%3Atiktok.com+cozy+bookshelf+US+creator`
+Example queries:
 
-Log each query in `attempted_angles` as `browser_google:"<query text>"`.
+- `first apartment tour instagram reels US creator 80k`
+- `home cinema cozy living room instagram influencer NA`
+- `site:tiktok.com cozy bookshelf US creator`
+
+Log each query in `attempted_angles` as `rpa_google:"<query text>"` (or `browser_google:` on fallback).
 
 ### Conservative rules (main-account protection)
 The agent operates the user's Instagram session in debug Chrome. Treat every
 action as visible to IG's risk system.
 
 - **Pacing**: random `2-4s` pause between candidate profiles; `1-2s` between reels within the same profile. No concurrent profile/reel browsing.
-- **Per-run caps**: at most **80 distinct profiles** and **400 reel page loads** per invocation (RPA `run_quota` / env `KOL_RPA_MAX_*_PER_RUN`). On hitting either cap, stop and deliver partial results.
+- **Per-run caps**: at most **80 distinct profiles** and **400 reel page loads** per invocation (env `KOL_RPA_MAX_*_PER_RUN`). Quota resets on each new gateway turn (`turn_id`) so rediscover does not inherit a prior run's exhausted counters. On hitting either cap, stop and deliver partial results.
 - **Forbidden actions**: `follow`, `unfollow`, `like`, `save`, `comment`, send DM, `share`, `subscribe`, any form submission, any login-page interaction. Read-only navigation, snapshots, `browser_console` extraction, and scrolling are allowed.
 - **Login assumption**: user already logged into IG in the debug-Chrome profile. Never navigate to auth flows or type credentials.
 - **Risk-page response**: checkpoint, captcha, "Action blocked", etc. → stop with `mode_gate_blocked: rate_limited`. Do not refresh or retry.
@@ -1109,6 +1122,8 @@ action as visible to IG's risk system.
 - `references/veedcrawl-api.md` — REST endpoints (search/profile/metadata/extract), MCP vs plugin.
 
 ## Pitfalls
+- **Do not end after bootstrap with a text-only status report.** Calling `skill_view` + list-candidates/skip/cooldown then finishing with “Bootstrap completed / STEP_0 needs verification” and `finish_reason=stop` is an illegal premature end. You must call `rpa_precheck_handle` / `rpa_fetch_ig_profile` (or complete STEP_0 ingest) and emit real `visited_handles` or a real `floor_unmet_reason` + `attempted_angles` before any final text. Console auto-recovers these stops; do not rely on that.
+- **Do not dump full exclusion / candidate JSON into the transcript.** Bootstrap with `--summary` only. A rediscover brief already samples `already_discovered_*` and caps `prior_runs` to the last few rounds — re-dumping 500–1000 handles via terminal is what hangs the next LLM stream.
 - Do not call `delegate_task` to batch discovery (e.g. "search public web for 150 handles"). Subagents lose the campaign tab-pool session, loop on empty `veedcrawl_*` args, and block the parent run for minutes. Browse and persist in the current run; let the console auto-fire `/rediscover` when the quantity floor is unmet.
 - For bridge CLI persistence, do not guess JSON keys per subcommand. `upsert-identity` expects `primary_handle`; `write-facts-multi` should be called with `--identity-id`; `add-candidate` is safest with `identity_id` already embedded in the JSON payload. Prefer file-backed `@/tmp/*.json` payloads.
 - To inspect persisted candidate handles/counts, call `list-candidate-handles --env <TEST|LIVE> --campaign-id <id> --plain`; do not pipe `list-candidates` through generated `python -c` snippets.
@@ -1119,14 +1134,14 @@ action as visible to IG's risk system.
 - Do not use `web_search`, Serper API, or terminal `python3 -c "import requests..."` for Google discovery — use `browser_navigate` to `google.com/search?q=...` per § Public web via browser Google.
 - Do not chain 3 same-vertical lateral hops just because each individual hop met the follower / region threshold. The cross-vertical jump rule requires at least one vertical-switch per 3-hop chain; pure same-niche chains reinforce the bubble even when every individual candidate is qualified.
 - Do not let visual similarity outrank buyer intent for functional, technical, family-practical, or use-case products.
-- Do not shortlist on Audience Match alone; Match ≥ 70 and Showcase ≥ 50 must both pass.
+- Do not shortlist on Audience Match alone; Match ≥ 60 and Showcase ≥ 40 must both pass.
 - Do not use the brief's `# learned_discovery_criteria` section to relax any HARD threshold (followers / region / views / ER / account type / skip lists). Learned criteria only adjust scoring emphasis and add soft vetoes; product-level criteria outrank category-level when they conflict.
 - Do not reject tech, gaming, comedy, entertainment, fashion, or lifestyle creators solely by niche.
 - Do not keep creators who self-sell furniture (own brand, DTC, persistent furniture storefront like `mytexashouse`-style accounts) — they are direct competitors no matter how lifestyle-personal the feed looks. Always check bio, link-in-bio, pinned posts, and the last 10-15 Reels for recurring furniture-commerce signals. Self-commerce in other categories (fashion / beauty / food / kitchenware / decor accessories / tech / pet) does NOT trigger this rule.
 - Do not overfit historical winners' surface style; reuse the conversion mechanism.
 - Do not include Reels posted within the last 72h in averages.
 - Do not compare follower thresholds against locale-formatted shorthand until you have normalized it to an absolute count. `73.8万` is `738,000`, not `73.8k`.
-- Do not keep commenters with < 100k followers.
+- Do not keep commenters with < 80k followers.
 - Do not use Veedcrawl search/profile as the only discovery path — browser surfaces are mandatory.
 - Do not call `mcp_veedcrawl_*` or bypass plugin tools for discovery.
 - Do not ignore `persisted: false` on veedcrawl tool results — fall back to browser.

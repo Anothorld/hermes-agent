@@ -535,28 +535,6 @@ def download_content_eval(
     from errors import RpaError
 
     mode = resolve_eval_mode(brief_fields)
-    if mode == "text":
-        return {
-            "eval_mode": "text",
-            "covers_target": 0,
-            "videos_target": 0,
-            "covers_downloaded": 0,
-            "videos_downloaded": 0,
-            "covers": [],
-            "videos": [],
-            "errors": [{
-                "code": "vision_eval_disabled",
-                "message": (
-                    "Vision/multimodal screening is OFF "
-                    "(KOL_RPA_VISION_EVAL_ENABLED=0). Do not download covers "
-                    "or videos. Use rpa_fetch_reel_comments(mode=evaluation, "
-                    "include_caption=true) ×10 and score from caption + comments only."
-                ),
-            }],
-            "partial": False,
-            "blocked": True,
-        }
-
     cover_reels = content_eval.get("cover_reels") or []
     video_reels = (content_eval.get("video_reels") or []) if mode == "video" else []
 
@@ -574,6 +552,7 @@ def download_content_eval(
             )
             covers.append({"ok": True, **reel, **result})
         except RpaError as e:
+            # Payload key is "message"; attribute on RpaError is ``detail``.
             cover_errors.append({
                 "reel_id": reel_id,
                 "url": reel_url,

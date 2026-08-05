@@ -40,9 +40,9 @@ def test_edge_cases():
 
 
 def test_borderline():
-    assert followers_normalize.is_borderline(100000) == True
-    assert followers_normalize.is_borderline(105000) == True
-    assert followers_normalize.is_borderline(109999) == True
-    assert followers_normalize.is_borderline(110000) == False
-    assert followers_normalize.is_borderline(99000) == False
+    assert followers_normalize.is_borderline(80000) == True
+    assert followers_normalize.is_borderline(90000) == True
+    assert followers_normalize.is_borderline(99999) == True
+    assert followers_normalize.is_borderline(100000) == False
+    assert followers_normalize.is_borderline(79000) == False
     assert followers_normalize.is_borderline(150000) == False

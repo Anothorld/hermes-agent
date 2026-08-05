@@ -243,7 +243,10 @@ with a stderr notice.
 
 Use dedicated projection commands such as
 `list-candidate-handles` instead of piping `list-candidates` into ad hoc
-`python -c` snippets.
+`python -c` snippets. For discovery **bootstrap**, prefer `--summary` on
+`list-candidates` / `list-candidate-handles` / `list-discovery-skip-handles` /
+`list-outreach-cooldown-handles` so full handle dumps do not blow the LLM
+context (membership checks go through `rpa_precheck_handle`).
 
 ### Merging duplicate campaigns (one product == one campaign)
 

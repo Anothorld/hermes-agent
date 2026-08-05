@@ -174,9 +174,8 @@ Tool mcp_chrome_devtools_navigate_page returned error:
    `get-dispatch-context --view agent`（compact JSON；省略 lanes，嵌入 identity）。
    - **`kol-campaign:*` 发现 run 额外拦截 `delegate_task`**（2026-06-08 SEB8010）：
      模型曾把「公网搜 150 handles」整包 `delegate_task` 出去，子代理空参循环 `veedcrawl_*`
-     且 LLM 挂起，父 run 同步卡在 `delegate_task` 数分钟。     发现必须在**当前 run** 用
-     `browser_*` / RPA + CAL 持久化，并在同轮尽量凑满 `additional_target_count`；
-     Console `/rediscover` auto-retry 只补硬阻塞后的缺口，不靠子代理、也不靠「每轮只入库 1 个」。
+     且 LLM 挂起，父 run 同步卡在 `delegate_task` 数分钟。发现必须在**当前 run** 用
+     `browser_*` + CAL 持久化；数量不足靠 Console `/rediscover` 自动重试，不靠子代理。
 5. **运维提醒**：机器重置或重做 WSL 配置后，若再 `hermes mcp add chrome_devtools`，务必指向**可达**的 CDP；
    本机标准浏览器路径就是内置 `browser_*` + tab-pool，不需要 chrome-devtools MCP。
 

@@ -1055,7 +1055,8 @@ def test_compose_rediscover_brief_includes_hard_rules() -> None:
         test_mode_to=None, prior_diagnostics=None,
     )
     assert "# hard_rules" in brief
-    assert "--with-status" in brief
+    assert "--summary" in brief
+    assert "rpa_precheck_handle" in brief
     assert "voice_descriptors" in brief
     assert "visited_handles" in brief
     conn.close()
@@ -1120,3 +1121,253 @@ def test_extract_visited_handles_heuristic_recovers_from_prose() -> None:
     assert "building_a_barndo" in handles
     assert "carson.roney" in handles
     assert "vda_designs" in handles
+
+
+_PREMATURE_OUTPUT = (
+    "Bootstrap completed.\n"
+    "STEP_0 result: cationz requires profile verification before any "
+    "new discovery. The other four pending-ingest entries are already in CAL."
+)
+
+
+def test_premature_bootstrap_stop_fires_recovery_auto_retry() -> None:
+    """Completed run with empty-shell soft-stop below floor → recovery retry."""
+    import json as _json
+
+    from app.discovery_gate import EXIT_KIND_PREMATURE, PREMATURE_FLOOR_REASON
+
+    conn = _seed_conn()
+    _seed_campaign(
+        conn,
+        run_id="run-discovery",
+        gate_run_id="run-discovery",
+        target_floor=10,
+        status="running",
+        retry_count=0,
+    )
+    bridge = _StubBridge()
+    bridge.candidates = [
+        {"identity_id": i, "primary_handle": f"h{i}",
+         "candidate_status": "discovered"}
+        for i in range(1, 4)
+    ]
+    gateway = _StubGateway()
+    gateway.states["run-discovery"] = {
+        "status": "completed",
+        "output": _PREMATURE_OUTPUT,
+    }
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).get("/products/SKU-1/campaigns?env=TEST")
+    assert r.status_code == 200, r.text
+
+    assert len(gateway.runs_started) == 1
+    assert "# premature_exit_recovery (HARD)" in gateway.runs_started[0]["input"]
+    row = conn.execute(
+        "SELECT gate_run_id, retry_count, status, floor_unmet_reason, "
+        "diagnostics_history FROM product_campaigns "
+        "WHERE campaign_id='CID-1' AND env='TEST'"
+    ).fetchone()
+    assert row["status"] == "running"
+    assert row["retry_count"] == 1
+    assert row["gate_run_id"] == gateway.runs_started[0]["run_id"]
+    assert row["floor_unmet_reason"] == PREMATURE_FLOOR_REASON
+    hist = _json.loads(row["diagnostics_history"] or "[]")
+    assert hist[-1].get("exit_kind") == EXIT_KIND_PREMATURE
+
+
+def test_premature_exit_repeated_escalates_after_cap() -> None:
+    """Third premature round escalates; no further auto-retry."""
+    import json as _json
+
+    from app.discovery_gate import (
+        EXIT_KIND_PREMATURE,
+        MAX_PREMATURE_EXIT_RECOVERIES,
+        PREMATURE_FLOOR_REASON,
+    )
+
+    assert MAX_PREMATURE_EXIT_RECOVERIES == 2
+    conn = _seed_conn()
+    _seed_campaign(
+        conn,
+        run_id="run-discovery",
+        gate_run_id="run-discovery",
+        target_floor=10,
+        status="running",
+        retry_count=2,
+    )
+    prior = [
+        {
+            "round_index": 1,
+            "persisted_count_at_end": 3,
+            "exit_kind": EXIT_KIND_PREMATURE,
+            "floor_unmet_reason": PREMATURE_FLOOR_REASON,
+        },
+        {
+            "round_index": 2,
+            "persisted_count_at_end": 3,
+            "exit_kind": EXIT_KIND_PREMATURE,
+            "floor_unmet_reason": PREMATURE_FLOOR_REASON,
+        },
+    ]
+    conn.execute(
+        "UPDATE product_campaigns SET diagnostics_history=? "
+        "WHERE campaign_id='CID-1' AND env='TEST'",
+        (_json.dumps(prior),),
+    )
+    bridge = _StubBridge()
+    bridge.candidates = [
+        {"identity_id": i, "primary_handle": f"h{i}",
+         "candidate_status": "discovered"}
+        for i in range(1, 4)
+    ]
+    gateway = _StubGateway()
+    gateway.states["run-discovery"] = {
+        "status": "completed",
+        "output": _PREMATURE_OUTPUT,
+    }
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).get("/products/SKU-1/campaigns?env=TEST")
+    assert r.status_code == 200, r.text
+
+    assert gateway.runs_started == []
+    assert len(bridge.escalations) == 1
+    esc = bridge.escalations[0]
+    assert esc["reason"] == "discovery_floor_unmet"
+    assert "早停" in esc["question_to_operator"]
+    assert "niche 枯竭" in esc["question_to_operator"]
+    row = conn.execute(
+        "SELECT gate_run_id, floor_unmet_reason FROM product_campaigns "
+        "WHERE campaign_id='CID-1' AND env='TEST'"
+    ).fetchone()
+    assert row["gate_run_id"] is None
+    assert row["floor_unmet_reason"] == "premature_exit_repeated"
+
+
+def test_premature_under_cap_skips_zero_new_early_escalation() -> None:
+    """Real zero-new history + current premature under cap → recovery retry,
+    not niche early-escalation.
+    """
+    import json as _json
+
+    from app.discovery_gate import EXIT_KIND_PREMATURE
+
+    conn = _seed_conn()
+    _seed_campaign(
+        conn,
+        run_id="run-discovery",
+        gate_run_id="run-discovery",
+        target_floor=10,
+        status="running",
+        retry_count=1,
+    )
+    # Two real zero-new rounds — would early-escalate if current were also
+    # counted as a normal zero-new round.
+    prior = [
+        {"round_index": 1, "persisted_count_at_end": 3, "is_auto_retry": False},
+        {"round_index": 2, "persisted_count_at_end": 3, "is_auto_retry": True},
+    ]
+    conn.execute(
+        "UPDATE product_campaigns SET diagnostics_history=? "
+        "WHERE campaign_id='CID-1' AND env='TEST'",
+        (_json.dumps(prior),),
+    )
+    bridge = _StubBridge()
+    bridge.candidates = [
+        {"identity_id": i, "primary_handle": f"h{i}",
+         "candidate_status": "discovered"}
+        for i in range(1, 4)
+    ]
+    gateway = _StubGateway()
+    gateway.states["run-discovery"] = {
+        "status": "completed",
+        "output": _PREMATURE_OUTPUT,
+    }
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).get("/products/SKU-1/campaigns?env=TEST")
+    assert r.status_code == 200, r.text
+
+    assert len(bridge.escalations) == 0
+    assert len(gateway.runs_started) == 1
+    hist = _json.loads(
+        conn.execute(
+            "SELECT diagnostics_history FROM product_campaigns "
+            "WHERE campaign_id='CID-1' AND env='TEST'"
+        ).fetchone()[0]
+    )
+    assert hist[-1].get("exit_kind") == EXIT_KIND_PREMATURE
+
+
+def test_floor_met_with_empty_diagnostics_no_premature_recovery() -> None:
+    conn = _seed_conn()
+    _seed_campaign(
+        conn,
+        run_id="run-discovery",
+        gate_run_id="run-discovery",
+        target_floor=3,
+        status="running",
+        retry_count=0,
+    )
+    bridge = _StubBridge()
+    bridge.candidates = [
+        {"identity_id": i, "primary_handle": f"h{i}",
+         "candidate_status": "discovered"}
+        for i in range(1, 4)
+    ]
+    gateway = _StubGateway()
+    gateway.states["run-discovery"] = {
+        "status": "completed",
+        "output": _PREMATURE_OUTPUT,
+    }
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).get("/products/SKU-1/campaigns?env=TEST")
+    assert r.status_code == 200, r.text
+
+    assert gateway.runs_started == []
+    assert bridge.escalations == []
+    row = conn.execute(
+        "SELECT gate_run_id FROM product_campaigns "
+        "WHERE campaign_id='CID-1' AND env='TEST'"
+    ).fetchone()
+    assert row["gate_run_id"] is None
+
+
+def test_premature_at_max_auto_retries_escalates() -> None:
+    from app.discovery_gate import MAX_AUTO_RETRIES
+
+    conn = _seed_conn()
+    _seed_campaign(
+        conn,
+        run_id="run-discovery",
+        gate_run_id="run-discovery",
+        target_floor=10,
+        status="running",
+        retry_count=MAX_AUTO_RETRIES,
+    )
+    bridge = _StubBridge()
+    bridge.candidates = [
+        {"identity_id": 1, "primary_handle": "a",
+         "candidate_status": "discovered"},
+    ]
+    gateway = _StubGateway()
+    gateway.states["run-discovery"] = {
+        "status": "completed",
+        "output": _PREMATURE_OUTPUT,
+    }
+
+    app = _build_app(conn, bridge, gateway)
+    r = TestClient(app).get("/products/SKU-1/campaigns?env=TEST")
+    assert r.status_code == 200, r.text
+
+    assert gateway.runs_started == []
+    assert len(bridge.escalations) == 1
+    assert "premature_exit_repeated" in (
+        conn.execute(
+            "SELECT floor_unmet_reason FROM product_campaigns "
+            "WHERE campaign_id='CID-1' AND env='TEST'"
+        ).fetchone()[0]
+        or ""
+    )

@@ -23,7 +23,7 @@ class RpaError(Exception):
 
     @property
     def message(self) -> str:
-        """Alias for ``detail`` — some handlers historically used ``.message``."""
+        """Alias for ``detail`` — keep for callers that historically used ``.message``."""
         return self.detail
 
 

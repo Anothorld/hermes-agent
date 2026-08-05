@@ -7,8 +7,10 @@ max 80 profiles and 400 reel page loads per run
 
 Quota counters are per-task (same key as tab-pool ``task_id``) and
 in-process (single gateway worker assumption, same as
-``discovery_session.py``). ``rpa_precheck_handle`` and ``rpa_check_ip``
-do NOT count against profile quota — they perform zero page loads.
+``discovery_session.py``). ``hooks.maybe_reset_run_quota`` clears them on
+each new agent ``turn_id`` so rediscover/auto-retry does not inherit an
+exhausted prior run. ``rpa_precheck_handle`` and ``rpa_check_ip`` do NOT
+count against profile quota — they perform zero page loads.
 """
 
 from __future__ import annotations

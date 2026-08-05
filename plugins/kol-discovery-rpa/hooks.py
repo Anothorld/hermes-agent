@@ -1,22 +1,14 @@
 """Pre-tool-call hook for kol-discovery-rpa.
 
-Enforces content-screening modes:
-
-- Vision OFF (default, ``KOL_RPA_VISION_EVAL_ENABLED=0``):
-  - In ``kol-campaign:*`` discovery sessions: block ``vision_analyze`` /
-    ``video_analyze`` (does NOT affect email-discover / brief-loader /
-    other skills that need OCR).
-  - Always block cover/video download tools (``rpa_download_ig_*``) —
-    those exist only for multimodal content screening.
-  Screening is caption + comments via
-  ``rpa_fetch_reel_comments(include_caption=true)``.
-- Vision ON + video OFF: block ``rpa_download_ig_reel`` (cover batch OK).
-- Vision ON + video ON: limit ``rpa_download_ig_reel`` to 3 per candidate.
+Enforces the video-eval switch:
+- When OFF (default): block ``rpa_download_ig_reel`` — cover mode only.
+- When ON: limit ``rpa_download_ig_reel`` to 3 distinct reels per run epoch.
 
 Also resets per-run pacing quota (profile/reel counters) at each new agent
 turn boundary. Gateway rediscover/auto-retry reuses the same
 ``kol-campaign:LIVE:...`` task_id across runs; ``turn_id`` (unique per
-``run_conversation``) is the correct per-run epoch.
+``run_conversation``) is the correct per-run epoch. Without turn-scoped
+reset, exhausted counters (e.g. 94/40) stick across launches.
 """
 
 from __future__ import annotations
@@ -36,19 +28,7 @@ HookResult = Optional[Union[None, Dict[str, str]]]
 
 _RPA_TOOL_PREFIX = "rpa_"
 _DOWNLOAD_TOOL = "rpa_download_ig_reel"
-_VISION_TOOLS = frozenset({"vision_analyze", "video_analyze"})
-_VISION_ASSET_TOOLS = frozenset({
-    "rpa_download_ig_content",
-    "rpa_download_ig_cover",
-    "rpa_download_ig_reel",
-})
 _MAX_DOWNLOADS_PER_CANDIDATE = 3
-
-# Align with kol-bridge-agent-guard session taxonomy (discovery vs draft/outreach).
-_NON_DISCOVERY_CAMPAIGN_PREFIXES = (
-    "kol-campaign-outreach:",
-    "kol-campaign-draft:",
-)
 
 _lock = threading.Lock()
 
@@ -58,35 +38,6 @@ _quota_epoch_by_task: dict[str, str] = {}
 
 # Distinct reel URLs downloaded per task (video mode cap).
 _download_reels: dict[str, list[str]] = {}
-
-_TEXT_MODE_MESSAGE = (
-    "Vision/multimodal content screening is DISABLED for kol-campaign "
-    "discovery (KOL_RPA_VISION_EVAL_ENABLED=0 / brief "
-    "rpa_vision_eval_enabled=false). "
-    "Do NOT call vision_analyze, video_analyze, rpa_download_ig_content, "
-    "rpa_download_ig_cover, or rpa_download_ig_reel for content screening. "
-    "Use rpa_fetch_ig_reels → rpa_fetch_reel_comments(mode=evaluation, "
-    "include_caption=true) ×10 on cover_reels[].url, then score Showcase/"
-    "Match from the author's caption/description + scraped comments only."
-)
-
-
-def _session_key(session_id: str = "", task_id: str = "") -> str:
-    """Prefer task_id when it carries the stable KOL session key."""
-    sid = (session_id or "").strip()
-    tid = (task_id or "").strip()
-    for candidate in (tid, sid):
-        if candidate.startswith("kol-"):
-            return candidate
-    return sid or tid
-
-
-def _is_campaign_discovery_session(session_id: str = "", task_id: str = "") -> bool:
-    """True for launch/rediscover ``kol-campaign:ENV:id``, not draft/outreach."""
-    key = _session_key(session_id, task_id)
-    if not key.startswith("kol-campaign"):
-        return False
-    return not any(key.startswith(p) for p in _NON_DISCOVERY_CAMPAIGN_PREFIXES)
 
 
 def _resolve_brief_fields(kwargs: dict) -> dict | None:
@@ -167,23 +118,8 @@ def pre_tool_call(
     turn_id: str = "",
     **kwargs: Any,
 ) -> HookResult:
-    """Pre-tool-call hook — vision/text mode, video switch, quota reset."""
-    del tool_call_id
-
-    from eval_mode import is_vision_eval_enabled, resolve_eval_mode
-
-    brief = _resolve_brief_fields(kwargs)
-    vision_on = is_vision_eval_enabled(brief)
-    discovery = _is_campaign_discovery_session(session_id, task_id)
-
-    if not vision_on:
-        # Download tools are discovery-only multimodal assets — always block.
-        if tool_name in _VISION_ASSET_TOOLS:
-            return {"action": "block", "message": _TEXT_MODE_MESSAGE}
-        # Core vision tools: only block inside campaign discovery so
-        # kol-email-discover / creator-brief / other skills keep OCR.
-        if tool_name in _VISION_TOOLS and discovery:
-            return {"action": "block", "message": _TEXT_MODE_MESSAGE}
+    """Pre-tool-call hook — video switch, download limits, turn-scoped quota reset."""
+    del tool_call_id, session_id
 
     if not tool_name.startswith(_RPA_TOOL_PREFIX):
         return None
@@ -197,6 +133,8 @@ def pre_tool_call(
     if tool_name != _DOWNLOAD_TOOL:
         return None
 
+    from eval_mode import resolve_eval_mode
+    brief = _resolve_brief_fields(kwargs)
     mode = resolve_eval_mode(brief)
 
     if mode == "cover":
@@ -218,7 +156,6 @@ def pre_tool_call(
 
     downloaded = _get_downloaded_reels(tid)
     if reel_url not in downloaded:
-        # New reel — check if we've hit the limit
         if len(downloaded) >= _MAX_DOWNLOADS_PER_CANDIDATE:
             return {
                 "action": "block",
@@ -226,8 +163,7 @@ def pre_tool_call(
                     f"rpa_download_ig_reel limit reached: {len(downloaded)} distinct "
                     f"reels already downloaded for this run (max "
                     f"{_MAX_DOWNLOADS_PER_CANDIDATE}). "
-                    "Use rpa_download_ig_content for the planned video_reels, or "
-                    "rpa_cleanup_reels then continue with another candidate."
+                    "Proceed with the downloaded videos + 2 covers + comments."
                 ),
             }
         _add_downloaded_reel(tid, reel_url)

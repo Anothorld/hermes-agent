@@ -66,7 +66,7 @@ def evaluate_profile_gates(
         borderline=borderline,
     )
     if not followers_pass:
-        discard_reasons.append("followers_below_100k")
+        discard_reasons.append("followers_below_min")
 
     # --- Region gate ---
     region_value = _resolve_region(region_signals)
@@ -179,13 +179,13 @@ def evaluate_reels_gates(
     avg_views_pass = avg_views >= rules.AVG_VIEWS_MIN
     gates["avg_views_excl_72h"] = _gate(avg_views_pass, int(avg_views), rules.AVG_VIEWS_MIN)
     if not avg_views_pass and reels_3mo > 0:
-        discard_reasons.append("avg_views_below_30k")
+        discard_reasons.append("avg_views_below_min")
 
     # --- Reel ER gate ---
     # The /reels/ grid only exposes views — likes and comments are always 0
     # from the grid extraction (ig_reels.py hardcodes them). Computing ER from
     # that would give 0% for every reel and hard-discard every candidate with
-    # a false reel_er_below_3pct. When ALL reels have likes=0 AND comments=0,
+    # a false reel_er_below_min. When ALL reels have likes=0 AND comments=0,
     # the engagement data is simply unavailable (not genuinely 0%); defer the
     # ER gate to the agent (which gets real likes/comments from
     # rpa_fetch_reel_comments per reel page).
@@ -208,7 +208,7 @@ def evaluate_reels_gates(
         er_pass = avg_er >= rules.REEL_ER_MIN
         gates["reel_er"] = _gate(er_pass, round(avg_er, 4), rules.REEL_ER_MIN)
         if not er_pass and er_values:
-            discard_reasons.append("reel_er_below_3pct")
+            discard_reasons.append("reel_er_below_min")
 
     hard_discard = len(discard_reasons) > 0
 

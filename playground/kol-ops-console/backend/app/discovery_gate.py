@@ -74,6 +74,34 @@ operator can still manually /rediscover after early escalation if they want
 to try a different angle.
 """
 
+EXIT_KIND_PREMATURE = "premature_bootstrap_stop"
+"""diagnostics_history.exit_kind when the agent ended after bootstrap with
+no real exploration (empty/soft-stop final answer).
+"""
+
+MAX_PREMATURE_EXIT_RECOVERIES = 2
+"""How many premature-bootstrap rounds may auto-recover before escalating.
+
+After append, ``premature_count <= MAX`` still fires recovery auto-retry;
+``premature_count > MAX`` escalates with ``premature_exit_repeated``.
+"""
+
+PREMATURE_FLOOR_REASON = (
+    "premature_bootstrap_stop: ended after bootstrap with no "
+    "visited_handles/attempted_angles"
+)
+
+_UNDECIDED_HEURISTIC_MARKER = "undecided: heuristic"
+
+_SOFT_STOP_RE = re.compile(
+    r"(?i)("
+    r"requires\s+profile\s+verification|"
+    r"pending\s+verification|"
+    r"需进一步评估|"
+    r"worth\s+a\s+look"
+    r")"
+)
+
 
 REDISCOVERY_INSTRUCTIONS = (
     "You are extending an existing KOL outreach campaign by discovering\n"
@@ -106,19 +134,15 @@ REDISCOVERY_INSTRUCTIONS = (
     "   STEP_0 is done or every pending handle is confirmed in CAL.\n"
     "1. SKIP kol-campaign-intake. campaign_config is already persisted; do\n"
     "   NOT call upsert-campaign and do NOT overwrite any existing config.\n"
-    "2. Read the current candidate pool from CAL FIRST:\n"
-    "   `list-candidates --env <env> --campaign-id <id>` (print to terminal stdout —\n"
-    "   NEVER `> /tmp/...`; redirect empties stdout and looks like CAL failure).\n"
-    "   Or `list-candidate-handles` for a compact handle-only view.\n"
-    "   Build an\n"
-    "   exclusion set of every handle currently in the pool, regardless of\n"
-    "   candidate_status (new/selected_for_outreach/rejected/archived).\n"
-    "   Merge this set with the `already_discovered_handles` block in the\n"
-    "   brief — both mean **already persisted in CAL**; trust whichever is\n"
-    "   larger. Do NOT re-ingest handles that appear in either set. Also merge\n"
-    "   handles from `list-outreach-cooldown-handles --env <env> --plain` (14-day\n"
-    "   cross-campaign outreach cooldown) so rediscover never re-adds a\n"
-    "   recently contacted KOL.\n"
+    "2. Read the current candidate pool from CAL FIRST with `--summary`:\n"
+    "   `list-candidates --env <env> --campaign-id <id> --summary`\n"
+    "   (print to terminal stdout — NEVER `> /tmp/...`; redirect empties stdout).\n"
+    "   Also `list-candidate-handles --summary`,\n"
+    "   `list-discovery-skip-handles --summary`,\n"
+    "   `list-outreach-cooldown-handles --summary`.\n"
+    "   Do NOT dump full handle JSON/TSV into the transcript (hangs the LLM).\n"
+    "   Exclusion membership = `rpa_precheck_handle` + summary counts.\n"
+    "   Trust `already_discovered_count` in the brief; do NOT re-ingest CAL handles.\n"
     "3. `skill_view(name='instagram-kol-discovery')` and then EXECUTE\n"
     "   discovery using built-in `browser_*` on local debug Chrome —\n"
     "   `browser_navigate`, `browser_snapshot`, `browser_get_images`,\n"
@@ -127,8 +151,7 @@ REDISCOVERY_INSTRUCTIONS = (
     "   `mcp_chrome_devtools_*` family.\n"
     "   **Browser no-hang:** one page at a time, single attempt per URL.\n"
     "   Navigate/snapshot error or timeout → switch surface; never retry the\n"
-    "   same URL in a loop. A hung run is never acceptable. Ending short of\n"
-    "   the quantity floor is acceptable ONLY under a hard blocker (below).\n"
+    "   same URL in a loop. A partial floor is acceptable; a hung run is not.\n"
     "   Do not fan out parallel browser sessions in one run.\n"
     "   When the brief includes `nox_discovery_enabled: true` and\n"
     "   `campaign_config_file:`, run the Nox audience screen per the\n"
@@ -137,41 +160,29 @@ REDISCOVERY_INSTRUCTIONS = (
     "\n"
     "   ITERATION CONTRACT — HARD QUANTITY FLOOR (read carefully):\n"
     "   - The goal is to PERSIST at least `additional_target_count` NEW\n"
-    "     candidates (handles not in the exclusion set) **inside THIS run**.\n"
-    "     Auto-retry is a last resort after a hard blocker — not the default\n"
-    "     way to fill the floor one-ingest-per-run.\n"
-    "   - SAME-RUN BATCH LOOP (mandatory):\n"
-    "     After EVERY successful `ingest-confirmed-candidate`, immediately\n"
-    "     re-count NEW persisted vs `additional_target_count`. If still short\n"
-    "     AND no hard blocker, CONTINUE discovering/qualifying/ingesting in\n"
-    "     THIS same run — do NOT write the final answer / end the turn.\n"
-    "   - FORBIDDEN early exits (these are failures, not completions):\n"
-    "     * Ending after 1 (or a few) successful ingests while still below\n"
-    "       `additional_target_count`\n"
-    "     * Ending because STEP_0 pending handles were already in CAL\n"
-    "     * Ending after discarding one focus handle (e.g. media account /\n"
-    "       content-screen fail) without starting a new discovery pass\n"
-    "     * Treating `next_round_focus` as a reason to stop THIS run\n"
-    "   - After each persistence, re-check `list-candidates`. If the floor\n"
-    "     is not hit, START ANOTHER discovery pass with broadened/shifted\n"
-    "     keywords (different niche angles, regional tags, language tags,\n"
-    "     adjacent hashtags, related-account graph from already-qualified\n"
-    "     KOLs).\n"
-    "   - Disqualifying a profile (off-niche, audience too small, media\n"
-    "     account, content screen fail) does NOT count toward the floor and\n"
-    "     does NOT authorize ending the run. Only successful\n"
+    "     candidates (handles not in the exclusion set). This is a HARD\n"
+    "     FLOOR, not a soft target.\n"
+    "   - The discovery skill's default browse budget is sized for a fresh\n"
+    "     campaign. In rediscover mode you MUST keep iterating: after each\n"
+    "     persistence round, re-check `list-candidates` and decide whether\n"
+    "     the floor has been hit. If not, START ANOTHER discovery pass\n"
+    "     with broadened or shifted keywords (different niche angles,\n"
+    "     regional tags, language tags, adjacent hashtags, related-account\n"
+    "     graph from already-qualified KOLs).\n"
+    "   - Disqualifying a profile (off-niche, audience too small, no\n"
+    "     contact) does NOT count toward the floor. Only successful\n"
     "     `ingest-confirmed-candidate` rows count.\n"
-    "   - Budget yourself up to MAX(80, additional_target_count * 4)\n"
-    "     profile visits in THIS run (honor RPA `run_quota`). Try at least\n"
-    "     3 distinct keyword angles before considering yourself blocked.\n"
-    "   - Hard blockers that allow stopping short (must set\n"
-    "     `floor_unmet_reason`): IG rate limit / checkpoint / captcha,\n"
-    "     RPA+browser both unavailable, cookie/session dead after re-login\n"
-    "     attempt, niche exhausted after ≥3 distinct angles with zero new\n"
-    "     outside exclusion_set, bridge/gateway down.\n"
-    "   - Auto-retry is ONLY for residual shortfall after a hard blocker.\n"
-    "     The console may auto-fire /rediscover (up to 5) if still short;\n"
-    "     do not rely on that to replace same-run batching.\n"
+    "   - Budget yourself up to MAX(40, additional_target_count * 4)\n"
+    "     profile visits per pass. Try at least 3 distinct keyword angles\n"
+    "     before considering yourself blocked.\n"
+    "   - Stopping short is a FAILURE STATE. The console runs a post-\n"
+    "     terminal quantity gate: if persisted NEW candidates <\n"
+    "     additional_target_count AND auto-retry budget remains, the\n"
+    "     backend AUTO-FIRES another /rediscover for the same campaign_id\n"
+    "     (up to 5 auto-retries total = 6 runs max). After that, the\n"
+    "     operator gets a `discovery_floor_unmet` escalation. Therefore:\n"
+    "     finishing partial is acceptable ONLY when truly blocked (rate\n"
+    "     limits, niche exhausted, bridge/gateway down).\n"
     "   - When you stop short you MUST include in the final answer the\n"
     "     structured diagnostics block (see instagram-kol-discovery skill):\n"
     "       floor_unmet_reason: <one-sentence why>\n"
@@ -188,18 +199,16 @@ REDISCOVERY_INSTRUCTIONS = (
     "   b) `ingest-confirmed-candidate --campaign-id <id> --env <env> --json\n"
     "      @/tmp/ingest_<handle>.json`;\n"
     "   c) `list-candidates --env <env> --campaign-id <id>` and verify the\n"
-    "      handle is now present;\n"
-    "   d) If NEW persisted < additional_target_count, go find the next\n"
-    "      candidate in THIS run (back to step 3 discovery pass).\n"
+    "      handle is now present.\n"
     "   NEVER touch existing candidates: do NOT change their\n"
     "   candidate_status, do NOT re-add an excluded handle, do NOT call\n"
     "   `select-candidates` (the operator owns approval).\n"
-    "5. When the floor is met (or a hard blocker forces stop-short), call\n"
+    "5. After the new candidates are persisted, call\n"
     "   `resolve-relationships --env <env> --campaign-id <id>`. The bridge\n"
     "   side is idempotent — already-resolved candidates are untouched.\n"
-    "6. Then end the agent turn. Do NOT shortlist, draft emails, send mail,\n"
-    "   or touch approved KOLs from earlier rounds. \"STOP\" here means stop\n"
-    "   outreach/draft work — NOT \"stop after the first ingest\".\n"
+    "6. STOP. Do NOT shortlist, draft emails, send mail, or touch the\n"
+    "   approved KOLs from earlier rounds. The operator will review the\n"
+    "   expanded pool in the web console.\n"
     "\n"
     "## Final-answer contract\n"
     "Report the count of NEW candidates persisted in this run (from your\n"
@@ -217,7 +226,7 @@ REDISCOVERY_INSTRUCTIONS = (
     "- Guard block JSON with `source: kol_bridge_agent_guard` is NOT bridge\n"
     "  validation — fix the command per `hint`.\n"
     "- If `list-candidates` returns 0 BEFORE step 2, treat the brief's\n"
-    "  `already_discovered_handles` as authoritative.\n"
+    "  `already_discovered_count` + bootstrap CLI as authoritative.\n"
     "- If the bridge returns 401, the X-Bridge-Key header is missing —\n"
     "  re-issue via the CLI (which reads HERMES_KOL_OPS_BRIDGE_KEY) or\n"
     "  add `--bridge-key $HERMES_KOL_OPS_BRIDGE_KEY` explicitly.\n"
@@ -289,22 +298,35 @@ def _compose_rediscover_brief(
         "",
         "# rediscover_directive",
         f"additional_target_count: {additional_count}",
-        (
-            "already_discovered_handles: []"
-            if not excluded_handles
-            else "already_discovered_handles:  # ALREADY IN CAL — skip ingest for every handle below"
-        ),
+        f"already_discovered_count: {len(excluded_handles)}",
     ])
-    for handle in excluded_handles:
-        lines.append(f"  - {handle}")
+    if not excluded_handles:
+        lines.append("already_discovered_handles: []")
+    else:
+        lines.append(
+            "already_discovered_handles_sample:  # ALREADY IN CAL — "
+            "full set via bootstrap list-*-handles --summary + "
+            "rpa_precheck_handle; do NOT cat/dump the full list into context"
+        )
+        for handle in excluded_handles[:_ALREADY_DISCOVERED_SAMPLE]:
+            lines.append(f"  - {handle}")
+        omitted = len(excluded_handles) - _ALREADY_DISCOVERED_SAMPLE
+        if omitted > 0:
+            lines.append(f"  # ... +{omitted} more omitted (context-safe)")
 
     pending_for_resume: list[str] = []
     if prior_diagnostics:
+        total_rounds = len(prior_diagnostics)
+        rounds_to_render = prior_diagnostics[-_PRIOR_ROUNDS_CAP:]
         lines.extend([
             "",
-            "# prior_runs (read-only — earlier rounds this campaign generation)",
+            (
+                f"# prior_runs (read-only — last {len(rounds_to_render)} of "
+                f"{total_rounds} rounds this campaign generation; older "
+                "rounds omitted to avoid LLM context hang)"
+            ),
         ])
-        for entry in prior_diagnostics:
+        for entry in rounds_to_render:
             lines.append(
                 f"## Round {entry.get('round_index', '?')} "
                 f"(run_id={entry.get('run_id')}, "
@@ -331,8 +353,11 @@ def _compose_rediscover_brief(
                 items = entry.get(list_key) or []
                 if items:
                     lines.append(f"{list_key}:")
-                    for item in items:
+                    for item in items[:_DIAG_LIST_ITEM_CAP]:
                         lines.append(f"  - {item}")
+                    omitted_items = len(items) - _DIAG_LIST_ITEM_CAP
+                    if omitted_items > 0:
+                        lines.append(f"  # ... +{omitted_items} more omitted")
 
         pending_for_resume = _collect_pending_ingests_for_resume(
             prior_diagnostics, excluded_handles
@@ -386,6 +411,12 @@ def _compose_rediscover_brief(
     if pending_for_resume:
         lines.extend(_render_resume_directives_block(pending_for_resume))
 
+    if (
+        prior_diagnostics
+        and prior_diagnostics[-1].get("exit_kind") == EXIT_KIND_PREMATURE
+    ):
+        lines.extend(_render_premature_exit_recovery_block())
+
     pitch = (product["pitch_md"] or "").strip()
     if pitch:
         lines.extend([
@@ -409,9 +440,10 @@ def _compose_rediscover_brief(
     lines.extend([
         "",
         "# hard_rules (override any cached skill version — obey verbatim)",
-        "1. Bootstrap the exclusion set with:",
-        "   list-candidate-handles --env <env> --campaign-id <cid> --with-status --plain",
-        "   Treat EVERY handle in the output as off-limits for browser_navigate.",
+        "1. Bootstrap with --summary (NOT full dumps):",
+        "   list-candidates / list-candidate-handles / list-discovery-skip-handles /",
+        "   list-outreach-cooldown-handles — all with --summary.",
+        "   Exclusion checks = rpa_precheck_handle. Dumping full lists hangs the LLM.",
         "2. Before writing /tmp/ingest_<handle>.json, self-check the payload:",
         "   - creator brief bundle: all 6 keys present together or all absent",
         "     (content_pillars, signature_hooks, voice_descriptors, hero_post_url,",
@@ -427,6 +459,10 @@ def _compose_rediscover_brief(
         "   (b) listed in pending_ingests in the run summary, or",
         "   (c) an explicit visited_handles: YAML entry with 'DISCARD: <reason>'.",
         "   No visited-but-undecided handles may remain at run end.",
+        "4. Illegal end: after bootstrap, do NOT finish with text-only status",
+        "   (e.g. 'requires profile verification') without RPA/profile work and",
+        "   non-empty visited_handles or floor_unmet_reason + attempted_angles.",
+        "   Console auto-recovers premature bootstrap stops.",
     ])
     return "\n".join(lines)
 
@@ -573,6 +609,14 @@ _DIAG_LIST_KEYS = (
 
 _NEXT_ROUND_FOCUS_CAP = 10
 _PENDING_INGESTS_CAP = 5
+# Only the newest N diagnostics rounds belong in the next brief. Mature
+# campaigns (100+ rediscover rounds) otherwise inject 100KB+ of prior_runs
+# history and hang the LLM stream on the first post-bootstrap API call.
+_PRIOR_ROUNDS_CAP = 5
+# Cap non-focus diagnostic lists per round (visited_handles / attempted_angles).
+_DIAG_LIST_ITEM_CAP = 15
+# Sample only — full exclusion comes from bootstrap CLI + rpa_precheck_handle.
+_ALREADY_DISCOVERED_SAMPLE = 25
 
 _DIAG_ALL_KEYS = _DIAG_SCALAR_KEYS + _DIAG_LIST_KEYS
 
@@ -729,7 +773,7 @@ def _render_resume_directives_block(pending_items: list[str]) -> list[str]:
         lines.append(f"  - {item}")
     lines.extend([
         "STEP_0: For EACH handle above not in list-candidates exclusion set:",
-        "  (Skip if handle is in `already_discovered_handles` — already in CAL.)",
+        "  (Skip if rpa_precheck_handle / bootstrap exclusion says already in CAL.)",
         "  browser_navigate profile if needed → write /tmp/ingest_<handle>.json",
         "  (nested source/identity/candidate per bridge-cli-json-payloads.md)",
         "  → ingest-confirmed-candidate → list-candidates verify",
@@ -1172,11 +1216,77 @@ def _read_diagnostics_history(
     return parsed if isinstance(parsed, list) else []
 
 
+def _has_real_visited_handles(visited: Any) -> bool:
+    """True when visited_handles shows real exploration (not heuristic mentions).
+
+    Heuristic recovery may record bare ``@handle`` prose as
+    ``undecided: heuristic`` even when the agent never navigated — those
+    must not clear the premature-bootstrap detector.
+    """
+    if not isinstance(visited, list) or not visited:
+        return False
+    marker = _UNDECIDED_HEURISTIC_MARKER.lower()
+    for item in visited:
+        text = str(item or "").strip()
+        if text and marker not in text.lower():
+            return True
+    return False
+
+
+def _is_premature_bootstrap_stop(
+    diagnostics: dict[str, Any],
+    final_text: str | None,
+) -> bool:
+    """Detect bootstrap-only / soft-stop ends with no real exploration."""
+    real_visits = _has_real_visited_handles(diagnostics.get("visited_handles"))
+    empty_angles = not (diagnostics.get("attempted_angles") or [])
+    empty_reason = not (diagnostics.get("floor_unmet_reason") or "").strip()
+    if not real_visits and empty_angles and empty_reason:
+        return True
+    if not real_visits and final_text and _SOFT_STOP_RE.search(final_text):
+        return True
+    return False
+
+
+def _tag_premature_diagnostics(diagnostics: dict[str, Any]) -> None:
+    """Mutate diagnostics in-place before append to history."""
+    diagnostics["exit_kind"] = EXIT_KIND_PREMATURE
+    diagnostics["floor_unmet_reason"] = PREMATURE_FLOOR_REASON
+
+
+def _count_premature_exits(diagnostics_history: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for entry in diagnostics_history
+        if entry.get("exit_kind") == EXIT_KIND_PREMATURE
+    )
+
+
+def _render_premature_exit_recovery_block() -> list[str]:
+    return [
+        "",
+        "# premature_exit_recovery (HARD)",
+        "The previous run ended ILLEGALLY after bootstrap with zero real",
+        "exploration (no visited_handles / attempted_angles / floor_unmet_reason).",
+        "Before any final text response you MUST:",
+        "1. Call rpa_precheck_handle and/or rpa_fetch_ig_profile (or complete",
+        "   STEP_0 ingest for pending handles), AND",
+        "2. Emit non-empty visited_handles with DISCARD/ingest conclusions,",
+        "   OR a real floor_unmet_reason plus attempted_angles.",
+        "Ending with 'requires profile verification' / 'pending verification'",
+        "/ '需进一步评估' alone is forbidden.",
+    ]
+
+
 def _count_consecutive_zero_new(diagnostics_history: list[dict[str, Any]]) -> int:
     """Count trailing rounds in ``diagnostics_history`` with no net-new
     persisted candidates.
 
-    Walks from the end of the list backward; for each adjacent pair
+    Premature-bootstrap rounds (``exit_kind == premature_bootstrap_stop``)
+    are filtered out first so empty early-stops do not look like niche
+    exhaustion.
+
+    Walks from the end of the filtered list backward; for each adjacent pair
     ``(entry[i], entry[i-1])`` where
     ``entry[i].persisted_count_at_end == entry[i-1].persisted_count_at_end``
     (i.e. the later round added zero candidates vs the prior round), increments
@@ -1189,12 +1299,17 @@ def _count_consecutive_zero_new(diagnostics_history: list[dict[str, Any]]) -> in
     entry (caller appends it via ``_append_diagnostics_entry`` before invoking
     this helper).
     """
-    if len(diagnostics_history) < 2:
+    filtered = [
+        entry
+        for entry in diagnostics_history
+        if entry.get("exit_kind") != EXIT_KIND_PREMATURE
+    ]
+    if len(filtered) < 2:
         return 0
     streak = 0
-    for i in range(len(diagnostics_history) - 1, 0, -1):
-        prev = diagnostics_history[i - 1]
-        curr = diagnostics_history[i]
+    for i in range(len(filtered) - 1, 0, -1):
+        prev = filtered[i - 1]
+        curr = filtered[i]
         prev_count = prev.get("persisted_count_at_end")
         curr_count = curr.get("persisted_count_at_end")
         if prev_count is None or curr_count is None:
@@ -1267,6 +1382,10 @@ async def evaluate_gate_after_terminal(
 
     Behavior:
     - ``current >= target_floor`` → pass, clear ``gate_run_id``, no-op.
+    - Premature bootstrap stop (completed run, empty/soft-stop diagnostics)
+      under recovery cap → auto-retry with ``# premature_exit_recovery``;
+      over cap / max retries → escalate ``premature_exit_repeated``.
+      Premature rounds are excluded from consecutive-zero niche streak.
     - ``current < target_floor and retry_count < MAX_AUTO_RETRIES`` → fire a
       rediscover for the missing count, incrementing ``retry_count``.
       ``gate_run_id`` is updated by the trigger to the new auto-retry's
@@ -1324,9 +1443,20 @@ async def evaluate_gate_after_terminal(
         # so future rounds (auto-retry or operator /rediscover) inherit the
         # full per-generation trail of attempted_angles / vertical_coverage /
         # floor_unmet_reason / underserved_verticals / remediation_attempted.
-        diagnostics = _extract_run_diagnostics(
+        # Evicted gate runs pass ``run_info=None`` — we cannot tell premature
+        # bootstrap-stop from a lost transcript, so keep legacy zero-new /
+        # auto-retry behavior (do not tag exit_kind).
+        final_output = (
             run_info.get("output") if isinstance(run_info, dict) else None
         )
+        diagnostics = _extract_run_diagnostics(final_output)
+        final_text = _coerce_output_to_text(final_output)
+        premature = (
+            isinstance(run_info, dict)
+            and _is_premature_bootstrap_stop(diagnostics, final_text)
+        )
+        if premature:
+            _tag_premature_diagnostics(diagnostics)
         _append_diagnostics_entry(
             conn,
             campaign_id=campaign_id,
@@ -1344,16 +1474,69 @@ async def evaluate_gate_after_terminal(
             return {"ok": True, "outcome": "floor_met", "current": current,
                     "target_floor": target_floor}
 
-        # Early-escalation: if the last MAX_CONSECUTIVE_ZERO_NEW_RUNS rounds
-        # all produced zero net-new persisted candidates, the niche is almost
-        # certainly exhausted and another auto-retry will burn tokens for
-        # nothing. Escalate to the operator now instead of firing retry N+1.
-        # Only triggers for auto-retry rounds (retry_count > 0); the initial
-        # operator-launched run is never early-escalated on its own.
-        if retry_count > 0:
-            history_after_append = _read_diagnostics_history(
-                conn, campaign_id=campaign_id, env=env,
+        history_after_append = _read_diagnostics_history(
+            conn, campaign_id=campaign_id, env=env,
+        )
+
+        # Premature bootstrap stop: recover with auto-retry (or escalate after
+        # cap). Mutually exclusive with niche zero-new early-escalation.
+        if premature:
+            premature_count = _count_premature_exits(history_after_append)
+            if (
+                premature_count > MAX_PREMATURE_EXIT_RECOVERIES
+                or retry_count >= MAX_AUTO_RETRIES
+            ):
+                early_reason = "premature_exit_repeated"
+                conn.execute(
+                    "UPDATE product_campaigns SET floor_unmet_reason=? "
+                    "WHERE campaign_id=? AND env=?",
+                    (early_reason, campaign_id, env),
+                )
+                try:
+                    await bridge.open_escalation({
+                        "env": env,
+                        "campaign_id": campaign_id,
+                        "reason": "discovery_floor_unmet",
+                        "question_to_operator": (
+                            f"连续 {premature_count} 轮在 bootstrap 后纯文本早停"
+                            f"（无真实 visited_handles / attempted_angles），"
+                            f"当前 {current}/{target_floor}。"
+                            f"这是模型/空终态早停，不是 niche 枯竭。"
+                            f"请人工 /rediscover 或检查 Chrome/RPA 环境后重试。"
+                            f"原因：{early_reason}。"
+                        ),
+                    })
+                except BridgeError as exc:
+                    logger.warning(
+                        "gate: premature-exit escalation failed for %s/%s: %s",
+                        campaign_id, env, exc,
+                    )
+                    return {"ok": False, "skipped": "escalation_failed",
+                            "current": current, "target_floor": target_floor}
+                _clear_gate_run_id(conn, campaign_id=campaign_id, env=env)
+                logger.info(
+                    "gate: escalated premature_exit_repeated for %s/%s "
+                    "(premature_count=%d current=%d target=%d retry=%d)",
+                    campaign_id, env, premature_count, current,
+                    target_floor, retry_count,
+                )
+                return {
+                    "ok": True, "outcome": "premature_exit_repeated",
+                    "current": current, "target_floor": target_floor,
+                    "premature_count": premature_count, "reason": early_reason,
+                }
+            # Under recovery cap: fall through to normal auto-retry launch
+            # (skips zero-new niche escalation below).
+            logger.info(
+                "gate: premature bootstrap stop on %s/%s — scheduling "
+                "recovery auto-retry (premature_count=%d retry=%d)",
+                campaign_id, env, premature_count, retry_count,
             )
+        elif retry_count > 0:
+            # Early-escalation: if the last MAX_CONSECUTIVE_ZERO_NEW_RUNS
+            # non-premature rounds all produced zero net-new persisted
+            # candidates, the niche is almost certainly exhausted.
+            # Only triggers for auto-retry rounds (retry_count > 0).
             zero_new_streak = _count_consecutive_zero_new(history_after_append)
             if zero_new_streak >= MAX_CONSECUTIVE_ZERO_NEW_RUNS:
                 early_reason = (

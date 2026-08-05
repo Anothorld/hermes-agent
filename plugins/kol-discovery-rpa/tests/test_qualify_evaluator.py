@@ -15,21 +15,28 @@ def test_profile_all_pass():
     assert len(r["discard_reasons"]) == 0
 
 
-def test_profile_followers_below_100k():
-    r = qualify_evaluator.evaluate_profile_gates("99K", ["US"])
+def test_profile_followers_below_min():
+    r = qualify_evaluator.evaluate_profile_gates("79K", ["US"])
     assert r["gates"]["followers"]["pass"] == False
-    assert "followers_below_100k" in r["discard_reasons"]
+    assert "followers_below_min" in r["discard_reasons"]
+
+
+def test_profile_followers_at_min_passes():
+    r = qualify_evaluator.evaluate_profile_gates("80K", ["US"])
+    assert r["gates"]["followers"]["pass"] == True
+    assert r["gates"]["followers"]["borderline"] == True
+    assert "followers_below_min" not in r["discard_reasons"]
 
 
 def test_profile_followers_borderline():
-    r = qualify_evaluator.evaluate_profile_gates("105K", ["US"])
+    r = qualify_evaluator.evaluate_profile_gates("85K", ["US"])
     assert r["gates"]["followers"]["pass"] == True
     assert r["gates"]["followers"]["borderline"] == True
-    assert "followers_below_100k" not in r["discard_reasons"]
+    assert "followers_below_min" not in r["discard_reasons"]
 
 
 def test_profile_followers_just_above_borderline():
-    r = qualify_evaluator.evaluate_profile_gates("110K", ["US"])
+    r = qualify_evaluator.evaluate_profile_gates("100K", ["US"])
     assert r["gates"]["followers"]["pass"] == True
     assert r["gates"]["followers"]["borderline"] == False
 
@@ -98,11 +105,11 @@ def test_reels_static_only():
     assert "static_only_account" in r["discard_reasons"]
 
 
-def test_reels_avg_views_below_30k():
+def test_reels_avg_views_below_min():
     profile = qualify_evaluator.evaluate_profile_gates("200K", ["US"])
     reels = [_reel(5000, 100, 5) for _ in range(6)]
     r = qualify_evaluator.evaluate_reels_gates(reels, profile)
-    assert "avg_views_below_30k" in r["discard_reasons"]
+    assert "avg_views_below_min" in r["discard_reasons"]
 
 
 def test_reels_avg_views_excludes_72h():
@@ -116,21 +123,21 @@ def test_reels_avg_views_excludes_72h():
     assert r["gates"]["avg_views_excl_72h"]["value"] == 50000
 
 
-def test_reels_er_below_3pct():
+def test_reels_er_below_min():
     profile = qualify_evaluator.evaluate_profile_gates("200K", ["US"])
-    # ER = (100+5)/50000 = 0.21% — way below 3%
+    # ER = (100+5)/50000 = 0.21% — way below 2%
     reels = [_reel(50000, 100, 5) for _ in range(6)]
     r = qualify_evaluator.evaluate_reels_gates(reels, profile)
-    assert "reel_er_below_3pct" in r["discard_reasons"]
+    assert "reel_er_below_min" in r["discard_reasons"]
 
 
-def test_reels_er_just_above_3pct():
+def test_reels_er_just_above_min():
     profile = qualify_evaluator.evaluate_profile_gates("200K", ["US"])
-    # ER = (1200+300)/50000 = 3% — exactly at threshold
-    reels = [_reel(50000, 1200, 300) for _ in range(6)]
+    # ER = (800+200)/50000 = 2% — exactly at threshold
+    reels = [_reel(50000, 800, 200) for _ in range(6)]
     r = qualify_evaluator.evaluate_reels_gates(reels, profile)
     assert r["gates"]["reel_er"]["pass"] == True
-    assert r["gates"]["reel_er"]["value"] >= 0.03
+    assert r["gates"]["reel_er"]["value"] >= 0.02
 
 
 def test_reels_er_deferred_when_grid_has_no_likes_comments():
@@ -141,7 +148,7 @@ def test_reels_er_deferred_when_grid_has_no_likes_comments():
     reels = [_reel(50000, 0, 0) for _ in range(6)]  # grid extraction: likes=comments=0
     r = qualify_evaluator.evaluate_reels_gates(reels, profile)
     assert r["hard_discard"] == False
-    assert "reel_er_below_3pct" not in r["discard_reasons"]
+    assert "reel_er_below_min" not in r["discard_reasons"]
     assert r["gates"]["reel_er"]["pass"] == True
     assert r["gates"]["reel_er"]["value"] == "deferred"
     assert r["gates"]["reel_er"]["reason"] == "likes_comments_unavailable_from_grid"
@@ -155,17 +162,17 @@ def test_reels_er_still_evaluated_when_some_engagement_present():
     reels = [_reel(50000, 0, 0) for _ in range(5)]
     reels.append(_reel(50000, 100, 5))  # ER = 0.21% — real but low
     r = qualify_evaluator.evaluate_reels_gates(reels, profile)
-    assert "reel_er_below_3pct" in r["discard_reasons"]
+    assert "reel_er_below_min" in r["discard_reasons"]
     assert r["gates"]["reel_er"]["value"] != "deferred"
 
 
 def test_reels_er_deferred_does_not_mask_real_low_views():
-    """Deferred ER should not hide a real avg_views_below_30k discard."""
+    """Deferred ER should not hide a real avg_views_below_min discard."""
     profile = qualify_evaluator.evaluate_profile_gates("200K", ["US"])
     reels = [_reel(5000, 0, 0) for _ in range(6)]  # low views + no engagement
     r = qualify_evaluator.evaluate_reels_gates(reels, profile)
-    assert "avg_views_below_30k" in r["discard_reasons"]
-    assert "reel_er_below_3pct" not in r["discard_reasons"]  # still deferred
+    assert "avg_views_below_min" in r["discard_reasons"]
+    assert "reel_er_below_min" not in r["discard_reasons"]  # still deferred
 
 
 # ----------------------------------------------------------------- exclusion precheck

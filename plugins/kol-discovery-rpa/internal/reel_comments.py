@@ -177,7 +177,7 @@ def fetch_reel_comments(
     mode: str = "evaluation",
     max_items: int = 15,
     include_caption: bool = True,
-    min_followers_hint: int = 100000,
+    min_followers_hint: int = 80000,
     scroll_comments: int = 0,
 ) -> dict:
     """Navigate to a Reel page and extract comments.

@@ -21,10 +21,10 @@ browser LLM turns to 1-2 per handle (50-70% token savings).
 | 2 | `rpa_precheck_handle` | 1 | Zero page-load exclusion_set/skip/cooldown precheck |
 | 3 | `rpa_fetch_ig_profile` | 1 | Profile data + account country + followers/region qualification gates |
 | 4 | `rpa_fetch_ig_reels` | 2 | Profile grid: 10 reels + thumbnails + `content_eval` plan |
-| 5 | `rpa_fetch_google_serp` | 2 | Google SERP extraction |
+| 5 | `rpa_fetch_google_serp` | 2 | Google SERP + `candidate_handles` (rows 30/40; resolves reel authors by default) |
 | 6 | `rpa_download_ig_reel` | 2 | yt-dlp MP4 (single reel; video eval mode only) |
 | 7 | `rpa_download_ig_cover` | 2 | Single cover (RPA thumbnail URL or yt-dlp fallback) |
-| 8 | `rpa_download_ig_content` | 2 | Batch: 10 covers + random 3 videos from `content_eval` |
+| 8 | `rpa_download_ig_content` | 2 | Batch: 2 covers + random 3 videos from `content_eval` |
 | 9 | `rpa_fetch_reel_comments` | 2/3 | Reel comments (evaluation + discovery modes) |
 | 10 | `rpa_cleanup_reels` | 2 | Delete old MP4 + cover image files |
 | 11 | `rpa_fetch_hashtag_candidates` | 3 | Hashtag explore |
@@ -46,13 +46,13 @@ Qualification` (L134-155). When the skill or bridge thresholds change, the
 
 | Criterion | Threshold | RPA enforcement |
 |-----------|-----------|-----------------|
-| Followers | >= 100k (K/M/万/亿 normalized) | `qualification.gates.followers` |
-| Followers borderline | 100k-110k | Gate passes; `borderline=true` flag for Agent |
+| Followers | >= 80k (K/M/万/亿 normalized) | `qualification.gates.followers` |
+| Followers borderline | 80k-100k | Gate passes; `borderline=true` flag for Agent |
 | Region | US / Canada; unknown = discard | `qualification.gates.region` |
 | Reels activity | >= 5 Reels in last 90 days | `qualification.gates.reels_3mo` |
 | Static-only | 0 reels → discard | `static_only_account` discard reason |
-| Avg Reel views | >= 30k (excluding 72h) | `qualification.gates.avg_views_excl_72h` |
-| Reel ER | >= 3% = (likes+comments)/views | `qualification.gates.reel_er` |
+| Avg Reel views | >= 20k (excluding 72h) | `qualification.gates.avg_views_excl_72h` |
+| Reel ER | >= 2% = (likes+comments)/views | `qualification.gates.reel_er` |
 | Account type | individual, not agency/brand | `qualification.gates.account_type` (heuristic) |
 | Furniture self-commerce | NOT a furniture seller | `qualification.gates.furniture_self_commerce` (heuristic) |
 | Skip list / cooldown | exclusion_set precheck | `qualification.gates.exclusion_precheck` |
@@ -61,25 +61,17 @@ Qualification` (L134-155). When the skill or bridge thresholds change, the
 the candidate and cannot override with learned criteria (skill L100-103
 priority: HARD > learned > default).
 
-## Content Screening Modes
+## Video Eval Switch
 
-| Vision (`KOL_RPA_VISION_EVAL_ENABLED`) | Video (`KOL_RPA_VIDEO_EVAL_ENABLED`) | Mode | Screening |
-|---|---|---|---|
-| OFF (default) | — | **text** | 10× caption + comments only |
-| ON | OFF | cover | 10 covers + vision_analyze + comments |
-| ON | ON | video | cover mode + 3 random videos + video_analyze |
+| Switch | Mode | Screening combination |
+|--------|------|-----------------------|
+| OFF (default) | cover | 2 covers + 10 comments |
+| ON | video | 2 covers + 3 random videos + 10 comments |
 
-Priority: brief `rpa_vision_eval_enabled` / `rpa_video_eval_enabled` > env > defaults
-(vision OFF, video OFF).
+Priority: brief field `rpa_video_eval_enabled` > env `KOL_RPA_VIDEO_EVAL_ENABLED` > default OFF.
 
-The `pre_tool_call` hook when vision is OFF:
-- blocks `rpa_download_ig_content` / `rpa_download_ig_cover` /
-  `rpa_download_ig_reel` always;
-- blocks `vision_analyze` / `video_analyze` **only** in `kol-campaign:*`
-  discovery sessions (not `kol-email-discover:` / creator-brief / draft).
-
-When vision ON and video OFF, only `rpa_download_ig_reel` is blocked; when
-video ON, downloads are capped at 3.
+The `pre_tool_call` hook blocks `rpa_download_ig_reel` when OFF, and limits
+to 3 downloads per candidate when ON.
 
 ## Anti-Scrape Strategy
 
@@ -88,11 +80,12 @@ video ON, downloads are capped at 3.
 - Per-run caps: 80 profiles, 400 reel page loads (env-overridable)
 - Quota epoch: counters reset on each new agent `turn_id` (gateway
   rediscover/auto-retry reuses the same `kol-campaign:…` task_id; without
-  turn-scoped reset, exhausted 94/40 counters stuck across launches)
+  turn-scoped reset, exhausted counters stuck across launches)
 - Cookies for yt-dlp / cover download: shared
   `$HOME/.hermes/local-chrome-debug-profile` (same as tab-pool /
   `start-debug-chrome.sh`), **not** `$HERMES_HOME/...` under a Hermes
-  profile — override with `DEBUG_CHROME_PROFILE_DIR`
+  profile — resolved by `internal/chrome_paths.py`; override with
+  `DEBUG_CHROME_PROFILE_DIR`
 - Risk detection: checkpoint/captcha/login-wall → stop run
 - Read-only: no follow/like/comment/DM actions
 - Fallback: RPA failure grants one-shot browser fallback token
@@ -160,7 +153,7 @@ word-matches must be locale-aware — not just `rpa_fetch_ig_profile`:
 | `rpa_fetch_ig_reels` | reel thumbnail_url | CSS `background-image` on `<div>` (current bloks layout), `<img>` fallback, `<video>` poster fallback |
 | `rpa_fetch_reel_comments` | reel likes + comment count | en/zh from og:description prefix (`N likes, N comments` / `N 次赞，N 条评论`) |
 | `rpa_fetch_reel_comments` | comment text + likes | en/zh/ja/ko/es; `/reel/` auto-rewritten to `/p/` for inline comments |
-| `rpa_fetch_google_serp` | — | h3-anchored extraction + Google-domain filter + `/url?q=` unwrap; locale-independent |
+| `rpa_fetch_google_serp` | — | h3-anchored extraction + scroll×3; `candidate_handles` from profile URLs / `@mentions` **and** (default) authors resolved from `/reel/`+`/p/` via `resolve_authors` (`max_author_resolves` default 20, max 30); `max_results` default 30 / max 40 |
 | `rpa_check_ip` | — | ipinfo.io JSON (locale-independent) |
 
 ## SPA Hydration Timing
@@ -199,19 +192,21 @@ reliable on a bloks reel page:
 
 | Field | Meaning |
 |-------|---------|
-| `cover_reels` | First 10 reels from the profile `/reels/` grid (most recent); comment/caption targets in text mode; also carry `thumbnail_url` when vision ON |
-| `video_reels` | When video eval is ON: **random 3** sampled from that same 10-reel pool (deterministic per handle) |
-| `eval_mode` | `text` (default), `cover`, or `video` |
-| `selection` | Metadata for ingest payloads (`caption_and_comments_only`, etc.) |
+| `cover_reels` | First **2** reels from the profile `/reels/` grid (most recent) for vision; each with RPA-scraped `thumbnail_url` |
+| `video_reels` | When video eval is ON: **random 3** sampled from the recent-10 pool (deterministic per handle) |
+| `eval_mode` | `cover` or `video` (from brief/env switch) |
+| `selection` | Metadata for ingest payloads (`random_3_from_recent_10`, etc.) |
 
-**Recommended flow (text mode, default):**
+**Recommended flow:**
 
 1. `rpa_fetch_ig_reels(handle, max_reels=10)` → read `data.content_eval`
-2. `rpa_fetch_reel_comments(mode=evaluation, include_caption=true)` ×10 on `cover_reels[].url`
-3. Score from caption + comments — do **not** download covers or call vision
+2. `rpa_download_ig_content(content_eval=...)` → local `cover_path` for **2** covers + MP4 for random 3 when ON
+3. `rpa_fetch_reel_comments` ×10 on the recent grid reel URLs (ER / voice)
+4. `vision_analyze(cover_path=...)` ×**2**; `video_analyze(file_path=...)` ×3 when ON
 
-**Vision ON flow:** download covers → comments ×10 → `vision_analyze` ×10
-(+ `video_analyze` ×3 when video ON). Cover downloads prefer RPA `thumbnail_url`.
+Cover downloads prefer the RPA grid `thumbnail_url` (HTTP GET with IG Referer) —
+no yt-dlp round-trip when the grid already exposed the CDN URL. Falls back to
+`rpa_download_ig_cover` / yt-dlp when the thumbnail is missing or HTTP fails.
 
 ## Reel Download (yt-dlp)
 
@@ -248,11 +243,21 @@ Chrome profile.
   `reel_id`.
 - `download_cover`: `cover_path`, `file_size_bytes`, `thumbnail_url`, `reel_id`.
 
+**`rpa_download_ig_content` errors / ok**:
+- Per-item failures use `RpaError.detail` in the JSON `"message"` field (and
+  `error` on each cover/video row). Do not read a non-existent `.message`
+  attribute on the exception — that previously masked real download codes as
+  `internal_error`.
+- Tool-level `ok` is true only when ≥1 cover downloaded; in video mode also
+  requires ≥1 video when `videos_target > 0`. All-cover failure → `ok=false`
+  with structured `errors[]` (partial failures still return `data`).
+
 **Limits & gating**:
-- When vision is OFF (default): all download tools + `vision_analyze` /
-  `video_analyze` are blocked — text screening only.
-- When vision ON and video OFF: `rpa_download_ig_reel` blocked; cover downloads OK.
-- When video ON: `rpa_download_ig_reel` capped at 3 distinct reels per run.
+- `rpa_download_ig_reel` is blocked by the pre-tool-call hook when video eval is
+  OFF (`KOL_RPA_VIDEO_EVAL_ENABLED=0`) and capped at 3 distinct reels per run
+  when ON.
+- `rpa_download_ig_cover` is **not** gated by the video-eval switch — cover mode
+  is the default, so the agent can always fetch cover images for `vision_analyze`.
 - Disk: auto-cleans videos **and** cover images older than 1 hour; 2 GB cap.
 
 **Upstream IG breakage**: yt-dlp's Instagram extractor intermittently returns
@@ -267,15 +272,13 @@ there is no direct MP4 URL in the page DOM to fall back to.
 |----------|---------|---------|
 | `KOL_RPA_ENABLED` | `1` | Master kill switch (`0` = disable all RPA tools) |
 | `KOL_RPA_PHASE` | `1` | Which tools to register (1=3, 2=8, 3=11) |
-| `KOL_RPA_VISION_EVAL_ENABLED` | `0` | Multimodal vision switch (`1` = allow cover/video analyze) |
-| `KOL_RPA_VIDEO_EVAL_ENABLED` | `0` | Video eval switch (`1` = ON; requires vision ON) |
+| `KOL_RPA_VIDEO_EVAL_ENABLED` | `0` | Video eval switch (`1` = ON) |
 | `KOL_RPA_STRICT_BROWSER_BLOCK` | `1` | Guard blocks browser_* to IG/Google URLs in discovery |
 | `KOL_RPA_STRICT` | `0` | `1` = block ALL browser_* in discovery (extreme mode) |
-| `KOL_RPA_MAX_PROFILES_PER_RUN` | `80` | Profile visit quota |
-| `KOL_RPA_MAX_REEL_LOADS_PER_RUN` | `400` | Reel page load quota |
+| `KOL_RPA_MAX_PROFILES_PER_RUN` | `80` | Profile visit quota (resets each gateway `turn_id`) |
+| `KOL_RPA_MAX_REEL_LOADS_PER_RUN` | `400` | Reel page load quota (resets each gateway `turn_id`) |
 | `KOL_RPA_PROFILE_DELAY_S` | `2.0,4.0` | Jitter range between profiles |
 | `KOL_RPA_REEL_DELAY_S` | `1.0,2.0` | Jitter range between reels |
-| `DEBUG_CHROME_PROFILE_DIR` | `$HOME/.hermes/local-chrome-debug-profile` | Shared Chrome user-data dir for IG cookies (cover/yt-dlp) |
 
 ## Dependencies
 
@@ -289,7 +292,7 @@ there is no direct MP4 URL in the page DOM to fall back to.
 kol-discovery-rpa/
   __init__.py          # register(ctx) — loads tools.py + hooks.py via importlib
   tools.py             # 11 SCHEMA constants + handlers + as_function_schema
-  hooks.py             # pre_tool_call: video eval + per-turn quota reset
+  hooks.py             # pre_tool_call: video eval switch enforcement
   plugin.yaml          # manifest
   internal/
     cdp_runner.py       # tab_pool.acquire + cdp_page wrapper + _seed_session

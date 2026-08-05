@@ -198,10 +198,11 @@ def fetch_reels(
         "count": len(reels),
     }
     if include_content_eval:
+        # cover_count comes from EVAL_COVER_COUNT (vision/cost cap), not max_reels.
+        # max_reels still sizes the grid extract for activity gates + comments.
         data["content_eval"] = build_content_eval_plan(
             reels,
             eval_mode=eval_mode,
-            cover_count=max_reels,
             handle=clean_handle,
         )
 

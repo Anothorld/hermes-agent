@@ -7,10 +7,15 @@ import sqlite3
 import pytest
 
 from app.discovery_gate import (
+    EXIT_KIND_PREMATURE,
+    PREMATURE_FLOOR_REASON,
     _collect_pending_ingests_for_resume,
     _compose_rediscover_brief,
+    _count_consecutive_zero_new,
     _extract_run_diagnostics,
+    _is_premature_bootstrap_stop,
     _render_resume_directives_block,
+    _tag_premature_diagnostics,
 )
 
 
@@ -97,6 +102,44 @@ def test_compose_brief_includes_resume_directives():
     assert "0. If `# resume_directives` is present" in brief
 
 
+def test_compose_rediscover_brief_caps_prior_runs_and_exclusion_sample():
+    """Mature campaigns must not inject 100+ prior rounds into the brief."""
+    product = _product_row()
+    prior = []
+    for i in range(1, 21):
+        prior.append({
+            "round_index": i,
+            "run_id": f"run_{i}",
+            "persisted_count_at_end": 500 + i,
+            "target_floor": 613,
+            "is_auto_retry": True,
+            "attempted_angles": [f"angle-{i}-{j}" for j in range(30)],
+            "visited_handles": [f"h{i}_{j} — DISCARD: x" for j in range(25)],
+            "next_round_focus": [f"focus-{i}-{j}" for j in range(12)],
+        })
+    excluded = [f"kol_{i}" for i in range(80)]
+    brief = _compose_rediscover_brief(
+        campaign_id="CID-1",
+        env="LIVE",
+        product=product,
+        additional_count=50,
+        excluded_handles=excluded,
+        test_mode_to=None,
+        prior_diagnostics=prior,
+    )
+    assert "already_discovered_count: 80" in brief
+    assert "already_discovered_handles_sample:" in brief
+    assert "kol_0" in brief
+    assert "kol_79" not in brief  # beyond sample cap
+    assert "last 5 of 20 rounds" in brief
+    assert "## Round 16 " in brief
+    assert "## Round 20 " in brief
+    assert "## Round 1 " not in brief
+    assert "angle-20-0" in brief
+    assert "angle-20-20" not in brief  # list item cap
+    assert len(brief) < 40_000
+
+
 def test_resume_directives_omit_handles_already_in_pool():
     product = _product_row()
     prior = [
@@ -148,3 +191,113 @@ def test_render_resume_directives_block():
     text = "\n".join(lines)
     assert "pending_ingest_count: 1" in text
     assert "ingest-confirmed-candidate" in text
+
+
+def test_premature_empty_shell_r132_shape():
+    """R132: bootstrap status text, no YAML diagnostics → premature."""
+    text = (
+        "Bootstrap completed.\n\n"
+        "CAL candidate count: 590\n"
+        "STEP_0 result: cationz is not present in the current CAL "
+        "candidate-handle output and requires profile verification "
+        "before any new discovery."
+    )
+    diag = _extract_run_diagnostics(text)
+    assert _is_premature_bootstrap_stop(diag, text) is True
+
+
+def test_premature_false_for_full_diagnostics_r131_shape():
+    text = """
+floor_unmet_reason: cationz already in CAL; new angles below 80K.
+attempted_angles:
+  - guest-room Google SERP
+visited_handles:
+  - "@houseofcomposition — DISCARD: 59 followers < 80K"
+"""
+    diag = _extract_run_diagnostics(text)
+    assert _is_premature_bootstrap_stop(diag, text) is False
+
+
+def test_premature_ignores_undecided_heuristic_visits():
+    """Soft-stop prose with @handle must not clear premature via heuristic."""
+    text = (
+        "@cationz requires profile verification before any new discovery. "
+        "pending verification."
+    )
+    diag = _extract_run_diagnostics(text)
+    # Heuristic may record undecided visits; detector must still fire.
+    assert diag.get("visited_handles")
+    assert all(
+        "undecided: heuristic" in str(item).lower()
+        for item in (diag.get("visited_handles") or [])
+    )
+    assert _is_premature_bootstrap_stop(diag, text) is True
+
+
+def test_premature_false_for_yaml_discard_visits():
+    text = """
+floor_unmet_reason: content mismatch after profile checks
+attempted_angles:
+  - next_round_focus queue
+visited_handles:
+  - "@simplyorganized — DISCARD: furniture_self_commerce_heuristic"
+requires profile verification elsewhere in prose should not matter
+"""
+    diag = _extract_run_diagnostics(text)
+    assert _is_premature_bootstrap_stop(diag, text) is False
+
+
+def test_zero_new_streak_skips_premature_entries():
+    history = [
+        {"persisted_count_at_end": 3, "is_auto_retry": False},
+        {"persisted_count_at_end": 3, "is_auto_retry": True},
+        {
+            "persisted_count_at_end": 3,
+            "is_auto_retry": True,
+            "exit_kind": EXIT_KIND_PREMATURE,
+        },
+        {
+            "persisted_count_at_end": 3,
+            "is_auto_retry": True,
+            "exit_kind": EXIT_KIND_PREMATURE,
+        },
+    ]
+    # Non-premature trailing pair is only the first two → streak 1.
+    assert _count_consecutive_zero_new(history) == 1
+
+
+def test_compose_brief_includes_premature_exit_recovery():
+    product = _product_row()
+    prior = [
+        {
+            "round_index": 132,
+            "run_id": "run_fcbc",
+            "persisted_count_at_end": 563,
+            "target_floor": 613,
+            "exit_kind": EXIT_KIND_PREMATURE,
+            "floor_unmet_reason": PREMATURE_FLOOR_REASON,
+        }
+    ]
+    brief = _compose_rediscover_brief(
+        campaign_id="CID-1",
+        env="LIVE",
+        product=product,
+        additional_count=50,
+        excluded_handles=[],
+        test_mode_to=None,
+        prior_diagnostics=prior,
+    )
+    assert "# premature_exit_recovery (HARD)" in brief
+    assert "rpa_precheck_handle" in brief
+    assert "Illegal end" in brief
+
+
+def test_tag_premature_diagnostics_sets_exit_kind():
+    diag = {
+        "floor_unmet_reason": None,
+        "attempted_angles": None,
+        "visited_handles": None,
+    }
+    _tag_premature_diagnostics(diag)
+    assert diag["exit_kind"] == EXIT_KIND_PREMATURE
+    assert diag["floor_unmet_reason"] == PREMATURE_FLOOR_REASON
