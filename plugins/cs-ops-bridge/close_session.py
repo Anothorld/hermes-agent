@@ -129,7 +129,7 @@ def close_session(
     leave_ok = proc.returncode == 0 and bool(payload.get("ok"))
 
     # Record a quickcep_leave_chat CAL event for every close attempt — mirrors
-    # leave_quickcep_after_failed_handoff's audit trail. Without this, the 1000+
+    # leave_quickcep_after_terminal_handoff's audit trail. Without this, the 1000+
     # historical console_close_session calls left no leave trace, so join/leave
     # net accounting drifted to 1159+ "stuck" sessions on the AI account.
     # Fail-soft: write failure must not block the close flow.

@@ -209,7 +209,7 @@ def _record_leave_event(
     Mirrors cal.write_event's INSERT shape for cs_conversation_events. Does NOT
     use cal.write_event because that requires importing the plugin package
     (relative imports). The INSERT is idempotent at the row level — one event
-    per call, matching close_session / leave_quickcep_after_failed_handoff.
+    per call, matching close_session / leave_quickcep_after_terminal_handoff.
     """
     payload = {
         "source": "backfill",

@@ -158,8 +158,8 @@ Flags: `--dry-run` (default), `--apply`, `--limit N` (default 50), `--env ENV`
 - One `quickcep_leave_chat` CAL event per session, with
   `source=backfill`, `ok`, `exit_code`, `result_code`, `confirmed_via`.
   Mirrors `close_session`'s leave event (source=`console_close`) and
-  `leave_quickcep_after_failed_handoff`'s (source=`failed_handoff`), so the
-  three leave paths share one event type for audit.
+  `leave_quickcep_after_terminal_handoff`'s (source=`failed_handoff` /
+  `skipped_handoff`), so the four leave paths share one event type for audit.
 - Fail-soft: if the CAL write itself fails, a WARNING is logged but the batch
   continues (the QuickCEP leave already happened).
 

@@ -665,3 +665,332 @@ def test_failed_handoff_tags_before_leave(monkeypatch, tmp_path):
     assert "tags" in call_order
     assert "leave-chat" in call_order
     assert call_order.index("tags") < call_order.index("leave-chat")
+
+
+# ── P1b: leave-chat on skipped handoff (incl failed→skipped remap) ─────────
+#
+# Production evidence (2026-08-05): 7 LIVE sessions with status=skipped,
+# joins≥1, leaves=0 — agent `apply-handoff --phase skipped` (or failed→skipped
+# remap) tagged AI-已结案 but never left, leaving the AI account assignee
+# and unread piling up. These tests lock the leave-on-skipped fix and guard
+# against regressing `operator_sent` / `draft_ready` (active states).
+
+
+def _setup_skipped_session(monkeypatch, tmp_path, qsid="sess-skip-leave"):
+    """Enqueue a session, mark it skipped, and write a prior join event."""
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    cal._schema_initialized = False
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id=qsid, message_id="m1", env="LIVE", chat_session_id="c1")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
+    # Simulate AI join-chat on launch.
+    cal.write_event(
+        quickcep_session_id=qsid, env="LIVE",
+        event_type="quickcep_join_chat",
+        payload={"ok": True, "source": "launch"},
+    )
+    cal.update_session_status(session_row_id=r["session"]["id"], status="skipped")
+    return cal, sh, r["session"]["id"]
+
+
+def test_skipped_handoff_leaves_when_previously_joined(monkeypatch, tmp_path):
+    """apply_handoff(skipped) must call leave-chat when AI previously joined.
+
+    Mirrors test_failed_handoff_leaves_when_previously_joined. This is the
+    primary fix for the production stuck-on-AI cohort (7 LIVE orphans).
+    """
+    cal, sh, row_id = _setup_skipped_session(monkeypatch, tmp_path)
+
+    cli_calls = []
+    def _fake_run(args):
+        cli_calls.append(args)
+        return 0, json.dumps({"ok": True, "result_code": 200}), ""
+
+    with patch.object(sh, "_run_quickcep_cli", side_effect=_fake_run), \
+         patch.object(sh, "apply_quickcep_tags", return_value=[]), \
+         patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+        result = sh.apply_handoff(
+            quickcep_session_id="sess-skip-leave",
+            phase="skipped",
+            env="LIVE",
+            force_quickcep_tags=True,
+        )
+
+    assert result["ok"] is True
+    assert "leave_chat" in result
+    assert result["leave_chat"]["ok"] is True
+    assert any(c[0] == "leave-chat" for c in cli_calls), cli_calls
+    events = cal.get_dispatch_context(quickcep_session_id="sess-skip-leave", env="LIVE") or {}
+    leave_evs = [e for e in events.get("recent_events", []) if e["event_type"] == "quickcep_leave_chat"]
+    assert len(leave_evs) == 1
+    assert leave_evs[0]["payload"]["source"] == "skipped_handoff"
+    assert leave_evs[0]["payload"]["ok"] is True
+
+
+def test_skipped_handoff_no_leave_when_never_joined(monkeypatch, tmp_path):
+    """apply_handoff(skipped) must NOT call leave-chat when AI never joined."""
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    cal._schema_initialized = False
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id="sess-skip-nojoin", message_id="m1", env="LIVE", chat_session_id="c1")
+    # No join event — AI never joined (e.g. first-message intent-gate skip).
+    cal.update_session_status(session_row_id=r["session"]["id"], status="skipped")
+    with patch.object(sh, "_run_quickcep_cli", return_value=(1, "", "not found")) as cli:
+        with patch.object(sh, "apply_quickcep_tags", return_value=[]):
+            with patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+                result = sh.apply_handoff(
+                    quickcep_session_id="sess-skip-nojoin",
+                    phase="skipped",
+                    env="LIVE",
+                    force_quickcep_tags=True,
+                )
+
+    assert result["ok"] is True
+    cli.assert_not_called()
+    assert result.get("leave_chat", {}).get("skipped") is True
+
+
+def test_failed_remapped_to_skipped_still_leaves(monkeypatch, tmp_path):
+    """A failed handoff that remaps to skipped (B2B/carrier spam wording) must
+    STILL leave — the remap runs before the leave block, so the leave block
+    sees phase=skipped and must fire. Regression guard for the production
+    carrier-COI cohort (e.g. session 2562830940433178626).
+    """
+    cal, sh, row_id = _setup_skipped_session(monkeypatch, tmp_path, "sess-remap")
+    # Reset to processing so the failed→skipped remap path is exercised.
+    cal.update_session_status(session_row_id=row_id, status="processing")
+
+    cli_calls = []
+    def _fake_run(args):
+        cli_calls.append(args)
+        return 0, json.dumps({"ok": True, "result_code": 200}), ""
+
+    # Context that triggers is_intentional_skip_context (B2B spam wording).
+    skip_ctx = {
+        "actions_taken": "识别为B2B垃圾销售邮件，不在AI处理范围，不回复",
+        "customer_need": "B2B spam",
+    }
+    with patch.object(sh, "_run_quickcep_cli", side_effect=_fake_run), \
+         patch.object(sh, "apply_quickcep_tags", return_value=[]), \
+         patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+        result = sh.apply_handoff(
+            quickcep_session_id="sess-remap",
+            phase="failed",
+            env="LIVE",
+            context=skip_ctx,
+            force_quickcep_tags=True,
+        )
+
+    assert result["ok"] is True
+    # Remap happened (plan phase is skipped) AND leave fired.
+    assert result["plan"]["phase"] == "skipped"
+    assert "leave_chat" in result
+    assert result["leave_chat"]["ok"] is True
+    assert any(c[0] == "leave-chat" for c in cli_calls), cli_calls
+    events = cal.get_dispatch_context(quickcep_session_id="sess-remap", env="LIVE") or {}
+    leave_evs = [e for e in events.get("recent_events", []) if e["event_type"] == "quickcep_leave_chat"]
+    assert len(leave_evs) == 1
+    assert leave_evs[0]["payload"]["source"] == "skipped_handoff"
+
+
+def test_skipped_handoff_no_leave_on_draft_ready(monkeypatch, tmp_path):
+    """apply_handoff(skipped) on a draft_ready session must NOT leave.
+
+    Status guard: leave only fires when CAL status == skipped. draft_ready is
+    an active operator-review state. Guards against evicting the AI from a
+    session that still has a pending draft (the S5a false-positive cohort,
+    e.g. session 2563199616132022274).
+    """
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    cal._schema_initialized = False
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id="sess-skip-dr", message_id="m1", env="LIVE", chat_session_id="c1")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
+    cal.write_event(
+        quickcep_session_id="sess-skip-dr", env="LIVE",
+        event_type="quickcep_join_chat", payload={"ok": True, "source": "launch"},
+    )
+    cal.save_draft(quickcep_session_id="sess-skip-dr", draft_html="<p>d</p>", source="agent", env="LIVE")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+
+    with patch.object(sh, "_run_quickcep_cli", return_value=(1, "", "nope")) as cli:
+        with patch.object(sh, "apply_quickcep_tags", return_value=[]):
+            with patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+                result = sh.apply_handoff(
+                    quickcep_session_id="sess-skip-dr",
+                    phase="skipped",
+                    env="LIVE",
+                )
+
+    # Status stays draft_ready (rank regression rejected).
+    sess = cal.get_session(quickcep_session_id="sess-skip-dr", env="LIVE")
+    assert sess["status"] == "draft_ready"
+    cli.assert_not_called()
+
+
+def test_operator_sent_handoff_never_leaves(monkeypatch, tmp_path):
+    """apply_handoff(operator_sent) must NOT leave even when AI joined.
+
+    operator_sent sets CAL operator_replied (await-customer) — an active
+    human-reply state. Leaving here would evict the AI from a live thread.
+    Guards the prior consensus and the production 'normal 已结案' cohort
+    (e.g. session 2562943915253686272).
+    """
+    monkeypatch.setenv("HERMES_CS_OPS_CAL_DB", str(tmp_path / "cal.db"))
+    cal = _load_pkg_module("cal")
+    cal._DB_PATH = tmp_path / "cal.db"
+    cal._schema_initialized = False
+    sh = _load_pkg_module("session_handoff")
+    r = cal.enqueue_session(quickcep_session_id="sess-opsent", message_id="m1", env="LIVE", chat_session_id="c1")
+    cal.update_session_status(session_row_id=r["session"]["id"], status="processing")
+    cal.write_event(
+        quickcep_session_id="sess-opsent", env="LIVE",
+        event_type="quickcep_join_chat", payload={"ok": True, "source": "launch"},
+    )
+    cal.update_session_status(session_row_id=r["session"]["id"], status="draft_ready")
+
+    with patch.object(sh, "_run_quickcep_cli", return_value=(1, "", "nope")) as cli:
+        with patch.object(sh, "apply_quickcep_tags", return_value=[]):
+            with patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+                result = sh.apply_handoff(
+                    quickcep_session_id="sess-opsent",
+                    phase="operator_sent",
+                    env="LIVE",
+                    context={"message_id": "m-out", "operator_id": "op1", "send_note": "x"},
+                )
+
+    assert result["ok"] is True
+    # operator_sent applies the closed tag but must NOT leave.
+    assert "leave_chat" not in result
+    cli.assert_not_called()
+
+
+def test_skipped_handoff_idempotent_after_prior_leave(monkeypatch, tmp_path):
+    """A second skipped handoff must NOT leave again if leave already happened
+    after the latest join. Guards against duplicate leave-chat calls when
+    operators re-click or rearm re-runs the skip."""
+    cal, sh, row_id = _setup_skipped_session(monkeypatch, tmp_path, "sess-skip-idem")
+    # Prior leave after the join.
+    cal.write_event(
+        quickcep_session_id="sess-skip-idem", env="LIVE",
+        event_type="quickcep_leave_chat",
+        payload={"source": "intent_gate_skip", "ok": True},
+    )
+
+    with patch.object(sh, "_run_quickcep_cli", return_value=(1, "", "nope")) as cli:
+        with patch.object(sh, "apply_quickcep_tags", return_value=[]):
+            with patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+                result = sh.apply_handoff(
+                    quickcep_session_id="sess-skip-idem",
+                    phase="skipped",
+                    env="LIVE",
+                    force_quickcep_tags=True,
+                )
+
+    cli.assert_not_called()
+    assert result.get("leave_chat", {}).get("skipped") is True
+
+
+def test_skipped_handoff_tags_before_leave(monkeypatch, tmp_path):
+    """Tags must be applied BEFORE leave-chat on skipped handoff too
+    (QuickCEP drops tags after chat_end). Mirrors the failed-order test."""
+    cal, sh, row_id = _setup_skipped_session(monkeypatch, tmp_path, "sess-skip-order")
+
+    call_order = []
+    def _fake_tags(**kw):
+        call_order.append("tags")
+        return []
+    def _fake_note(**kw):
+        call_order.append("note")
+        return {"ok": True}
+    def _fake_run(args):
+        call_order.append("leave-chat")
+        return 0, json.dumps({"ok": True}), ""
+
+    with patch.object(sh, "apply_quickcep_tags", side_effect=_fake_tags), \
+         patch.object(sh, "apply_quickcep_note", side_effect=_fake_note), \
+         patch.object(sh, "_run_quickcep_cli", side_effect=_fake_run):
+        sh.apply_handoff(
+            quickcep_session_id="sess-skip-order",
+            phase="skipped",
+            env="LIVE",
+            force_quickcep_tags=True,
+        )
+
+    assert "tags" in call_order
+    assert "leave-chat" in call_order
+    assert call_order.index("tags") < call_order.index("leave-chat")
+
+
+def test_skipped_rehandoff_still_leaves_when_joined(monkeypatch, tmp_path):
+    """A second skipped handoff on an already-skipped session where AI had
+    joined but never left must still leave. Unlike failed (rank 50≥40, stale
+    early-return), skipped (rank 25<40) re-runs compose_handoff and reaches
+    the post-handoff leave block, which fires because status==skipped==phase.
+    This is the ACTUAL production orphan-heal path (a re-sent
+    `apply-handoff --phase skipped` on a stuck session), NOT the stale heal
+    block (which is unreachable for terminal phases — see comment in
+    session_handoff.py). Guards the production 2-join carrier-pile cohort
+    (e.g. session 2553282704113762304)."""
+    cal, sh, row_id = _setup_skipped_session(monkeypatch, tmp_path, "sess-skip-stale")
+
+    cli_calls = []
+    def _fake_run(args):
+        cli_calls.append(args)
+        return 0, json.dumps({"ok": True, "result_code": 200}), ""
+
+    with patch.object(sh, "_run_quickcep_cli", side_effect=_fake_run), \
+         patch.object(sh, "apply_quickcep_tags", return_value=[]), \
+         patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+        # Second skipped handoff on an already-skipped session → re-applies
+        # tags and the post-handoff leave block fires (status==skipped).
+        result = sh.apply_handoff(
+            quickcep_session_id="sess-skip-stale",
+            phase="skipped",
+            env="LIVE",
+            force_quickcep_tags=True,
+        )
+
+    assert result["ok"] is True
+    assert "leave_chat" in result
+    assert result["leave_chat"]["ok"] is True
+    assert any(c[0] == "leave-chat" for c in cli_calls), cli_calls
+
+
+def test_skipped_rehandoff_without_force_quickcep_tags_still_leaves(monkeypatch, tmp_path):
+    """Re-handoff `apply-handoff --phase skipped` WITHOUT force_quickcep_tags
+    on an already-skipped joined session must STILL leave. The leave block
+    uses caller_skip_quickcep (the caller's flag), NOT the local skip_quickcep
+    variable that qc_skip_reason flips to True on "session already skipped".
+    This is the real-world operator/agent re-click path: a plain re-send of
+    skipped on a stuck orphan (no force flag) must heal-leave. Regression
+    guard flagged by multi-model review (grok W-warning)."""
+    cal, sh, row_id = _setup_skipped_session(monkeypatch, tmp_path, "sess-skip-noforce")
+
+    cli_calls = []
+    def _fake_run(args):
+        cli_calls.append(args)
+        return 0, json.dumps({"ok": True, "result_code": 200}), ""
+
+    with patch.object(sh, "_run_quickcep_cli", side_effect=_fake_run), \
+         patch.object(sh, "apply_quickcep_tags", return_value=[]), \
+         patch.object(sh, "apply_quickcep_note", return_value={"ok": True}):
+        # Re-send skipped WITHOUT force_quickcep_tags — qc_skip_reason becomes
+        # "session already skipped" and local skip_quickcep flips True, but
+        # caller_skip_quickcep stays False → leave block still fires.
+        result = sh.apply_handoff(
+            quickcep_session_id="sess-skip-noforce",
+            phase="skipped",
+            env="LIVE",
+        )
+
+    assert result["ok"] is True
+    assert "leave_chat" in result, "re-handoff without force must still leave"
+    assert result["leave_chat"]["ok"] is True
+    assert any(c[0] == "leave-chat" for c in cli_calls), cli_calls
