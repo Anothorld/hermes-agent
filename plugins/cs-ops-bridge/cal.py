@@ -1382,16 +1382,27 @@ def latest_event_created_at(
     *,
     session_row_id: int,
     event_types: tuple[str, ...] | list[str],
+    ok_only: bool = False,
 ) -> Optional[str]:
-    """Return the newest ``created_at`` among the given event types, or None."""
+    """Return the newest ``created_at`` among the given event types, or None.
+
+    When ``ok_only=True``, restrict to events whose ``payload_json->>'ok'`` is
+    ``'true'``. Used by the leave-on-terminal idempotency guard so a prior
+    *failed* leave (``ok:false``) does NOT count as "already left" — the
+    session may still be joined in QuickCEP and a manual retry must be allowed.
+    """
     types = tuple(t for t in event_types if str(t).strip())
     if not types:
         return None
     placeholders = ",".join("?" for _ in types)
+    # SQLite json_extract returns JSON true/false as 1/0 (not 'true'/'false'),
+    # and NULL for missing keys. `IS 1` matches only real boolean true and
+    # treats missing/NULL/false as non-matching (excluded from "already left").
+    ok_clause = " AND json_extract(payload_json, '$.ok') IS 1" if ok_only else ""
     with _connect() as conn:
         row = conn.execute(
             f"""SELECT MAX(created_at) AS ts FROM cs_conversation_events
-                WHERE session_id=? AND event_type IN ({placeholders})""",
+                WHERE session_id=? AND event_type IN ({placeholders}){ok_clause}""",
             (session_row_id, *types),
         ).fetchone()
         if not row or row["ts"] is None:

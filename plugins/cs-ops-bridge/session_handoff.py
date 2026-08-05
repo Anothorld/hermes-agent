@@ -796,9 +796,14 @@ def leave_quickcep_after_terminal_handoff(
         )
         if not joined_at:
             return {"ok": True, "skipped": True, "reason": "never joined"}
+        # Only a prior *successful* leave (ok:true) counts as "already left".
+        # A failed leave (ok:false) means the AI may still be joined in
+        # QuickCEP — a manual retry (e.g. console_leave_only) must be allowed
+        # rather than silently no-op'ing on the stuck session.
         left_at = cal.latest_event_created_at(
             session_row_id=session_row_id,
             event_types=("quickcep_leave_chat",),
+            ok_only=True,
         )
         if left_at and left_at >= joined_at:
             return {"ok": True, "skipped": True, "reason": "already left after latest join"}

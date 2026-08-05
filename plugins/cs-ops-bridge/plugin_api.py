@@ -519,6 +519,21 @@ class CloseSessionBody(BaseModel):
     close_escalations: bool = False
 
 
+class LeaveOnlyBody(BaseModel):
+    """Body for ``POST /sessions/{id}/leave`` — unassign AI without closing ticket.
+
+    Unlike ``CloseSessionBody``, this does NOT call ``apply_handoff(reviewed)``
+    or ``close_session``: CAL status is unchanged, no ``console_close_session``
+    event is written, and the QuickCEP ticket stays open. Use this to free a
+    session stuck on the AI account (e.g. a skipped/failed handoff that never
+    left) without forcing a terminal ``reviewed`` close.
+    """
+    env: str = "LIVE"
+    operator_id: Optional[str] = None
+    operator_name: Optional[str] = None
+    note: str = ""
+
+
 class UnassignAllBody(BaseModel):
     env: str = "LIVE"
     quickcep_email: str
@@ -583,6 +598,77 @@ def close_session_route(
         raise HTTPException(status_code=500, detail=result)
     if not result.get("ok"):
         raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@router.post("/sessions/{quickcep_session_id}/leave")
+def leave_session_only_route(
+    quickcep_session_id: str,
+    body: LeaveOnlyBody,
+    x_bridge_key: Annotated[Optional[str], Header()] = None,
+) -> dict[str, Any]:
+    """Unassign the AI from the QuickCEP session WITHOUT closing the ticket.
+
+    Reuses ``leave_quickcep_after_terminal_handoff`` (idempotent join/leave
+    guard, fail-soft) with ``source=console_leave_only`` so the audit event
+    is distinguishable from ``failed_handoff`` / ``skipped_handoff`` /
+    ``console_close``. CAL status is NOT changed — the ticket stays open and
+    can be picked up from the unassigned queue. No-op when the AI never
+    joined or already left after the latest join.
+    """
+    _require_bridge_key(x_bridge_key)
+    from . import cal
+    from .session_handoff import leave_quickcep_after_terminal_handoff
+
+    sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=body.env)
+    if not sess:
+        raise HTTPException(status_code=404, detail={"error": "session_not_found", "session_id": quickcep_session_id})
+    # Backend status guard — the FE disables the button for non-terminal
+    # statuses, but the API contract must be enforced server-side (§4): a
+    # direct call (or FE bug) must NOT be able to kick the AI out of an
+    # actively-processed session and orphan an in-flight gateway run. Only
+    # `skipped`/`failed` are leavable; `reviewed` is already closed.
+    status = str(sess.get("status") or "")
+    if status not in ("skipped", "failed"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "status_not_leavable",
+                "status": status,
+                "session_id": quickcep_session_id,
+                "allowed": ["skipped", "failed"],
+            },
+        )
+    result = leave_quickcep_after_terminal_handoff(
+        quickcep_session_id=quickcep_session_id,
+        env=body.env,
+        session_row_id=sess["id"],
+        source="console_leave_only",
+    )
+    # Persist operator identity + note on a dedicated CAL audit event (mirrors
+    # close_session's `console_close_session` event) so the audit trail can
+    # answer "who unassigned this session and why?" — the leave helper's own
+    # `quickcep_leave_chat` payload only carries source/ok/exit codes.
+    try:
+        cal.write_event(
+            quickcep_session_id=quickcep_session_id,
+            env=body.env,
+            event_type="console_leave_only",
+            payload={
+                "operator_id": body.operator_id,
+                "operator_name": body.operator_name,
+                "note": (body.note or "")[:500],
+                "leave_ok": bool(result.get("ok")) if isinstance(result, dict) else False,
+                "leave_skipped": bool(result.get("skipped")) if isinstance(result, dict) else False,
+                "leave_reason": (result.get("reason") or result.get("error")) if isinstance(result, dict) else None,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — audit best-effort, must not block leave
+        log.warning("console_leave_only audit write failed session=%s: %s", quickcep_session_id, exc)
+    if isinstance(result, dict):
+        result["operator_id"] = body.operator_id
+        result["operator_name"] = body.operator_name
+        result["note"] = (body.note or "")[:500]
     return result
 
 
