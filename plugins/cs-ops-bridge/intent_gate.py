@@ -156,6 +156,11 @@ def check_intent_gate(
             force_reclassify=force_reclassify,
         )
         if result is not None:
+            log.info(
+                "cs.intent.decision session=%s env=%s allowed=%s reason=%s "
+                "source=classifier force_reclassify=%s",
+                session_id, env, result.allowed, result.reason, force_reclassify,
+            )
             return result
         # classifier unreachable → graceful fallthrough to legacy logic
         log.warning(
@@ -164,6 +169,11 @@ def check_intent_gate(
         )
 
     if not intent_filter_enabled():
+        log.info(
+            "cs.intent.decision session=%s env=%s allowed=True reason=filter_disabled "
+            "source=legacy",
+            session_id, env,
+        )
         return IntentGateResult(True, "filter_disabled", ())
 
     tags = normalize_intention_tags(intention_tags)
@@ -187,6 +197,11 @@ def check_intent_gate(
                     "customer_email_domain": customer_email.split("@")[-1] if "@" in customer_email else "",
                 },
             )
+            log.info(
+                "cs.intent.decision session=%s env=%s allowed=True "
+                "reason=prior_customer_no_intent_tags source=legacy",
+                session_id, env,
+            )
             return IntentGateResult(True, "prior_customer_no_intent_tags", ())
         _agent_debug_log(
             hypothesis_id="F",
@@ -194,12 +209,27 @@ def check_intent_gate(
             message="blocked no intention tags",
             data={"quickcep_session_id": session_id, "has_customer_email": bool(customer_email)},
         )
+        log.info(
+            "cs.intent.decision session=%s env=%s allowed=False "
+            "reason=no_intention_tags source=legacy",
+            session_id, env,
+        )
         return IntentGateResult(False, "no_intention_tags", ())
 
     if matches_allowed_intention(tags):
+        log.info(
+            "cs.intent.decision session=%s env=%s allowed=True reason=allowed "
+            "tags=%s source=legacy",
+            session_id, env, list(tags),
+        )
         return IntentGateResult(True, "allowed", tags)
 
     allowed = ", ".join(sorted(allowed_intention_tags()))
+    log.info(
+        "cs.intent.decision session=%s env=%s allowed=False "
+        "reason=intention_not_allowed tags=%s allowed_tags=[%s] source=legacy",
+        session_id, env, list(tags), allowed,
+    )
     return IntentGateResult(False, f"intention_not_allowed (allowed: {allowed})", tags)
 
 

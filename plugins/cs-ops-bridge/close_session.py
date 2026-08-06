@@ -220,4 +220,12 @@ def close_session(
             )
             result["escalations_closed_error"] = str(exc)
 
+    log.info(
+        "cs.close session=%s env=%s operator=%s(%s) mark_reviewed=%s "
+        "close_escalations=%s leave_ok=true reviewed_ok=%s esc_closed=%d",
+        quickcep_session_id, env, operator_name or "-", operator_id or "-",
+        mark_reviewed, close_escalations,
+        bool(reviewed and reviewed.get("ok")) if reviewed else "n/a",
+        len(result.get("escalations_closed", [])),
+    )
     return result

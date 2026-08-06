@@ -169,9 +169,19 @@ def reconcile_operator_sent_once(*, env: str | None = None) -> dict[str, Any]:
                     "(not a numeric QuickCEP id; purge via cal.purge_sessions_by_ids)",
                     sid, row_id, status,
                 )
+                log.info(
+                    "cs.reconcile.operator_sent session=%s env=%s status=%s "
+                    "decision=skipped reason=invalid_session_id row_id=%s",
+                    sid, env, status, row_id,
+                )
                 continue
             op_msg = _fetch_last_operator_message(sid)
             if not op_msg:
+                log.info(
+                    "cs.reconcile.operator_sent session=%s env=%s status=%s "
+                    "decision=no_outbound reason=cli_none_or_no_operator_latest",
+                    sid, env, status,
+                )
                 continue
             result = handle_operator_send(
                 {
@@ -185,11 +195,21 @@ def reconcile_operator_sent_once(*, env: str | None = None) -> dict[str, Any]:
             if result.get("ok") and not result.get("skipped"):
                 synced += 1
                 log.info("operator reconcile synced session=%s msg=%s", sid, op_msg["id"])
+                log.info(
+                    "cs.reconcile.operator_sent session=%s env=%s status=%s "
+                    "decision=synced msg_id=%s prior_status=%s",
+                    sid, env, status, op_msg["id"], status,
+                )
             elif result.get("skipped"):
                 log.info(
                     "operator reconcile skipped session=%s reason=%s",
                     sid,
                     result.get("reason"),
+                )
+                log.info(
+                    "cs.reconcile.operator_sent session=%s env=%s status=%s "
+                    "decision=skipped reason=%s msg_id=%s",
+                    sid, env, status, result.get("reason"), op_msg["id"],
                 )
     repair = repair_orphaned_escalations_once(env=env)
     return {

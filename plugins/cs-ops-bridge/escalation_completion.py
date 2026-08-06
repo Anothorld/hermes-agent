@@ -37,6 +37,10 @@ def complete_resuming_escalation_by_id(
 
     if ctx.get("feishu_done_notified"):
         if cal.finalize_escalation(escalation_id=eid, decision=phase):
+            log.info(
+                "cs.escalation.complete escalation_id=%s session=%s from_state=resuming "
+                "to_state=resolved phase=%s decision=already_notified", eid, qsid, phase,
+            )
             return {"ok": True, "escalation_id": eid, "skipped": True, "reason": "already_notified"}
         return {"ok": False, "escalation_id": eid, "error": "finalize failed after prior notify"}
 
@@ -50,6 +54,10 @@ def complete_resuming_escalation_by_id(
     )
     if not send.ok:
         log.error("feishu escalation done notify failed esc=%s err=%s", eid, send.error)
+        log.info(
+            "cs.escalation.complete escalation_id=%s session=%s phase=%s "
+            "decision=feishu_notify_failed error=%s", eid, qsid, phase, send.error,
+        )
         return {"ok": False, "escalation_id": eid, "error": send.error}
 
     cal.merge_escalation_resume_context(
@@ -58,9 +66,18 @@ def complete_resuming_escalation_by_id(
     )
     if not cal.finalize_escalation(escalation_id=eid, decision=phase):
         log.error("finalize escalation failed esc=%s", eid)
+        log.info(
+            "cs.escalation.complete escalation_id=%s session=%s phase=%s "
+            "decision=finalize_failed", eid, qsid, phase,
+        )
         return {"ok": False, "escalation_id": eid, "error": "finalize failed"}
 
     log.info("escalation completed esc=%s phase=%s session=%s", eid, phase, qsid)
+    log.info(
+        "cs.escalation.complete escalation_id=%s session=%s from_state=resuming "
+        "to_state=resolved phase=%s decision=completed feishu_ok=true",
+        eid, qsid, phase,
+    )
     return {
         "ok": True,
         "escalation_id": eid,
@@ -105,6 +122,11 @@ def complete_resuming_escalation_superseded_by_operator(
 
     if ctx.get("feishu_done_notified"):
         if cal.finalize_escalation(escalation_id=eid, decision="operator_manual_reply"):
+            log.info(
+                "cs.escalation.supersede escalation_id=%s session=%s from_state=resuming "
+                "to_state=resolved decision=already_notified resume_run_stopped=%s",
+                eid, qsid, run_stopped,
+            )
             return {
                 "ok": True,
                 "escalation_id": eid,
@@ -124,6 +146,10 @@ def complete_resuming_escalation_superseded_by_operator(
     )
     if not send.ok:
         log.error("feishu operator-supersede notify failed esc=%s err=%s", eid, send.error)
+        log.info(
+            "cs.escalation.supersede escalation_id=%s session=%s decision=feishu_notify_failed "
+            "error=%s", eid, qsid, send.error,
+        )
         return {"ok": False, "escalation_id": eid, "error": send.error}
 
     cal.merge_escalation_resume_context(
@@ -136,9 +162,18 @@ def complete_resuming_escalation_superseded_by_operator(
     )
     if not cal.finalize_escalation(escalation_id=eid, decision="operator_manual_reply"):
         log.error("finalize escalation failed esc=%s", eid)
+        log.info(
+            "cs.escalation.supersede escalation_id=%s session=%s decision=finalize_failed",
+            eid, qsid,
+        )
         return {"ok": False, "escalation_id": eid, "error": "finalize failed"}
 
     log.info("escalation superseded by operator send esc=%s session=%s", eid, qsid)
+    log.info(
+        "cs.escalation.supersede escalation_id=%s session=%s from_state=resuming "
+        "to_state=resolved decision=superseded resume_run_stopped=%s feishu_ok=true",
+        eid, qsid, run_stopped,
+    )
     return {
         "ok": True,
         "escalation_id": eid,

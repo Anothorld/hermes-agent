@@ -301,6 +301,10 @@ def _poll_resuming_escalations(
             late_ids.append(mid)
             late_detected += 1
             log.info("late operator reply ignored esc=%s msg=%s", eid, mid)
+            log.info(
+                "cs.poller.late_reply escalation_id=%s msg=%s decision=ignored reason=already_claimed",
+                eid, mid,
+            )
             if root_for_lock:
                 _ensure_escalation_lock_notified(
                     escalation_id=int(eid),
@@ -393,7 +397,16 @@ def poll_once() -> dict[str, Any]:
             decided_by=str(sender.get("id") or "feishu_operator"),
             feishu_reply_message_id=mid,
         ):
+            log.info(
+                "cs.poller.claim escalation_id=%s msg=%s decision=claim_lost_or_not_awaiting",
+                eid, mid,
+            )
             continue
+
+        log.info(
+            "cs.poller.claim escalation_id=%s msg=%s decision=claimed "
+            "decided_by=%s", eid, mid, sender.get("id") or "feishu_operator",
+        )
 
         if root_for_lock:
             _ensure_escalation_lock_notified(
@@ -416,9 +429,17 @@ def poll_once() -> dict[str, Any]:
         )
         if not result.get("ok"):
             log.error("resume escalation %s failed: %s", eid, result.get("error"))
+            log.info(
+                "cs.poller.claim escalation_id=%s msg=%s decision=resume_failed error=%s",
+                eid, mid, result.get("error"),
+            )
             continue
         seen[eid] = mid
         resumed += 1
+        log.info(
+            "cs.poller.claim escalation_id=%s msg=%s decision=resume_launched run_id=%s",
+            eid, mid, result.get("run_id"),
+        )
 
     retried = _retry_resuming_without_run(env=_ENV)
     resuming_stats = _poll_resuming_escalations(token=token, env=_ENV, seen_late=seen_late)

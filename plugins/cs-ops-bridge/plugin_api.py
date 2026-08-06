@@ -249,6 +249,7 @@ def pause_global(
     _require_bridge_key(x_bridge_key)
     cal.set_global_pause(paused=True, by=body.by)
     log.info("global PAUSED by %s", body.by or "console")
+    log.info("cs.pause decision=paused by=%s env=LIVE", body.by or "console")
     return {"ok": True, "paused": True}
 
 
@@ -261,6 +262,7 @@ def resume_global(
     _require_bridge_key(x_bridge_key)
     cal.set_global_pause(paused=False, by=body.by)
     log.info("global RESUMED by %s", body.by or "console")
+    log.info("cs.pause decision=resumed by=%s env=LIVE", body.by or "console")
     return {"ok": True, "paused": False}
 
 
@@ -622,6 +624,10 @@ def leave_session_only_route(
 
     sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=body.env)
     if not sess:
+        log.info(
+            "cs.leave_only session=%s env=%s operator=%s(%s) decision=not_found",
+            quickcep_session_id, body.env, body.operator_name or "-", body.operator_id or "-",
+        )
         raise HTTPException(status_code=404, detail={"error": "session_not_found", "session_id": quickcep_session_id})
     # Backend status guard — the FE disables the button for non-terminal
     # statuses, but the API contract must be enforced server-side (§4): a
@@ -630,6 +636,12 @@ def leave_session_only_route(
     # `skipped`/`failed` are leavable; `reviewed` is already closed.
     status = str(sess.get("status") or "")
     if status not in ("skipped", "failed"):
+        log.warning(
+            "cs.leave_only session=%s env=%s operator=%s(%s) decision=rejected "
+            "status=%s (not leavable)",
+            quickcep_session_id, body.env, body.operator_name or "-", body.operator_id or "-",
+            status,
+        )
         raise HTTPException(
             status_code=409,
             detail={
@@ -639,6 +651,12 @@ def leave_session_only_route(
                 "allowed": ["skipped", "failed"],
             },
         )
+    log.info(
+        "cs.leave_only session=%s env=%s operator=%s(%s) decision=proceed "
+        "status=%s note=%r",
+        quickcep_session_id, body.env, body.operator_name or "-", body.operator_id or "-",
+        status, (body.note or "")[:80],
+    )
     result = leave_quickcep_after_terminal_handoff(
         quickcep_session_id=quickcep_session_id,
         env=body.env,

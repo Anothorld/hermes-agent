@@ -130,10 +130,12 @@ def _leave_one_session(session_id: str, jwt: str) -> dict[str, Any]:
     # still succeeded (code 200). Treat chat_end_not_confirmed as success.
     if out.get("ok"):
         log.info("unassign leave-chat ok session=%s chat_end=True", session_id)
+        log.info("cs.leave.bulk session=%s decision=left chat_end=true source=unassign_all", session_id)
         return {"ok": True, "chat_end": True}
     err = out.get("error") or ""
     if err == "chat_end_not_confirmed":
         log.info("unassign leave-chat ok session=%s chat_end_not_confirmed (unassigned)", session_id)
+        log.info("cs.leave.bulk session=%s decision=left chat_end=false source=unassign_all unassigned=true", session_id)
         return {"ok": True, "chat_end": False, "unassigned": True}
     detail = err or "leave_failed"
     stderr = (proc.stderr or "").strip()
@@ -141,6 +143,7 @@ def _leave_one_session(session_id: str, jwt: str) -> dict[str, Any]:
         "unassign leave-chat failed session=%s error=%s result_code=%s exit=%s stderr=%s",
         session_id, detail, out.get("result_code"), proc.returncode, stderr[:300],
     )
+    log.info("cs.leave.bulk session=%s decision=failed error=%s source=unassign_all", session_id, detail)
     return {"ok": False, "chat_end": False, "error": detail, "result_code": out.get("result_code"), "stderr": stderr[:500]}
 
 
@@ -257,6 +260,7 @@ def _leave_sessions_via_shared_socket(
                 res["ok"] = True
                 res["chat_end"] = True
                 log.info("unassign shared-socket ok session=%s chat_end=True", sid)
+                log.info("cs.leave.bulk session=%s decision=left chat_end=true source=unassign_all_shared_socket", sid)
             elif leave_ok and not closed:
                 # batchLeaveChat returned 200 but chat_end didn't fire — operator
                 # still removed from operatorIds. Treat as unassign success.
@@ -264,6 +268,7 @@ def _leave_sessions_via_shared_socket(
                 res["chat_end"] = False
                 res["unassigned"] = True
                 log.info("unassign shared-socket ok session=%s chat_end_not_confirmed (unassigned)", sid)
+                log.info("cs.leave.bulk session=%s decision=left chat_end=false source=unassign_all_shared_socket unassigned=true", sid)
             else:
                 res["ok"] = False
                 res["error"] = "leave_failed"
@@ -272,6 +277,7 @@ def _leave_sessions_via_shared_socket(
                     "unassign shared-socket leave_failed session=%s result_code=%s",
                     sid, leave.get("code"),
                 )
+                log.info("cs.leave.bulk session=%s decision=failed error=leave_failed source=unassign_all_shared_socket", sid)
         except QuickCEPRequestError as exc:
             res["ok"] = False
             res["error"] = str(exc) or "quickcep_request_error"
@@ -417,6 +423,12 @@ def unassign_all_sessions(
         "unassign_all: done env=%s operator=%s(%s) mode=%s unassigned=%d failed=%d elapsed=%.1fs",
         env, operator_name, operator_id,
         mode, unassigned, failed, time.time() - t0,
+    )
+    log.info(
+        "cs.leave.bulk env=%s operator=%s(%s) decision=complete mode=%s "
+        "total_assigned=%d unassigned=%d failed=%d elapsed_ms=%d",
+        env, operator_name, operator_id, mode, len(assigned), unassigned, failed,
+        int((time.time() - t0) * 1000),
     )
 
     return {

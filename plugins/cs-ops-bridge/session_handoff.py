@@ -795,6 +795,11 @@ def leave_quickcep_after_terminal_handoff(
             event_types=("quickcep_join_chat",),
         )
         if not joined_at:
+            log.info(
+                "cs.leave session=%s env=%s source=%s decision=noop "
+                "reason=never_joined",
+                quickcep_session_id, env, source,
+            )
             return {"ok": True, "skipped": True, "reason": "never joined"}
         # Only a prior *successful* leave (ok:true) counts as "already left".
         # A failed leave (ok:false) means the AI may still be joined in
@@ -806,9 +811,17 @@ def leave_quickcep_after_terminal_handoff(
             ok_only=True,
         )
         if left_at and left_at >= joined_at:
+            log.info(
+                "cs.leave session=%s env=%s source=%s decision=noop "
+                "reason=already_left (idempotent, prior ok:true leave at/after latest join)",
+                quickcep_session_id, env, source,
+            )
             return {"ok": True, "skipped": True, "reason": "already left after latest join"}
     except Exception as exc:
-        log.debug("leave-on-terminal event lookup failed session=%s: %s", quickcep_session_id, exc)
+        log.warning(
+            "cs.leave session=%s env=%s source=%s decision=lookup_failed: %s",
+            quickcep_session_id, env, source, exc,
+        )
         return {"ok": False, "skipped": True, "reason": f"event lookup failed: {exc}"}
 
     try:
@@ -823,6 +836,12 @@ def leave_quickcep_after_terminal_handoff(
         payload = reconcile_leave_chat_payload(
             payload, cli=cli, session_id=quickcep_session_id,
         )
+        if payload.get("confirmed_via"):
+            log.info(
+                "cs.leave.confirm session=%s env=%s source=%s decision=upgraded "
+                "confirmed_via=%s prior_error=chat_end_not_confirmed",
+                quickcep_session_id, env, source, payload.get("confirmed_via"),
+            )
         ok = bool(payload.get("ok"))
         cal.write_event(
             quickcep_session_id=quickcep_session_id,
@@ -837,15 +856,23 @@ def leave_quickcep_after_terminal_handoff(
             },
         )
         if ok:
-            log.info("%s → leave-chat ok session=%s", source, quickcep_session_id)
+            log.info(
+                "cs.leave session=%s env=%s source=%s decision=left exit_code=%s",
+                quickcep_session_id, env, source, code,
+            )
         else:
             log.warning(
-                "%s → leave-chat failed session=%s exit=%s err=%s",
-                source, quickcep_session_id, code, payload.get("error") or "<unknown>",
+                "cs.leave session=%s env=%s source=%s decision=failed "
+                "exit_code=%s error=%s",
+                quickcep_session_id, env, source, code,
+                payload.get("error") or "<unknown>",
             )
         return {"ok": ok, "payload": payload}
     except Exception as exc:  # noqa: BLE001 — fail-soft
-        log.warning("%s → leave-chat crashed session=%s: %s", source, quickcep_session_id, exc)
+        log.warning(
+            "cs.leave session=%s env=%s source=%s decision=crashed: %s",
+            quickcep_session_id, env, source, exc,
+        )
         try:
             cal.write_event(
                 quickcep_session_id=quickcep_session_id,
@@ -1225,6 +1252,28 @@ def apply_handoff(
         except Exception as exc:
             log.debug("leave-on-terminal after handoff failed session=%s: %s", quickcep_session_id, exc)
 
+    # Audit: handoff is the central state-transition orchestrator. Log the
+    # full outcome so the state flow is reconstructable from logs: phase
+    # applied, from→to status, tags/notes/leave results, and whether the
+    # handoff was a no-op (stale) or effective. The status transition itself
+    # is also logged by cal.update_session_status; this log adds the handoff
+    # context (phase, tags, leave) that the status log lacks.
+    leave_outcome = "-"
+    if "leave_chat" in result and isinstance(result["leave_chat"], dict):
+        lr = result["leave_chat"]
+        leave_outcome = "ok" if lr.get("ok") and not lr.get("skipped") else (
+            "skipped" if lr.get("skipped") else "failed"
+        )
+    log.info(
+        "cs.handoff session=%s env=%s phase=%s from_status=%s to_status=%s "
+        "ok=%s tags_ok=%s note_ok=%s leave=%s skip_quickcep=%s "
+        "force_quickcep_tags=%s",
+        quickcep_session_id, env, phase, sess.get("status", "-"),
+        plan.target_status, ok,
+        all(r.get("ok", True) for r in tag_results),
+        note_result.get("ok", True), leave_outcome,
+        caller_skip_quickcep, force_quickcep_tags,
+    )
     return result
 
 
@@ -1267,6 +1316,7 @@ def handle_operator_send(
     session_id = str(info.get("chatSubSessionId") or "")
     message_id = str(info.get("id") or "")
     if not session_id:
+        log.info("cs.operator_send session=? env=%s decision=skipped reason=no_session_id", env)
         return {"ok": False, "skipped": True, "reason": "no session id"}
 
     untracked_enabled = os.environ.get("CS_OPS_HANDOFF_UNTRACKED_SENDS", "false").lower() in (
@@ -1277,7 +1327,15 @@ def handle_operator_send(
     sess = cal.get_session(quickcep_session_id=session_id, env=env)
     if not sess:
         if not untracked_enabled:
+            log.info(
+                "cs.operator_send session=%s env=%s decision=skipped reason=not_in_cal "
+                "message_id=%s", session_id, env, message_id,
+            )
             return {"ok": False, "skipped": True, "reason": "session not in CAL"}
+        log.info(
+            "cs.operator_send session=%s env=%s decision=skipped reason=untracked_no_cal_row "
+            "message_id=%s", session_id, env, message_id,
+        )
         return {
             "ok": False,
             "skipped": True,
@@ -1293,6 +1351,11 @@ def handle_operator_send(
         "failed",
     }
     if sess["status"] not in allowed_statuses:
+        log.info(
+            "cs.operator_send session=%s env=%s message_id=%s from_status=%s "
+            "decision=skipped reason=status_not_allowed",
+            session_id, env, message_id, sess["status"],
+        )
         return {"ok": False, "skipped": True, "reason": f"status={sess['status']}"}
 
     ctx_data = cal.get_dispatch_context(quickcep_session_id=session_id, env=env) or {}
@@ -1300,6 +1363,11 @@ def handle_operator_send(
     prior_hint = (facts.get("handoff") or {}).get("last_operator_hint") or "已按草稿回复客户"
     last_out = (facts.get("handoff") or {}).get("last_operator_outbound_id")
     if message_id and last_out and str(last_out) == message_id:
+        log.info(
+            "cs.operator_send session=%s env=%s message_id=%s from_status=%s "
+            "decision=deduped reason=message_id_matches_last_outbound",
+            session_id, env, message_id, sess["status"],
+        )
         return _maybe_close_escalations_after_operator_send(
             session_id=session_id,
             env=env,
@@ -1338,6 +1406,12 @@ def handle_operator_send(
         chat_session_id=str(info.get("chatSessionId") or sess.get("chat_session_id") or "") or None,
     )
     if result.get("ok") and not result.get("skipped"):
+        log.info(
+            "cs.operator_send session=%s env=%s message_id=%s from_status=%s "
+            "decision=applied operator_id=%s",
+            session_id, env, message_id, sess["status"],
+            info.get("ownerId") or "",
+        )
         return _maybe_close_escalations_after_operator_send(
             session_id=session_id,
             env=env,

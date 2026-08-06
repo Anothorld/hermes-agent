@@ -139,7 +139,7 @@ def drain_run_events(*, base: str, api_key: Optional[str], run_id: str, timeout_
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             resp.read(4096)
     except Exception as exc:
-        log.debug("gateway drain skipped for %s: %s", run_id, exc)
+        log.info("cs.launch.drain_skipped run=%s reason=%s", run_id, exc)
 
 
 def get_run_status(*, base: str, api_key: Optional[str], run_id: str) -> Optional[dict]:

@@ -253,6 +253,12 @@ def record_join_chat_event(
             source,
             attempts,
         )
+        log.info(
+            "cs.join session=%s env=%s source=%s decision=joined attempts=%d "
+            "result_code=%s message_id=%s",
+            quickcep_session_id, env, source, attempts,
+            join_result.get("result_code"), message_id,
+        )
     else:
         log.warning(
             "quickcep join failed session=%s source=%s error=%s detail=%s",
@@ -260,6 +266,12 @@ def record_join_chat_event(
             source,
             join_result.get("error"),
             join_result.get("error_detail"),
+        )
+        log.info(
+            "cs.join session=%s env=%s source=%s decision=failed attempts=%d "
+            "error=%s failed_step=%s",
+            quickcep_session_id, env, source, attempts,
+            join_result.get("error"), join_result.get("failed_step"),
         )
     payload = {
         "ok": ok,

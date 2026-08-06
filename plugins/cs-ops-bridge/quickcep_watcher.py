@@ -523,9 +523,9 @@ def _leave_quickcep_if_previously_joined(*, session_id: str) -> None:
     # calling leave-chat on those would kick the AI out of a session it is actively
     # working on (or one a human expert is engaged with), orphaning the gateway run.
     if str(sess.get("status") or "") != "skipped":
-        log.debug(
-            "leave-on-skip skipped session=%s status=%s (busy, not disrupted)",
-            session_id, sess.get("status"),
+        log.info(
+            "cs.leave session=%s env=%s source=intent_gate_skip decision=noop "
+            "reason=busy_status status=%s", session_id, _ENV, sess.get("status"),
         )
         return
     try:
@@ -536,6 +536,10 @@ def _leave_quickcep_if_previously_joined(*, session_id: str) -> None:
         log.debug("leave-on-skip join-event lookup failed session=%s: %s", session_id, exc)
         return
     if not joined:
+        log.info(
+            "cs.leave session=%s env=%s source=intent_gate_skip decision=noop "
+            "reason=never_joined", session_id, _ENV,
+        )
         return
     # Idempotency: if a prior intent_gate_skip already left this session, don't
     # call leave-chat again on repeated out_of_scope follow-ups — the AI is
@@ -548,7 +552,10 @@ def _leave_quickcep_if_previously_joined(*, session_id: str) -> None:
         log.debug("leave-on-skip leave-event lookup failed session=%s: %s", session_id, exc)
         already_left = False
     if already_left:
-        log.debug("leave-on-skip already left session=%s (idempotent no-op)", session_id)
+        log.info(
+            "cs.leave session=%s env=%s source=intent_gate_skip decision=noop "
+            "reason=already_left (idempotent)", session_id, _ENV,
+        )
         return
     try:
         from .session_handoff import _run_quickcep_cli
@@ -564,6 +571,12 @@ def _leave_quickcep_if_previously_joined(*, session_id: str) -> None:
         except json.JSONDecodeError:
             payload = {"raw_stdout": (out or "")[:500]}
         payload = reconcile_leave_chat_payload(payload, cli=cli, session_id=session_id)
+        if payload.get("confirmed_via"):
+            log.info(
+                "cs.leave.confirm session=%s env=%s source=intent_gate_skip "
+                "decision=upgraded confirmed_via=%s prior_error=chat_end_not_confirmed",
+                session_id, _ENV, payload.get("confirmed_via"),
+            )
         ok = bool(payload.get("ok"))
         cal.write_event(
             quickcep_session_id=session_id,
@@ -579,10 +592,19 @@ def _leave_quickcep_if_previously_joined(*, session_id: str) -> None:
         )
         if ok:
             log.info("intent_gate skip → leave-chat ok session=%s", session_id)
+            log.info(
+                "cs.leave session=%s env=%s source=intent_gate_skip decision=left "
+                "exit_code=%s", session_id, _ENV, code,
+            )
         else:
             log.warning(
                 "intent_gate skip → leave-chat failed session=%s exit=%s err=%s",
                 session_id, code, payload.get("error") or "<unknown>",
+            )
+            log.info(
+                "cs.leave session=%s env=%s source=intent_gate_skip decision=failed "
+                "exit_code=%s error=%s", session_id, _ENV, code,
+                payload.get("error") or "<unknown>",
             )
     except Exception as exc:  # noqa: BLE001 — fail-soft
         log.warning("intent_gate skip → leave-chat crashed session=%s: %s", session_id, exc)
@@ -608,14 +630,18 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     # Skip ALL new launches (SIO + REST); in-flight runs complete naturally.
     # This prevents new AI drafts → new escalations on off-hours.
     if cal.is_globally_paused():
-        log.info("skip launch session %s — globally paused (下班)", session_id)
+        log.info(
+            "cs.launch.decision session=%s env=%s message_id=%s decision=skip "
+            "reason=globally_paused (下班)",
+            session_id, _ENV, message_id,
+        )
         return None
 
     if not inbound_payload_is_email(info):
         log.info(
-            "skip launch session %s non_email channel=%s",
-            session_id,
-            info.get("channel"),
+            "cs.launch.decision session=%s env=%s message_id=%s decision=skip_permanent "
+            "gate=non_email channel=%s",
+            session_id, _ENV, message_id, info.get("channel"),
         )
         _enqueue_permanent_skip(
             session_id=session_id,
@@ -632,6 +658,11 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     # real emails still process), and leave-chat must NOT fire. See
     # rating_inbound.py and _consume_customer_rating for the full contract.
     if is_customer_rating_inbound(info):
+        log.info(
+            "cs.launch.decision session=%s env=%s message_id=%s decision=consume "
+            "gate=customer_rating (no AI launch, status-preserving)",
+            session_id, _ENV, message_id,
+        )
         _consume_customer_rating(session_id=session_id, info=info)
         return None
 
@@ -696,10 +727,9 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     )
     if not gate.allowed:
         log.info(
-            "skip launch session %s intent_gate=%s tags=%s",
-            session_id,
-            gate.reason,
-            list(gate.tags) or None,
+            "cs.launch.decision session=%s env=%s message_id=%s decision=skip "
+            "gate=intent_gate reason=%s tags=%s",
+            session_id, _ENV, message_id, gate.reason, list(gate.tags) or None,
         )
         # Permanent skip: intent explicitly not in allowlist. Enqueue + skipped.
         # Transient skip: no_intention_tags (QuickCEP classification pending) stays
@@ -768,7 +798,11 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         set_processing=True,
     )
     if result.get("deduped"):
-        log.info("deduped session %s message %s", session_id, message_id)
+        log.info(
+            "cs.launch.decision session=%s env=%s message_id=%s decision=skip "
+            "reason=deduped (message already processed)",
+            session_id, _ENV, message_id,
+        )
         return None
     # Non-deduped inbound → a genuinely new message for this session. Drop the
     # L2 caches (messages/tags/orders) so the Console's next GET sees the new
@@ -784,9 +818,9 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
     if not result.get("should_launch", True):
         session_status = str((result.get("session") or {}).get("status") or "")
         log.info(
-            "skip launch session %s status=%s (busy)",
-            session_id,
-            session_status,
+            "cs.launch.decision session=%s env=%s message_id=%s decision=skip "
+            "reason=busy status=%s (followup while in-flight)",
+            session_id, _ENV, message_id, session_status,
         )
         _record_followup_while_busy(
             session_id=session_id,
@@ -841,7 +875,11 @@ def _launch_for_message(info: dict[str, Any]) -> Optional[str]:
         message_id=message_id,
     )
     if outcome.run_id:
-        log.info("launched run %s for session %s", outcome.run_id, session_id)
+        log.info(
+            "cs.launch.decision session=%s env=%s message_id=%s decision=launch "
+            "run_id=%s join_ok=%s",
+            session_id, _ENV, message_id, outcome.run_id, _join_succeeded,
+        )
         return outcome.run_id
     if outcome.dedup_skipped:
         # Another launch for the same session:message_id is in-flight (process-

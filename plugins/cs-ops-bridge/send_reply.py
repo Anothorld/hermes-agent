@@ -176,9 +176,11 @@ def send_reply(
     """Send the CAL-stored draft and close the session lifecycle (PR1.6)."""
     sess = cal.get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
+        log.info("cs.send.reply session=%s env=%s decision=failed reason=session_not_found", quickcep_session_id, env)
         return {"ok": False, "error": "session not found"}
     draft_html = sess.get("draft_html")
     if not draft_html:
+        log.info("cs.send.reply session=%s env=%s decision=failed reason=no_draft", quickcep_session_id, env)
         return {"ok": False, "error": "no_draft", "error_detail": "no draft stored in CAL for this session"}
 
     attachments = []
@@ -197,6 +199,11 @@ def send_reply(
         env=env,
     )
     if block:
+        log.info(
+            "cs.send.reply session=%s env=%s decision=guard_blocked operator=%s(%s) "
+            "block_reason=%s", quickcep_session_id, env, operator_id, operator_name,
+            block.get("reason") or block,
+        )
         return {"ok": False, "error": "guard_blocked", "error_detail": block}
 
     subject = subject_override or sess.get("email_subject") or ""
@@ -215,6 +222,11 @@ def send_reply(
     )
     if code != 0:
         log.warning("send-reply quickcep_cli failed session=%s: %s", quickcep_session_id, err or out)
+        log.info(
+            "cs.send.reply session=%s env=%s operator=%s(%s) decision=send_failed "
+            "exit_code=%s subject=%s attachments=%d",
+            quickcep_session_id, env, operator_id, operator_name, code, subject, len(attachments),
+        )
         return {"ok": False, "error": "send_failed", "exit_code": code,
                 "stderr": err, "stdout": out}
 
@@ -335,4 +347,13 @@ def send_reply(
     }
     if edit_memory_outcome is not None:
         result["edit_memory"] = edit_memory_outcome
+    log.info(
+        "cs.send.reply session=%s env=%s operator=%s(%s) decision=sent "
+        "message_id=%s subject=%s attachments=%d handoff_ok=%s edit_memory=%s",
+        quickcep_session_id, env, operator_id, operator_name, message_id, subject,
+        len(attachments), bool(handoff_result.get("ok")),
+        "launched" if (edit_memory_outcome and edit_memory_outcome.get("run_id")) else (
+            "skipped_bypass" if (edit_memory_outcome and "error" not in edit_memory_outcome) else "none"
+        ),
+    )
     return result

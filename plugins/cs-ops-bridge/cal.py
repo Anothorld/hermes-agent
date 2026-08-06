@@ -224,6 +224,11 @@ def enqueue_session(
                 "SELECT * FROM cs_session WHERE quickcep_session_id=? AND env=?",
                 (quickcep_session_id, env),
             ).fetchone()
+            log.info(
+                "cs.intake session=%s env=%s message_id=%s decision=deduped "
+                "(already processed)",
+                quickcep_session_id, env, message_id,
+            )
             return {"created": False, "deduped": True, "should_launch": False, "session": dict(row) if row else None}
 
         # Capture prior status before UPSERT so the inbound event can flag a
@@ -348,6 +353,18 @@ def enqueue_session(
             "should_launch": should_launch,
             "session": session,
         }
+        # Audit: inbound intake decision. Captures the full decision context —
+        # whether this is a new session or a reopen (terminal→pending), whether
+        # the watcher should launch AI (should_launch), any force_status skip,
+        # and the resulting status. This is the entry point of the state flow.
+        log.info(
+            "cs.intake session=%s env=%s message_id=%s decision=created "
+            "prior_status=%s status=%s should_launch=%s is_reopen=%s "
+            "force_status=%s set_processing=%s event_type=%s",
+            quickcep_session_id, env, message_id, prior_status, status,
+            should_launch, is_reopen, force_status or "-", set_processing,
+            event_type,
+        )
         return result
 
 
@@ -1567,12 +1584,23 @@ def consume_rating_atomic(
             ).fetchone()
             if not row:
                 conn.execute("ROLLBACK")
+                log.info(
+                    "cs.intake session=%s env=%s message_id=%s "
+                    "decision=rating_consume_missing content_type=%s "
+                    "(no CAL session row)",
+                    quickcep_session_id, env, message_id, content_type or "-",
+                )
                 return "missing"
             sess_id = row["id"]
             status = str(row["status"] or "")
             last_msg = str(row["last_message_id"] or "")
             if last_msg == str(message_id):
                 conn.execute("ROLLBACK")
+                log.info(
+                    "cs.intake session=%s env=%s message_id=%s "
+                    "decision=rating_consume_idempotent (same-namespace redelivery)",
+                    quickcep_session_id, env, message_id,
+                )
                 return "idempotent"
             prior = conn.execute(
                 "SELECT 1 FROM cs_conversation_events "
@@ -1607,7 +1635,15 @@ def consume_rating_atomic(
                     ),
                 )
             conn.execute("COMMIT")
-            return "cross_namespace_dedup" if prior else "consumed"
+            outcome = "cross_namespace_dedup" if prior else "consumed"
+            log.info(
+                "cs.intake session=%s env=%s message_id=%s "
+                "decision=rating_consume_%s content_type=%s status=%s "
+                "audit_written=%s",
+                quickcep_session_id, env, message_id, outcome,
+                content_type or "-", status, "no" if prior else "yes",
+            )
+            return outcome
         except Exception:
             try:
                 conn.execute("ROLLBACK")
@@ -1647,12 +1683,37 @@ def update_session_status(
                 target_rank = _STATUS_RANKS.get(status, 0)
                 if target_rank < cur_rank:
                     log.warning(
-                        "update_session_status blocked regression %s -> %s "
-                        "session_row_id=%s (pass allow_regression=True to override)",
-                        cur_status, status, session_row_id,
+                        "cs.state.transition BLOCKED session_row_id=%s %s->%s "
+                        "reason=regression_blocked allow_regression=false "
+                        "(pass allow_regression=True to override)",
+                        session_row_id, cur_status, status,
                     )
                     conn.commit()  # no-op commit; preserve
                     return
+                # Audit: log every successful status transition. This is the
+                # single chokepoint for all CAL status changes (apply_handoff,
+                # close_session, watcher, processing_stale, relaunch all flow
+                # through here), so logging here gives complete post-hoc audit
+                # of the state machine without instrumenting every caller.
+                if cur_status != status:
+                    log.info(
+                        "cs.state.transition session_row_id=%s %s->%s "
+                        "allow_regression=%s",
+                        session_row_id, cur_status, status, allow_regression,
+                    )
+        else:
+            # allow_regression=True path: still audit the transition (caller
+            # explicitly authorized a backward/reset move — record it).
+            cur = conn.execute(
+                "SELECT status FROM cs_session WHERE id=?", (session_row_id,)
+            ).fetchone()
+            cur_status = str(cur[0]) if cur else "?"
+            if cur_status != status:
+                log.info(
+                    "cs.state.transition session_row_id=%s %s->%s "
+                    "allow_regression=true",
+                    session_row_id, cur_status, status,
+                )
         # v5: stamp processing_started_at the first time a session leaves
         # `pending` for any active state. COALESCE keeps the original value
         # on subsequent transitions so the daily report can bucket by the
@@ -1965,6 +2026,11 @@ def write_event(
 ) -> bool:
     sess = get_session(quickcep_session_id=quickcep_session_id, env=env)
     if not sess:
+        log.warning(
+            "cs.event.write SKIPPED session=%s env=%s event_type=%s "
+            "reason=session_not_found",
+            quickcep_session_id, env, event_type,
+        )
         return False
     safe_payload = sanitize_mapping(dict(payload or {}))
     with _connect() as conn:
@@ -1974,6 +2040,17 @@ def write_event(
             (sess["id"], event_type, json.dumps(safe_payload), env, _now()),
         )
         conn.commit()
+    # Audit: every CAL event write is logged so the application log mirrors the
+    # cs_conversation_events table — operators can reconstruct the session
+    # timeline from logs alone (post-hoc audit / troubleshooting). The
+    # payload `source` field (when present) distinguishes who/what drove the
+    # event (failed_handoff / skipped_handoff / console_close / console_leave_only
+    # / intent_gate_skip / agent_launch / operator / ...).
+    src = safe_payload.get("source") if isinstance(safe_payload, dict) else None
+    log.info(
+        "cs.event.write session=%s env=%s session_row_id=%s event_type=%s source=%s",
+        quickcep_session_id, env, sess["id"], event_type, src or "-",
+    )
     return True
 
 
@@ -2028,6 +2105,11 @@ def open_escalation(
         env=env,
     )
     if existing:
+        log.info(
+            "cs.escalation.open session=%s env=%s escalation_id=%s "
+            "decision=deduped reason=%s urgency=%s",
+            quickcep_session_id, env, existing[0]["id"], reason, urgency,
+        )
         return existing[0]["id"]
 
     now = _now()
@@ -2056,7 +2138,13 @@ def open_escalation(
         )
         # Lifecycle status is owned by apply-handoff (awaiting_expert phase), not open_escalation.
         conn.commit()
-        return int(cur.lastrowid)
+        esc_id = int(cur.lastrowid)
+        log.info(
+            "cs.escalation.open session=%s env=%s escalation_id=%s "
+            "decision=created reason=%s urgency=%s feishu_chat_id=%s",
+            quickcep_session_id, env, esc_id, reason, urgency, feishu_chat_id,
+        )
+        return esc_id
 
 
 def update_escalation_feishu(
@@ -2258,6 +2346,10 @@ def reopen_escalation_for_resume(*, escalation_id: int) -> bool:
             (escalation_id,),
         ).fetchone()
         if not row:
+            log.info(
+                "cs.escalation.reopen escalation_id=%s decision=rejected reason=not_found",
+                escalation_id,
+            )
             return False
         ctx = json.loads(row["resume_context_json"] or "{}")
         for key in (
@@ -2284,6 +2376,12 @@ def reopen_escalation_for_resume(*, escalation_id: int) -> bool:
             (json.dumps(ctx), now, escalation_id),
         )
         conn.commit()
+        log.info(
+            "cs.escalation.reopen escalation_id=%s decision=reopened "
+            "to_state=resuming retried_at=%s outcome=%s",
+            escalation_id, now,
+            "applied" if cur.rowcount == 1 else "rejected_not_found",
+        )
         return cur.rowcount == 1
 
 
@@ -2297,6 +2395,11 @@ def claim_escalation_reply(
     """Atomically accept the first operator reply (awaiting_answer → resuming)."""
     answer = (operator_answer or "").strip()
     if not answer:
+        log.info(
+            "cs.escalation.claim escalation_id=%s decision=rejected reason=empty_answer "
+            "decided_by=%s feishu_reply_message_id=%s",
+            escalation_id, decided_by, feishu_reply_message_id,
+        )
         return False
     now = _now()
     with _connect() as conn:
@@ -2305,6 +2408,12 @@ def claim_escalation_reply(
             (escalation_id,),
         ).fetchone()
         if not row:
+            log.info(
+                "cs.escalation.claim escalation_id=%s decision=rejected "
+                "reason=not_found_or_not_awaiting_answer decided_by=%s "
+                "feishu_reply_message_id=%s",
+                escalation_id, decided_by, feishu_reply_message_id,
+            )
             return False
         ctx = json.loads(row["resume_context_json"] or "{}")
         ctx["feishu_reply_message_id"] = feishu_reply_message_id
@@ -2323,6 +2432,13 @@ def claim_escalation_reply(
             (mask_string(answer), decided_by, now, json.dumps(ctx), now, escalation_id),
         )
         conn.commit()
+        log.info(
+            "cs.escalation.claim escalation_id=%s from_state=awaiting_answer "
+            "to_state=resuming decision=%s decided_by=%s feishu_reply_message_id=%s",
+            escalation_id,
+            "claimed" if cur.rowcount == 1 else "rejected_state_changed",
+            decided_by, feishu_reply_message_id,
+        )
         return cur.rowcount == 1
 
 
@@ -2366,6 +2482,12 @@ def finalize_escalation(
             (decision, now, final_state, now, escalation_id),
         )
         conn.commit()
+        log.info(
+            "cs.escalation.finalize escalation_id=%s from_state=resuming "
+            "to_state=%s decision=%s outcome=%s",
+            escalation_id, final_state, decision,
+            "applied" if cur.rowcount == 1 else "rejected_not_resuming",
+        )
         return cur.rowcount == 1
 
 
@@ -2405,6 +2527,10 @@ def resolve_escalation(
     with _connect() as conn:
         row = conn.execute("SELECT session_id FROM cs_escalations WHERE id=?", (escalation_id,)).fetchone()
         if not row:
+            log.info(
+                "cs.escalation.resolve escalation_id=%s decision=rejected reason=not_found",
+                escalation_id,
+            )
             return False
         conn.execute(
             """UPDATE cs_escalations SET
@@ -2413,12 +2539,35 @@ def resolve_escalation(
                WHERE id=?""",
             (decision, decided_by, now, masked_answer, final_state, now, escalation_id),
         )
+        session_status_changed = "none"
         if final_state == "resolved" and touch_session:
+            sess_row = conn.execute(
+                "SELECT status FROM cs_session WHERE id=?", (row["session_id"],)
+            ).fetchone()
+            prior_status = str(sess_row[0]) if sess_row else "?"
             conn.execute(
                 "UPDATE cs_session SET status='processing', updated_at=? WHERE id=?",
                 (now, row["session_id"]),
             )
+            session_status_changed = "processing"
+            # Audit the session status change here (rather than via
+            # update_session_status) to preserve the single-transaction atomicity
+            # of the escalation+session resolve. Mirrors the cs.state.transition
+            # format so dashboards/grep stay consistent.
+            if prior_status != "processing":
+                log.info(
+                    "cs.state.transition session_row_id=%s %s->%s "
+                    "allow_regression=true source=resolve_escalation escalation_id=%s",
+                    row["session_id"], prior_status, "processing", escalation_id,
+                )
         conn.commit()
+        log.info(
+            "cs.escalation.resolve escalation_id=%s decision=%s decided_by=%s "
+            "final_state=%s touch_session=%s session_row_id=%s "
+            "session_status_changed=%s",
+            escalation_id, decision, decided_by, final_state, touch_session,
+            row["session_id"], session_status_changed,
+        )
     return True
 
 
@@ -2442,6 +2591,12 @@ def patch_escalation_decision(
             (decision, decided_by, now, masked_answer, now, escalation_id),
         )
         conn.commit()
+        log.info(
+            "cs.escalation.patch_decision escalation_id=%s decision=%s "
+            "decided_by=%s operator_answer_provided=%s outcome=%s",
+            escalation_id, decision, decided_by, bool(operator_answer),
+            "applied" if cur.rowcount == 1 else "rejected_not_found",
+        )
         return cur.rowcount == 1
 
 

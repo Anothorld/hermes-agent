@@ -163,6 +163,10 @@ class GatewayClient:
         dedup = launch_dedup_key(session_id, dedup_message_id)
         if not try_acquire_launch(dedup):
             log.info("launch dedup skip %s", dedup)
+            log.info(
+                "cs.launch.gateway session=%s dedup_key=%s kind=%s decision=dedup_inflight",
+                session_id, dedup, run_kind or "process",
+            )
             return LaunchOutcome(run_id=None, dedup_skipped=True)
         try:
             body = {
@@ -178,10 +182,18 @@ class GatewayClient:
             out = post_run_with_retry(base=self.base, api_key=self.api_key, body=body)
             if not out.ok:
                 # Transient (429/5xx/unreachable) → caller re-queues to pending.
+                log.info(
+                    "cs.launch.gateway session=%s dedup_key=%s kind=%s decision=failed "
+                    "transient=%s", session_id, dedup, run_kind or "process", out.transient,
+                )
                 return LaunchOutcome(run_id=None, transient=out.transient)
             run_id = out.data.get("run_id") if isinstance(out.data, dict) else None
             if run_id:
                 drain_run_events(base=self.base, api_key=self.api_key, run_id=str(run_id))
+            log.info(
+                "cs.launch.gateway session=%s dedup_key=%s kind=%s decision=launched "
+                "run_id=%s", session_id, dedup, run_kind or "process", run_id,
+            )
             return LaunchOutcome(run_id=str(run_id) if run_id else None)
         finally:
             release_launch(dedup)

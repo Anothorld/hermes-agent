@@ -74,8 +74,19 @@ def check_resuming_stale_once() -> dict[str, Any]:
             handled.add(eid)
             newly_handled += 1
             log.warning("resuming escalation timed out esc=%s elapsed_h=%.1f", eid, elapsed_h)
+            log.info(
+                "cs.escalation.timeout escalation_id=%s session=%s env=%s "
+                "from_state=resuming to_state=failed kind=resuming_stale "
+                "elapsed_h=%.1f decision=finalized", eid, qsid, _ENV, elapsed_h,
+            )
         else:
             log.warning("resuming timeout finalize failed esc=%s: %s", eid, result.get("error"))
+            log.info(
+                "cs.escalation.timeout escalation_id=%s session=%s env=%s "
+                "from_state=resuming to_state=failed kind=resuming_stale "
+                "elapsed_h=%.1f decision=finalize_failed error=%s",
+                eid, qsid, _ENV, elapsed_h, result.get("error"),
+            )
 
     cal.set_poller_state(
         "escalation_resuming_timeout",

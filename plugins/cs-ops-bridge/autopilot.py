@@ -87,6 +87,11 @@ def on_draft_ready(*, quickcep_session_id: str, env: str = "LIVE") -> Optional[d
             event_type="autopilot_scheduled",
             payload={"job_id": job["id"], "send_at": send_at},
         )
+        log.info(
+            "cs.autopilot.schedule session=%s env=%s job_id=%s send_at=%s "
+            "baseline_hash=%s decision=scheduled",
+            quickcep_session_id, env, job["id"], send_at, job.get("baseline_hash") or "",
+        )
     return job
 
 
@@ -129,6 +134,10 @@ def run_autopilot_tick(*, env: str = "LIVE") -> dict[str, Any]:
                 payload={"reason": "baseline_hash_mismatch", "job_id": job["id"]},
             )
             cancelled += 1
+            log.info(
+                "cs.autopilot.send session=%s env=%s job_id=%s decision=cancelled "
+                "reason=baseline_hash_mismatch", qsid, env, job["id"],
+            )
             continue
         try:
             from .send_reply import send_reply
@@ -138,13 +147,26 @@ def run_autopilot_tick(*, env: str = "LIVE") -> dict[str, Any]:
             log.warning("autopilot send failed session=%s: %s", qsid, exc)
             cal.finalize_autopilot_job(job_id=job["id"], status="failed")
             failed += 1
+            log.info(
+                "cs.autopilot.send session=%s env=%s job_id=%s decision=failed "
+                "reason=exception error=%s", qsid, env, job["id"], str(exc)[:200],
+            )
             continue
         if result.get("ok"):
             cal.finalize_autopilot_job(job_id=job["id"], status="sent", message_id=str(result.get("message_id") or ""))
             sent += 1
+            log.info(
+                "cs.autopilot.send session=%s env=%s job_id=%s decision=sent "
+                "message_id=%s", qsid, env, job["id"], result.get("message_id") or "",
+            )
         else:
             cal.finalize_autopilot_job(job_id=job["id"], status="failed")
             failed += 1
+            log.info(
+                "cs.autopilot.send session=%s env=%s job_id=%s decision=failed "
+                "reason=send_failed error=%s",
+                qsid, env, job["id"], result.get("error") or "",
+            )
     return {"ok": True, "enabled": True, "sent": sent, "cancelled": cancelled,
             "failed": failed, "claimed": len(claimed)}
 

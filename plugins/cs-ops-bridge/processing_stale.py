@@ -119,6 +119,13 @@ def check_processing_stale_once() -> dict[str, Any]:
                 elapsed_min,
                 trigger,
             )
+            log.info(
+                "cs.recover.processing_stale session=%s env=%s from_status=processing "
+                "to_status=failed trigger=%s elapsed_min=%.1f heartbeat_min=%s "
+                "agent_processing_at=%s handoff_ok=true",
+                qsid, _ENV, trigger, elapsed_min, _HEARTBEAT_MIN,
+                sess.get("agent_processing_at"),
+            )
             try:
                 cal.write_event(
                     quickcep_session_id=qsid,
@@ -139,6 +146,13 @@ def check_processing_stale_once() -> dict[str, Any]:
                 "processing stale handoff skipped/failed session=%s: %s",
                 qsid,
                 result.get("reason") or result.get("error"),
+            )
+            log.info(
+                "cs.recover.processing_stale session=%s env=%s from_status=processing "
+                "to_status=failed trigger=%s elapsed_min=%.1f handoff_ok=false "
+                "reason=%s",
+                qsid, _ENV, trigger, elapsed_min,
+                result.get("reason") or result.get("error") or "unknown",
             )
 
     cal.set_poller_state(

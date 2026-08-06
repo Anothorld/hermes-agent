@@ -28,6 +28,7 @@ def resume_escalation(
     """Launch gateway resume run for a claimed escalation (stays resuming until handoff completes)."""
     esc = cal.get_escalation(escalation_id=escalation_id)
     if not esc:
+        log.info("cs.escalation.resume escalation_id=%s decision=failed reason=not_found", escalation_id)
         return {"ok": False, "error": "escalation not found"}
 
     state = str(esc.get("state"))
@@ -39,15 +40,29 @@ def resume_escalation(
             decided_by=decided_by,
             feishu_reply_message_id=reply_mid,
         ):
+            log.info(
+                "cs.escalation.resume escalation_id=%s decision=failed "
+                "reason=claim_lost_or_not_awaiting decided_by=%s",
+                escalation_id, decided_by,
+            )
             return {"ok": False, "error": "escalation already claimed or not awaiting_answer"}
         esc = cal.get_escalation(escalation_id=escalation_id) or esc
         state = str(esc.get("state"))
 
     if state != "resuming":
+        log.info(
+            "cs.escalation.resume escalation_id=%s decision=failed "
+            "reason=state_not_resuming state=%s", escalation_id, state,
+        )
         return {"ok": False, "error": f"escalation state is {state}, expected resuming"}
 
     ctx = esc.get("resume_context") or {}
     if ctx.get("resume_run_id"):
+        log.info(
+            "cs.escalation.resume escalation_id=%s decision=deduped "
+            "run_id=%s reason=resume_run_id_already_set",
+            escalation_id, ctx["resume_run_id"],
+        )
         return {
             "ok": True,
             "run_id": ctx["resume_run_id"],
@@ -71,6 +86,10 @@ def resume_escalation(
     sess = esc.get("session") or {}
     qsid = str(sess.get("quickcep_session_id") or "")
     if not qsid:
+        log.info(
+            "cs.escalation.resume escalation_id=%s decision=failed reason=missing_quickcep_session",
+            escalation_id,
+        )
         return {"ok": False, "error": "missing quickcep session on escalation"}
 
     ctx = esc.get("resume_context") or {}
@@ -79,6 +98,10 @@ def resume_escalation(
         or (esc.get("operator_answer") or operator_answer or "")
     ).strip()
     if not answer:
+        log.info(
+            "cs.escalation.resume escalation_id=%s session=%s decision=failed "
+            "reason=operator_answer_required", escalation_id, qsid,
+        )
         return {"ok": False, "error": "operator_answer required"}
 
     operator_attachments = ctx.get("operator_attachments") or []
@@ -95,9 +118,18 @@ def resume_escalation(
     if not outcome.run_id:
         err = "launch deduped" if outcome.dedup_skipped else "gateway launch failed"
         log.error("resume escalation %s: %s", escalation_id, err)
+        log.info(
+            "cs.escalation.resume escalation_id=%s session=%s decision=failed "
+            "reason=%s dedup_skipped=%s", escalation_id, qsid, err, outcome.dedup_skipped,
+        )
         return {"ok": False, "error": err, "dedup_skipped": outcome.dedup_skipped}
 
     cal.record_escalation_resume_run(escalation_id=escalation_id, run_id=str(outcome.run_id))
+    log.info(
+        "cs.escalation.resume escalation_id=%s session=%s env=%s decision=launched "
+        "run_id=%s decided_by=%s",
+        escalation_id, qsid, env, outcome.run_id, decided_by,
+    )
     return {"ok": True, "run_id": outcome.run_id, "escalation_id": escalation_id}
 
 
@@ -295,6 +327,11 @@ def handle_resume_run_finished(
         "resume failure detected esc=%s session=%s run=%s is_retry=%s",
         eid, qsid, resume_run_id, is_retry,
     )
+    log.info(
+        "cs.escalation.resume_failed escalation_id=%s session=%s env=%s run_id=%s "
+        "is_retry=%s decision=notified reason=%s",
+        eid, qsid, parsed_env, resume_run_id, is_retry, reason,
+    )
     return {"ok": True, "action": "notified", "escalation_id": eid}
 
 
@@ -351,4 +388,10 @@ def retry_resume_for_session(*, quickcep_session_id: str, env: str) -> dict[str,
     )
     result["kind"] = "resume_retry"
     result["escalation_id"] = eid
+    log.info(
+        "cs.escalation.resume_retry escalation_id=%s session=%s env=%s old_run_id=%s "
+        "new_run_id=%s decision=%s",
+        eid, quickcep_session_id, env, old_run_id, result.get("run_id"),
+        "relaunched" if result.get("ok") else "no_resume",
+    )
     return result

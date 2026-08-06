@@ -69,6 +69,11 @@ def _close_one_escalation(
             state,
             quickcep_session_id,
         )
+        log.info(
+            "cs.escalation.close escalation_id=%s session=%s env=%s prior_state=%s "
+            "decision=closed reason=operator_manual_reply to_state=resolved",
+            eid, quickcep_session_id, env, state,
+        )
     else:
         log.warning(
             "escalation close failed on operator send esc=%s state=%s session=%s err=%s",
@@ -76,6 +81,11 @@ def _close_one_escalation(
             state,
             quickcep_session_id,
             result.get("error"),
+        )
+        log.info(
+            "cs.escalation.close escalation_id=%s session=%s env=%s prior_state=%s "
+            "decision=close_failed error=%s",
+            eid, quickcep_session_id, env, state, result.get("error"),
         )
     return {"escalation_id": eid, "prior_state": state, **result}
 
@@ -167,6 +177,11 @@ def repair_orphaned_escalations_once(*, env: str | None = None) -> dict[str, Any
                 "orphaned escalation repair session=%s closed=%s",
                 sid,
                 closed_ids,
+            )
+            log.info(
+                "cs.escalation.close session=%s env=%s decision=repair_closed "
+                "escalation_ids=%s reason=orphaned_after_operator_send",
+                sid, env, closed_ids,
             )
 
     return {"ok": True, "checked": checked, "repaired": repaired}
