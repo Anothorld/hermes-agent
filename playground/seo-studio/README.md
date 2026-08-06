@@ -22,6 +22,15 @@ Browser (Studio UI)  ──HTTP──►  Bridge (FastAPI :8766)  ──subproce
 
 手测跑测步骤与日志判定标准见 [docs/manual-qa-editorial-placements.md](docs/manual-qa-editorial-placements.md)。
 
+## Production deploy
+
+生产主机（与 CS 同机 `192.168.10.123`）部署与运维见：
+
+- [`playground/seo-studio-deploy/README.md`](../../../playground/seo-studio-deploy/README.md)
+- [`playground/seo-studio-deploy/docs/OPS_HANDOFF.md`](../../../playground/seo-studio-deploy/docs/OPS_HANDOFF.md)
+
+入口：http://192.168.10.123:8766/ ；首次 `bootstrap-remote.sh`，日常 `deploy.sh`。
+
 ## Quick start
 
 ```bash

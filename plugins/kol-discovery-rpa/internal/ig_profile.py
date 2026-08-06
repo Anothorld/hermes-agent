@@ -275,6 +275,19 @@ _CLICK_ABOUT_JS = """
 _READ_DETAILS_JS = """
 (() => {
   const dialogs = document.querySelectorAll('[role="dialog"]');
+  // Loading shell: IG often opens a dialog with only "关闭" + aria "正在加载..."
+  // for 1–3s before the location rows hydrate. Report loading so Python can poll.
+  for (const d of dialogs) {
+    const ariaBusy = [...d.querySelectorAll('[aria-label]')].map(
+      (e) => e.getAttribute('aria-label') || ''
+    ).join(' ');
+    const t = (d.innerText || '').replace(/\\s+/g, ' ').trim();
+    const looksLoading = /正在加载|loading/i.test(ariaBusy + ' ' + t);
+    const hasLocationRows = /账户所在地|所在地|加入日期|曾用账号|已认证|account location|date joined|former usernames|about this account/i.test(t);
+    if (looksLoading && !hasLocationRows) {
+      return {ok: false, error: 'details dialog loading', loading: true, dialog_text_sample: t.slice(0, 120)};
+    }
+  }
   let details = null;
   for (const d of dialogs) {
     const t = (d.innerText || '');
@@ -385,6 +398,9 @@ def _fetch_account_location(runner) -> dict:
     e.g. "US"), ``date_joined``, ``verified_date``, ``former_usernames``.
     Returns ``{}`` if the flow fails. Never raises — location is a best-effort
     enrichment; the region gate falls back to bio-derived signals when absent.
+
+    IG often shows a loading shell (aria ``正在加载...``) for 1–3s after opening
+    About this account; we poll until location rows appear (or timeout).
     """
     import time
 
@@ -398,9 +414,23 @@ def _fetch_account_location(runner) -> dict:
         if not (isinstance(r, dict) and r.get("ok")):
             runner.eval(_CLOSE_DIALOG_JS)
             return {}
-        time.sleep(0.7)
 
-        r = runner.eval(_READ_DETAILS_JS)
+        # Poll for hydrated details (was a fixed 0.7s sleep — too short for
+        # many profiles; empty location → false region_unknown hard-discard).
+        r = None
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            time.sleep(0.45)
+            r = runner.eval(_READ_DETAILS_JS)
+            if isinstance(r, dict) and r.get("ok"):
+                break
+            if isinstance(r, dict) and r.get("loading"):
+                continue
+            # Not loading and not ok — brief extra wait once, then give up.
+            time.sleep(0.5)
+            r = runner.eval(_READ_DETAILS_JS)
+            break
+
         runner.eval(_CLOSE_DIALOG_JS)
         if not (isinstance(r, dict) and r.get("ok")):
             return {}

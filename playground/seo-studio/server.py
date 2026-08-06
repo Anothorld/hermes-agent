@@ -81,7 +81,10 @@ SKILL_DIR = Path(os.environ.get("SEO_SKILL_DIR", "")).resolve() or Path.home() /
 RUNS_DIR = Path(os.environ.get("SEO_RUNS_DIR", str(SKILL_DIR / "runs"))).resolve()
 STUDIO_HTML = Path(os.environ.get("SEO_STUDIO_HTML", "")).resolve() or (Path(__file__).parent / "ui" / "index.html")
 GATEWAY_BASE = os.environ.get("HERMES_GATEWAY_BASE", "http://127.0.0.1:8644")
-GATEWAY_KEY = os.environ.get("HERMES_GATEWAY_KEY", "")
+# Prefer HERMES_GATEWAY_KEY; fall back to API_SERVER_KEY (same value start.sh
+# exports for Bridge→Gateway). Docker Compose injects profile .env which only
+# sets API_SERVER_KEY.
+GATEWAY_KEY = os.environ.get("HERMES_GATEWAY_KEY") or os.environ.get("API_SERVER_KEY", "")
 PROFILE = os.environ.get("SEO_PROFILE", "povison-seo")
 SCRIPT_TIMEOUT = int(os.environ.get("SEO_SCRIPT_TIMEOUT", "600"))
 SCRIPTS = SKILL_DIR / "scripts"

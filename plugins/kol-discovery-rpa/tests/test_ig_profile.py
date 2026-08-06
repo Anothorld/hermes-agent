@@ -336,6 +336,27 @@ def test_account_location_flow_failure_falls_back_to_bio():
     assert out["qualification"]["gates"]["region"]["value"] == "US"
 
 
+def test_account_location_polls_through_loading_shell(monkeypatch):
+    """IG loading dialog (正在加载...) must be polled until location rows appear."""
+    monkeypatch.setattr(ig_profile.time if hasattr(ig_profile, "time") else __import__("time"), "sleep", lambda *_: None)
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    runner = _FakeRunner("t1", [
+        _profile_result(followers_raw="125K", location_signals=[]),
+        {"ok": True},  # options
+        {"ok": True, "via": "账户简介"},
+        {"ok": False, "error": "details dialog loading", "loading": True},
+        {"ok": False, "error": "details dialog loading", "loading": True},
+        {"ok": True, "location": "美国", "date_joined": "2022年12月",
+         "verified_date": "", "former_usernames": ""},
+        {"ok": True, "via": "button"},  # close
+    ])
+    out = ig_profile.fetch_profile(runner, "darthdaddyy")
+    assert out["data"]["account_location"] == "美国"
+    assert out["data"]["account_country"] == "US"
+    assert out["qualification"]["gates"]["region"]["pass"] is True
+    assert out["qualification"]["gates"]["region"]["value"] == "US"
+
+
 def test_account_location_disabled_skips_click_flow():
     """include_account_location=False → no extra eval calls, account_country empty."""
     runner = _FakeRunner("t1", [_profile_result(followers_raw="125K", location_signals=[])])

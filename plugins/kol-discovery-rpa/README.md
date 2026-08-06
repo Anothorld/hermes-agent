@@ -119,7 +119,9 @@ of silently discarding the candidate with `followers=0` + `region_unknown`.
 ## Account Location (账户所在地)
 
 `fetch_profile` reads the authoritative account country from the header `...` →
-`账户简介` / `About this account` dialog (gated by `include_account_location`,
+`账户简介` / `About this account` dialog (gated by `include_account_location`;
+polls through IG's ``正在加载...`` shell up to ~4s — a fixed short sleep used to
+miss location and false-`region_unknown` discard, e.g. `@darthdaddyy`),
 default True). The dialog renders the account's country (e.g. `账户所在地 美国`),
 date joined, and verification date — far more reliable than guessing region from
 bio text (a `📍SoCal` bio line resolved to `region_unknown` because `socal`

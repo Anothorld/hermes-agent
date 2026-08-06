@@ -55,6 +55,12 @@ warn() { printf '\033[1;33m[seo]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[seo]\033[0m %s\n' "$*" >&2; exit 1; }
 
 load_env() {
+  # Preserve systemd / caller-exported bind host (prod uses 0.0.0.0). Sourcing
+  # .env files must not silently force 127.0.0.1 and hide the Studio from LAN.
+  local _preset_bridge_host="${SEO_BRIDGE_HOST:-}"
+  local _preset_bridge_port="${SEO_BRIDGE_PORT:-}"
+  local _preset_gateway_port="${SEO_GATEWAY_PORT:-}"
+
   if [[ -f "$PROFILE_ENV" ]]; then
     log "loading profile env: $PROFILE_ENV"
     set -a
@@ -71,6 +77,10 @@ load_env() {
     source "$ENV_FILE"
     set +a
   fi
+
+  [[ -n "$_preset_bridge_host" ]] && SEO_BRIDGE_HOST="$_preset_bridge_host"
+  [[ -n "$_preset_bridge_port" ]] && SEO_BRIDGE_PORT="$_preset_bridge_port"
+  [[ -n "$_preset_gateway_port" ]] && SEO_GATEWAY_PORT="$_preset_gateway_port"
 
   : "${SEO_BRIDGE_HOST:=127.0.0.1}"
   : "${SEO_BRIDGE_PORT:=8766}"
