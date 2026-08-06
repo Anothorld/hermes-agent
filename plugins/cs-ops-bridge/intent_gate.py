@@ -221,12 +221,14 @@ _SEAM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cs-intent
 
 
 def _seam_timeout() -> float:
-    """Hard cap for the whole classify seam (pre-fetch + POST). Default 45s
-    (30s LLM + ~10s pre-fetch buffer); tune down for faster endpoints."""
+    """Hard cap for the whole classify seam (pre-fetch + POST). Default 150s
+    (120s LLM + ~30s pre-fetch/network buffer). Must stay ≥
+    ``CS_INTENT_LLM_TIMEOUT`` so the client never abandons a still-running
+    LLM call. Tune down for faster non-reasoning endpoints."""
     try:
-        return float(os.environ.get("CS_INTENT_SEAM_TIMEOUT", "45"))
+        return float(os.environ.get("CS_INTENT_SEAM_TIMEOUT", "150"))
     except ValueError:
-        return 45.0
+        return 150.0
 
 
 def _classifier_gate(
@@ -398,12 +400,12 @@ def _classifier_gate_work(
         method="POST",
     )
     # urlopen timeout must be >= the LLM timeout (CS_INTENT_LLM_TIMEOUT, default
-    # 30s) so the client doesn't give up before the server finishes. A 3s timeout
+    # 120s) so the client doesn't give up before the server finishes. A 3s timeout
     # here caused unbounded duplicate LLM calls: the client aborted at 3s, the
     # FastAPI server kept running the LLM to completion (writing to cs_intent.db),
     # the watcher fell back to "no_intention_tags" (transient skip, no CAL dedup),
     # and the next REST tick re-POSTed — repeating the waste. Aligned to
-    # _seam_timeout() (default 45s) which is also the future.result cap.
+    # _seam_timeout() (default 150s) which is also the future.result cap.
     try:
         with urllib.request.urlopen(req, timeout=_seam_timeout()) as resp:
             raw = resp.read()

@@ -243,7 +243,7 @@ def test_seam_timeout_falls_back_to_legacy(monkeypatch):
 
 def test_seam_timeout_env_default():
     ig = _load("intent_gate")
-    assert ig._seam_timeout() == 45.0
+    assert ig._seam_timeout() == 150.0
 
 
 # ── Idempotency cache: GET /gate-extract before POST /classify ──
@@ -325,7 +325,7 @@ def test_cache_miss_proceeds_to_post(monkeypatch):
 
 def test_urlopen_timeout_matches_seam_timeout(monkeypatch):
     """Regression guard: urlopen timeout must NOT be a hardcoded 3s — it must
-    follow _seam_timeout() so a 30s LLM call isn't aborted at 3s.
+    follow _seam_timeout() so a long LLM call isn't aborted early.
     """
     ig = _load("intent_gate")
     monkeypatch.setenv("CS_INTENT_ENABLED", "true")

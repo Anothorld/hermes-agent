@@ -873,12 +873,14 @@ def _llm_config() -> dict[str, str]:
 
 
 def _llm_timeout() -> float:
-    """LLM call timeout. Default 30s (classification prompts can be slow on
-    self-hosted endpoints). Override via CS_INTENT_LLM_TIMEOUT."""
+    """LLM call timeout. Default 120s (reasoning flash models on self-hosted
+    endpoints often need 30–60s+ for the full classify prompt). Override via
+    ``CS_INTENT_LLM_TIMEOUT``. Keep ``CS_INTENT_SEAM_TIMEOUT`` (bridge) ≥ this.
+    """
     try:
-        return float(os.environ.get("CS_INTENT_LLM_TIMEOUT", "30"))
+        return float(os.environ.get("CS_INTENT_LLM_TIMEOUT", "120"))
     except ValueError:
-        return 30.0
+        return 120.0
 
 
 def _augment_prompt_with_learning(prompt: str, *, env: str) -> str:
