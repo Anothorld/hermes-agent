@@ -234,12 +234,16 @@ cmd_start() {
   mkdir -p "$PROFILE_DIR"
   log "starting Chrome (port=$PORT, profile=$PROFILE_DIR)"
 
-  # Background, detached, swallow output. The Chrome window itself is the UI.
+  # Optional extra flags (e.g. for headless containers: set
+  # DEBUG_CHROME_EXTRA_FLAGS="--no-sandbox --disable-dev-shm-usage --headless=new"
+  # in the gateway env). Desktop usage leaves this unset to keep the Chrome window UI.
+  # shellcheck disable=SC2086
   "$CHROME_BIN" \
     --remote-debugging-port="$PORT" \
     --user-data-dir="$PROFILE_DIR" \
     --no-first-run \
     --no-default-browser-check \
+    ${DEBUG_CHROME_EXTRA_FLAGS:-} \
     about:blank \
     >/dev/null 2>&1 &
   disown || true

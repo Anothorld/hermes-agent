@@ -13,6 +13,7 @@ Task ``status`` values (operator-facing):
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -32,6 +33,12 @@ def _now() -> str:
 
 
 def _db_path() -> Path:
+    # Honor SEO_STUDIO_DB so the gateway-side plugin (seo_studio_progress) and the
+    # bridge can share one DB on a volume both containers mount (e.g. /opt/data
+    # in Docker Compose). Falls back to the file next to db.py for local dev.
+    env = os.environ.get("SEO_STUDIO_DB", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
     return Path(__file__).resolve().parent / "seo_studio.db"
 
 
