@@ -41,39 +41,38 @@ Returns the same shape as `rpa_fetch_google_serp` so the skill consumes it uncha
 
 ## Providers
 
-Selected via `SERP_API_PROVIDER` (default `google_cse`).
+Selected via `SERP_API_PROVIDER` (default `serper`).
 
-| Provider | Env vars | Free tier | Notes |
-|---|---|---|---|
-| `google_cse` (default) | `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_CX` | 100 queries/day | [Programmable Search Engine](https://programmablesearchengine.google.com/) — create an engine "Search the entire web", copy the `cx`. Enable Custom Search API + create an API key in Google Cloud. Max 10 results/query. |
-| `brave` | `BRAVE_SEARCH_API_KEY` (or `BRAVE_API_KEY` / `SERP_API_KEY`) | ~1,000 queries/month ($5/mo credit; **credit card required** to sign up, not charged on free plan) | [Brave Search API](https://brave.com/search/api/) — real web results from a clean provider IP (no datacenter CAPTCHA). Best free option for self-hosted servers. count ≤ 20. |
-| `serper` | `SERPER_API_KEY` (or `SERP_API_KEY`) | 2.5k free credits | [serper.dev](https://serper.dev) — $50/mo for 50k after. Rich snippets, up to 40 results. |
-| `serpapi` | `SERPAPI_KEY` (or `SERP_API_KEY`) | 100/mo free | [serpapi.com](https://serpapi.com) — $75/mo for 5k after. Google+Bing+others. |
-| `valueserp` | `VALUESERP_KEY` (or `SERP_API_KEY`) | pay-per-result | [valueserp.com](https://www.valueserp.com) — $1/1k results. |
-| `wigolo` | `WIGOLO_API_URL` (default `http://127.0.0.1:3333`); `WIGOLO_API_TOKEN` only if bound off-loopback | **$0/query, no key, no cloud** | Self-hosted daemon (`wigolo serve`). Multi-engine fusion (18 adapters) + on-device ML rerank + anti-bot. ⚠️ No Google adapter; on datacenter IPs the non-bing engines get CAPTCHA'd — verify result quality before relying on it. |
+| Provider | Env vars | Free tier | Card? | Notes |
+|---|---|---|---|---|
+| `serper` (default) | `SERPER_API_KEY` (or `SERP_API_KEY`) | **2,500 free credits** (one-time) | **No** | [serper.dev](https://serper.dev) — real Google results from a clean provider IP (no datacenter CAPTCHA). Best free option for self-hosted servers. ~250 brainstorms; $50/50k after. Up to 40 results/query. |
+| `serpapi` | `SERPAPI_KEY` (or `SERP_API_KEY`) | 250/mo (recurring) | No | [serpapi.com](https://serpapi.com) — Google+Bing+others. Good for ongoing low volume. |
+| `google_cse` | `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_CX` | 100 queries/day | No | [Programmable Search Engine](https://programmablesearchengine.google.com/) — "Search the entire web", enable Custom Search API + API key in Google Cloud. Max 10/query. May 403 if key has API restrictions. |
+| `brave` | `BRAVE_SEARCH_API_KEY` (or `BRAVE_API_KEY` / `SERP_API_KEY`) | free tier removed late 2025; $5/mo credit only | **Yes** | [Brave Search API](https://brave.com/search/api/) — real web results, clean IP. Not recommended in 2026 (needs a card). count ≤ 20. |
+| `valueserp` | `VALUESERP_KEY` (or `SERP_API_KEY`) | 100/mo | No | [valueserp.com](https://www.valueserp.com) — $1/1k results. |
+| `wigolo` | `WIGOLO_API_URL` (default `http://127.0.0.1:3333`); `WIGOLO_API_TOKEN` only if bound off-loopback | **$0/query, no key, no cloud** | No | Self-hosted daemon (`wigolo serve`). ⚠️ No Google adapter; on datacenter IPs the non-bing engines get CAPTCHA'd and bing returns poor-locale results — verify quality before relying on it. |
 
 A generic `SERP_API_KEY` is honored as a fallback for all paid providers. `wigolo` needs
 no key — only the daemon URL (loopback is open by default).
 
-### brave (recommended free option for self-hosted / datacenter IPs)
+### serper (recommended free option for self-hosted / datacenter IPs)
 
 When the gateway's egress IP is flagged by search engines (CAPTCHAs on Google/Bing/DDG),
-browser-based SERP, wigolo's direct adapters, and direct scraping all fail. **Brave
-Search API** returns real web results from Brave's index via an API call from a clean
-provider IP — no browser, no datacenter CAPTCHA. Free plan covers ~1,000 queries/month
-($5/mo credit; a credit card is required to sign up as an anti-fraud measure but is not
-charged on the free plan).
+browser-based SERP, wigolo's direct adapters, and direct scraping all fail. **Serper**
+returns real Google results via an API call from a clean provider IP — no browser, no
+datacenter CAPTCHA. 2,500 free credits on signup (no credit card), enough for ~250
+brainstorms; $50 / 50k after.
 
 Setup:
 
-1. Register at [brave.com/search/api](https://brave.com/search/api/) and create an API
-   key (Subscription Token).
+1. Register at [serper.dev](https://serper.dev) (email only, no credit card) and create
+   an API key.
 2. Put the key in the deploy-safe env file (e.g. `/opt/povison-seo/data/serp.env`):
    ```
-   BRAVE_SEARCH_API_KEY=<your-key>
+   SERP_API_PROVIDER=serper
+   SERPER_API_KEY=<your-key>
    ```
-3. Set `SERP_API_PROVIDER=brave` in the gateway service env. Done — `serp_fetch_google`
-   now calls Brave Search API.
+3. Recreate the gateway. Done — `serp_fetch_google` now calls Serper.
 
 ## Other env vars
 
