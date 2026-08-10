@@ -1,0 +1,7 @@
+name: serp-api
+version: 0.1.0
+description: "SERP API client for SEO Studio brainstorm — fetches Google organic results (title/url/snippet/rank) via Google Custom Search (free), Serper, SerpAPI, or Valueserp. Drop-in replacement for the browser-based rpa_fetch_google_serp on datacenter IPs that get CAPTCHA'd. File-cached + retry + circuit breaker; no browser/CDP needed."
+author: seo-studio
+kind: backend
+provides_tools:
+  - serp_fetch_google
